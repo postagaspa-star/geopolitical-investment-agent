@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.env
+venv/
+.venv/
+env/
+
+# SQLite database
+*.db
+*.db-wal
+*.db-shm
+
+# Uploaded documents (user data)
+backend/documents/
+
+# Backend static (generated on Render)
+backend/static/
+
+# Node
+node_modules/
+frontend/build/
+npm-debug.log*
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+.claude/
