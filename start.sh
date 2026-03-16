@@ -1,2 +1,2 @@
 #!/bin/bash
-cd backend && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
+cd backend && python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
