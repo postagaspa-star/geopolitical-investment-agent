@@ -60,18 +60,17 @@ npm run dev
 |-----------|-------------|---------|
 | `ANTHROPIC_API_KEY` | Chiave API di Anthropic (obbligatoria) | - |
 | `NEWS_API_KEY` | Chiave API di News API (obbligatoria) | - |
-| `INITIAL_PORTFOLIO_BALANCE` | Saldo iniziale del portafoglio simulato | `100000` |
-| `AGENT_RUN_INTERVAL_HOURS` | Intervallo di esecuzione dell'agente (ore) | `6` |
+| `FINNHUB_API_KEY` | Chiave API di Finnhub per congressional trading (opzionale) | - |
+| `DB_PATH` | Percorso del database SQLite (su Render: `/data/portfolio.db`) | `backend/investment_agent.db` |
+| `DOCUMENTS_PATH` | Percorso documenti caricati (su Render: `/data/documents`) | `backend/documents/` |
 
-## Deploy su Railway
+## Deploy su Render
 
-1. Clonare il repository:
-   ```bash
-   git clone <url-del-repo>
-   ```
-2. Collegare il progetto a [Railway](https://railway.app) tramite la dashboard.
-3. Configurare le variabili d'ambiente (`ANTHROPIC_API_KEY`, `NEWS_API_KEY`) nelle impostazioni del servizio.
-4. Eseguire il deploy: Railway rileverà automaticamente il file `railway.toml` e avvierà build e deploy.
+1. Creare un nuovo **Web Service** su [Render](https://render.com)
+2. Collegare il repository GitHub
+3. Render rileverà automaticamente `render.yaml`
+4. Configurare le variabili d'ambiente: `ANTHROPIC_API_KEY`, `NEWS_API_KEY`, `FINNHUB_API_KEY`
+5. Il disco persistente (`/data`, 1GB) viene creato automaticamente per database e documenti
 
 ## Endpoint API
 

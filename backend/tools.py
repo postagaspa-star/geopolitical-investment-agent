@@ -183,6 +183,19 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "get_congressional_trades",
+        "description": (
+            "Recupera i trade recenti dei membri del Congresso USA via Finnhub. "
+            "Utile per identificare settori dove i legislatori stanno investendo, "
+            "spesso in anticipo su cambiamenti normativi o geopolitici."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
         # Strumento per quando l'agente decide di non operare
         "name": "do_nothing",
         "description": (
@@ -400,6 +413,21 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
                 "market_session": market_session,
                 "priority_assets": priority_assets,
                 "saved_at": timestamp,
+            }
+
+        elif tool_name == "get_congressional_trades":
+            logger.info("[%s] Recupero trade congressisti USA...", run_id)
+            congressional_data = await data_fetchers.fetch_congressional_trades()
+
+            database.insert_agent_log(
+                run_id=run_id,
+                phase="GEOPOLITICAL",
+                content=f"Trade congressisti recuperati: {len(congressional_data.get('trades', []))} ticker significativi",
+            )
+
+            result = {
+                "congressional_trades": congressional_data,
+                "fetched_at": timestamp,
             }
 
         elif tool_name == "do_nothing":

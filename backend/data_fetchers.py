@@ -288,3 +288,90 @@ def get_all_watchlist_tickers() -> List[str]:
     for settore, tickers in WATCHLIST.items():
         tutti_i_ticker.update(tickers)
     return sorted(tutti_i_ticker)
+
+
+async def fetch_congressional_trades() -> Dict[str, Any]:
+    """
+    Recupera i trade recenti dei membri del Congresso USA via Finnhub.
+    Questi trade sono segnali insider forti perché i congressisti siedono
+    su commissioni che regolano i settori in cui investono.
+    """
+    api_key = os.environ.get("FINNHUB_API_KEY", "")
+    if not api_key:
+        logger.warning("FINNHUB_API_KEY non configurata; congressional trades saltati.")
+        return {
+            "trades": [],
+            "fetched_at": datetime.utcnow().isoformat(),
+            "source": "finnhub_congressional",
+            "error": "FINNHUB_API_KEY mancante",
+        }
+
+    url = f"https://finnhub.io/api/v1/stock/congressional-trading?token={api_key}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    logger.warning("Finnhub congressional trading ha restituito stato %s", resp.status)
+                    return {
+                        "trades": [],
+                        "fetched_at": datetime.utcnow().isoformat(),
+                        "source": "finnhub_congressional",
+                        "error": f"HTTP {resp.status}",
+                    }
+                data = await resp.json(content_type=None)
+
+        # data è una lista di trade. Filtra per amount > 50000 e raggruppa per ticker
+        trades = data if isinstance(data, list) else data.get("data", [])
+
+        # Filtra trade significativi (ultimi 30 giorni, amount > 50000)
+        cutoff = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+        significant = []
+        for t in trades:
+            tx_date = t.get("transactionDate", "")
+            amount_low = t.get("amountFrom", 0) or 0
+            if tx_date >= cutoff and amount_low >= 50000:
+                significant.append(t)
+
+        # Raggruppa per ticker
+        grouped = {}
+        for t in significant:
+            sym = t.get("symbol", "UNKNOWN")
+            if sym not in grouped:
+                grouped[sym] = {"buys": 0, "sells": 0, "total_amount": 0, "representatives": set()}
+            tx_type = t.get("transactionType", "").lower()
+            if "purchase" in tx_type or "buy" in tx_type:
+                grouped[sym]["buys"] += 1
+            elif "sale" in tx_type or "sell" in tx_type:
+                grouped[sym]["sells"] += 1
+            grouped[sym]["total_amount"] += (t.get("amountFrom", 0) or 0)
+            rep = t.get("representative", "Unknown")
+            grouped[sym]["representatives"].add(rep)
+
+        # Converti in lista ordinata per numero di congressisti
+        result_trades = []
+        for sym, info in grouped.items():
+            result_trades.append({
+                "ticker": sym,
+                "buy_count": info["buys"],
+                "sell_count": info["sells"],
+                "total_representatives": len(info["representatives"]),
+                "total_amount_estimate": info["total_amount"],
+                "representatives": list(info["representatives"])[:5],
+            })
+        result_trades.sort(key=lambda x: x["total_representatives"], reverse=True)
+
+        return {
+            "trades": result_trades[:20],
+            "total_significant_trades": len(significant),
+            "fetched_at": datetime.utcnow().isoformat(),
+            "source": "finnhub_congressional",
+            "error": None,
+        }
+    except Exception as exc:
+        logger.error("Errore in fetch_congressional_trades: %s", exc)
+        return {
+            "trades": [],
+            "fetched_at": datetime.utcnow().isoformat(),
+            "source": "finnhub_congressional",
+            "error": str(exc),
+        }

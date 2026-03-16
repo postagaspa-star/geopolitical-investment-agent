@@ -467,92 +467,132 @@ function Settings({ onBack }) {
   // === Stili inline riutilizzabili ===
   const inputStyle = {
     width: "100%",
-    padding: "0.5rem 0.75rem",
-    background: "rgba(255,255,255,0.05)",
-    border: "1px solid var(--border-color)",
-    borderRadius: "6px",
-    color: "var(--text-primary)",
-    fontSize: "0.85rem",
-    fontFamily: "var(--font-sans)",
+    padding: "10px 12px",
+    background: "#ffffff",
+    border: "1px solid #d1d5db",
+    borderRadius: "8px",
+    color: "#111827",
+    fontSize: "14px",
+    fontFamily: "'Inter', -apple-system, sans-serif",
     outline: "none",
+    transition: "border-color 0.15s, box-shadow 0.15s",
+    boxSizing: "border-box",
   };
 
   const textareaStyle = {
     ...inputStyle,
-    fontFamily: "var(--font-mono)",
-    fontSize: "0.8rem",
-    lineHeight: "1.5",
+    fontFamily: "'Inter', -apple-system, sans-serif",
+    fontSize: "14px",
+    lineHeight: "1.6",
     resize: "vertical",
+    minHeight: "200px",
   };
 
   const selectStyle = {
     ...inputStyle,
     cursor: "pointer",
+    appearance: "none",
+    backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E\")",
+    backgroundRepeat: "no-repeat",
+    backgroundPosition: "right 12px center",
+    paddingRight: "32px",
   };
 
   const labelStyle = {
     display: "block",
-    fontSize: "0.75rem",
-    color: "var(--text-secondary)",
-    marginBottom: "0.35rem",
-    fontWeight: 600,
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
+    fontSize: "13px",
+    color: "#6b7280",
+    marginBottom: "6px",
+    fontWeight: 500,
   };
 
   const fieldGroup = {
-    marginBottom: "1rem",
+    marginBottom: "16px",
+  };
+
+  const cardStyle = {
+    background: "#ffffff",
+    border: "1px solid #e5e7eb",
+    borderRadius: "12px",
+    padding: "24px",
+    marginBottom: "24px",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+  };
+
+  const sectionTitle = {
+    fontSize: "16px",
+    fontWeight: 600,
+    color: "#111827",
+    marginBottom: "20px",
+    margin: 0,
+    marginBottom: "20px",
+  };
+
+  const btnPrimary = {
+    padding: "10px 20px",
+    background: "#3b82f6",
+    color: "#ffffff",
+    border: "none",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontSize: "14px",
+    fontWeight: 500,
+    fontFamily: "'Inter', -apple-system, sans-serif",
+    transition: "background 0.15s",
   };
 
   const btnDanger = {
-    padding: "0.5rem 1.2rem",
-    border: "1px solid var(--negative)",
-    background: "transparent",
-    color: "var(--negative)",
-    borderRadius: "6px",
+    padding: "10px 20px",
+    border: "1px solid #ef4444",
+    background: "#ffffff",
+    color: "#ef4444",
+    borderRadius: "8px",
     cursor: "pointer",
-    fontSize: "0.85rem",
-    fontWeight: 600,
+    fontSize: "14px",
+    fontWeight: 500,
+    fontFamily: "'Inter', -apple-system, sans-serif",
   };
 
-  const btnSmall = {
-    padding: "0.3rem 0.7rem",
-    border: "1px solid var(--accent-blue)",
-    background: "transparent",
-    color: "var(--accent-blue)",
-    borderRadius: "4px",
+  const btnSecondary = {
+    padding: "8px 14px",
+    background: "#f3f4f6",
+    color: "#374151",
+    border: "1px solid #d1d5db",
+    borderRadius: "8px",
     cursor: "pointer",
-    fontSize: "0.75rem",
-    fontWeight: 600,
+    fontSize: "13px",
+    fontWeight: 500,
+    fontFamily: "'Inter', -apple-system, sans-serif",
   };
 
   const tickerBadge = {
     display: "inline-flex",
     alignItems: "center",
-    gap: "0.3rem",
-    padding: "0.2rem 0.5rem",
-    background: "rgba(68, 138, 255, 0.12)",
-    border: "1px solid rgba(68, 138, 255, 0.3)",
-    borderRadius: "4px",
-    fontSize: "0.75rem",
-    fontWeight: 700,
-    color: "var(--accent-blue)",
-    margin: "0.2rem",
+    gap: "6px",
+    padding: "4px 10px",
+    background: "#eff6ff",
+    border: "1px solid #bfdbfe",
+    borderRadius: "6px",
+    fontSize: "13px",
+    fontWeight: 600,
+    color: "#1d4ed8",
+    margin: "3px",
   };
 
   const removeBtn = {
     background: "none",
     border: "none",
-    color: "var(--text-muted)",
+    color: "#9ca3af",
     cursor: "pointer",
-    fontSize: "0.7rem",
-    padding: "0 0.15rem",
+    fontSize: "11px",
+    padding: "0 2px",
     lineHeight: 1,
+    transition: "color 0.15s",
   };
 
   const inlineRow = {
     display: "flex",
-    gap: "0.5rem",
+    gap: "8px",
     alignItems: "center",
   };
 
@@ -567,539 +607,732 @@ function Settings({ onBack }) {
     { key: "documents", name: "Documenti" },
   ];
 
+  // Focus style handler helper
+  const handleFocus = (e) => {
+    e.target.style.borderColor = "#3b82f6";
+    e.target.style.boxShadow = "0 0 0 3px rgba(59,130,246,0.1)";
+  };
+  const handleBlur = (e) => {
+    e.target.style.borderColor = "#d1d5db";
+    e.target.style.boxShadow = "none";
+  };
+
   return (
     <div
       style={{
-        padding: "1.5rem 2rem",
-        maxWidth: "1000px",
-        margin: "0 auto",
+        background: "#f9fafb",
+        minHeight: "100vh",
+        padding: "32px",
+        color: "#111827",
+        fontFamily: "'Inter', -apple-system, sans-serif",
       }}
     >
-      {/* Intestazione con freccia indietro */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "1rem",
-          marginBottom: "1.5rem",
-        }}
-      >
-        {onBack && (
-          <button
-            onClick={onBack}
-            style={{
-              background: "none",
-              border: "1px solid var(--border-color)",
-              color: "var(--text-primary)",
-              borderRadius: "6px",
-              cursor: "pointer",
-              padding: "0.4rem 0.7rem",
-              fontSize: "1.1rem",
-              lineHeight: 1,
-            }}
-          >
-            &#8592;
-          </button>
-        )}
+      <div style={{ maxWidth: "720px", margin: "0 auto" }}>
+
+        {/* Page title */}
         <h1
           style={{
-            fontSize: "1.4rem",
+            fontSize: "24px",
             fontWeight: 700,
+            color: "#111827",
+            marginBottom: "24px",
             letterSpacing: "-0.02em",
           }}
         >
           Impostazioni
         </h1>
-      </div>
 
-      {/* Messaggio di feedback globale */}
-      {message && (
-        <div
-          style={{
-            padding: "0.6rem 1rem",
-            marginBottom: "1rem",
-            borderRadius: "6px",
-            fontSize: "0.85rem",
-            fontWeight: 600,
-            background: message.isError
-              ? "rgba(255,23,68,0.12)"
-              : "rgba(0,200,83,0.12)",
-            color: message.isError ? "var(--negative)" : "var(--positive)",
-            border: `1px solid ${
-              message.isError
-                ? "rgba(255,23,68,0.3)"
-                : "rgba(0,200,83,0.3)"
-            }`,
-          }}
-        >
-          {message.text}
-        </div>
-      )}
-
-      {/* ============================================= */}
-      {/* SEZIONE 0: DIAGNOSTICA SISTEMA               */}
-      {/* ============================================= */}
-      <div className="card" style={{ marginBottom: "1.25rem" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: "1rem",
-          }}
-        >
-          <div className="card-title" style={{ margin: 0 }}>
-            Diagnostica Sistema
+        {/* Messaggio di feedback globale */}
+        {message && (
+          <div
+            style={{
+              padding: "10px 16px",
+              marginBottom: "16px",
+              borderRadius: "8px",
+              fontSize: "14px",
+              fontWeight: 500,
+              background: message.isError ? "#fef2f2" : "#ecfdf5",
+              color: message.isError ? "#991b1b" : "#065f46",
+              border: `1px solid ${message.isError ? "#fecaca" : "#a7f3d0"}`,
+            }}
+          >
+            {message.text}
           </div>
+        )}
+
+        {/* ============================================= */}
+        {/* SEZIONE 0: DIAGNOSTICA SISTEMA               */}
+        {/* ============================================= */}
+        <div style={cardStyle}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: "16px",
+            }}
+          >
+            <div style={{ ...sectionTitle, marginBottom: 0 }}>
+              Diagnostica Sistema
+            </div>
+            <button
+              style={btnSecondary}
+              onClick={handleRerunDiagnostics}
+            >
+              Riaggiorna
+            </button>
+          </div>
+
+          <div>
+            {diagItems.map(({ key, name }, index) => {
+              const diag = diagnostics[key];
+              const dotColor =
+                diag.status === "ok"
+                  ? "#10b981"
+                  : diag.status === "error"
+                  ? "#ef4444"
+                  : "#9ca3af";
+              return (
+                <div key={key}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "10px",
+                      padding: "10px 0",
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: "8px",
+                        height: "8px",
+                        borderRadius: "50%",
+                        background: dotColor,
+                        flexShrink: 0,
+                        animation:
+                          diag.status === "loading"
+                            ? "pulse 1.5s ease-in-out infinite"
+                            : "none",
+                      }}
+                    />
+                    <span
+                      style={{
+                        fontSize: "14px",
+                        color: "#374151",
+                        fontWeight: 500,
+                        minWidth: "130px",
+                      }}
+                    >
+                      {name}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "13px",
+                        color: "#6b7280",
+                      }}
+                    >
+                      {diag.status === "loading" && "Verifica..."}
+                      {diag.status === "ok" &&
+                        `OK${diag.message ? ` — ${diag.message}` : ""}`}
+                      {diag.status === "error" &&
+                        `Errore${diag.message ? `: ${diag.message}` : ""}`}
+                    </span>
+                  </div>
+                  {index < diagItems.length - 1 && (
+                    <div
+                      style={{
+                        height: "1px",
+                        background: "#f3f4f6",
+                      }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Pulse animation keyframes */}
+        <style>{`
+          @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+          }
+        `}</style>
+
+        {/* ============================== */}
+        {/* SEZIONE 1: PROFILO AGENTE      */}
+        {/* ============================== */}
+        <div style={cardStyle}>
+          <div style={sectionTitle}>Profilo Agente</div>
+
+          <div style={fieldGroup}>
+            <label style={labelStyle}>Prompt di sistema</label>
+            <textarea
+              rows={8}
+              style={textareaStyle}
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              placeholder={DEFAULT_SYSTEM_PROMPT}
+              onFocus={handleFocus}
+              onBlur={handleBlur}
+            />
+          </div>
+
+          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
+            <div style={{ ...fieldGroup, flex: "1 1 250px" }}>
+              <label style={labelStyle}>Modello</label>
+              <select
+                style={selectStyle}
+                value={modelName}
+                onChange={(e) => setModelName(e.target.value)}
+                onFocus={handleFocus}
+                onBlur={handleBlur}
+              >
+                {MODEL_OPTIONS.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ ...fieldGroup, flex: "0 1 180px" }}>
+              <label style={labelStyle}>Intervallo esecuzione (ore)</label>
+              <input
+                type="number"
+                min={1}
+                max={24}
+                style={inputStyle}
+                value={runInterval}
+                onChange={(e) => setRunInterval(Number(e.target.value))}
+                onFocus={handleFocus}
+                onBlur={handleBlur}
+              />
+            </div>
+          </div>
+
           <button
             style={{
-              ...btnSmall,
-              fontSize: "0.7rem",
-              padding: "0.25rem 0.6rem",
+              ...btnPrimary,
+              opacity: saving ? 0.6 : 1,
+              cursor: saving ? "not-allowed" : "pointer",
             }}
-            onClick={handleRerunDiagnostics}
-          >
-            Riaggiorna
-          </button>
-        </div>
-
-        <div className="diag-list">
-          {diagItems.map(({ key, name }) => {
-            const diag = diagnostics[key];
-            return (
-              <div className="diag-item" key={key}>
-                <span className={`diag-dot ${diag.status}`} />
-                <span className="diag-name">{name}</span>
-                <span className="diag-status">
-                  {diag.status === "loading" && "Verifica..."}
-                  {diag.status === "ok" && (
-                    <span style={{ color: "var(--positive)" }}>
-                      OK{diag.message ? ` — ${diag.message}` : ""}
-                    </span>
-                  )}
-                  {diag.status === "error" && (
-                    <span style={{ color: "var(--negative)" }}>
-                      Errore{diag.message ? `: ${diag.message}` : ""}
-                    </span>
-                  )}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ============================== */}
-      {/* SEZIONE 1: PROFILO AGENTE      */}
-      {/* ============================== */}
-      <div className="card" style={{ marginBottom: "1.25rem" }}>
-        <div className="card-title">Profilo Agente</div>
-
-        <div style={fieldGroup}>
-          <label style={labelStyle}>Prompt di sistema</label>
-          <textarea
-            rows={12}
-            style={textareaStyle}
-            value={systemPrompt}
-            onChange={(e) => setSystemPrompt(e.target.value)}
-            placeholder={DEFAULT_SYSTEM_PROMPT}
-          />
-        </div>
-
-        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-          <div style={{ ...fieldGroup, flex: "1 1 250px" }}>
-            <label style={labelStyle}>Modello</label>
-            <select
-              style={selectStyle}
-              value={modelName}
-              onChange={(e) => setModelName(e.target.value)}
-            >
-              {MODEL_OPTIONS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={{ ...fieldGroup, flex: "0 1 180px" }}>
-            <label style={labelStyle}>Intervallo esecuzione (ore)</label>
-            <input
-              type="number"
-              min={1}
-              max={24}
-              style={inputStyle}
-              value={runInterval}
-              onChange={(e) => setRunInterval(Number(e.target.value))}
-            />
-          </div>
-        </div>
-
-        <button
-          className="btn-run"
-          onClick={handleSaveProfile}
-          disabled={saving}
-        >
-          {saving ? "Salvando..." : "Salva Profilo"}
-        </button>
-      </div>
-
-      {/* ============================================= */}
-      {/* SEZIONE 2: DOCUMENTI DI ANALISI TECNICA       */}
-      {/* ============================================= */}
-      <div className="card" style={{ marginBottom: "1.25rem" }}>
-        <div className="card-title">Documenti di Analisi Tecnica</div>
-
-        {/* Upload nascosto + pulsante stilizzato */}
-        <input
-          type="file"
-          accept=".pdf,.txt"
-          ref={fileInputRef}
-          onChange={handleFileUpload}
-          style={{ display: "none" }}
-        />
-        <button
-          className="btn-run"
-          style={{ marginBottom: "1rem" }}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          Carica Documento
-        </button>
-
-        {/* Lista documenti caricati */}
-        {documents.length > 0 ? (
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Nome File</th>
-                <th>Data Upload</th>
-                <th>Dimensione</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {documents.map((doc) => (
-                <tr key={doc.id}>
-                  <td>{doc.filename}</td>
-                  <td>{formatDate(doc.uploaded_at)}</td>
-                  <td>{formatFileSize(doc.file_size)}</td>
-                  <td>
-                    <button
-                      onClick={() => handleDeleteDoc(doc.id)}
-                      style={{
-                        ...removeBtn,
-                        color: "var(--negative)",
-                        fontSize: "1rem",
-                        fontWeight: 700,
-                      }}
-                      title="Elimina documento"
-                    >
-                      &#10005;
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <div className="empty-state">Nessun documento caricato</div>
-        )}
-      </div>
-
-      {/* ============================================= */}
-      {/* SEZIONE 3: CONFIGURAZIONE PORTAFOGLIO         */}
-      {/* ============================================= */}
-      <div className="card" style={{ marginBottom: "1.25rem" }}>
-        <div className="card-title">Configurazione Portafoglio</div>
-
-        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-          <div style={{ ...fieldGroup, flex: "1 1 180px" }}>
-            <label style={labelStyle}>Bilancio iniziale ($)</label>
-            <input
-              type="number"
-              style={inputStyle}
-              value={initialBalance}
-              onChange={(e) => setInitialBalance(Number(e.target.value))}
-            />
-          </div>
-
-          <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
-            <label style={labelStyle}>Max posizione (%)</label>
-            <input
-              type="number"
-              style={inputStyle}
-              value={maxPositionPct}
-              onChange={(e) => setMaxPositionPct(Number(e.target.value))}
-            />
-          </div>
-
-          <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
-            <label style={labelStyle}>Stop Loss (%)</label>
-            <input
-              type="number"
-              style={inputStyle}
-              value={stopLossThreshold}
-              onChange={(e) => setStopLossThreshold(Number(e.target.value))}
-            />
-          </div>
-
-          <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
-            <label style={labelStyle}>Max posizioni aperte</label>
-            <input
-              type="number"
-              style={inputStyle}
-              value={maxOpenPositions}
-              onChange={(e) => setMaxOpenPositions(Number(e.target.value))}
-            />
-          </div>
-
-          <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
-            <label style={labelStyle}>Confidenza minima</label>
-            <input
-              type="number"
-              style={inputStyle}
-              value={minConfidence}
-              onChange={(e) => setMinConfidence(Number(e.target.value))}
-            />
-          </div>
-        </div>
-
-        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-          <button
-            className="btn-run"
-            onClick={handleSavePortfolio}
+            onClick={handleSaveProfile}
             disabled={saving}
           >
-            {saving ? "Salvando..." : "Salva Configurazione"}
-          </button>
-          <button style={btnDanger} onClick={handleResetPortfolio}>
-            Resetta Portafoglio
+            {saving ? "Salvando..." : "Salva Profilo"}
           </button>
         </div>
-      </div>
 
-      {/* ============================================= */}
-      {/* SEZIONE 4: UNIVERSO ASSET (WATCHLIST)         */}
-      {/* ============================================= */}
-      <div className="card" style={{ marginBottom: "1.25rem" }}>
-        <div className="card-title">Universo Asset (Watchlist)</div>
+        {/* ============================================= */}
+        {/* SEZIONE 2: DOCUMENTI DI ANALISI TECNICA       */}
+        {/* ============================================= */}
+        <div style={cardStyle}>
+          <div style={sectionTitle}>Documenti di Analisi Tecnica</div>
 
-        {Object.entries(watchlist).map(([sector, tickers]) => (
-          <div key={sector} style={{ marginBottom: "1rem" }}>
-            {/* Nome settore come intestazione */}
-            <div
-              style={{
-                fontSize: "0.8rem",
-                fontWeight: 700,
-                color: "var(--text-secondary)",
-                textTransform: "uppercase",
-                letterSpacing: "0.04em",
-                marginBottom: "0.4rem",
-              }}
-            >
-              {sector.replace(/_/g, " ")}
-            </div>
+          {/* Upload nascosto + pulsante stilizzato */}
+          <input
+            type="file"
+            accept=".pdf,.txt"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            style={{ display: "none" }}
+          />
+          <button
+            style={{ ...btnPrimary, marginBottom: "16px" }}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            Carica Documento
+          </button>
 
-            {/* Badge dei ticker con pulsante rimozione */}
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                marginBottom: "0.5rem",
-              }}
-            >
-              {tickers.map((ticker) => (
-                <span key={ticker} style={tickerBadge}>
-                  {ticker}
-                  <button
-                    style={removeBtn}
-                    onClick={() => handleRemoveTicker(sector, ticker)}
-                    title={`Rimuovi ${ticker}`}
-                  >
-                    &#10005;
-                  </button>
-                </span>
-              ))}
-            </div>
-
-            {/* Input per aggiungere un ticker al settore */}
-            <div style={inlineRow}>
-              <input
-                type="text"
-                placeholder="Ticker..."
+          {/* Lista documenti caricati */}
+          {documents.length > 0 ? (
+            <div style={{ borderRadius: "8px", overflow: "hidden", border: "1px solid #e5e7eb" }}>
+              <table
                 style={{
-                  ...inputStyle,
-                  width: "120px",
-                  flex: "0 0 auto",
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontSize: "14px",
                 }}
-                value={newTickerInputs[sector] || ""}
-                onChange={(e) =>
-                  setNewTickerInputs((prev) => ({
-                    ...prev,
-                    [sector]: e.target.value,
-                  }))
-                }
-                onKeyDown={(e) =>
-                  e.key === "Enter" && handleAddTicker(sector)
-                }
-              />
-              <button
-                style={btnSmall}
-                onClick={() => handleAddTicker(sector)}
               >
-                Aggiungi
-              </button>
+                <thead>
+                  <tr style={{ background: "#f9fafb" }}>
+                    <th
+                      style={{
+                        textAlign: "left",
+                        padding: "10px 14px",
+                        fontWeight: 500,
+                        color: "#6b7280",
+                        fontSize: "13px",
+                        borderBottom: "1px solid #e5e7eb",
+                      }}
+                    >
+                      Nome File
+                    </th>
+                    <th
+                      style={{
+                        textAlign: "left",
+                        padding: "10px 14px",
+                        fontWeight: 500,
+                        color: "#6b7280",
+                        fontSize: "13px",
+                        borderBottom: "1px solid #e5e7eb",
+                      }}
+                    >
+                      Data Upload
+                    </th>
+                    <th
+                      style={{
+                        textAlign: "left",
+                        padding: "10px 14px",
+                        fontWeight: 500,
+                        color: "#6b7280",
+                        fontSize: "13px",
+                        borderBottom: "1px solid #e5e7eb",
+                      }}
+                    >
+                      Dimensione
+                    </th>
+                    <th
+                      style={{
+                        width: "40px",
+                        borderBottom: "1px solid #e5e7eb",
+                      }}
+                    ></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {documents.map((doc, i) => (
+                    <tr
+                      key={doc.id}
+                      style={{
+                        borderBottom:
+                          i < documents.length - 1
+                            ? "1px solid #f3f4f6"
+                            : "none",
+                      }}
+                    >
+                      <td
+                        style={{
+                          padding: "10px 14px",
+                          color: "#111827",
+                          fontWeight: 500,
+                        }}
+                      >
+                        {doc.filename}
+                      </td>
+                      <td
+                        style={{
+                          padding: "10px 14px",
+                          color: "#6b7280",
+                        }}
+                      >
+                        {formatDate(doc.uploaded_at)}
+                      </td>
+                      <td
+                        style={{
+                          padding: "10px 14px",
+                          color: "#6b7280",
+                        }}
+                      >
+                        {formatFileSize(doc.file_size)}
+                      </td>
+                      <td style={{ padding: "10px 14px", textAlign: "center" }}>
+                        <button
+                          onClick={() => handleDeleteDoc(doc.id)}
+                          style={{
+                            ...removeBtn,
+                            color: "#ef4444",
+                            fontSize: "14px",
+                            fontWeight: 600,
+                          }}
+                          title="Elimina documento"
+                        >
+                          &#10005;
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div
+              style={{
+                padding: "24px",
+                textAlign: "center",
+                color: "#9ca3af",
+                fontSize: "14px",
+                background: "#f9fafb",
+                borderRadius: "8px",
+                border: "1px dashed #e5e7eb",
+              }}
+            >
+              Nessun documento caricato
+            </div>
+          )}
+        </div>
+
+        {/* ============================================= */}
+        {/* SEZIONE 3: CONFIGURAZIONE PORTAFOGLIO         */}
+        {/* ============================================= */}
+        <div style={cardStyle}>
+          <div style={sectionTitle}>Configurazione Portafoglio</div>
+
+          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
+            <div style={{ ...fieldGroup, flex: "1 1 180px" }}>
+              <label style={labelStyle}>Bilancio iniziale ($)</label>
+              <input
+                type="number"
+                style={inputStyle}
+                value={initialBalance}
+                onChange={(e) => setInitialBalance(Number(e.target.value))}
+                onFocus={handleFocus}
+                onBlur={handleBlur}
+              />
+            </div>
+
+            <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
+              <label style={labelStyle}>Max posizione (%)</label>
+              <input
+                type="number"
+                style={inputStyle}
+                value={maxPositionPct}
+                onChange={(e) => setMaxPositionPct(Number(e.target.value))}
+                onFocus={handleFocus}
+                onBlur={handleBlur}
+              />
+            </div>
+
+            <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
+              <label style={labelStyle}>Stop Loss (%)</label>
+              <input
+                type="number"
+                style={inputStyle}
+                value={stopLossThreshold}
+                onChange={(e) => setStopLossThreshold(Number(e.target.value))}
+                onFocus={handleFocus}
+                onBlur={handleBlur}
+              />
+            </div>
+
+            <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
+              <label style={labelStyle}>Max posizioni aperte</label>
+              <input
+                type="number"
+                style={inputStyle}
+                value={maxOpenPositions}
+                onChange={(e) => setMaxOpenPositions(Number(e.target.value))}
+                onFocus={handleFocus}
+                onBlur={handleBlur}
+              />
+            </div>
+
+            <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
+              <label style={labelStyle}>Confidenza minima</label>
+              <input
+                type="number"
+                style={inputStyle}
+                value={minConfidence}
+                onChange={(e) => setMinConfidence(Number(e.target.value))}
+                onFocus={handleFocus}
+                onBlur={handleBlur}
+              />
             </div>
           </div>
-        ))}
 
-        {/* Aggiunta di un nuovo settore */}
-        <div
-          style={{
-            borderTop: "1px solid var(--border-color)",
-            paddingTop: "1rem",
-            marginTop: "0.5rem",
-          }}
-        >
-          <div style={inlineRow}>
-            <input
-              type="text"
-              placeholder="Nome nuovo settore..."
+          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+            <button
               style={{
-                ...inputStyle,
-                width: "200px",
-                flex: "0 0 auto",
+                ...btnPrimary,
+                opacity: saving ? 0.6 : 1,
+                cursor: saving ? "not-allowed" : "pointer",
               }}
-              value={newSectorName}
-              onChange={(e) => setNewSectorName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAddSector()}
-            />
-            <button style={btnSmall} onClick={handleAddSector}>
-              Nuovo Settore
+              onClick={handleSavePortfolio}
+              disabled={saving}
+            >
+              {saving ? "Salvando..." : "Salva Configurazione"}
+            </button>
+            <button style={btnDanger} onClick={handleResetPortfolio}>
+              Resetta Portafoglio
             </button>
           </div>
         </div>
 
-        <button
-          className="btn-run"
-          style={{ marginTop: "1rem" }}
-          onClick={handleSaveWatchlist}
-          disabled={saving}
-        >
-          {saving ? "Salvando..." : "Salva Watchlist"}
-        </button>
-      </div>
+        {/* ============================================= */}
+        {/* SEZIONE 4: UNIVERSO ASSET (WATCHLIST)         */}
+        {/* ============================================= */}
+        <div style={cardStyle}>
+          <div style={sectionTitle}>Universo Asset (Watchlist)</div>
 
-      {/* ============================================= */}
-      {/* SEZIONE 5: CONFIGURAZIONE API                 */}
-      {/* ============================================= */}
-      <div className="card" style={{ marginBottom: "1.25rem" }}>
-        <div className="card-title">Configurazione API</div>
-
-        <div style={fieldGroup}>
-          <label style={labelStyle}>Anthropic API Key</label>
-          <input
-            type="password"
-            style={inputStyle}
-            value={anthropicKey}
-            onChange={(e) => setAnthropicKey(e.target.value)}
-            placeholder="Configurata tramite variabile d'ambiente"
-          />
-        </div>
-
-        <div style={fieldGroup}>
-          <label style={labelStyle}>NewsAPI Key</label>
-          <input
-            type="password"
-            style={inputStyle}
-            value={newsApiKey}
-            onChange={(e) => setNewsApiKey(e.target.value)}
-            placeholder="Inserisci la chiave NewsAPI"
-          />
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            gap: "0.75rem",
-            flexWrap: "wrap",
-            alignItems: "center",
-          }}
-        >
-          <button className="btn-run" onClick={handleTestConnection}>
-            Testa Connessione
-          </button>
-          <button
-            className="btn-run"
-            onClick={handleSaveApiKeys}
-            disabled={saving}
-          >
-            {saving ? "Salvando..." : "Salva Chiavi API"}
-          </button>
-        </div>
-
-        {/* Risultato del test di connessione */}
-        {connectionTest && (
-          <div style={{ marginTop: "1rem" }}>
-            {connectionTest.loading ? (
+          {Object.entries(watchlist).map(([sector, tickers]) => (
+            <div key={sector} style={{ marginBottom: "20px" }}>
+              {/* Nome settore come intestazione */}
               <div
                 style={{
-                  color: "var(--text-muted)",
-                  fontSize: "0.85rem",
+                  fontSize: "13px",
+                  fontWeight: 600,
+                  color: "#6b7280",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  marginBottom: "8px",
                 }}
               >
-                Test in corso...
+                {sector.replace(/_/g, " ")}
               </div>
-            ) : connectionTest.error ? (
-              <div className="negative" style={{ fontSize: "0.85rem" }}>
-                Errore: {connectionTest.error}
+
+              {/* Badge dei ticker con pulsante rimozione */}
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  marginBottom: "8px",
+                }}
+              >
+                {tickers.map((ticker) => (
+                  <span key={ticker} style={tickerBadge}>
+                    {ticker}
+                    <button
+                      style={removeBtn}
+                      onClick={() => handleRemoveTicker(sector, ticker)}
+                      title={`Rimuovi ${ticker}`}
+                    >
+                      &#10005;
+                    </button>
+                  </span>
+                ))}
               </div>
-            ) : (
-              <div style={{ fontSize: "0.85rem" }}>
-                {connectionTest.anthropic != null && (
-                  <div style={{ marginBottom: "0.3rem" }}>
-                    <span
-                      className={
-                        connectionTest.anthropic ? "positive" : "negative"
-                      }
-                      style={{ fontWeight: 700 }}
-                    >
-                      &#9679;
-                    </span>{" "}
-                    Anthropic API:{" "}
-                    <span
-                      className={
-                        connectionTest.anthropic ? "positive" : "negative"
-                      }
-                    >
-                      {connectionTest.anthropic ? "Connessa" : "Non connessa"}
-                    </span>
-                  </div>
-                )}
-                {connectionTest.newsapi != null && (
-                  <div>
-                    <span
-                      className={
-                        connectionTest.newsapi ? "positive" : "negative"
-                      }
-                      style={{ fontWeight: 700 }}
-                    >
-                      &#9679;
-                    </span>{" "}
-                    NewsAPI:{" "}
-                    <span
-                      className={
-                        connectionTest.newsapi ? "positive" : "negative"
-                      }
-                    >
-                      {connectionTest.newsapi ? "Connessa" : "Non connessa"}
-                    </span>
-                  </div>
-                )}
+
+              {/* Input per aggiungere un ticker al settore */}
+              <div style={inlineRow}>
+                <input
+                  type="text"
+                  placeholder="Ticker..."
+                  style={{
+                    ...inputStyle,
+                    width: "120px",
+                    flex: "0 0 auto",
+                  }}
+                  value={newTickerInputs[sector] || ""}
+                  onChange={(e) =>
+                    setNewTickerInputs((prev) => ({
+                      ...prev,
+                      [sector]: e.target.value,
+                    }))
+                  }
+                  onKeyDown={(e) =>
+                    e.key === "Enter" && handleAddTicker(sector)
+                  }
+                  onFocus={handleFocus}
+                  onBlur={handleBlur}
+                />
+                <button
+                  style={btnSecondary}
+                  onClick={() => handleAddTicker(sector)}
+                >
+                  Aggiungi
+                </button>
               </div>
-            )}
+            </div>
+          ))}
+
+          {/* Aggiunta di un nuovo settore */}
+          <div
+            style={{
+              borderTop: "1px solid #e5e7eb",
+              paddingTop: "16px",
+              marginTop: "8px",
+            }}
+          >
+            <div style={inlineRow}>
+              <input
+                type="text"
+                placeholder="Nome nuovo settore..."
+                style={{
+                  ...inputStyle,
+                  width: "200px",
+                  flex: "0 0 auto",
+                }}
+                value={newSectorName}
+                onChange={(e) => setNewSectorName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAddSector()}
+                onFocus={handleFocus}
+                onBlur={handleBlur}
+              />
+              <button style={btnSecondary} onClick={handleAddSector}>
+                Nuovo Settore
+              </button>
+            </div>
           </div>
-        )}
+
+          <button
+            style={{
+              ...btnPrimary,
+              marginTop: "16px",
+              opacity: saving ? 0.6 : 1,
+              cursor: saving ? "not-allowed" : "pointer",
+            }}
+            onClick={handleSaveWatchlist}
+            disabled={saving}
+          >
+            {saving ? "Salvando..." : "Salva Watchlist"}
+          </button>
+        </div>
+
+        {/* ============================================= */}
+        {/* SEZIONE 5: CONFIGURAZIONE API                 */}
+        {/* ============================================= */}
+        <div style={cardStyle}>
+          <div style={sectionTitle}>Configurazione API</div>
+
+          <div style={fieldGroup}>
+            <label style={labelStyle}>Anthropic API Key</label>
+            <input
+              type="password"
+              style={inputStyle}
+              value={anthropicKey}
+              onChange={(e) => setAnthropicKey(e.target.value)}
+              placeholder="Configurata tramite variabile d'ambiente"
+              onFocus={handleFocus}
+              onBlur={handleBlur}
+            />
+          </div>
+
+          <div style={fieldGroup}>
+            <label style={labelStyle}>NewsAPI Key</label>
+            <input
+              type="password"
+              style={inputStyle}
+              value={newsApiKey}
+              onChange={(e) => setNewsApiKey(e.target.value)}
+              placeholder="Inserisci la chiave NewsAPI"
+              onFocus={handleFocus}
+              onBlur={handleBlur}
+            />
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              gap: "12px",
+              flexWrap: "wrap",
+              alignItems: "center",
+            }}
+          >
+            <button style={btnSecondary} onClick={handleTestConnection}>
+              Testa Connessione
+            </button>
+            <button
+              style={{
+                ...btnPrimary,
+                opacity: saving ? 0.6 : 1,
+                cursor: saving ? "not-allowed" : "pointer",
+              }}
+              onClick={handleSaveApiKeys}
+              disabled={saving}
+            >
+              {saving ? "Salvando..." : "Salva Chiavi API"}
+            </button>
+          </div>
+
+          {/* Risultato del test di connessione */}
+          {connectionTest && (
+            <div style={{ marginTop: "16px" }}>
+              {connectionTest.loading ? (
+                <div
+                  style={{
+                    color: "#9ca3af",
+                    fontSize: "14px",
+                  }}
+                >
+                  Test in corso...
+                </div>
+              ) : connectionTest.error ? (
+                <div
+                  style={{
+                    fontSize: "14px",
+                    color: "#991b1b",
+                    background: "#fef2f2",
+                    border: "1px solid #fecaca",
+                    borderRadius: "8px",
+                    padding: "10px 14px",
+                  }}
+                >
+                  Errore: {connectionTest.error}
+                </div>
+              ) : (
+                <div style={{ fontSize: "14px" }}>
+                  {connectionTest.anthropic != null && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        marginBottom: "6px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: "8px",
+                          height: "8px",
+                          borderRadius: "50%",
+                          background: connectionTest.anthropic
+                            ? "#10b981"
+                            : "#ef4444",
+                          flexShrink: 0,
+                        }}
+                      />
+                      <span style={{ color: "#374151" }}>Anthropic API:</span>
+                      <span
+                        style={{
+                          color: connectionTest.anthropic
+                            ? "#065f46"
+                            : "#991b1b",
+                          fontWeight: 500,
+                        }}
+                      >
+                        {connectionTest.anthropic ? "Connessa" : "Non connessa"}
+                      </span>
+                    </div>
+                  )}
+                  {connectionTest.newsapi != null && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: "8px",
+                          height: "8px",
+                          borderRadius: "50%",
+                          background: connectionTest.newsapi
+                            ? "#10b981"
+                            : "#ef4444",
+                          flexShrink: 0,
+                        }}
+                      />
+                      <span style={{ color: "#374151" }}>NewsAPI:</span>
+                      <span
+                        style={{
+                          color: connectionTest.newsapi
+                            ? "#065f46"
+                            : "#991b1b",
+                          fontWeight: 500,
+                        }}
+                      >
+                        {connectionTest.newsapi ? "Connessa" : "Non connessa"}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

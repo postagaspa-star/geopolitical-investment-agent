@@ -47,6 +47,10 @@ Segui questa procedura rigorosa ad ogni ciclo:
 2. **Stato del Portafoglio**: Chiama `get_portfolio_state` per conoscere le posizioni
    attuali, la liquidita' disponibile e le performance complessive.
 
+2b. **Congressional Trading**: Chiama `get_congressional_trades` per verificare se membri
+   del Congresso USA hanno effettuato trade significativi. Questi possono essere segnali
+   anticipatori di cambiamenti normativi o geopolitici.
+
 3. **Analisi Tecnica**: Basandoti sulla tua analisi geopolitica, identifica i ticker
    piu' rilevanti e chiama `get_technical_analysis` per ciascuno di essi.
    Valuta medie mobili, RSI, MACD e bande di Bollinger.
@@ -70,6 +74,7 @@ Il tuo compito e' SOLO raccogliere e analizzare notizie geopolitiche per prepara
 PROCEDURA WEEKEND:
 1. Chiama `get_geopolitical_data` per raccogliere le ultime notizie geopolitiche.
 2. Analizza attentamente gli eventi: conflitti, sanzioni, accordi, elezioni, crisi energetiche.
+2b. Chiama `get_congressional_trades` per verificare trade significativi dei congressisti USA.
 3. Chiama `save_weekend_intelligence` per salvare la tua analisi con:
    - key_events: lista degli eventi chiave identificati
    - market_implications: come questi eventi influenzeranno i mercati alla riapertura
@@ -149,7 +154,7 @@ def _build_system_prompt(mode="full"):
 def _get_tools_for_mode(mode="full"):
     """Restituisce i tool disponibili in base alla modalita'."""
     if mode == "weekend":
-        allowed = {"get_geopolitical_data", "save_weekend_intelligence", "do_nothing"}
+        allowed = {"get_geopolitical_data", "save_weekend_intelligence", "do_nothing", "get_congressional_trades"}
     elif mode == "pre_market":
         allowed = {"get_geopolitical_data", "get_portfolio_state",
                    "save_pre_market_briefing", "do_nothing"}
