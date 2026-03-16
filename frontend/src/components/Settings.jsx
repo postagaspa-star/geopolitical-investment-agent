@@ -23,7 +23,21 @@ const MODEL_OPTIONS = [
   "claude-haiku-4-20250514",
 ];
 
+// Stato iniziale diagnostica
+const INITIAL_DIAGNOSTICS = {
+  anthropic: { status: "loading", message: "" },
+  newsapi:   { status: "loading", message: "" },
+  gdelt:     { status: "loading", message: "" },
+  yfinance:  { status: "loading", message: "" },
+  db:        { status: "loading", message: "" },
+  scheduler: { status: "loading", message: "" },
+  documents: { status: "loading", message: "" },
+};
+
 function Settings({ onBack }) {
+  // === Stato Sezione 0: Diagnostica Sistema ===
+  const [diagnostics, setDiagnostics] = useState(INITIAL_DIAGNOSTICS);
+
   // === Stato Sezione 1: Profilo Agente ===
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [modelName, setModelName] = useState(MODEL_OPTIONS[0]);
@@ -54,10 +68,131 @@ function Settings({ onBack }) {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
 
+  // Aggiorna un singolo item nella diagnostica
+  const setDiagItem = (key, status, msg = "") => {
+    setDiagnostics((prev) => ({
+      ...prev,
+      [key]: { status, message: msg },
+    }));
+  };
+
   // Mostra messaggio temporaneo di feedback
   const showMessage = (text, isError = false) => {
     setMessage({ text, isError });
     setTimeout(() => setMessage(null), 3000);
+  };
+
+  // === Diagnostica: eseguita al mount in parallelo ===
+  const runDiagnostics = async (docsData) => {
+    // Test Anthropic
+    const testAnthropic = async () => {
+      try {
+        const res = await fetch(`${API}/api/settings/test-anthropic`);
+        const data = await res.json();
+        if (data.status === "ok") {
+          setDiagItem("anthropic", "ok");
+        } else {
+          setDiagItem("anthropic", "error", data.message || "Risposta non valida");
+        }
+      } catch (err) {
+        setDiagItem("anthropic", "error", err.message);
+      }
+    };
+
+    // Test NewsAPI
+    const testNewsapi = async () => {
+      try {
+        const res = await fetch(`${API}/api/settings/test-newsapi`);
+        const data = await res.json();
+        if (data.status === "ok") {
+          setDiagItem("newsapi", "ok");
+        } else {
+          setDiagItem("newsapi", "error", data.message || "Risposta non valida");
+        }
+      } catch (err) {
+        setDiagItem("newsapi", "error", err.message);
+      }
+    };
+
+    // Test GDELT (esterno)
+    const testGdelt = async () => {
+      try {
+        const res = await fetch(
+          "https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json"
+        );
+        if (res.ok) {
+          setDiagItem("gdelt", "ok");
+        } else {
+          setDiagItem("gdelt", "error", `HTTP ${res.status}`);
+        }
+      } catch (err) {
+        setDiagItem("gdelt", "error", err.message);
+      }
+    };
+
+    // Test yfinance
+    const testYfinance = async () => {
+      try {
+        const res = await fetch(`${API}/api/settings/test-yfinance`);
+        const data = await res.json();
+        if (data.status === "ok") {
+          setDiagItem("yfinance", "ok");
+        } else {
+          setDiagItem("yfinance", "error", data.message || "Risposta non valida");
+        }
+      } catch (err) {
+        setDiagItem("yfinance", "error", err.message);
+      }
+    };
+
+    // Test DB
+    const testDb = async () => {
+      try {
+        const res = await fetch(`${API}/api/settings/test-db`);
+        const data = await res.json();
+        if (data.status === "ok") {
+          setDiagItem("db", "ok");
+        } else {
+          setDiagItem("db", "error", data.message || "Risposta non valida");
+        }
+      } catch (err) {
+        setDiagItem("db", "error", err.message);
+      }
+    };
+
+    // Test Scheduler (stato agente)
+    const testScheduler = async () => {
+      try {
+        const res = await fetch(`${API}/api/agent/status`);
+        const data = await res.json();
+        const running = data.is_running || data.scheduler_running || data.status === "running";
+        if (running) {
+          setDiagItem("scheduler", "ok", "In esecuzione");
+        } else {
+          setDiagItem("scheduler", "ok", "Attivo (idle)");
+        }
+      } catch (err) {
+        setDiagItem("scheduler", "error", err.message);
+      }
+    };
+
+    // Documenti: usa i dati già caricati
+    const checkDocuments = (docs) => {
+      const count = Array.isArray(docs) ? docs.length : 0;
+      setDiagItem("documents", "ok", `${count} documento${count !== 1 ? "i" : ""} caricato${count !== 1 ? "i" : ""}`);
+    };
+
+    // Lancia tutto in parallelo
+    await Promise.all([
+      testAnthropic(),
+      testNewsapi(),
+      testGdelt(),
+      testYfinance(),
+      testDb(),
+      testScheduler(),
+    ]);
+
+    checkDocuments(docsData);
   };
 
   // === Caricamento iniziale di tutte le impostazioni ===
@@ -107,20 +242,39 @@ function Settings({ onBack }) {
       }
     };
 
-    loadSettings();
-    loadDocuments();
+    const init = async () => {
+      // Carica impostazioni e documenti in parallelo
+      const [, docsData] = await Promise.all([
+        loadSettings(),
+        loadDocumentsRaw(),
+      ]);
+      // Lancia diagnostica con il conteggio documenti già disponibile
+      runDiagnostics(docsData);
+    };
+
+    init();
   }, []);
 
-  // Caricamento lista documenti dal server
-  const loadDocuments = async () => {
+  // Caricamento lista documenti dal server (restituisce i dati)
+  const loadDocumentsRaw = async () => {
     try {
       const res = await fetch(`${API}/api/documents`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setDocuments(Array.isArray(data) ? data : []);
+      const docs = Array.isArray(data) ? data : [];
+      setDocuments(docs);
+      return docs;
     } catch (err) {
       console.error("Errore caricamento documenti:", err);
+      setDocuments([]);
+      return [];
     }
+  };
+
+  // Caricamento lista documenti dal server (aggiorna stato)
+  const loadDocuments = async () => {
+    const docs = await loadDocumentsRaw();
+    return docs;
   };
 
   // === Salvataggio generico impostazioni via POST ===
@@ -163,7 +317,12 @@ function Settings({ onBack }) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       showMessage("Documento caricato con successo");
-      loadDocuments();
+      const docs = await loadDocuments();
+      setDiagItem(
+        "documents",
+        "ok",
+        `${docs.length} documento${docs.length !== 1 ? "i" : ""} caricato${docs.length !== 1 ? "i" : ""}`
+      );
     } catch (err) {
       showMessage(`Errore upload: ${err.message}`, true);
     }
@@ -179,7 +338,12 @@ function Settings({ onBack }) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       showMessage("Documento eliminato");
-      loadDocuments();
+      const docs = await loadDocuments();
+      setDiagItem(
+        "documents",
+        "ok",
+        `${docs.length} documento${docs.length !== 1 ? "i" : ""} caricato${docs.length !== 1 ? "i" : ""}`
+      );
     } catch (err) {
       showMessage(`Errore eliminazione: ${err.message}`, true);
     }
@@ -293,6 +457,13 @@ function Settings({ onBack }) {
     saveSettings(settings);
   };
 
+  // Re-run diagnostica manualmente
+  const handleRerunDiagnostics = async () => {
+    setDiagnostics(INITIAL_DIAGNOSTICS);
+    const docs = await loadDocumentsRaw();
+    runDiagnostics(docs);
+  };
+
   // === Stili inline riutilizzabili ===
   const inputStyle = {
     width: "100%",
@@ -385,6 +556,17 @@ function Settings({ onBack }) {
     alignItems: "center",
   };
 
+  // Dati di configurazione per i diag-item
+  const diagItems = [
+    { key: "anthropic", name: "Anthropic API" },
+    { key: "newsapi",   name: "NewsAPI" },
+    { key: "gdelt",     name: "GDELT Project" },
+    { key: "yfinance",  name: "yFinance" },
+    { key: "db",        name: "Database" },
+    { key: "scheduler", name: "Scheduler Agente" },
+    { key: "documents", name: "Documenti" },
+  ];
+
   return (
     <div
       style={{
@@ -402,21 +584,23 @@ function Settings({ onBack }) {
           marginBottom: "1.5rem",
         }}
       >
-        <button
-          onClick={onBack}
-          style={{
-            background: "none",
-            border: "1px solid var(--border-color)",
-            color: "var(--text-primary)",
-            borderRadius: "6px",
-            cursor: "pointer",
-            padding: "0.4rem 0.7rem",
-            fontSize: "1.1rem",
-            lineHeight: 1,
-          }}
-        >
-          &#8592;
-        </button>
+        {onBack && (
+          <button
+            onClick={onBack}
+            style={{
+              background: "none",
+              border: "1px solid var(--border-color)",
+              color: "var(--text-primary)",
+              borderRadius: "6px",
+              cursor: "pointer",
+              padding: "0.4rem 0.7rem",
+              fontSize: "1.1rem",
+              lineHeight: 1,
+            }}
+          >
+            &#8592;
+          </button>
+        )}
         <h1
           style={{
             fontSize: "1.4rem",
@@ -451,6 +635,59 @@ function Settings({ onBack }) {
           {message.text}
         </div>
       )}
+
+      {/* ============================================= */}
+      {/* SEZIONE 0: DIAGNOSTICA SISTEMA               */}
+      {/* ============================================= */}
+      <div className="card" style={{ marginBottom: "1.25rem" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: "1rem",
+          }}
+        >
+          <div className="card-title" style={{ margin: 0 }}>
+            Diagnostica Sistema
+          </div>
+          <button
+            style={{
+              ...btnSmall,
+              fontSize: "0.7rem",
+              padding: "0.25rem 0.6rem",
+            }}
+            onClick={handleRerunDiagnostics}
+          >
+            Riaggiorna
+          </button>
+        </div>
+
+        <div className="diag-list">
+          {diagItems.map(({ key, name }) => {
+            const diag = diagnostics[key];
+            return (
+              <div className="diag-item" key={key}>
+                <span className={`diag-dot ${diag.status}`} />
+                <span className="diag-name">{name}</span>
+                <span className="diag-status">
+                  {diag.status === "loading" && "Verifica..."}
+                  {diag.status === "ok" && (
+                    <span style={{ color: "var(--positive)" }}>
+                      OK{diag.message ? ` — ${diag.message}` : ""}
+                    </span>
+                  )}
+                  {diag.status === "error" && (
+                    <span style={{ color: "var(--negative)" }}>
+                      Errore{diag.message ? `: ${diag.message}` : ""}
+                    </span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
       {/* ============================== */}
       {/* SEZIONE 1: PROFILO AGENTE      */}
@@ -627,9 +864,7 @@ function Settings({ onBack }) {
           </div>
         </div>
 
-        <div
-          style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}
-        >
+        <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
           <button
             className="btn-run"
             onClick={handleSavePortfolio}
@@ -737,9 +972,7 @@ function Settings({ onBack }) {
               }}
               value={newSectorName}
               onChange={(e) => setNewSectorName(e.target.value)}
-              onKeyDown={(e) =>
-                e.key === "Enter" && handleAddSector()
-              }
+              onKeyDown={(e) => e.key === "Enter" && handleAddSector()}
             />
             <button style={btnSmall} onClick={handleAddSector}>
               Nuovo Settore
@@ -818,10 +1051,7 @@ function Settings({ onBack }) {
                 Test in corso...
               </div>
             ) : connectionTest.error ? (
-              <div
-                className="negative"
-                style={{ fontSize: "0.85rem" }}
-              >
+              <div className="negative" style={{ fontSize: "0.85rem" }}>
                 Errore: {connectionTest.error}
               </div>
             ) : (
@@ -830,9 +1060,7 @@ function Settings({ onBack }) {
                   <div style={{ marginBottom: "0.3rem" }}>
                     <span
                       className={
-                        connectionTest.anthropic
-                          ? "positive"
-                          : "negative"
+                        connectionTest.anthropic ? "positive" : "negative"
                       }
                       style={{ fontWeight: 700 }}
                     >
@@ -841,14 +1069,10 @@ function Settings({ onBack }) {
                     Anthropic API:{" "}
                     <span
                       className={
-                        connectionTest.anthropic
-                          ? "positive"
-                          : "negative"
+                        connectionTest.anthropic ? "positive" : "negative"
                       }
                     >
-                      {connectionTest.anthropic
-                        ? "Connessa"
-                        : "Non connessa"}
+                      {connectionTest.anthropic ? "Connessa" : "Non connessa"}
                     </span>
                   </div>
                 )}
@@ -856,9 +1080,7 @@ function Settings({ onBack }) {
                   <div>
                     <span
                       className={
-                        connectionTest.newsapi
-                          ? "positive"
-                          : "negative"
+                        connectionTest.newsapi ? "positive" : "negative"
                       }
                       style={{ fontWeight: 700 }}
                     >
@@ -867,14 +1089,10 @@ function Settings({ onBack }) {
                     NewsAPI:{" "}
                     <span
                       className={
-                        connectionTest.newsapi
-                          ? "positive"
-                          : "negative"
+                        connectionTest.newsapi ? "positive" : "negative"
                       }
                     >
-                      {connectionTest.newsapi
-                        ? "Connessa"
-                        : "Non connessa"}
+                      {connectionTest.newsapi ? "Connessa" : "Non connessa"}
                     </span>
                   </div>
                 )}

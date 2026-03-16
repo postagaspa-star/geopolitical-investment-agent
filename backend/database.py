@@ -101,6 +101,12 @@ def init_db():
                 url TEXT PRIMARY KEY,
                 processed_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                total_value REAL NOT NULL,
+                cash_balance REAL NOT NULL,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
         row = conn.execute("SELECT COUNT(*) as cnt FROM portfolio").fetchone()
         if row["cnt"] == 0:
@@ -314,3 +320,19 @@ def cleanup_old_processed_articles(days=7):
         conn.execute(
             "DELETE FROM processed_articles WHERE processed_at < datetime('now', ?)",
             (f'-{days} days',))
+
+def insert_portfolio_snapshot(total_value, cash_balance):
+    """Salva uno snapshot del valore del portafoglio."""
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO portfolio_snapshots (total_value, cash_balance) VALUES (?,?)",
+            (total_value, cash_balance))
+
+def get_portfolio_history(days=30):
+    """Restituisce lo storico del valore del portafoglio."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT total_value, cash_balance, timestamp FROM portfolio_snapshots "
+            "WHERE timestamp >= datetime('now', ?) ORDER BY timestamp ASC",
+            (f'-{days} days',)).fetchall()
+        return [dict(r) for r in rows]

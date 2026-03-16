@@ -422,6 +422,90 @@ async def test_api_connection():
     return results
 
 
+# --- Endpoint storico portafoglio ---
+
+@app.get("/api/portfolio/history")
+async def get_portfolio_history(period: str = Query(default="30d")):
+    """Restituisce lo storico del valore del portafoglio."""
+    try:
+        days_map = {"7d": 7, "1w": 7, "30d": 30, "1m": 30, "90d": 90, "3m": 90, "all": 3650}
+        days = days_map.get(period.lower(), 30)
+        history = database.get_portfolio_history(days=days)
+        if not history:
+            p = database.get_portfolio()
+            val = p["total_value"] if p else 100000
+            cash = p["cash_balance"] if p else 100000
+            from datetime import datetime
+            history = [{"total_value": val, "cash_balance": cash, "timestamp": datetime.utcnow().isoformat()}]
+        return history
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# --- Endpoint diagnostica ---
+
+@app.get("/api/settings/test-anthropic")
+async def test_anthropic():
+    """Testa la connessione ad Anthropic."""
+    api_key = database.get_setting("anthropic_api_key", os.environ.get("ANTHROPIC_API_KEY", ""))
+    if not api_key:
+        return {"status": "error", "message": "Chiave API non configurata"}
+    try:
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_key)
+        client.messages.create(model="claude-haiku-4-20250514", max_tokens=10,
+                               messages=[{"role": "user", "content": "ping"}])
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/settings/test-newsapi")
+async def test_newsapi():
+    """Testa la connessione a NewsAPI."""
+    news_key = database.get_setting("news_api_key", os.environ.get("NEWS_API_KEY", ""))
+    if not news_key:
+        return {"status": "error", "message": "Chiave API non configurata"}
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            url = f"https://newsapi.org/v2/top-headlines?country=us&pageSize=1&apiKey={news_key}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    return {"status": "ok"}
+                else:
+                    return {"status": "error", "message": f"HTTP {resp.status}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/settings/test-yfinance")
+async def test_yfinance():
+    """Testa yfinance scaricando dati SPY."""
+    try:
+        from data_fetchers import fetch_market_data
+        result = fetch_market_data("SPY", period_days=5)
+        if result.get("error"):
+            return {"status": "error", "message": result["error"]}
+        if len(result.get("data", [])) > 0:
+            return {"status": "ok", "last_price": result["data"][-1]["close"]}
+        return {"status": "error", "message": "Nessun dato ricevuto"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/settings/test-db")
+async def test_db():
+    """Testa la connessione al database."""
+    try:
+        p = database.get_portfolio()
+        if p:
+            return {"status": "ok", "tables": "portfolio accessibile"}
+        return {"status": "error", "message": "Portafoglio vuoto"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 # --- Montaggio dei file statici del frontend React ---
 # Se la directory di build esiste, serve i file statici per la SPA.
 # In modalita' sviluppo, la directory potrebbe non esistere.

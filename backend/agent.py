@@ -363,6 +363,14 @@ async def run_agent(mode="full") -> dict:
             "mode": mode,
         }
 
+        # Salva snapshot del portafoglio
+        try:
+            p = database.get_portfolio()
+            if p:
+                database.insert_portfolio_snapshot(p["total_value"], p["cash_balance"])
+        except Exception:
+            pass
+
         return summary
 
     except Exception as e:
