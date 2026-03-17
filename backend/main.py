@@ -9,9 +9,9 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, File, Query, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -523,23 +523,41 @@ async def test_gdelt():
 
 
 # --- Montaggio dei file statici del frontend React ---
-# Se la directory di build esiste, serve i file statici per la SPA.
-# In modalita' sviluppo, la directory potrebbe non esistere.
-
 # Cerca la build del frontend in due posizioni:
 # 1. backend/static (usata su Render dopo il build command che copia la build qui)
 # 2. ../frontend/build (sviluppo locale)
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 _frontend_build_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "build")
 
+_spa_dir: str | None = None
 if os.path.isdir(_static_dir):
+    _spa_dir = _static_dir
     logger.info(f"Directory static trovata (Render): {_static_dir}")
-    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="frontend")
 elif os.path.isdir(_frontend_build_dir):
+    _spa_dir = _frontend_build_dir
     logger.info(f"Directory di build del frontend trovata: {_frontend_build_dir}")
-    app.mount("/", StaticFiles(directory=_frontend_build_dir, html=True), name="frontend")
 else:
     logger.warning(
         "Nessuna directory di build del frontend trovata. "
         "Il montaggio dei file statici e' stato saltato."
     )
+
+if _spa_dir:
+    # Monta gli asset statici (JS, CSS, immagini) sotto /static
+    _assets_dir = os.path.join(_spa_dir, "static")
+    if os.path.isdir(_assets_dir):
+        app.mount("/static", StaticFiles(directory=_assets_dir), name="static-assets")
+
+    # Catch-all: per qualsiasi rotta non-API, restituisce index.html (SPA routing)
+    @app.get("/{full_path:path}")
+    async def serve_spa(request: Request, full_path: str):
+        """Serve index.html per tutte le rotte non-API (SPA catch-all)."""
+        # Se il file richiesto esiste nella directory statica, servilo direttamente
+        file_path = os.path.join(_spa_dir, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        # Altrimenti restituisci index.html per il client-side routing
+        index_path = os.path.join(_spa_dir, "index.html")
+        if os.path.isfile(index_path):
+            return FileResponse(index_path)
+        return JSONResponse(status_code=404, content={"detail": "Frontend non trovato"})
