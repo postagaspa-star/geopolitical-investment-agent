@@ -218,7 +218,9 @@ function Settings({ onBack }) {
       try {
         const res = await fetch(`${API}/api/settings`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const raw = await res.json();
+        // Il backend restituisce {"settings": {...}} — estrai il contenuto
+        const data = raw.settings ?? raw;
 
         // Profilo agente
         if (data.system_prompt) setSystemPrompt(data.system_prompt);
@@ -302,7 +304,7 @@ function Settings({ onBack }) {
       const res = await fetch(`${API}/api/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings),
+        body: JSON.stringify({ settings }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       showMessage("Impostazioni salvate con successo");
