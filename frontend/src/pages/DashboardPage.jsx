@@ -39,7 +39,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
       .catch(() => setHistoryData([]));
   }, [period]);
 
-  const lastValue = historyData.length > 0 ? historyData[historyData.length - 1]?.value : null;
+  const lastValue = historyData.length > 0 ? historyData[historyData.length - 1]?.total_value : null;
   const lineColor = lastValue !== null && lastValue >= 100000 ? "#10b981" : "#ef4444";
 
   const formatXAxis = (tick) => {
@@ -152,7 +152,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
               <Tooltip content={<CustomTooltip />} />
               <Line
                 type="monotone"
-                dataKey="value"
+                dataKey="total_value"
                 stroke={lineColor}
                 strokeWidth={2}
                 dot={false}
@@ -319,7 +319,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                     ? new Date(log.timestamp).toLocaleString("it-IT")
                     : ""}
                 </span>
-                <span className="log-message">{log.message}</span>
+                <span className="log-message">{log.content || log.message}</span>
               </div>
             ))}
           </div>

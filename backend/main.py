@@ -506,6 +506,30 @@ async def test_db():
         return {"status": "error", "message": str(e)}
 
 
+@app.get("/api/settings/test-finnhub")
+async def test_finnhub():
+    """Testa la connessione a Finnhub."""
+    finnhub_key = database.get_setting("finnhub_api_key", os.environ.get("FINNHUB_API_KEY", ""))
+    if not finnhub_key:
+        return {"status": "error", "message": "Chiave API Finnhub non configurata"}
+    try:
+        import aiohttp
+        url = f"https://finnhub.io/api/v1/stock/profile2?symbol=AAPL&token={finnhub_key}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data and data.get("name"):
+                        return {"status": "ok"}
+                    return {"status": "error", "message": "Risposta vuota (chiave non valida?)"}
+                elif resp.status == 401:
+                    return {"status": "error", "message": "Chiave API non valida"}
+                else:
+                    return {"status": "error", "message": f"HTTP {resp.status}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 @app.get("/api/settings/test-gdelt")
 async def test_gdelt():
     """Testa la connessione a GDELT."""

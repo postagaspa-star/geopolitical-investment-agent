@@ -301,7 +301,8 @@ async def fetch_congressional_trades() -> Dict[str, Any]:
     Questi trade sono segnali insider forti perché i congressisti siedono
     su commissioni che regolano i settori in cui investono.
     """
-    api_key = os.environ.get("FINNHUB_API_KEY", "")
+    import database as _db
+    api_key = _db.get_setting("finnhub_api_key", os.environ.get("FINNHUB_API_KEY", ""))
     if not api_key:
         logger.warning("FINNHUB_API_KEY non configurata; congressional trades saltati.")
         return {

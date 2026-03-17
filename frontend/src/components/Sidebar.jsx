@@ -23,7 +23,7 @@ const formatEUR = (value) =>
   new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(value ?? 0);
 
 function getActivityIcon(log) {
-  const text = (log?.message ?? log ?? '').toString().toUpperCase();
+  const text = (log?.content ?? log?.message ?? log ?? '').toString().toUpperCase();
   if (text.includes('GEOPOLIT')) {
     return <Globe className="activity-icon geo" />;
   }
@@ -36,7 +36,7 @@ function getActivityIcon(log) {
 function getLogText(log) {
   if (typeof log === 'string') return log;
   if (log && typeof log === 'object') {
-    return log.message ?? log.text ?? log.event ?? JSON.stringify(log);
+    return log.content ?? log.message ?? log.text ?? log.event ?? JSON.stringify(log);
   }
   return String(log);
 }

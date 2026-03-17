@@ -27,6 +27,7 @@ const MODEL_OPTIONS = [
 const INITIAL_DIAGNOSTICS = {
   anthropic: { status: "loading", message: "" },
   newsapi:   { status: "loading", message: "" },
+  finnhub:   { status: "loading", message: "" },
   gdelt:     { status: "loading", message: "" },
   yfinance:  { status: "loading", message: "" },
   db:        { status: "loading", message: "" },
@@ -62,6 +63,7 @@ function Settings({ onBack }) {
   // === Stato Sezione 5: API Keys ===
   const [anthropicKey, setAnthropicKey] = useState("");
   const [newsApiKey, setNewsApiKey] = useState("");
+  const [finnhubKey, setFinnhubKey] = useState("");
   const [connectionTest, setConnectionTest] = useState(null);
 
   // === Stato UI generale ===
@@ -111,6 +113,21 @@ function Settings({ onBack }) {
         }
       } catch (err) {
         setDiagItem("newsapi", "error", err.message);
+      }
+    };
+
+    // Test Finnhub
+    const testFinnhub = async () => {
+      try {
+        const res = await fetch(`${API}/api/settings/test-finnhub`);
+        const data = await res.json();
+        if (data.status === "ok") {
+          setDiagItem("finnhub", "ok");
+        } else {
+          setDiagItem("finnhub", "error", data.message || "Risposta non valida");
+        }
+      } catch (err) {
+        setDiagItem("finnhub", "error", err.message);
       }
     };
 
@@ -185,6 +202,7 @@ function Settings({ onBack }) {
     await Promise.all([
       testAnthropic(),
       testNewsapi(),
+      testFinnhub(),
       testGdelt(),
       testYfinance(),
       testDb(),
@@ -236,6 +254,7 @@ function Settings({ onBack }) {
         // API Keys
         if (data.anthropic_api_key) setAnthropicKey(data.anthropic_api_key);
         if (data.news_api_key) setNewsApiKey(data.news_api_key);
+        if (data.finnhub_api_key) setFinnhubKey(data.finnhub_api_key);
       } catch (err) {
         console.error("Errore caricamento impostazioni:", err);
       }
@@ -453,6 +472,7 @@ function Settings({ onBack }) {
     const settings = {};
     if (anthropicKey) settings.anthropic_api_key = anthropicKey;
     if (newsApiKey) settings.news_api_key = newsApiKey;
+    if (finnhubKey) settings.finnhub_api_key = finnhubKey;
     saveSettings(settings);
   };
 
@@ -599,6 +619,7 @@ function Settings({ onBack }) {
   const diagItems = [
     { key: "anthropic", name: "Anthropic API" },
     { key: "newsapi",   name: "NewsAPI" },
+    { key: "finnhub",   name: "Finnhub API" },
     { key: "gdelt",     name: "GDELT Project" },
     { key: "yfinance",  name: "yFinance" },
     { key: "db",        name: "Database" },
@@ -1206,6 +1227,19 @@ function Settings({ onBack }) {
               value={newsApiKey}
               onChange={(e) => setNewsApiKey(e.target.value)}
               placeholder="Inserisci la chiave NewsAPI"
+              onFocus={handleFocus}
+              onBlur={handleBlur}
+            />
+          </div>
+
+          <div style={fieldGroup}>
+            <label style={labelStyle}>Finnhub API Key</label>
+            <input
+              type="password"
+              style={inputStyle}
+              value={finnhubKey}
+              onChange={(e) => setFinnhubKey(e.target.value)}
+              placeholder="Inserisci la chiave Finnhub (congressional trading)"
               onFocus={handleFocus}
               onBlur={handleBlur}
             />
