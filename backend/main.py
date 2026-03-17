@@ -395,8 +395,9 @@ async def test_api_connection():
             client = Anthropic(api_key=api_key)
             # Chiamata minima per verificare la chiave
             models_to_try = [
-                database.get_setting("model_name", "claude-sonnet-4-20250514"),
-                "claude-3-5-sonnet-20241022",
+                database.get_setting("model_name", "claude-3-5-haiku-20241022"),
+                "claude-3-5-haiku-20241022",
+                "claude-sonnet-4-20250514",
                 "claude-3-haiku-20240307",
             ]
             connected = False
@@ -471,8 +472,8 @@ async def test_anthropic():
         if model:
             models_to_try.append(model)
         models_to_try.extend([
+            "claude-3-5-haiku-20241022",
             "claude-sonnet-4-20250514",
-            "claude-haiku-4-20250514",
             "claude-3-5-sonnet-20241022",
             "claude-3-haiku-20240307",
         ])

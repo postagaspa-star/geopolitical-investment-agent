@@ -16,11 +16,12 @@ const DEFAULT_WATCHLIST = {
 const DEFAULT_SYSTEM_PROMPT =
   "Sei un agente di investimento geopolitico. Analizza le notizie geopolitiche globali e i dati tecnici di mercato per prendere decisioni di trading informate. Valuta i rischi, identifica opportunit\u00e0 e gestisci il portafoglio in modo prudente.";
 
-// Modelli disponibili
+// Modelli disponibili (nomi API ufficiali Anthropic)
 const MODEL_OPTIONS = [
-  "claude-opus-4-5-20250514",
+  "claude-sonnet-4-5-20250929",
+  "claude-opus-4-20250514",
   "claude-sonnet-4-20250514",
-  "claude-haiku-4-20250514",
+  "claude-3-5-haiku-20241022",
 ];
 
 // Stato iniziale diagnostica

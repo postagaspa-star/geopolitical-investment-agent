@@ -20,7 +20,7 @@ import database
 logger = logging.getLogger(__name__)
 
 # Modello di default
-DEFAULT_MODEL = "claude-opus-4-5-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
 # Stato globale dell'agente, condiviso con il resto dell'applicazione
 agent_status: dict = {
