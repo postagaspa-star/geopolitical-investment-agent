@@ -1,5 +1,6 @@
 #!/bin/bash
-pip install -r requirements.txt
+set -e
+pip3 install -r requirements.txt
 cd frontend && npm install && npm run build && cd ..
 mkdir -p backend/static
 cp -r frontend/build/* backend/static/
