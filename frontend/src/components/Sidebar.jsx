@@ -61,7 +61,7 @@ export default function Sidebar({
   const recentLogs = Array.isArray(logs) ? logs.slice(-5).reverse() : [];
 
   const totalValue = portfolio?.total_value ?? 0;
-  const cashBalance = portfolio?.cash_balance ?? 0;
+  const cashBalance = portfolio?.cash ?? portfolio?.cash_balance ?? 0;
   const initialCapital = 100000;
   const pnlPct = ((totalValue - initialCapital) / initialCapital) * 100;
   const pnlPositive = pnlPct >= 0;
