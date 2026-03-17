@@ -394,10 +394,21 @@ async def test_api_connection():
             from anthropic import Anthropic
             client = Anthropic(api_key=api_key)
             # Chiamata minima per verificare la chiave
-            model = database.get_setting("model_name", "claude-haiku-4-20250514")
-            client.messages.create(model=model, max_tokens=10,
-                                   messages=[{"role": "user", "content": "ping"}])
-            results["anthropic"] = {"status": "ok"}
+            models_to_try = [
+                database.get_setting("model_name", "claude-sonnet-4-20250514"),
+                "claude-3-5-sonnet-20241022",
+                "claude-3-haiku-20240307",
+            ]
+            connected = False
+            for m in models_to_try:
+                try:
+                    client.messages.create(model=m, max_tokens=10,
+                                           messages=[{"role": "user", "content": "ping"}])
+                    connected = True
+                    break
+                except Exception:
+                    continue
+            results["anthropic"] = {"status": "ok"} if connected else {"status": "error", "message": "Nessun modello disponibile"}
         except Exception as e:
             results["anthropic"] = {"status": "error", "message": str(e)}
     else:
@@ -454,11 +465,27 @@ async def test_anthropic():
     try:
         from anthropic import Anthropic
         client = Anthropic(api_key=api_key)
-        # Usa il modello configurato dall'utente, con fallback
-        model = database.get_setting("model_name", "claude-haiku-4-20250514")
-        client.messages.create(model=model, max_tokens=10,
-                               messages=[{"role": "user", "content": "ping"}])
-        return {"status": "ok"}
+        # Prova diversi modelli in ordine di preferenza
+        model = database.get_setting("model_name", None)
+        models_to_try = []
+        if model:
+            models_to_try.append(model)
+        models_to_try.extend([
+            "claude-sonnet-4-20250514",
+            "claude-haiku-4-20250514",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-haiku-20240307",
+        ])
+        last_err = None
+        for m in models_to_try:
+            try:
+                client.messages.create(model=m, max_tokens=10,
+                                       messages=[{"role": "user", "content": "ping"}])
+                return {"status": "ok", "model": m}
+            except Exception as model_err:
+                last_err = model_err
+                continue
+        return {"status": "error", "message": str(last_err)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -486,13 +513,13 @@ async def test_newsapi():
 async def test_yfinance():
     """Testa yfinance scaricando dati SPY."""
     try:
-        from data_fetchers import fetch_market_data
-        result = fetch_market_data("SPY", period_days=30)
-        if result.get("error"):
-            return {"status": "error", "message": result["error"]}
-        if len(result.get("data", [])) > 0:
-            return {"status": "ok", "last_price": result["data"][-1]["close"]}
-        return {"status": "error", "message": "Nessun dato ricevuto"}
+        import yfinance
+        ticker = yfinance.Ticker("SPY")
+        hist = ticker.history(period="5d")
+        if hist.empty:
+            return {"status": "error", "message": "Nessun dato ricevuto (history vuota)"}
+        last_close = float(hist["Close"].iloc[-1])
+        return {"status": "ok", "last_price": round(last_close, 2)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
