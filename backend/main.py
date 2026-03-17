@@ -394,7 +394,8 @@ async def test_api_connection():
             from anthropic import Anthropic
             client = Anthropic(api_key=api_key)
             # Chiamata minima per verificare la chiave
-            client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=10,
+            model = database.get_setting("model_name", "claude-haiku-4-20250514")
+            client.messages.create(model=model, max_tokens=10,
                                    messages=[{"role": "user", "content": "ping"}])
             results["anthropic"] = {"status": "ok"}
         except Exception as e:
@@ -453,7 +454,9 @@ async def test_anthropic():
     try:
         from anthropic import Anthropic
         client = Anthropic(api_key=api_key)
-        client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=10,
+        # Usa il modello configurato dall'utente, con fallback
+        model = database.get_setting("model_name", "claude-haiku-4-20250514")
+        client.messages.create(model=model, max_tokens=10,
                                messages=[{"role": "user", "content": "ping"}])
         return {"status": "ok"}
     except Exception as e:
@@ -484,7 +487,7 @@ async def test_yfinance():
     """Testa yfinance scaricando dati SPY."""
     try:
         from data_fetchers import fetch_market_data
-        result = fetch_market_data("SPY", period_days=5)
+        result = fetch_market_data("SPY", period_days=30)
         if result.get("error"):
             return {"status": "error", "message": result["error"]}
         if len(result.get("data", [])) > 0:
