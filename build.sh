@@ -2,9 +2,9 @@
 set -e
 
 # Create a Python virtual environment for the backend
-python3 -m venv $HOME/venv
-$HOME/venv/bin/pip install --upgrade pip
-$HOME/venv/bin/pip install -r requirements.txt
+python3 -m venv ./venv
+./venv/bin/pip install --upgrade pip
+./venv/bin/pip install -r requirements.txt
 
 # Build the React frontend
 cd frontend && npm install && npm run build && cd ..
