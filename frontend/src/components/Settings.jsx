@@ -114,16 +114,15 @@ function Settings({ onBack }) {
       }
     };
 
-    // Test GDELT (esterno)
+    // Test GDELT (via backend per evitare CORS)
     const testGdelt = async () => {
       try {
-        const res = await fetch(
-          "https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json"
-        );
-        if (res.ok) {
+        const res = await fetch(`${API}/api/settings/test-gdelt`);
+        const data = await res.json();
+        if (data.status === "ok") {
           setDiagItem("gdelt", "ok");
         } else {
-          setDiagItem("gdelt", "error", `HTTP ${res.status}`);
+          setDiagItem("gdelt", "error", data.message || "Risposta non valida");
         }
       } catch (err) {
         setDiagItem("gdelt", "error", err.message);

@@ -394,7 +394,7 @@ async def test_api_connection():
             from anthropic import Anthropic
             client = Anthropic(api_key=api_key)
             # Chiamata minima per verificare la chiave
-            client.messages.create(model="claude-haiku-4-20250514", max_tokens=10,
+            client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=10,
                                    messages=[{"role": "user", "content": "ping"}])
             results["anthropic"] = {"status": "ok"}
         except Exception as e:
@@ -453,7 +453,7 @@ async def test_anthropic():
     try:
         from anthropic import Anthropic
         client = Anthropic(api_key=api_key)
-        client.messages.create(model="claude-haiku-4-20250514", max_tokens=10,
+        client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=10,
                                messages=[{"role": "user", "content": "ping"}])
         return {"status": "ok"}
     except Exception as e:
@@ -502,6 +502,22 @@ async def test_db():
         if p:
             return {"status": "ok", "tables": "portfolio accessibile"}
         return {"status": "error", "message": "Portafoglio vuoto"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/settings/test-gdelt")
+async def test_gdelt():
+    """Testa la connessione a GDELT."""
+    try:
+        import aiohttp
+        url = "https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    return {"status": "ok"}
+                else:
+                    return {"status": "error", "message": f"HTTP {resp.status}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

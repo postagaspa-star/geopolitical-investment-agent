@@ -250,6 +250,11 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
                 "error": "Nessun dato disponibile",
             }
 
+        # yfinance >= 0.2.31 restituisce colonne multi-index (Price, Ticker).
+        # Appiattisci prendendo solo il primo livello.
+        if isinstance(df.columns, __import__('pandas').MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
         # Converte il DataFrame in una lista di dizionari
         records: List[Dict[str, Any]] = []
         for idx, row in df.iterrows():
