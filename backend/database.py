@@ -205,10 +205,10 @@ def set_setting(key, value):
             (key, value))
 
 def get_all_settings():
-    """Restituisce tutte le impostazioni come dizionario."""
+    """Restituisce tutte le impostazioni come dizionario piatto {chiave: valore}."""
     with get_db() as conn:
-        rows = conn.execute("SELECT key, value, updated_at FROM settings").fetchall()
-        return {r["key"]: {"value": r["value"], "updated_at": r["updated_at"]} for r in rows}
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        return {r["key"]: r["value"] for r in rows}
 
 
 # --- Funzioni per i documenti tecnici ---
