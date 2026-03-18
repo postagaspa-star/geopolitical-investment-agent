@@ -60,7 +60,7 @@ function SectorPieChart({ positions }) {
   const grouped = {};
   for (const pos of positions) {
     const sector = getSector(pos.ticker);
-    const value = Math.abs(Number(pos.current_value ?? pos.value ?? pos.qty * pos.entry_price ?? 0));
+    const value = Math.abs(Number(pos.current_price ?? 0) * Number(pos.quantity ?? 0));
     grouped[sector] = (grouped[sector] ?? 0) + value;
   }
 
@@ -143,19 +143,34 @@ function SectorPerformanceTable({ trades }) {
     return <div className="empty-state">Nessun trade</div>;
   }
 
-  const grouped = {};
-  for (const trade of trades) {
-    const sector = getSector(trade.ticker);
-    if (!grouped[sector]) grouped[sector] = { total: 0, wins: 0, returns: [] };
-    grouped[sector].total += 1;
+  // Match BUY/SELL pairs by ticker to compute real returns
+  const buyMap = {};
+  const sectorResults = {};
 
-    const outcome = Number(trade.pnl ?? trade.return_pct ?? trade.profit ?? 0);
-    if (outcome > 0) grouped[sector].wins += 1;
-    grouped[sector].returns.push(outcome);
+  for (const trade of trades) {
+    const ticker = trade.ticker?.toUpperCase() ?? '';
+    const side = (trade.action ?? '').toUpperCase();
+    const sector = getSector(ticker);
+
+    if (!sectorResults[sector]) sectorResults[sector] = { total: 0, wins: 0, returns: [] };
+    sectorResults[sector].total += 1;
+
+    if (side === 'BUY') {
+      if (!buyMap[ticker]) buyMap[ticker] = [];
+      buyMap[ticker].push(Number(trade.price ?? 0));
+    } else if (side === 'SELL' && buyMap[ticker]?.length) {
+      const buyPrice = buyMap[ticker].shift();
+      const sellPrice = Number(trade.price ?? 0);
+      if (buyPrice > 0) {
+        const ret = ((sellPrice - buyPrice) / buyPrice) * 100;
+        sectorResults[sector].returns.push(ret);
+        if (ret > 0) sectorResults[sector].wins += 1;
+      }
+    }
   }
 
-  const rows = Object.entries(grouped).map(([sector, stats]) => {
-    const winRate = stats.total > 0 ? (stats.wins / stats.total) * 100 : 0;
+  const rows = Object.entries(sectorResults).map(([sector, stats]) => {
+    const winRate = stats.returns.length > 0 ? (stats.wins / stats.returns.length) * 100 : 0;
     const avgReturn = stats.returns.length
       ? stats.returns.reduce((a, b) => a + b, 0) / stats.returns.length
       : 0;

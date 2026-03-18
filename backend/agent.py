@@ -157,7 +157,7 @@ def _get_tools_for_mode(mode="full"):
         allowed = {"get_geopolitical_data", "save_weekend_intelligence", "do_nothing", "get_congressional_trades"}
     elif mode == "pre_market":
         allowed = {"get_geopolitical_data", "get_portfolio_state",
-                   "save_pre_market_briefing", "do_nothing"}
+                   "get_congressional_trades", "save_pre_market_briefing", "do_nothing"}
     else:
         return TOOL_DEFINITIONS
 

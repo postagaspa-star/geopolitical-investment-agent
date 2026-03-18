@@ -65,13 +65,15 @@ def get_portfolio_state():
     """
     Restituisce lo stato completo del portafoglio:
     liquidita', posizioni, valore totale e P&L complessivo.
+    Il P&L e' calcolato rispetto al bilancio iniziale (total_value - initial_balance).
     """
-    portfolio = get_portfolio()
-    if portfolio is None:
+    p = get_portfolio()
+    if p is None:
         return {
             "cash": 0.0,
             "positions": [],
             "total_value": 0.0,
+            "initial_balance": 100000.0,
             "pnl": 0.0,
             "pnl_pct": 0.0,
             "open_positions_count": 0,
@@ -80,18 +82,28 @@ def get_portfolio_state():
     positions = get_positions()
     total_value = calculate_total_value()
 
-    # Calcolo P&L totale non realizzato
-    total_pnl = sum(pos["unrealized_pnl"] for pos in positions)
+    # Legge il bilancio iniziale dalle impostazioni (fallback: env o 100000)
+    try:
+        ib = get_setting("initial_balance", None)
+        if ib is not None:
+            initial_balance = float(ib)
+        else:
+            initial_balance = float(
+                __import__("os").environ.get("INITIAL_PORTFOLIO_BALANCE", 100000)
+            )
+    except (ValueError, TypeError):
+        initial_balance = 100000.0
 
-    # Calcolo P&L percentuale rispetto al costo totale delle posizioni
-    total_cost = sum(pos["avg_buy_price"] * pos["quantity"] for pos in positions)
-    pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
+    # P&L calcolato rispetto al capitale iniziale
+    pnl = total_value - initial_balance
+    pnl_pct = (pnl / initial_balance * 100) if initial_balance > 0 else 0.0
 
     return {
-        "cash": portfolio["cash_balance"],
+        "cash": p["cash_balance"],
         "positions": positions,
         "total_value": total_value,
-        "pnl": round(total_pnl, 2),
+        "initial_balance": initial_balance,
+        "pnl": round(pnl, 2),
         "pnl_pct": round(pnl_pct, 2),
         "open_positions_count": len(positions),
     }

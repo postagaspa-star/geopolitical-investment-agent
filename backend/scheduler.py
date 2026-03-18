@@ -123,18 +123,6 @@ async def _scheduled_agent_job():
         # Importazione ritardata per evitare dipendenze circolari
         from agent import run_agent
 
-        # Ottimizzazione costi: controlla se ci sono novita'
-        new_articles = database.count_new_articles_since(hours=2)
-        if new_articles < 5 and mode != "full":
-            logger.info(
-                "Nessuna novita' geopolitica significativa (%d articoli nelle ultime 2 ore). Run saltato.",
-                new_articles)
-            database.insert_agent_log(
-                run_id="scheduler",
-                phase="INFO",
-                content=f"Run saltato - solo {new_articles} articoli nuovi nelle ultime 2 ore (modalita': {mode})")
-            return
-
         # Pulizia periodica degli articoli vecchi
         database.cleanup_old_processed_articles(days=7)
 
@@ -171,14 +159,24 @@ def start_scheduler() -> AsyncIOScheduler:
         logger.warning("Scheduler gia' attivo, nessuna azione necessaria.")
         return _scheduler
 
-    logger.info("Avvio scheduler autonomo (intervallo: 20 minuti)...")
+    # Leggi intervallo da impostazioni (ore), con fallback a 20 minuti
+    try:
+        hours_str = database.get_setting("agent_run_interval_hours", None)
+        if hours_str is not None:
+            interval_minutes = max(5, int(float(hours_str) * 60))
+        else:
+            interval_minutes = 20  # Default: 20 minuti
+    except (ValueError, TypeError):
+        interval_minutes = 20
+
+    logger.info("Avvio scheduler autonomo (intervallo: %d minuti)...", interval_minutes)
 
     _scheduler = AsyncIOScheduler()
 
     _scheduler.add_job(
         _sync_job_wrapper,
         trigger="interval",
-        minutes=20,
+        minutes=interval_minutes,
         id="agent_continuous_job",
         name="Monitoraggio continuo agente geopolitico",
         replace_existing=True,
@@ -189,7 +187,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # Salva stato nel database
     database.set_setting("agent_running", "true")
 
-    logger.info("Scheduler avviato con successo. Prossimo run tra 20 minuti.")
+    logger.info("Scheduler avviato con successo. Prossimo run tra %d minuti.", interval_minutes)
     return _scheduler
 
 

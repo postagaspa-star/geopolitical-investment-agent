@@ -28,8 +28,9 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
   const [historyData, setHistoryData] = useState([]);
 
   const totalValue = portfolio?.total_value ?? 0;
-  const pnl = totalValue - 100000;
-  const pnlPct = (pnl / 100000) * 100;
+  const initialBalance = portfolio?.initial_balance ?? 100000;
+  const pnl = totalValue - initialBalance;
+  const pnlPct = initialBalance > 0 ? (pnl / initialBalance) * 100 : 0;
   const openPositions = positions?.length ?? 0;
 
   useEffect(() => {
@@ -40,7 +41,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
   }, [period]);
 
   const lastValue = historyData.length > 0 ? historyData[historyData.length - 1]?.total_value : null;
-  const lineColor = lastValue !== null && lastValue >= 100000 ? "#10b981" : "#ef4444";
+  const lineColor = lastValue !== null && lastValue >= initialBalance ? "#10b981" : "#ef4444";
 
   const formatXAxis = (tick) => {
     if (!tick) return "";
@@ -291,7 +292,23 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                       {pnlPctPos.toFixed(2)}%
                     </td>
                     <td>
-                      <button className="btn-secondary btn-sm">Chiudi</button>
+                      <button
+                      className="btn-secondary btn-sm"
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (!window.confirm(`Chiudere la posizione ${pos.ticker}?`)) return;
+                        try {
+                          const res = await fetch(`${API}/api/positions/close`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ ticker: pos.ticker }),
+                          });
+                          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                        } catch (err) {
+                          console.error("Errore chiusura posizione:", err);
+                        }
+                      }}
+                    >Chiudi</button>
                     </td>
                   </tr>
                 );

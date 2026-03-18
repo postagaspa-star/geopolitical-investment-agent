@@ -62,8 +62,8 @@ export default function Sidebar({
 
   const totalValue = portfolio?.total_value ?? 0;
   const cashBalance = portfolio?.cash ?? portfolio?.cash_balance ?? 0;
-  const initialCapital = 100000;
-  const pnlPct = ((totalValue - initialCapital) / initialCapital) * 100;
+  const initialCapital = portfolio?.initial_balance ?? 100000;
+  const pnlPct = initialCapital > 0 ? ((totalValue - initialCapital) / initialCapital) * 100 : 0;
   const pnlPositive = pnlPct >= 0;
 
   return (

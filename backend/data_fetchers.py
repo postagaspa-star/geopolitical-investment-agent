@@ -16,8 +16,20 @@ import yfinance
 # Configurazione del logger
 logger = logging.getLogger(__name__)
 
-# Chiave API per NewsAPI, letta dalle variabili d'ambiente
-NEWS_API_KEY: str = os.environ.get("NEWS_API_KEY", "")
+# Chiave API per NewsAPI (fallback alla variabile d'ambiente)
+_NEWS_API_KEY_ENV: str = os.environ.get("NEWS_API_KEY", "")
+
+
+def _get_news_api_key() -> str:
+    """Restituisce la chiave NewsAPI da DB settings o variabile d'ambiente."""
+    try:
+        import database as _db
+        key = _db.get_setting("news_api_key", None)
+        if key:
+            return key
+    except Exception:
+        pass
+    return _NEWS_API_KEY_ENV
 
 # Lista di titoli da monitorare, suddivisi per settore
 WATCHLIST: Dict[str, List[str]] = {
@@ -140,11 +152,12 @@ async def _fetch_newsapi_single(
     session: aiohttp.ClientSession, query: str
 ) -> Dict[str, Any]:
     """Esegue una singola query verso NewsAPI e restituisce i risultati."""
-    if not NEWS_API_KEY:
+    api_key = _get_news_api_key()
+    if not api_key:
         logger.warning("NEWS_API_KEY non configurata; la query '%s' viene saltata.", query)
         return {"query": query, "articles": [], "error": "NEWS_API_KEY mancante"}
 
-    url = NEWSAPI_BASE_URL.format(query=query, api_key=NEWS_API_KEY)
+    url = NEWSAPI_BASE_URL.format(query=query, api_key=api_key)
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
             if resp.status != 200:

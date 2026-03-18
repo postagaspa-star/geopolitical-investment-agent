@@ -380,6 +380,45 @@ async def reset_portfolio(payload: ResetPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# --- Endpoint chiusura manuale posizione ---
+
+
+class ClosePositionPayload(BaseModel):
+    ticker: str
+
+
+@app.post("/api/positions/close")
+async def close_position(payload: ClosePositionPayload):
+    """Chiude manualmente una posizione vendendo tutte le azioni al prezzo corrente."""
+    try:
+        import data_fetchers
+        pos = database.get_position(payload.ticker)
+        if not pos:
+            return JSONResponse(status_code=404, content={"error": f"Posizione {payload.ticker} non trovata"})
+
+        # Ottieni il prezzo corrente
+        price_data = data_fetchers.fetch_market_data(payload.ticker, period_days=5)
+        if price_data.get("data"):
+            current_price = price_data["data"][-1]["close"]
+        else:
+            current_price = pos["current_price"]
+        if current_price <= 0:
+            return JSONResponse(status_code=400, content={"error": "Impossibile ottenere il prezzo corrente"})
+
+        result = portfolio.execute_sell(
+            ticker=payload.ticker,
+            quantity=pos["quantity"],
+            price=current_price,
+            geo_reasoning="Chiusura manuale da interfaccia",
+            tech_reasoning="Chiusura manuale da interfaccia",
+            confidence=100,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Errore nella chiusura della posizione: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # --- Endpoint test connessione API ---
 
 
@@ -448,8 +487,8 @@ async def get_portfolio_history(period: str = Query(default="30d")):
             p = database.get_portfolio()
             val = p["total_value"] if p else 100000
             cash = p["cash_balance"] if p else 100000
-            from datetime import datetime
-            history = [{"total_value": val, "cash_balance": cash, "timestamp": datetime.utcnow().isoformat()}]
+            from datetime import datetime, timezone
+            history = [{"total_value": val, "cash_balance": cash, "timestamp": datetime.now(timezone.utc).isoformat()}]
         return history
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})

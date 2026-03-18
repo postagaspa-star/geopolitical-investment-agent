@@ -237,12 +237,16 @@ def delete_document(doc_id):
         conn.execute("DELETE FROM technical_documents WHERE id=?", (doc_id,))
 
 def reset_portfolio_data(new_balance):
-    """Resetta il portafoglio: elimina posizioni, trade, e reinizializza il saldo."""
+    """Resetta il portafoglio: elimina posizioni, trade, snapshots e reinizializza il saldo."""
     with get_db() as conn:
         conn.execute("DELETE FROM positions")
         conn.execute("DELETE FROM trades")
+        conn.execute("DELETE FROM portfolio_snapshots")
+        conn.execute("DELETE FROM agent_logs")
         conn.execute("UPDATE portfolio SET cash_balance=?, total_value=?, updated_at=datetime('now') WHERE id=(SELECT MAX(id) FROM portfolio)",
                      (new_balance, new_balance))
+    # Aggiorna anche la impostazione initial_balance
+    set_setting("initial_balance", str(new_balance))
 
 
 # --- Funzioni per weekend intelligence ---
