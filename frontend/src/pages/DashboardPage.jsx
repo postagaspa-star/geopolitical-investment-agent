@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import {
   LineChart,
   Line,
@@ -177,7 +177,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
             <div className="modal-header">
               <h2>Tutte le Transazioni</h2>
               <button
-                className="modal-close-btn"
+                className="modal-close"
                 onClick={() => setShowTradeModal(false)}
               >
                 &times;
@@ -201,9 +201,8 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                   </thead>
                   <tbody>
                     {trades.map((trade, idx) => (
-                      <>
+                      <React.Fragment key={idx}>
                         <tr
-                          key={idx}
                           className="trade-row"
                           onClick={() => toggleTrade(idx)}
                           style={{ cursor: "pointer" }}
@@ -226,22 +225,22 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                           <td>{trade.quantity}</td>
                           <td>{formatEUR(trade.price)}</td>
                           <td>
-                            {trade.confidence !== undefined && trade.confidence !== null
-                              ? `${(trade.confidence * 100).toFixed(0)}%`
+                            {trade.confidence_score != null
+                              ? `${Number(trade.confidence_score).toFixed(0)}%`
                               : "—"}
                           </td>
                         </tr>
                         {expandedTradeIdx === idx && (
-                          <tr key={`reasoning-${idx}`} className="trade-reasoning-row">
+                          <tr className="trade-reasoning-row">
                             <td colSpan={6}>
                               <div className="trade-reasoning">
                                 <strong>Reasoning:</strong>{" "}
-                                {trade.reasoning || "Nessun dettaglio disponibile."}
+                                {trade.final_decision || trade.geopolitical_reasoning || trade.technical_reasoning || "Nessun dettaglio disponibile."}
                               </div>
                             </td>
                           </tr>
                         )}
-                      </>
+                      </React.Fragment>
                     ))}
                   </tbody>
                 </table>

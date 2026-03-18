@@ -411,6 +411,8 @@ function Settings({ onBack }) {
     try {
       const res = await fetch(`${API}/api/portfolio/reset`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_balance: initialBalance }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       showMessage("Portafoglio resettato con successo");
@@ -545,7 +547,6 @@ function Settings({ onBack }) {
     fontSize: "16px",
     fontWeight: 600,
     color: "#111827",
-    marginBottom: "20px",
     margin: 0,
     marginBottom: "20px",
   };
