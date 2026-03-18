@@ -36,7 +36,7 @@ const INITIAL_DIAGNOSTICS = {
   documents: { status: "loading", message: "" },
 };
 
-function Settings({ onBack }) {
+function Settings({ onBack, onDataRefresh }) {
   // === Stato Sezione 0: Diagnostica Sistema ===
   const [diagnostics, setDiagnostics] = useState(INITIAL_DIAGNOSTICS);
 
@@ -416,6 +416,8 @@ function Settings({ onBack }) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       showMessage("Portafoglio resettato con successo");
+      // Trigger immediate data refresh in parent App
+      if (onDataRefresh) onDataRefresh();
     } catch (err) {
       showMessage(`Errore reset: ${err.message}`, true);
     }

@@ -154,7 +154,7 @@ function AppContent() {
           } />
           <Route path="/intelligence" element={<IntelligencePage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
-          <Route path="/settings" element={<Settings />} />
+          <Route path="/settings" element={<Settings onDataRefresh={fetchAll} />} />
         </Routes>
       </main>
     </div>
