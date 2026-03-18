@@ -51,10 +51,6 @@ function Settings({ onBack, onDataRefresh }) {
 
   // === Stato Sezione 3: Configurazione Portafoglio ===
   const [initialBalance, setInitialBalance] = useState(100000);
-  const [maxPositionPct, setMaxPositionPct] = useState(10);
-  const [stopLossThreshold, setStopLossThreshold] = useState(-15);
-  const [maxOpenPositions, setMaxOpenPositions] = useState(8);
-  const [minConfidence, setMinConfidence] = useState(40);
 
   // === Stato Sezione 4: Watchlist ===
   const [watchlist, setWatchlist] = useState(DEFAULT_WATCHLIST);
@@ -232,14 +228,6 @@ function Settings({ onBack, onDataRefresh }) {
         // Configurazione portafoglio
         if (data.initial_balance != null)
           setInitialBalance(Number(data.initial_balance));
-        if (data.max_position_pct != null)
-          setMaxPositionPct(Number(data.max_position_pct) * 100);
-        if (data.stop_loss_threshold != null)
-          setStopLossThreshold(Number(data.stop_loss_threshold) * 100);
-        if (data.max_open_positions != null)
-          setMaxOpenPositions(Number(data.max_open_positions));
-        if (data.min_confidence != null)
-          setMinConfidence(Number(data.min_confidence));
 
         // Watchlist (stringa JSON o oggetto)
         if (data.watchlist) {
@@ -389,21 +377,11 @@ function Settings({ onBack, onDataRefresh }) {
   };
 
   // === Handler Sezione 3: Salva configurazione portafoglio ===
-  const handleSavePortfolio = () => {
-    saveSettings({
-      initial_balance: initialBalance,
-      max_position_pct: maxPositionPct / 100,
-      stop_loss_threshold: stopLossThreshold / 100,
-      max_open_positions: maxOpenPositions,
-      min_confidence: minConfidence,
-    });
-  };
-
-  // Reset completo del portafoglio con conferma
-  const handleResetPortfolio = async () => {
+  // Imposta il nuovo bilancio iniziale e resetta tutto il portafoglio
+  const handleSetBalance = async () => {
     if (
       !window.confirm(
-        "Sei sicuro di voler resettare il portafoglio? Questa azione \u00e8 irreversibile."
+        `Impostare il bilancio a ${Number(initialBalance).toLocaleString("it-IT")} € e resettare tutto il portafoglio? Posizioni, trade e log verranno cancellati.`
       )
     ) {
       return;
@@ -415,11 +393,11 @@ function Settings({ onBack, onDataRefresh }) {
         body: JSON.stringify({ new_balance: initialBalance }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      showMessage("Portafoglio resettato con successo");
+      showMessage("Portafoglio impostato con successo");
       // Trigger immediate data refresh in parent App
       if (onDataRefresh) onDataRefresh();
     } catch (err) {
-      showMessage(`Errore reset: ${err.message}`, true);
+      showMessage(`Errore: ${err.message}`, true);
     }
   };
 
@@ -1004,11 +982,17 @@ function Settings({ onBack, onDataRefresh }) {
         {/* SEZIONE 3: CONFIGURAZIONE PORTAFOGLIO         */}
         {/* ============================================= */}
         <div style={cardStyle}>
-          <div style={sectionTitle}>Configurazione Portafoglio</div>
+          <div style={sectionTitle}>Capitale Iniziale</div>
 
-          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
-            <div style={{ ...fieldGroup, flex: "1 1 180px" }}>
-              <label style={labelStyle}>Bilancio iniziale ($)</label>
+          <p style={{ color: "#9ca3af", fontSize: "0.85rem", margin: "0 0 16px 0" }}>
+            Imposta il capitale di partenza dell'agente. Cambiare questo valore resetta
+            completamente il portafoglio (posizioni, trade e log verranno cancellati).
+            L'AI decide autonomamente come gestire il rischio, le posizioni e le allocazioni.
+          </p>
+
+          <div style={{ display: "flex", gap: "16px", alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ ...fieldGroup, flex: "0 1 250px" }}>
+              <label style={labelStyle}>Bilancio iniziale</label>
               <input
                 type="number"
                 style={inputStyle}
@@ -1016,72 +1000,13 @@ function Settings({ onBack, onDataRefresh }) {
                 onChange={(e) => setInitialBalance(Number(e.target.value))}
                 onFocus={handleFocus}
                 onBlur={handleBlur}
+                min={1000}
+                step={1000}
               />
             </div>
 
-            <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
-              <label style={labelStyle}>Max posizione (%)</label>
-              <input
-                type="number"
-                style={inputStyle}
-                value={maxPositionPct}
-                onChange={(e) => setMaxPositionPct(Number(e.target.value))}
-                onFocus={handleFocus}
-                onBlur={handleBlur}
-              />
-            </div>
-
-            <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
-              <label style={labelStyle}>Stop Loss (%)</label>
-              <input
-                type="number"
-                style={inputStyle}
-                value={stopLossThreshold}
-                onChange={(e) => setStopLossThreshold(Number(e.target.value))}
-                onFocus={handleFocus}
-                onBlur={handleBlur}
-              />
-            </div>
-
-            <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
-              <label style={labelStyle}>Max posizioni aperte</label>
-              <input
-                type="number"
-                style={inputStyle}
-                value={maxOpenPositions}
-                onChange={(e) => setMaxOpenPositions(Number(e.target.value))}
-                onFocus={handleFocus}
-                onBlur={handleBlur}
-              />
-            </div>
-
-            <div style={{ ...fieldGroup, flex: "1 1 140px" }}>
-              <label style={labelStyle}>Confidenza minima</label>
-              <input
-                type="number"
-                style={inputStyle}
-                value={minConfidence}
-                onChange={(e) => setMinConfidence(Number(e.target.value))}
-                onFocus={handleFocus}
-                onBlur={handleBlur}
-              />
-            </div>
-          </div>
-
-          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
-            <button
-              style={{
-                ...btnPrimary,
-                opacity: saving ? 0.6 : 1,
-                cursor: saving ? "not-allowed" : "pointer",
-              }}
-              onClick={handleSavePortfolio}
-              disabled={saving}
-            >
-              {saving ? "Salvando..." : "Salva Configurazione"}
-            </button>
-            <button style={btnDanger} onClick={handleResetPortfolio}>
-              Resetta Portafoglio
+            <button style={btnDanger} onClick={handleSetBalance}>
+              Imposta e Resetta
             </button>
           </div>
         </div>

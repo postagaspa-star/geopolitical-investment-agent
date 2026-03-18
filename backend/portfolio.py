@@ -1,12 +1,14 @@
 """
-Modulo di gestione del portafoglio virtuale con regole di risk management
-applicate direttamente nel codice (NON nel prompt dell'agente).
+Modulo di gestione del portafoglio virtuale.
 
-Regole di risk management:
-- Nessuna posizione singola puo' superare il 10% del valore totale del portafoglio
-- Stop-loss automatico al -15% per posizione (eseguito autonomamente ad ogni run)
-- Massimo 8 posizioni aperte contemporaneamente
-- Non eseguire operazioni se confidence_score < 40
+L'agente AI ha piena autonomia decisionale su:
+- Quante posizioni aprire e di quale dimensione
+- Quando vendere (stop-loss, take-profit, ribilanciamento)
+- Livello di confidenza minimo per operare
+- Allocazione del portafoglio per settore
+
+Il codice si limita a eseguire gli ordini e a verificare che ci sia
+liquidita' sufficiente e che le posizioni esistano prima di venderle.
 """
 
 from database import (
@@ -16,27 +18,6 @@ from database import (
     update_position_price, count_positions,
     insert_trade, get_setting,
 )
-
-# --- Valori di default per il risk management ---
-_DEFAULT_MAX_POSITION_PCT = 0.10
-_DEFAULT_STOP_LOSS = -0.15
-_DEFAULT_MAX_POSITIONS = 8
-_DEFAULT_MIN_CONFIDENCE = 40
-
-
-def _get_risk_params():
-    """Legge i parametri di risk management dal database, con fallback ai default."""
-    try:
-        max_pct = float(get_setting("max_position_pct", str(_DEFAULT_MAX_POSITION_PCT)))
-        stop_loss = float(get_setting("stop_loss_threshold", str(_DEFAULT_STOP_LOSS)))
-        max_pos = int(float(get_setting("max_open_positions", str(_DEFAULT_MAX_POSITIONS))))
-        min_conf = float(get_setting("min_confidence", str(_DEFAULT_MIN_CONFIDENCE)))
-    except Exception:
-        max_pct = _DEFAULT_MAX_POSITION_PCT
-        stop_loss = _DEFAULT_STOP_LOSS
-        max_pos = _DEFAULT_MAX_POSITIONS
-        min_conf = _DEFAULT_MIN_CONFIDENCE
-    return max_pct, stop_loss, max_pos, min_conf
 
 
 def calculate_total_value():
@@ -111,16 +92,14 @@ def get_portfolio_state():
 
 def can_buy(ticker, quantity, price):
     """
-    Verifica se un acquisto e' consentito dalle regole di risk management.
+    Verifica se un acquisto e' possibile (solo controllo liquidita').
+    L'AI decide autonomamente dimensione e allocazione delle posizioni.
     Restituisce (consentito: bool, motivo: str).
     """
-    MAX_POSITION_PCT, _, MAX_OPEN_POSITIONS, _ = _get_risk_params()
-
     p = get_portfolio()
     if p is None:
         return False, "Portafoglio non inizializzato"
 
-    total_value = calculate_total_value()
     cost = quantity * price
 
     if cost > p["cash_balance"]:
@@ -129,45 +108,16 @@ def can_buy(ticker, quantity, price):
             f"disponibili {p['cash_balance']:.2f}"
         )
 
-    existing = get_position(ticker)
-    if existing is None and count_positions() >= MAX_OPEN_POSITIONS:
-        return False, (
-            f"Numero massimo di posizioni aperte raggiunto ({MAX_OPEN_POSITIONS})"
-        )
-
-    existing_value = 0.0
-    if existing is not None:
-        existing_value = existing["current_price"] * existing["quantity"]
-    new_position_value = existing_value + cost
-
-    max_allowed = total_value * MAX_POSITION_PCT
-    if new_position_value > max_allowed:
-        return False, (
-            f"Limite di concentrazione superato: la posizione varrebbe "
-            f"{new_position_value:.2f} (max consentito: {max_allowed:.2f}, "
-            f"cioe' {MAX_POSITION_PCT*100:.0f}% del portafoglio)"
-        )
-
     return True, "Acquisto consentito"
 
 
 def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confidence):
     """
-    Esegue un ordine di acquisto applicando tutti i controlli di risk management.
+    Esegue un ordine di acquisto verificando solo la disponibilita' di liquidita'.
+    L'AI decide autonomamente quando e quanto comprare.
     Restituisce un dizionario con l'esito dell'operazione.
     """
-    # Controllo punteggio di confidenza minimo (letto dal DB)
-    _, _, _, MIN_CONFIDENCE = _get_risk_params()
-    if confidence < MIN_CONFIDENCE:
-        return {
-            "success": False,
-            "reason": (
-                f"Confidenza troppo bassa: {confidence} "
-                f"(minimo richiesto: {MIN_CONFIDENCE})"
-            ),
-        }
-
-    # Controlli di risk management
+    # Controllo liquidita'
     allowed, reason = can_buy(ticker, quantity, price)
     if not allowed:
         return {"success": False, "reason": reason}
@@ -215,20 +165,10 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
 
 def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confidence):
     """
-    Esegue un ordine di vendita con i relativi controlli.
+    Esegue un ordine di vendita verificando solo che la posizione esista.
+    L'AI decide autonomamente quando e quanto vendere.
     Restituisce un dizionario con l'esito dell'operazione.
     """
-    # Controllo punteggio di confidenza minimo (letto dal DB)
-    _, _, _, MIN_CONFIDENCE = _get_risk_params()
-    if confidence < MIN_CONFIDENCE:
-        return {
-            "success": False,
-            "reason": (
-                f"Confidenza troppo bassa: {confidence} "
-                f"(minimo richiesto: {MIN_CONFIDENCE})"
-            ),
-        }
-
     # Verifica che la posizione esista
     existing = get_position(ticker)
     if existing is None:
@@ -323,55 +263,3 @@ def update_prices(prices: dict):
     }
 
 
-def check_stop_losses(current_prices: dict):
-    """
-    Controlla tutte le posizioni aperte e esegue automaticamente lo stop-loss
-    per quelle che hanno perso oltre il 15% rispetto al prezzo medio di acquisto.
-    Viene eseguito autonomamente ad ogni run del sistema.
-    """
-    # Prima aggiorna i prezzi con quelli forniti
-    if current_prices:
-        update_prices(current_prices)
-
-    positions = get_positions()
-    triggered = []
-
-    for pos in positions:
-        ticker = pos["ticker"]
-        current_price = current_prices.get(ticker, pos["current_price"])
-
-        # Salta posizioni senza prezzo corrente valido
-        if current_price <= 0 or pos["avg_buy_price"] <= 0:
-            continue
-
-        # Calcola la variazione percentuale rispetto al prezzo medio di acquisto
-        change_pct = (current_price - pos["avg_buy_price"]) / pos["avg_buy_price"]
-
-        _, STOP_LOSS_THRESHOLD, _, _ = _get_risk_params()
-        if change_pct <= STOP_LOSS_THRESHOLD:
-            # Stop-loss attivato: vendita automatica dell'intera posizione
-            result = execute_sell(
-                ticker=ticker,
-                quantity=pos["quantity"],
-                price=current_price,
-                geo_reasoning="Stop-loss automatico attivato dal sistema",
-                tech_reasoning=(
-                    f"Perdita del {change_pct*100:.1f}% "
-                    f"(soglia: {STOP_LOSS_THRESHOLD*100:.0f}%)"
-                ),
-                confidence=100,  # Esecuzione automatica, confidenza massima
-            )
-            triggered.append({
-                "ticker": ticker,
-                "avg_buy_price": pos["avg_buy_price"],
-                "trigger_price": current_price,
-                "loss_pct": round(change_pct * 100, 2),
-                "quantity_sold": pos["quantity"],
-                "sell_result": result,
-            })
-
-    return {
-        "stop_losses_checked": len(positions),
-        "stop_losses_triggered": len(triggered),
-        "details": triggered,
-    }
