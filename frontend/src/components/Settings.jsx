@@ -196,7 +196,7 @@ function Settings({ onBack }) {
     // Documenti: usa i dati già caricati
     const checkDocuments = (docs) => {
       const count = Array.isArray(docs) ? docs.length : 0;
-      setDiagItem("documents", "ok", `${count} documento${count !== 1 ? "i" : ""} caricato${count !== 1 ? "i" : ""}`);
+      setDiagItem("documents", "ok", `${count} ${count !== 1 ? "documenti caricati" : "documento caricato"}`);
     };
 
     // Lancia tutto in parallelo
@@ -342,7 +342,7 @@ function Settings({ onBack }) {
       setDiagItem(
         "documents",
         "ok",
-        `${docs.length} documento${docs.length !== 1 ? "i" : ""} caricato${docs.length !== 1 ? "i" : ""}`
+        `${docs.length} ${docs.length !== 1 ? "documenti caricati" : "documento caricato"}`
       );
     } catch (err) {
       showMessage(`Errore upload: ${err.message}`, true);
@@ -363,7 +363,7 @@ function Settings({ onBack }) {
       setDiagItem(
         "documents",
         "ok",
-        `${docs.length} documento${docs.length !== 1 ? "i" : ""} caricato${docs.length !== 1 ? "i" : ""}`
+        `${docs.length} ${docs.length !== 1 ? "documenti caricati" : "documento caricato"}`
       );
     } catch (err) {
       showMessage(`Errore eliminazione: ${err.message}`, true);
