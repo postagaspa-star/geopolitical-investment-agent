@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom';
+import { useState, useEffect } from 'react';
 import {
   LayoutDashboard,
   Brain,
@@ -10,6 +11,8 @@ import {
   Play,
   Square,
   Zap,
+  Trophy,
+  ExternalLink,
 } from 'lucide-react';
 
 const MODE_LABELS = {
@@ -59,6 +62,30 @@ export default function Sidebar({
   const modeLabel = MODE_LABELS[currentMode] ?? currentMode ?? 'Inattivo';
   const isRunning = agentStatus === 'running';
   const recentLogs = Array.isArray(logs) ? logs.slice(-5).reverse() : [];
+
+  // ClawStreet status
+  const [csStatus, setCsStatus] = useState(null);
+  const [csRegistering, setCsRegistering] = useState(false);
+  const API = window.location.origin;
+
+  useEffect(() => {
+    fetch(`${API}/api/clawstreet/status`)
+      .then(r => r.json())
+      .then(d => setCsStatus(d))
+      .catch(() => {});
+  }, [API]);
+
+  const handleRegisterCS = async () => {
+    setCsRegistering(true);
+    try {
+      const res = await fetch(`${API}/api/clawstreet/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (res.ok) {
+        const updated = await fetch(`${API}/api/clawstreet/status`).then(r => r.json());
+        setCsStatus(updated);
+      }
+    } catch {}
+    setCsRegistering(false);
+  };
 
   const totalValue = portfolio?.total_value ?? 0;
   const cashBalance = portfolio?.cash ?? portfolio?.cash_balance ?? 0;
@@ -212,6 +239,40 @@ export default function Sidebar({
           >
             Liquidità: <strong>{formatEUR(cashBalance)}</strong>
           </div>
+        </div>
+
+        {/* ClawStreet */}
+        <div className="sidebar-portfolio" style={{ borderTop: '1px solid var(--border)', paddingTop: '0.75rem', marginTop: '0.5rem' }}>
+          <div className="portfolio-label" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <Trophy size={14} /> ClawStreet
+          </div>
+          {csStatus?.registered ? (
+            <>
+              <div className="status-countdown" style={{ marginTop: '0.25rem' }}>
+                Bot: <strong>{csStatus.bot_name || 'GeoInvest AI'}</strong>
+              </div>
+              {csStatus.public_url && (
+                <a
+                  href={csStatus.public_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="status-countdown"
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', marginTop: '0.25rem', color: 'var(--primary)', textDecoration: 'none', fontSize: '0.75rem' }}
+                >
+                  <ExternalLink size={12} /> Pagina pubblica
+                </a>
+              )}
+            </>
+          ) : (
+            <button
+              className="btn btn-secondary"
+              style={{ marginTop: '0.35rem', fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
+              onClick={handleRegisterCS}
+              disabled={csRegistering}
+            >
+              {csRegistering ? 'Registrando...' : 'Registra bot pubblico'}
+            </button>
+          )}
         </div>
       </aside>
     </>

@@ -40,27 +40,31 @@ la situazione geopolitica globale e prendere decisioni di investimento informate
 
 Segui questa procedura rigorosa ad ogni ciclo:
 
-1. **Analisi Geopolitica**: Prima di tutto, chiama `get_geopolitical_data` per ottenere
-   le ultime notizie e gli eventi geopolitici. Analizza attentamente conflitti, sanzioni,
-   accordi commerciali, elezioni e altri eventi che possono influenzare i mercati.
+1. **Market Intelligence**: Come PRIMO passo, chiama `get_market_intelligence` con i ticker
+   piu' rilevanti dalla watchlist per ottenere il quadro macro completo: sentiment, contesto
+   SPY/settori, segnali obbligazionari (yield curve) e screener di asset in ipervenduto.
 
-2. **Stato del Portafoglio**: Chiama `get_portfolio_state` per conoscere le posizioni
+2. **Analisi Geopolitica**: Chiama `get_geopolitical_data` per ottenere le ultime notizie
+   e gli eventi geopolitici. Analizza conflitti, sanzioni, accordi commerciali, elezioni
+   e altri eventi che possono influenzare i mercati.
+
+3. **Stato del Portafoglio**: Chiama `get_portfolio_state` per conoscere le posizioni
    attuali, la liquidita' disponibile e le performance complessive.
 
-2b. **Congressional Trading**: Chiama `get_congressional_trades` per verificare se membri
-   del Congresso USA hanno effettuato trade significativi. Questi possono essere segnali
-   anticipatori di cambiamenti normativi o geopolitici.
+3b. **Congressional Trading**: Chiama `get_congressional_trades` per verificare se membri
+   del Congresso USA hanno effettuato trade significativi.
 
-3. **Analisi Tecnica**: Basandoti sulla tua analisi geopolitica, identifica i ticker
-   piu' rilevanti e chiama `get_technical_analysis` per ciascuno di essi.
+4. **Analisi Tecnica**: Basandoti sulla market intelligence e l'analisi geopolitica,
+   identifica i ticker piu' rilevanti e chiama `get_technical_analysis` per ciascuno.
    Valuta medie mobili, RSI, MACD e bande di Bollinger.
 
-4. **Decisione**: Per ogni opportunita' identificata, decidi se:
+5. **Decisione**: Per ogni opportunita' identificata, decidi se:
    - Eseguire un'operazione tramite `execute_trade`, fornendo motivazioni dettagliate
    - Non operare tramite `do_nothing`, spiegando il motivo
 
 Criteri di decisione:
 - Peso dell'analisi: 50% geopolitica, 50% tecnica
+- Integra i dati ClawStreet (sentiment, economia, screener) nelle tue decisioni
 - Fornisci SEMPRE motivazioni dettagliate per ogni decisione
 - Sii conservativo: preferisci la qualita' alla quantita' delle operazioni
 - Non operare se le condizioni non sono chiaramente favorevoli
@@ -72,10 +76,11 @@ WEEKEND_SYSTEM_PROMPT = """Sei un agente di intelligence geopolitica. I mercati 
 Il tuo compito e' SOLO raccogliere e analizzare notizie geopolitiche per prepararti alla settimana.
 
 PROCEDURA WEEKEND:
-1. Chiama `get_geopolitical_data` per raccogliere le ultime notizie geopolitiche.
-2. Analizza attentamente gli eventi: conflitti, sanzioni, accordi, elezioni, crisi energetiche.
-2b. Chiama `get_congressional_trades` per verificare trade significativi dei congressisti USA.
-3. Chiama `save_weekend_intelligence` per salvare la tua analisi con:
+1. Chiama `get_market_intelligence` per ottenere il quadro macro della settimana appena chiusa.
+2. Chiama `get_geopolitical_data` per raccogliere le ultime notizie geopolitiche.
+3. Analizza attentamente gli eventi: conflitti, sanzioni, accordi, elezioni, crisi energetiche.
+3b. Chiama `get_congressional_trades` per verificare trade significativi dei congressisti USA.
+4. Chiama `save_weekend_intelligence` per salvare la tua analisi con:
    - key_events: lista degli eventi chiave identificati
    - market_implications: come questi eventi influenzeranno i mercati alla riapertura
    - priority_assets: ticker da monitorare prioritariamente lunedi'
@@ -93,9 +98,10 @@ PRE_MARKET_SYSTEM_PROMPT = """Sei un agente di preparazione pre-market. I mercat
 Il tuo compito e' preparare un briefing per l'apertura dei mercati.
 
 PROCEDURA PRE-MARKET:
-1. Chiama `get_geopolitical_data` per raccogliere le ultime notizie.
-2. Analizza gli eventi e la loro rilevanza per l'apertura imminente.
-3. Chiama `save_pre_market_briefing` per salvare il briefing con:
+1. Chiama `get_market_intelligence` per avere il quadro macro e sentiment aggiornato.
+2. Chiama `get_geopolitical_data` per raccogliere le ultime notizie.
+3. Analizza gli eventi e la loro rilevanza per l'apertura imminente.
+4. Chiama `save_pre_market_briefing` per salvare il briefing con:
    - market_session: quale mercato sta per aprire (EU_OPEN o US_OPEN)
    - key_events: eventi chiave per l'apertura
    - priority_assets: ticker da monitorare all'apertura
@@ -154,9 +160,10 @@ def _build_system_prompt(mode="full"):
 def _get_tools_for_mode(mode="full"):
     """Restituisce i tool disponibili in base alla modalita'."""
     if mode == "weekend":
-        allowed = {"get_geopolitical_data", "save_weekend_intelligence", "do_nothing", "get_congressional_trades"}
+        allowed = {"get_geopolitical_data", "get_market_intelligence",
+                   "save_weekend_intelligence", "do_nothing", "get_congressional_trades"}
     elif mode == "pre_market":
-        allowed = {"get_geopolitical_data", "get_portfolio_state",
+        allowed = {"get_geopolitical_data", "get_market_intelligence", "get_portfolio_state",
                    "get_congressional_trades", "save_pre_market_briefing", "do_nothing"}
     else:
         return TOOL_DEFINITIONS

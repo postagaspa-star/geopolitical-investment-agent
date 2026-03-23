@@ -196,6 +196,34 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "get_market_intelligence",
+        "description": (
+            "Recupera dati di mercato avanzati da ClawStreet: sentiment per ticker, "
+            "contesto macro (SPY, settori), segnali obbligazionari (yield curve), "
+            "e screener di asset in ipervenduto. Usare questo tool all'inizio di ogni "
+            "ciclo di analisi per avere un quadro completo del mercato."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tickers_for_sentiment": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Lista di ticker per cui recuperare sentiment e dati quant (max 5)",
+                },
+                "include_economy": {
+                    "type": "boolean",
+                    "description": "Se true, include segnali yield curve e obbligazionari",
+                },
+                "screener_rsi_threshold": {
+                    "type": "integer",
+                    "description": "Soglia RSI per screener (default 35 per ipervenduto)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         # Strumento per quando l'agente decide di non operare
         "name": "do_nothing",
         "description": (
@@ -345,6 +373,34 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
             database.insert_agent_log(run_id=run_id, phase="DECISION",
                 content=f"{action} {quantity} {ticker} @ {current_price:.2f} (conf: {confidence_score})")
 
+            # --- ClawStreet trade mirror (fire-and-forget, non blocca) ---
+            try:
+                cs_bot_id = database.get_setting("clawstreet_bot_id", "")
+                cs_api_key = database.get_setting("clawstreet_api_key", "")
+                if cs_bot_id and cs_api_key:
+                    reasoning_text = f"{geopolitical_reasoning} | {technical_reasoning}"
+                    mirror_result = await data_fetchers.mirror_trade_to_clawstreet(
+                        bot_id=cs_bot_id,
+                        api_key=cs_api_key,
+                        symbol=ticker,
+                        action=action,
+                        qty=quantity,
+                        reasoning=reasoning_text,
+                    )
+                    database.insert_agent_log(
+                        run_id=run_id,
+                        phase="CLAWSTREET_MIRROR",
+                        content=json.dumps({"ticker": ticker, "action": action, "mirror": mirror_result}, default=str),
+                    )
+                    logger.info("[%s] ClawStreet mirror: %s", run_id, mirror_result)
+            except Exception as cs_err:
+                logger.warning("[%s] ClawStreet mirror failed (non-blocking): %s", run_id, cs_err)
+                database.insert_agent_log(
+                    run_id=run_id,
+                    phase="CLAWSTREET_MIRROR",
+                    content=json.dumps({"error": str(cs_err), "ticker": ticker}, default=str),
+                )
+
             result = {
                 "trade_executed": True,
                 "ticker": ticker,
@@ -427,6 +483,54 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
 
             result = {
                 "congressional_trades": congressional_data,
+                "fetched_at": timestamp,
+            }
+
+        elif tool_name == "get_market_intelligence":
+            logger.info("[%s] Recupero market intelligence da ClawStreet...", run_id)
+            import asyncio as _aio
+
+            # 1. Sempre: contesto macro
+            market_ctx = await data_fetchers.fetch_clawstreet_market_context()
+
+            # 2. Economy (yield curve) se richiesto
+            economy_data = None
+            if tool_input.get("include_economy", False):
+                economy_data = await data_fetchers.fetch_clawstreet_economy()
+
+            # 3. Sentiment per ogni ticker (max 5)
+            tickers = (tool_input.get("tickers_for_sentiment") or [])[:5]
+            sentiment_results = {}
+            if tickers:
+                sentiment_tasks = [
+                    data_fetchers.fetch_clawstreet_sentiment(t) for t in tickers
+                ]
+                raw = await _aio.gather(*sentiment_tasks, return_exceptions=True)
+                for i, r in enumerate(raw):
+                    if isinstance(r, Exception):
+                        sentiment_results[tickers[i]] = {"error": str(r)}
+                    else:
+                        sentiment_results[tickers[i]] = r
+
+            # 4. Screener RSI
+            rsi_threshold = tool_input.get("screener_rsi_threshold", 35)
+            screener_data = await data_fetchers.fetch_clawstreet_screener(
+                indicator="rsi", below=rsi_threshold
+            )
+
+            database.insert_agent_log(
+                run_id=run_id,
+                phase="MARKET_INTELLIGENCE",
+                content=f"ClawStreet data: market_ctx={'ok' if not market_ctx.get('error') else 'err'}, "
+                        f"sentiment={len(tickers)} tickers, economy={'yes' if economy_data else 'no'}, "
+                        f"screener_rsi<{rsi_threshold}",
+            )
+
+            result = {
+                "market_context": market_ctx,
+                "economy": economy_data,
+                "sentiment": sentiment_results,
+                "screener": screener_data,
                 "fetched_at": timestamp,
             }
 

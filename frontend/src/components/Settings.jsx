@@ -63,6 +63,10 @@ function Settings({ onBack, onDataRefresh }) {
   const [finnhubKey, setFinnhubKey] = useState("");
   const [connectionTest, setConnectionTest] = useState(null);
 
+  // === Stato Sezione 6: ClawStreet ===
+  const [csStatus, setCsStatus] = useState(null);
+  const [csRegistering, setCsRegistering] = useState(false);
+
   // === Stato UI generale ===
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
@@ -259,6 +263,11 @@ function Settings({ onBack, onDataRefresh }) {
       ]);
       // Lancia diagnostica con il conteggio documenti già disponibile
       runDiagnostics(docsData);
+      // Carica stato ClawStreet
+      try {
+        const csRes = await fetch(`${API}/api/clawstreet/status`);
+        if (csRes.ok) setCsStatus(await csRes.json());
+      } catch {}
     };
 
     init();
@@ -436,6 +445,29 @@ function Settings({ onBack, onDataRefresh }) {
 
   const handleSaveWatchlist = () => {
     saveSettings({ watchlist: JSON.stringify(watchlist) });
+  };
+
+  // === Handler Sezione 6: ClawStreet ===
+  const handleRegisterClawStreet = async () => {
+    setCsRegistering(true);
+    try {
+      const res = await fetch(`${API}/api/clawstreet/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      showMessage("Bot registrato su ClawStreet con successo!");
+      // Ricarica lo stato
+      const csRes = await fetch(`${API}/api/clawstreet/status`);
+      if (csRes.ok) setCsStatus(await csRes.json());
+    } catch (err) {
+      showMessage(`Errore registrazione: ${err.message}`, true);
+    }
+    setCsRegistering(false);
   };
 
   // === Handler Sezione 5: Test connessione e salvataggio API keys ===
@@ -1294,6 +1326,78 @@ function Settings({ onBack, onDataRefresh }) {
                   )}
                 </div>
               )}
+            </div>
+          )}
+        </div>
+
+        {/* ============================================= */}
+        {/* SEZIONE 6: CLAWSTREET                         */}
+        {/* ============================================= */}
+        <div style={cardStyle}>
+          <div style={sectionTitle}>ClawStreet</div>
+
+          <p style={{ color: "#9ca3af", fontSize: "0.85rem", margin: "0 0 16px 0" }}>
+            Registra il bot sulla piattaforma pubblica ClawStreet per condividere i trade
+            e comparire nella leaderboard. I dati di mercato ClawStreet (sentiment, macro, screener)
+            sono già integrati automaticamente nell'agente.
+          </p>
+
+          {csStatus?.registered ? (
+            <div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                  <span style={{
+                    width: "8px", height: "8px", borderRadius: "50%",
+                    background: "#10b981", flexShrink: 0,
+                  }} />
+                  <span style={{ color: "#374151", fontWeight: 500 }}>Registrato</span>
+                </div>
+                <div style={{ fontSize: "0.85rem", color: "#6b7280" }}>
+                  <strong>Nome:</strong> {csStatus.bot_name || "GeoInvest AI"}
+                  {csStatus.bot_ticker && <> · <strong>Ticker:</strong> {csStatus.bot_ticker}</>}
+                </div>
+                {csStatus.public_url && (
+                  <a
+                    href={csStatus.public_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: "#3b82f6", fontSize: "0.85rem", textDecoration: "none" }}
+                  >
+                    🔗 Pagina pubblica del bot →
+                  </a>
+                )}
+                {csStatus.claim_url && (
+                  <a
+                    href={csStatus.claim_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: "#8b5cf6", fontSize: "0.85rem", textDecoration: "none" }}
+                  >
+                    🔑 Claim URL →
+                  </a>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "12px" }}>
+                <span style={{
+                  width: "8px", height: "8px", borderRadius: "50%",
+                  background: "#9ca3af", flexShrink: 0,
+                }} />
+                <span style={{ color: "#6b7280" }}>Non registrato</span>
+              </div>
+              <button
+                style={{
+                  ...btnPrimary,
+                  opacity: csRegistering ? 0.6 : 1,
+                  cursor: csRegistering ? "not-allowed" : "pointer",
+                }}
+                onClick={handleRegisterClawStreet}
+                disabled={csRegistering}
+              >
+                {csRegistering ? "Registrazione in corso..." : "Registra Bot su ClawStreet"}
+              </button>
             </div>
           )}
         </div>

@@ -419,6 +419,75 @@ async def close_position(payload: ClosePositionPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# --- Endpoint ClawStreet ---
+
+
+class ClawStreetRegisterPayload(BaseModel):
+    name: str = "GeoInvest AI"
+    ticker: str = "GEO"
+    strategy: str = "Geopolitical risk analysis combined with technical analysis. Uses GDELT, NewsAPI, and Congressional trading data to identify macro opportunities."
+    personality: str = "Disciplined and data-driven. Follows the trend, never averages down losses, always sets stop-loss."
+    bio: str = "AI agent combining geopolitical intelligence with technical analysis to trade global macro themes."
+
+
+@app.post("/api/clawstreet/register")
+async def register_clawstreet_bot(payload: ClawStreetRegisterPayload):
+    """Registra il bot su ClawStreet e salva le credenziali nel database."""
+    try:
+        import data_fetchers
+        result = await data_fetchers.register_clawstreet_bot(
+            name=payload.name,
+            ticker=payload.ticker,
+            strategy=payload.strategy,
+            personality=payload.personality,
+            bio=payload.bio,
+        )
+        if result.get("success"):
+            data = result.get("data", {})
+            # Salva le credenziali nel database
+            if data.get("bot_id") or data.get("id"):
+                database.set_setting("clawstreet_bot_id", str(data.get("bot_id") or data.get("id", "")))
+            if data.get("api_key") or data.get("apiKey"):
+                database.set_setting("clawstreet_api_key", str(data.get("api_key") or data.get("apiKey", "")))
+            if data.get("claim_url") or data.get("claimUrl") or data.get("url"):
+                database.set_setting("clawstreet_claim_url", str(data.get("claim_url") or data.get("claimUrl") or data.get("url", "")))
+            # Salva anche nome e ticker
+            database.set_setting("clawstreet_bot_name", payload.name)
+            database.set_setting("clawstreet_bot_ticker", payload.ticker)
+            return {"status": "registered", "data": data}
+        else:
+            return JSONResponse(status_code=400, content={
+                "error": "Registrazione fallita",
+                "details": result,
+            })
+    except Exception as e:
+        logger.error(f"Errore nella registrazione ClawStreet: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/clawstreet/status")
+async def get_clawstreet_status():
+    """Restituisce lo stato della registrazione ClawStreet."""
+    try:
+        bot_id = database.get_setting("clawstreet_bot_id", "")
+        api_key = database.get_setting("clawstreet_api_key", "")
+        claim_url = database.get_setting("clawstreet_claim_url", "")
+        bot_name = database.get_setting("clawstreet_bot_name", "")
+        bot_ticker = database.get_setting("clawstreet_bot_ticker", "")
+        registered = bool(bot_id and api_key)
+        return {
+            "registered": registered,
+            "bot_id": bot_id,
+            "bot_name": bot_name,
+            "bot_ticker": bot_ticker,
+            "claim_url": claim_url,
+            "public_url": f"https://www.clawstreet.io/bot/{bot_id}" if bot_id else None,
+        }
+    except Exception as e:
+        logger.error(f"Errore nello stato ClawStreet: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # --- Endpoint test connessione API ---
 
 

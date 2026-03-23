@@ -308,6 +308,194 @@ def get_all_watchlist_tickers() -> List[str]:
     return sorted(tutti_i_ticker)
 
 
+# ============================================================
+# ClawStreet API — dati di mercato gratuiti (no auth)
+# ============================================================
+
+CLAWSTREET_BASE = "https://www.clawstreet.io/api"
+CLAWSTREET_TIMEOUT = aiohttp.ClientTimeout(total=5)
+
+
+async def fetch_clawstreet_sentiment(ticker: str) -> Dict[str, Any]:
+    """
+    Sentiment news per singolo ticker (-1 a +1) più dati quantitativi:
+    put/call ratio, implied volatility, short interest.
+    """
+    url = f"{CLAWSTREET_BASE}/data/sentiment?symbol={ticker}&quant=1"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
+                if resp.status != 200:
+                    return {"ticker": ticker, "error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+                return {"ticker": ticker, "data": data, "error": None}
+    except Exception as exc:
+        logger.warning("ClawStreet sentiment error for %s: %s", ticker, exc)
+        return {"ticker": ticker, "error": str(exc)}
+
+
+async def fetch_clawstreet_market_context() -> Dict[str, Any]:
+    """
+    Contesto macro generale: SPY return, sentiment di mercato,
+    performance per settore.
+    """
+    url = f"{CLAWSTREET_BASE}/data/market"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+                return {"data": data, "error": None}
+    except Exception as exc:
+        logger.warning("ClawStreet market context error: %s", exc)
+        return {"error": str(exc)}
+
+
+async def fetch_clawstreet_economy() -> Dict[str, Any]:
+    """
+    Segnali obbligazionari: TLT, SHY, direzione della yield curve.
+    Indica risk-on vs risk-off del mercato.
+    """
+    url = f"{CLAWSTREET_BASE}/data/economy"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+                return {"data": data, "error": None}
+    except Exception as exc:
+        logger.warning("ClawStreet economy error: %s", exc)
+        return {"error": str(exc)}
+
+
+async def fetch_clawstreet_screener(indicator: str = "rsi", below: int = 35) -> Dict[str, Any]:
+    """
+    Screener bulk: tutti i simboli con RSI sotto una soglia.
+    Utile per trovare asset in ipervenduto.
+    """
+    url = f"{CLAWSTREET_BASE}/data/scan?indicator={indicator}&below={below}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+                return {"data": data, "error": None}
+    except Exception as exc:
+        logger.warning("ClawStreet screener error: %s", exc)
+        return {"error": str(exc)}
+
+
+async def fetch_clawstreet_fundamentals(ticker: str) -> Dict[str, Any]:
+    """
+    Fondamentali trimestrali: revenue, EPS, P/E, debt/equity, cash flow.
+    """
+    url = f"{CLAWSTREET_BASE}/data/fundamentals?symbol={ticker}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
+                if resp.status != 200:
+                    return {"ticker": ticker, "error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+                return {"ticker": ticker, "data": data, "error": None}
+    except Exception as exc:
+        logger.warning("ClawStreet fundamentals error for %s: %s", ticker, exc)
+        return {"ticker": ticker, "error": str(exc)}
+
+
+async def check_clawstreet_market_status() -> Dict[str, Any]:
+    """Controlla se i mercati USA sono aperti secondo ClawStreet."""
+    url = f"{CLAWSTREET_BASE}/market-status"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
+                if resp.status != 200:
+                    return {"open": False, "error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+                return {"data": data, "error": None}
+    except Exception as exc:
+        logger.warning("ClawStreet market-status error: %s", exc)
+        return {"open": False, "error": str(exc)}
+
+
+async def mirror_trade_to_clawstreet(
+    bot_id: str, api_key: str, symbol: str, action: str,
+    qty: int, reasoning: str
+) -> Dict[str, Any]:
+    """
+    Invia un trade mirror a ClawStreet. Restituisce il risultato.
+    Per azioni, verifica che il mercato sia aperto (skip per crypto X:).
+    """
+    # Converti crypto prefix se necessario
+    is_crypto = symbol.startswith("X:") or symbol.endswith("USD") and len(symbol) > 5
+    if is_crypto and not symbol.startswith("X:"):
+        symbol = f"X:{symbol}"
+
+    # Per titoli azionari, controlla che i mercati siano aperti
+    if not is_crypto:
+        mkt = await check_clawstreet_market_status()
+        mkt_data = mkt.get("data", {})
+        # Se il campo open/isOpen esiste e indica chiuso, skippa
+        is_open = mkt_data.get("isOpen", mkt_data.get("open", True))
+        if not is_open:
+            return {"mirrored": False, "reason": "Mercati USA chiusi, trade non inviato a ClawStreet"}
+
+    url = f"{CLAWSTREET_BASE}/bots/{bot_id}/trade"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "symbol": symbol,
+        "action": action.lower(),
+        "qty": qty,
+        "reasoning": reasoning[:280],
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=CLAWSTREET_TIMEOUT) as resp:
+                body = await resp.text()
+                if resp.status in (200, 201):
+                    return {"mirrored": True, "status": resp.status, "response": body}
+                else:
+                    return {"mirrored": False, "status": resp.status, "response": body}
+    except Exception as exc:
+        logger.warning("ClawStreet trade mirror error: %s", exc)
+        return {"mirrored": False, "error": str(exc)}
+
+
+async def register_clawstreet_bot(
+    name: str, ticker: str, strategy: str, personality: str, bio: str
+) -> Dict[str, Any]:
+    """Registra un nuovo bot su ClawStreet."""
+    url = f"{CLAWSTREET_BASE}/bots/register"
+    payload = {
+        "name": name,
+        "ticker": ticker,
+        "strategy": strategy,
+        "personality": personality,
+        "bio": bio,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=CLAWSTREET_TIMEOUT) as resp:
+                body = await resp.json(content_type=None)
+                if resp.status in (200, 201):
+                    return {"success": True, "data": body}
+                else:
+                    return {"success": False, "status": resp.status, "data": body}
+    except Exception as exc:
+        logger.error("ClawStreet registration error: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+
+# ============================================================
+# Finnhub Congressional Trades
+# ============================================================
+
+
 async def fetch_congressional_trades() -> Dict[str, Any]:
     """
     Recupera i trade recenti dei membri del Congresso USA via Finnhub.
