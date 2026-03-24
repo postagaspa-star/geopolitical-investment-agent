@@ -6,12 +6,19 @@ all'orario e al giorno (weekend / pre-market / mercato aperto).
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import database
+
+# URL del servizio per il self-ping keep-alive (Render free tier)
+_RENDER_EXTERNAL_URL = os.environ.get(
+    "RENDER_EXTERNAL_URL",
+    "https://geopolitical-investment-agent.onrender.com"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +151,30 @@ def _sync_job_wrapper():
         logger.error("Errore nell'avvio del task schedulato: %s", e, exc_info=True)
 
 
+async def _keep_alive_ping():
+    """
+    Pinga il proprio health endpoint per evitare che Render free tier
+    metta il servizio in sleep dopo 15 minuti di inattivita'.
+    """
+    import httpx
+    url = f"{_RENDER_EXTERNAL_URL}/api/health"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            logger.debug("Keep-alive ping: %s -> %d", url, resp.status_code)
+    except Exception as e:
+        logger.warning("Keep-alive ping fallito: %s", e)
+
+
+def _sync_keep_alive_wrapper():
+    """Wrapper sincrono per il keep-alive ping."""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_keep_alive_ping())
+    except Exception:
+        pass
+
+
 # ============================================================
 # Gestione scheduler
 # ============================================================
@@ -179,6 +210,16 @@ def start_scheduler() -> AsyncIOScheduler:
         minutes=interval_minutes,
         id="agent_continuous_job",
         name="Monitoraggio continuo agente geopolitico",
+        replace_existing=True,
+    )
+
+    # Keep-alive: pinga il servizio ogni 10 minuti per evitare lo sleep di Render
+    _scheduler.add_job(
+        _sync_keep_alive_wrapper,
+        trigger="interval",
+        minutes=10,
+        id="keep_alive_ping",
+        name="Keep-alive ping (anti-sleep Render)",
         replace_existing=True,
     )
 
