@@ -1,8 +1,11 @@
 """
 Database module - Setup e queries SQLite per il sistema di investimento simulato.
 """
+import logging
 import sqlite3, os
 from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
 
 # Path del database: usa /data/portfolio.db su Render (disco persistente),
 # altrimenti fallback locale
@@ -58,7 +61,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS agent_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
-                phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO')),
+                phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO','MARKET_INTELLIGENCE','CLAWSTREET_MIRROR')),
                 content TEXT NOT NULL,
                 timestamp TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -108,6 +111,37 @@ def init_db():
                 timestamp TEXT NOT NULL DEFAULT (datetime('now'))
             );
         """)
+        # Migrazione: ricreare agent_logs se ha il vecchio constraint
+        # (SQLite non supporta ALTER TABLE per modificare CHECK constraint)
+        try:
+            conn.execute(
+                "INSERT INTO agent_logs (run_id, phase, content) VALUES ('_migration_test', 'MARKET_INTELLIGENCE', 'test')"
+            )
+            conn.execute("DELETE FROM agent_logs WHERE run_id = '_migration_test'")
+        except Exception:
+            # Il vecchio constraint non accetta le nuove fasi: ricrea la tabella
+            logger.info("Migrazione agent_logs: aggiornamento constraint phase...")
+            rows = conn.execute("SELECT run_id, phase, content, timestamp FROM agent_logs").fetchall()
+            conn.execute("DROP TABLE agent_logs")
+            conn.execute("""
+                CREATE TABLE agent_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO','MARKET_INTELLIGENCE','CLAWSTREET_MIRROR')),
+                    content TEXT NOT NULL,
+                    timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            for r in rows:
+                try:
+                    conn.execute(
+                        "INSERT INTO agent_logs (run_id, phase, content, timestamp) VALUES (?,?,?,?)",
+                        (r["run_id"], r["phase"], r["content"], r["timestamp"]),
+                    )
+                except Exception:
+                    pass
+            logger.info("Migrazione agent_logs completata.")
+
         row = conn.execute("SELECT COUNT(*) as cnt FROM portfolio").fetchone()
         if row["cnt"] == 0:
             bal = float(os.environ.get("INITIAL_PORTFOLIO_BALANCE", 100000))

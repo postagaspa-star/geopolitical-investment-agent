@@ -131,18 +131,18 @@ def _build_system_prompt(mode="full"):
     # Aggiungi intelligence accumulata (per full e pre_market)
     if mode in ("full", "pre_market"):
         weekend_intel = database.get_latest_weekend_intelligence()
-        if weekend_intel:
+        if weekend_intel and weekend_intel.get("content"):
             base_prompt += "\n\n--- INTELLIGENCE WEEKEND ACCUMULATA ---\n"
-            base_prompt += weekend_intel["content"]
+            base_prompt += weekend_intel.get("content", "")
             if weekend_intel.get("market_implications"):
                 base_prompt += f"\n\nIMPLICAZIONI MERCATO: {weekend_intel['market_implications']}"
             base_prompt += "\n--- FINE INTELLIGENCE WEEKEND ---\n"
 
     if mode == "full":
         pre_market = database.get_latest_pre_market_briefing()
-        if pre_market:
+        if pre_market and pre_market.get("content"):
             base_prompt += "\n\n--- BRIEFING PRE-MARKET ---\n"
-            base_prompt += pre_market["content"]
+            base_prompt += pre_market.get("content", "")
             base_prompt += "\n--- FINE BRIEFING PRE-MARKET ---\n"
 
     # Aggiungi il contenuto dei documenti tecnici come contesto (solo full)

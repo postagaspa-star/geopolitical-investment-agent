@@ -18,10 +18,9 @@ const DEFAULT_SYSTEM_PROMPT =
 
 // Modelli disponibili (nomi API ufficiali Anthropic)
 const MODEL_OPTIONS = [
-  "claude-sonnet-4-5-20250929",
-  "claude-opus-4-20250514",
   "claude-sonnet-4-20250514",
-  "claude-3-5-haiku-20241022",
+  "claude-opus-4-20250514",
+  "claude-haiku-4-5-20251001",
 ];
 
 // Stato iniziale diagnostica

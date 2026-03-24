@@ -79,6 +79,7 @@ app.add_middleware(
 
 
 @app.get("/health")
+@app.get("/api/health")
 async def health_check():
     """Controllo dello stato di salute del servizio."""
     return {"status": "ok"}

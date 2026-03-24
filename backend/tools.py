@@ -3,6 +3,7 @@ Definizioni degli strumenti Claude e gestori di esecuzione.
 Questo modulo definisce i tool disponibili per l'agente e gestisce le chiamate.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -302,8 +303,10 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
                 run_id, ticker, period_days,
             )
 
-            market_data = data_fetchers.fetch_market_data(
-                ticker=ticker, period_days=period_days,
+            # Esegui in executor per non bloccare l'event loop async
+            loop = asyncio.get_event_loop()
+            market_data = await loop.run_in_executor(
+                None, data_fetchers.fetch_market_data, ticker, period_days,
             )
             # Converti i dati di mercato in DataFrame per l'analisi tecnica
             import pandas as pd
@@ -348,8 +351,11 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
                 run_id, action, quantity, ticker, confidence_score,
             )
 
-            # Ottieni il prezzo corrente del titolo
-            price_data = data_fetchers.fetch_market_data(ticker, period_days=5)
+            # Ottieni il prezzo corrente del titolo (in executor per non bloccare)
+            loop = asyncio.get_event_loop()
+            price_data = await loop.run_in_executor(
+                None, data_fetchers.fetch_market_data, ticker, 5,
+            )
             if price_data.get("data"):
                 current_price = price_data["data"][-1]["close"]
             else:
