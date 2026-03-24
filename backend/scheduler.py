@@ -157,7 +157,7 @@ async def _keep_alive_ping():
     metta il servizio in sleep dopo 15 minuti di inattivita'.
     """
     import httpx
-    url = f"{_RENDER_EXTERNAL_URL}/api/health"
+    url = f"{_RENDER_EXTERNAL_URL}/health"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url)
