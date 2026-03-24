@@ -7,6 +7,7 @@
 import os
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,11 @@ import yfinance
 
 # Configurazione del logger
 logger = logging.getLogger(__name__)
+
+# Cache in-memory per yfinance (evita rate-limit 429)
+# Struttura: { "TICKER:period_days": (timestamp, result) }
+_yfinance_cache: Dict[str, tuple] = {}
+_YFINANCE_CACHE_TTL = 300  # 5 minuti di TTL
 
 # Chiave API per NewsAPI (fallback alla variabile d'ambiente)
 _NEWS_API_KEY_ENV: str = os.environ.get("NEWS_API_KEY", "")
@@ -230,6 +236,7 @@ async def fetch_newsapi_data() -> Dict[str, Any]:
 def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
     """
     Scarica i dati OHLCV per un singolo ticker usando yfinance.
+    Include cache in-memory (5 min TTL) per evitare rate-limit 429.
 
     Parametri:
         ticker: simbolo del titolo (es. "XOM")
@@ -241,7 +248,19 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
         - fetched_at: timestamp del recupero
         - error: eventuale messaggio di errore
     """
+    # Controlla la cache
+    cache_key = f"{ticker}:{period_days}"
+    now = time.time()
+    if cache_key in _yfinance_cache:
+        cached_time, cached_result = _yfinance_cache[cache_key]
+        if now - cached_time < _YFINANCE_CACHE_TTL:
+            logger.debug("yfinance cache hit per %s", cache_key)
+            return cached_result
+
     try:
+        # Pausa breve tra richieste consecutive per evitare rate-limit
+        time.sleep(0.5)
+
         # Calcola le date di inizio e fine
         end_date = datetime.utcnow()
         start_date = end_date - timedelta(days=period_days)
@@ -256,12 +275,15 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
 
         if df.empty:
             logger.warning("Nessun dato ricevuto da yfinance per il ticker: %s", ticker)
-            return {
+            result = {
                 "ticker": ticker,
                 "data": [],
                 "fetched_at": datetime.utcnow().isoformat(),
                 "error": "Nessun dato disponibile",
             }
+            # Cache anche i risultati vuoti (per evitare richieste ripetute)
+            _yfinance_cache[cache_key] = (now, result)
+            return result
 
         # yfinance >= 0.2.31 restituisce colonne multi-index (Price, Ticker).
         # Appiattisci prendendo solo il primo livello.
@@ -280,20 +302,27 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
                 "volume": int(row.get("Volume", 0)),
             })
 
-        return {
+        result = {
             "ticker": ticker,
             "data": records,
             "fetched_at": datetime.utcnow().isoformat(),
             "error": None,
         }
+        # Salva in cache
+        _yfinance_cache[cache_key] = (now, result)
+        return result
+
     except Exception as exc:
         logger.error("Errore durante il download di dati per '%s': %s", ticker, exc)
-        return {
+        result = {
             "ticker": ticker,
             "data": [],
             "fetched_at": datetime.utcnow().isoformat(),
             "error": str(exc),
         }
+        # Cache anche gli errori per 60 secondi (evita spam di retry)
+        _yfinance_cache[cache_key] = (now - _YFINANCE_CACHE_TTL + 60, result)
+        return result
 
 
 def get_all_watchlist_tickers() -> List[str]:

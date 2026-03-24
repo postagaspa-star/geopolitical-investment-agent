@@ -620,14 +620,15 @@ async def test_newsapi():
 
 @app.get("/api/settings/test-yfinance")
 async def test_yfinance():
-    """Testa yfinance scaricando dati SPY."""
+    """Testa yfinance scaricando dati SPY con retry per rate-limit."""
     try:
-        import yfinance
-        ticker = yfinance.Ticker("SPY")
-        hist = ticker.history(period="5d")
-        if hist.empty:
-            return {"status": "error", "message": "Nessun dato ricevuto (history vuota)"}
-        last_close = float(hist["Close"].iloc[-1])
+        import data_fetchers
+        result = data_fetchers.fetch_market_data("SPY", period_days=5)
+        if result.get("error"):
+            return {"status": "error", "message": result["error"]}
+        if not result.get("data"):
+            return {"status": "error", "message": "Nessun dato ricevuto"}
+        last_close = result["data"][-1]["close"]
         return {"status": "ok", "last_price": round(last_close, 2)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
