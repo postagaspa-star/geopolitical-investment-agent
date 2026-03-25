@@ -242,6 +242,8 @@ async def get_agent_status():
             "is_weekend": scheduler_info["is_weekend"],
             "next_run": scheduler_info.get("next_run"),
             "next_market_open": scheduler_info.get("next_market_open"),
+            "architecture": "multi-agent" if scheduler_info["mode"] == "full" else "single-agent",
+            "deepseek_available": bool(os.environ.get("DEEPSEEK_API_KEY")),
         })
         return status
     except Exception as e:
@@ -675,6 +677,33 @@ async def test_finnhub():
                     return {"status": "error", "message": "Chiave API non valida"}
                 else:
                     return {"status": "error", "message": f"HTTP {resp.status}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/settings/test-deepseek")
+async def test_deepseek():
+    """Testa la connessione a DeepSeek API."""
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not deepseek_key:
+        return {"status": "error", "message": "DEEPSEEK_API_KEY non configurata"}
+    try:
+        import aiohttp
+        headers = {"Authorization": f"Bearer {deepseek_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 5,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://api.deepseek.com/v1/chat/completions",
+                                    json=payload, headers=headers,
+                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    return {"status": "ok", "model": "deepseek-chat"}
+                else:
+                    body = await resp.text()
+                    return {"status": "error", "message": f"HTTP {resp.status}: {body[:200]}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

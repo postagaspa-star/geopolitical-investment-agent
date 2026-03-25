@@ -676,3 +676,63 @@ body {
 /* === Analytics page === */
 .analytics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
 @media (max-width: 900px) { .analytics-grid { grid-template-columns: 1fr; } }
+
+/* === Thinking Process === */
+.thinking-process { max-height: 70vh; overflow-y: auto; padding-right: 0.5rem; }
+.thinking-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border);
+}
+.thinking-count { font-size: 0.8rem; color: var(--text-muted); }
+
+.run-group {
+  margin-bottom: 1.25rem; background: var(--bg-surface);
+  border-radius: var(--radius-sm); border: 1px solid var(--border);
+  overflow: hidden;
+}
+.run-group-header {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.6rem 0.75rem; background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border); font-size: 0.75rem;
+}
+.run-id { font-family: var(--font-mono); color: var(--text-secondary); font-weight: 600; }
+.run-time { margin-left: auto; color: var(--text-muted); font-size: 0.7rem; }
+
+.badge-multi {
+  background: rgba(124,58,237,0.2); color: #a78bfa;
+  padding: 0.1rem 0.4rem; border-radius: var(--radius-xs);
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.5px;
+}
+.badge-single {
+  background: rgba(100,116,139,0.2); color: #94a3b8;
+  padding: 0.1rem 0.4rem; border-radius: var(--radius-xs);
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.5px;
+}
+
+.log-entry {
+  padding: 0.5rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.04);
+  cursor: pointer; transition: background var(--transition);
+}
+.log-entry:hover { background: var(--bg-surface-hover); }
+.log-entry:last-child { border-bottom: none; }
+
+.log-entry-header {
+  display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.2rem;
+}
+.log-phase-badge {
+  display: inline-block; padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-xs); font-size: 0.6rem;
+  font-weight: 700; letter-spacing: 0.5px; color: white;
+  text-transform: uppercase; white-space: nowrap;
+}
+.log-time { font-size: 0.65rem; color: var(--text-muted); margin-left: auto; font-family: var(--font-mono); }
+.log-summary { font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; }
+.log-detail {
+  margin-top: 0.5rem; padding: 0.5rem;
+  background: var(--bg-primary); border-radius: var(--radius-xs);
+  font-size: 0.65rem; color: var(--text-muted); line-height: 1.4;
+  font-family: var(--font-mono); overflow-x: auto; max-height: 200px;
+  white-space: pre-wrap; word-break: break-all;
+}
+
+.btn-sm { font-size: 0.7rem; padding: 0.2rem 0.5rem; }

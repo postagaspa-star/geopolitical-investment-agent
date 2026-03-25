@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 
 const API = window.location.origin;
 
@@ -11,10 +11,157 @@ const fmtDate = (ts) => {
   });
 };
 
+const PHASE_COLORS = {
+  ORCHESTRATOR: "#7c3aed",
+  GEO_WORKER: "#059669",
+  TECH_WORKER: "#2563eb",
+  MANAGER: "#dc2626",
+  MANAGER_DECISION: "#f59e0b",
+  MARKET_INTELLIGENCE: "#0891b2",
+  GEOPOLITICAL: "#059669",
+  TECHNICAL: "#6366f1",
+  DECISION: "#f59e0b",
+  CLAWSTREET_MIRROR: "#8b5cf6",
+  INFO: "#64748b",
+  ERROR: "#ef4444",
+};
+
+const PHASE_LABELS = {
+  ORCHESTRATOR: "Orchestratore",
+  GEO_WORKER: "Worker Geopolitico",
+  TECH_WORKER: "Worker Tecnico",
+  MANAGER: "Manager Agent",
+  MANAGER_DECISION: "Decisione Manager",
+  MANAGER_TOOL: "Manager Tool",
+  MARKET_INTELLIGENCE: "Market Intel",
+  GEOPOLITICAL: "Geopolitica",
+  TECHNICAL: "Analisi Tecnica",
+  DECISION: "Decisione",
+  CLAWSTREET_MIRROR: "ClawStreet",
+  INFO: "Info",
+  ERROR: "Errore",
+};
+
+function parseLogContent(content) {
+  try {
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+function LogEntry({ log }) {
+  const [expanded, setExpanded] = useState(false);
+  const phase = log.phase || "INFO";
+  const color = PHASE_COLORS[phase] || "#64748b";
+  const label = PHASE_LABELS[phase] || phase;
+  const parsed = parseLogContent(log.content);
+
+  let summary = log.content;
+  if (parsed) {
+    if (parsed.event) {
+      summary = parsed.event.replace(/_/g, " ").toUpperCase();
+      if (parsed.mode) summary += ` (${parsed.mode})`;
+      if (parsed.duration_seconds) summary += ` — ${parsed.duration_seconds.toFixed(1)}s`;
+      if (parsed.architecture) summary += ` [${parsed.architecture}]`;
+      if (parsed.geo_risk) summary += ` | Risk: ${parsed.geo_risk}`;
+      if (parsed.tech_engine) summary += ` | Engine: ${parsed.tech_engine}`;
+    } else if (parsed.tool_name) {
+      summary = `Tool: ${parsed.tool_name}`;
+      if (parsed.tool_input?.ticker) summary += ` (${parsed.tool_input.ticker})`;
+    } else if (parsed.error) {
+      summary = `ERRORE: ${parsed.error.substring(0, 150)}`;
+    }
+  }
+  if (summary.length > 200) summary = summary.substring(0, 200) + "...";
+
+  return (
+    <div className="log-entry" onClick={() => setExpanded(!expanded)}>
+      <div className="log-entry-header">
+        <span className="log-phase-badge" style={{ background: color }}>{label}</span>
+        <span className="log-time">{fmtDate(log.timestamp)}</span>
+      </div>
+      <div className="log-summary">{summary}</div>
+      {expanded && parsed && (
+        <pre className="log-detail">{JSON.stringify(parsed, null, 2)}</pre>
+      )}
+    </div>
+  );
+}
+
+function ThinkingProcess({ logs, loading }) {
+  const logsEndRef = useRef(null);
+  const [groupByRun, setGroupByRun] = useState(true);
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  if (loading) {
+    return <div className="empty-state">Caricamento log agente...</div>;
+  }
+
+  if (!logs || logs.length === 0) {
+    return <div className="empty-state">Nessun log disponibile. L'agente non ha ancora eseguito un ciclo.</div>;
+  }
+
+  // Group by run_id
+  const grouped = {};
+  for (const log of logs) {
+    const rid = log.run_id || "unknown";
+    if (!grouped[rid]) grouped[rid] = [];
+    grouped[rid].push(log);
+  }
+
+  const runIds = Object.keys(grouped);
+
+  return (
+    <div className="thinking-process">
+      <div className="thinking-header">
+        <span className="thinking-count">{logs.length} log entries — {runIds.length} runs</span>
+        <button
+          className={`btn btn-sm ${groupByRun ? "btn-primary" : "btn-secondary"}`}
+          onClick={() => setGroupByRun(!groupByRun)}
+          style={{ fontSize: "0.7rem", padding: "0.2rem 0.5rem" }}
+        >
+          {groupByRun ? "Raggruppati" : "Cronologico"}
+        </button>
+      </div>
+
+      {groupByRun ? (
+        runIds.map((rid) => {
+          const runLogs = grouped[rid];
+          const firstLog = runLogs[0];
+          const firstParsed = parseLogContent(firstLog?.content);
+          const arch = firstParsed?.architecture || "single-agent";
+          const isMulti = arch === "multi-agent" || arch === "manager-workers";
+
+          return (
+            <div key={rid} className="run-group">
+              <div className="run-group-header">
+                <span className="run-id">Run: {rid.substring(0, 8)}</span>
+                {isMulti && <span className="badge badge-multi">MULTI-AGENT</span>}
+                {!isMulti && <span className="badge badge-single">SINGLE-AGENT</span>}
+                <span className="run-time">{fmtDate(firstLog?.timestamp)}</span>
+              </div>
+              {runLogs.map((log, i) => <LogEntry key={i} log={log} />)}
+            </div>
+          );
+        })
+      ) : (
+        logs.map((log, i) => <LogEntry key={i} log={log} />)
+      )}
+      <div ref={logsEndRef} />
+    </div>
+  );
+}
+
 function IntelligencePage() {
   const [intelligence, setIntelligence] = useState([]);
   const [briefings, setBriefings] = useState([]);
-  const [activeSection, setActiveSection] = useState("intelligence");
+  const [agentLogs, setAgentLogs] = useState([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [activeSection, setActiveSection] = useState("thinking");
   const [expandedId, setExpandedId] = useState(null);
 
   const fetchIntelligence = useCallback(async () => {
@@ -31,15 +178,41 @@ function IntelligencePage() {
     } catch (err) { console.error(err); }
   }, []);
 
-  useEffect(() => { fetchIntelligence(); fetchBriefings(); }, [fetchIntelligence, fetchBriefings]);
+  const fetchLogs = useCallback(async () => {
+    setLogsLoading(true);
+    try {
+      const res = await fetch(`${API}/api/logs?limit=200`);
+      if (res.ok) {
+        const data = await res.json();
+        setAgentLogs(Array.isArray(data) ? data.reverse() : []);
+      }
+    } catch (err) { console.error(err); }
+    setLogsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchIntelligence();
+    fetchBriefings();
+    fetchLogs();
+  }, [fetchIntelligence, fetchBriefings, fetchLogs]);
+
+  // Auto-refresh logs every 15s when on thinking tab
+  useEffect(() => {
+    if (activeSection !== "thinking") return;
+    const interval = setInterval(fetchLogs, 15000);
+    return () => clearInterval(interval);
+  }, [activeSection, fetchLogs]);
 
   const parseJson = (str) => { try { return JSON.parse(str); } catch { return []; } };
 
   return (
     <div>
-      <h2 style={{fontSize:"1.3rem",marginBottom:"1.5rem",color:"var(--text-primary)"}}>Intelligence &amp; Briefings</h2>
+      <h2 style={{fontSize:"1.3rem",marginBottom:"1.5rem",color:"var(--text-primary)"}}>Intelligence &amp; Thinking Process</h2>
 
       <div className="intel-tabs">
+        <button className={`intel-tab ${activeSection === "thinking" ? "active" : ""}`} onClick={() => setActiveSection("thinking")}>
+          Thinking Process ({agentLogs.length})
+        </button>
         <button className={`intel-tab ${activeSection === "intelligence" ? "active" : ""}`} onClick={() => setActiveSection("intelligence")}>
           Weekend Intelligence ({Array.isArray(intelligence) ? intelligence.length : 0})
         </button>
@@ -47,6 +220,10 @@ function IntelligencePage() {
           Pre-Market Briefings ({Array.isArray(briefings) ? briefings.length : 0})
         </button>
       </div>
+
+      {activeSection === "thinking" && (
+        <ThinkingProcess logs={agentLogs} loading={logsLoading} />
+      )}
 
       {activeSection === "intelligence" && (
         <div>

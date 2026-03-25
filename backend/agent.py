@@ -1,9 +1,9 @@
 """
-Logica principale dell'agente Claude Opus per investimenti geopolitici.
+Logica principale dell'agente GeoInvest AI.
 Supporta tre modalita' operative:
-- WEEKEND: solo raccolta e analisi notizie geopolitiche
-- PRE_MARKET: briefing preparatorio per apertura mercati
-- FULL: ciclo completo con analisi tecnica e decisioni di trade
+- WEEKEND: solo raccolta e analisi notizie geopolitiche (single-agent)
+- PRE_MARKET: briefing preparatorio per apertura mercati (single-agent)
+- FULL: sistema multi-agente gerarchico (Manager + Workers)
 """
 
 import json
@@ -246,6 +246,59 @@ async def run_agent(mode="full") -> dict:
     logger.info("Avvio esecuzione agente. Run ID: %s, Modalita': %s", run_id, mode.upper())
 
     try:
+        # --- FULL MODE: Sistema Multi-Agent ---
+        if mode == "full":
+            logger.info("[%s] Avvio sistema MULTI-AGENT gerarchico...", run_id)
+            database.insert_agent_log(
+                run_id=run_id, phase="INFO",
+                content=json.dumps({
+                    "event": "multi_agent_start", "run_id": run_id,
+                    "mode": mode, "architecture": "manager-workers",
+                }),
+            )
+
+            from multi_agent import run_multi_agent
+            ma_result = await run_multi_agent(run_id=run_id, mode=mode)
+
+            run_end = datetime.now(timezone.utc).isoformat()
+            final_response = ma_result.get("final_response", "")
+
+            database.insert_agent_log(
+                run_id=run_id, phase="INFO",
+                content=json.dumps({
+                    "event": "multi_agent_complete",
+                    "duration": ma_result.get("duration_seconds"),
+                    "geo_risk": ma_result.get("geo_report_summary", {}).get("risk_level"),
+                    "tech_engine": ma_result.get("tech_report_summary", {}).get("engine"),
+                    "mode": mode,
+                }),
+            )
+
+            summary = {
+                "run_id": run_id,
+                "started_at": run_start,
+                "completed_at": run_end,
+                "iterations": ma_result.get("manager_result", {}).get("iterations", 0),
+                "stop_reason": ma_result.get("manager_result", {}).get("stop_reason", "complete"),
+                "final_response": final_response,
+                "status": "completed",
+                "mode": mode,
+                "architecture": "multi-agent",
+                "geo_risk": ma_result.get("geo_report_summary", {}).get("risk_level"),
+                "tech_engine": ma_result.get("tech_report_summary", {}).get("engine"),
+            }
+
+            agent_status = {
+                "status": "idle",
+                "last_run_id": run_id,
+                "last_run_at": run_end,
+                "error_details": None,
+                "mode": mode,
+            }
+
+            return summary
+
+        # --- WEEKEND / PRE_MARKET: Single-Agent classico ---
         api_key = _get_api_key()
         model_name = _get_model_name()
         system_prompt = _build_system_prompt(mode=mode)
@@ -267,6 +320,7 @@ async def run_agent(mode="full") -> dict:
                 "model": model_name,
                 "run_id": run_id,
                 "mode": mode,
+                "architecture": "single-agent",
             }),
         )
 
@@ -278,7 +332,7 @@ async def run_agent(mode="full") -> dict:
             messages=messages,
         )
 
-        max_iterations = 25 if mode == "full" else 10
+        max_iterations = 10
         iteration = 0
 
         while response.stop_reason == "tool_use" and iteration < max_iterations:
@@ -365,6 +419,7 @@ async def run_agent(mode="full") -> dict:
             "final_response": final_response,
             "status": "completed",
             "mode": mode,
+            "architecture": "single-agent",
         }
 
         agent_status = {
