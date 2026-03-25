@@ -1,0 +1,388 @@
+"""
+DatabaseManager per Supabase (PostgreSQL).
+Drop-in replacement per il modulo database.py basato su SQLite.
+Usa la libreria supabase-py con la service_role key per accesso completo.
+"""
+import json
+import logging
+import os
+from datetime import datetime, timezone, timedelta
+
+from supabase import create_client, Client
+
+logger = logging.getLogger(__name__)
+
+# --- Connessione Supabase ---
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")  # service_role key
+
+_client: Client | None = None
+
+
+def _get_client() -> Client:
+    """Restituisce il client Supabase singleton."""
+    global _client
+    if _client is None:
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            raise RuntimeError(
+                "SUPABASE_URL e SUPABASE_KEY devono essere configurati come variabili d'ambiente"
+            )
+        _client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _client
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ============================================================
+# Init (compatibilita' con il vecchio database.init_db)
+# ============================================================
+
+def init_db():
+    """Verifica la connessione a Supabase e inizializza il portafoglio se vuoto."""
+    try:
+        client = _get_client()
+        # Verifica connessione leggendo il portfolio
+        result = client.table("portfolio").select("id").limit(1).execute()
+        if not result.data:
+            # Inserisci portafoglio iniziale
+            bal = float(os.environ.get("INITIAL_PORTFOLIO_BALANCE", 100000))
+            client.table("portfolio").insert({
+                "cash_balance": bal,
+                "total_value": bal,
+            }).execute()
+            logger.info("Portafoglio iniziale creato su Supabase con saldo %.2f", bal)
+        logger.info("Supabase connesso e operativo.")
+    except Exception as e:
+        logger.error("Errore connessione Supabase: %s", e, exc_info=True)
+        raise
+
+
+# ============================================================
+# Portfolio
+# ============================================================
+
+def get_portfolio():
+    client = _get_client()
+    result = client.table("portfolio").select("*").order("id", desc=True).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+def update_portfolio(cash_balance, total_value):
+    client = _get_client()
+    # Prendi l'id piu' alto
+    row = client.table("portfolio").select("id").order("id", desc=True).limit(1).execute()
+    if row.data:
+        client.table("portfolio").update({
+            "cash_balance": cash_balance,
+            "total_value": total_value,
+            "updated_at": _now_iso(),
+        }).eq("id", row.data[0]["id"]).execute()
+
+
+# ============================================================
+# Positions
+# ============================================================
+
+def get_positions():
+    client = _get_client()
+    result = client.table("positions").select("*").order("opened_at", desc=True).execute()
+    return result.data or []
+
+
+def get_position(ticker):
+    client = _get_client()
+    result = client.table("positions").select("*").eq("ticker", ticker).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+def upsert_position(ticker, quantity, avg_buy_price, current_price=0):
+    client = _get_client()
+    pnl = (current_price - avg_buy_price) * quantity if current_price > 0 else 0
+    existing = get_position(ticker)
+    if existing:
+        client.table("positions").update({
+            "quantity": quantity,
+            "avg_buy_price": avg_buy_price,
+            "current_price": current_price,
+            "unrealized_pnl": pnl,
+        }).eq("ticker", ticker).execute()
+    else:
+        client.table("positions").insert({
+            "ticker": ticker,
+            "quantity": quantity,
+            "avg_buy_price": avg_buy_price,
+            "current_price": current_price,
+            "unrealized_pnl": pnl,
+        }).execute()
+
+
+def delete_position(ticker):
+    client = _get_client()
+    client.table("positions").delete().eq("ticker", ticker).execute()
+
+
+def update_position_price(ticker, current_price):
+    client = _get_client()
+    pos = get_position(ticker)
+    if pos:
+        pnl = (current_price - pos["avg_buy_price"]) * pos["quantity"]
+        client.table("positions").update({
+            "current_price": current_price,
+            "unrealized_pnl": pnl,
+        }).eq("ticker", ticker).execute()
+
+
+def count_positions():
+    client = _get_client()
+    result = client.table("positions").select("id", count="exact").execute()
+    return result.count or 0
+
+
+# ============================================================
+# Trades
+# ============================================================
+
+def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning, final_decision, confidence):
+    client = _get_client()
+    client.table("trades").insert({
+        "ticker": ticker,
+        "action": action,
+        "quantity": quantity,
+        "price": price,
+        "total_value": price * quantity,
+        "geopolitical_reasoning": geo_reasoning,
+        "technical_reasoning": tech_reasoning,
+        "final_decision": final_decision,
+        "confidence_score": confidence,
+    }).execute()
+
+
+def get_trades(limit=50):
+    client = _get_client()
+    result = client.table("trades").select("*").order("timestamp", desc=True).limit(limit).execute()
+    return result.data or []
+
+
+# ============================================================
+# Agent Logs
+# ============================================================
+
+def insert_agent_log(run_id, phase, content):
+    client = _get_client()
+    client.table("agent_logs").insert({
+        "run_id": run_id,
+        "phase": phase,
+        "content": content,
+    }).execute()
+
+
+def get_agent_logs(limit=100):
+    client = _get_client()
+    result = client.table("agent_logs").select("*").order("timestamp", desc=True).limit(limit).execute()
+    return result.data or []
+
+
+def get_logs_by_run(run_id):
+    client = _get_client()
+    result = client.table("agent_logs").select("*").eq("run_id", run_id).order("timestamp").execute()
+    return result.data or []
+
+
+# ============================================================
+# Geopolitical Snapshots
+# ============================================================
+
+def insert_geopolitical_snapshot(run_id, source, raw_data, processed_summary):
+    client = _get_client()
+    client.table("geopolitical_snapshots").insert({
+        "run_id": run_id,
+        "source": source,
+        "raw_data": raw_data,
+        "processed_summary": processed_summary,
+    }).execute()
+
+
+def get_geopolitical_snapshots(limit=20):
+    client = _get_client()
+    result = client.table("geopolitical_snapshots").select("*").order("timestamp", desc=True).limit(limit).execute()
+    return result.data or []
+
+
+# ============================================================
+# Settings
+# ============================================================
+
+def get_setting(key, default=None):
+    client = _get_client()
+    result = client.table("settings").select("value").eq("key", key).limit(1).execute()
+    return result.data[0]["value"] if result.data else default
+
+
+def set_setting(key, value):
+    client = _get_client()
+    client.table("settings").upsert({
+        "key": key,
+        "value": str(value),
+        "updated_at": _now_iso(),
+    }).execute()
+
+
+def get_all_settings():
+    client = _get_client()
+    result = client.table("settings").select("key, value").execute()
+    return {r["key"]: r["value"] for r in (result.data or [])}
+
+
+# ============================================================
+# Technical Documents
+# ============================================================
+
+def insert_document(filename, content, file_size=0):
+    client = _get_client()
+    client.table("technical_documents").insert({
+        "filename": filename,
+        "content": content,
+        "file_size": file_size,
+    }).execute()
+
+
+def get_documents():
+    client = _get_client()
+    result = client.table("technical_documents").select("id, filename, file_size, uploaded_at").order("uploaded_at", desc=True).execute()
+    return result.data or []
+
+
+def get_document_contents():
+    client = _get_client()
+    result = client.table("technical_documents").select("id, filename, content").order("uploaded_at").execute()
+    return result.data or []
+
+
+def delete_document(doc_id):
+    client = _get_client()
+    client.table("technical_documents").delete().eq("id", doc_id).execute()
+
+
+# ============================================================
+# Portfolio Reset
+# ============================================================
+
+def reset_portfolio_data(new_balance):
+    client = _get_client()
+    client.table("positions").delete().neq("id", 0).execute()
+    client.table("trades").delete().neq("id", 0).execute()
+    client.table("portfolio_snapshots").delete().neq("id", 0).execute()
+    client.table("agent_logs").delete().neq("id", 0).execute()
+    # Aggiorna il portafoglio
+    row = client.table("portfolio").select("id").order("id", desc=True).limit(1).execute()
+    if row.data:
+        client.table("portfolio").update({
+            "cash_balance": new_balance,
+            "total_value": new_balance,
+            "updated_at": _now_iso(),
+        }).eq("id", row.data[0]["id"]).execute()
+    set_setting("initial_balance", str(new_balance))
+
+
+# ============================================================
+# Weekend Intelligence
+# ============================================================
+
+def insert_weekend_intelligence(run_id, content, key_events, market_implications):
+    client = _get_client()
+    client.table("weekend_intelligence").insert({
+        "run_id": run_id,
+        "content": content,
+        "key_events": key_events,
+        "market_implications": market_implications,
+    }).execute()
+
+
+def get_weekend_intelligence(limit=20):
+    client = _get_client()
+    result = client.table("weekend_intelligence").select("*").order("saved_at", desc=True).limit(limit).execute()
+    return result.data or []
+
+
+def get_latest_weekend_intelligence():
+    client = _get_client()
+    result = client.table("weekend_intelligence").select("*").order("saved_at", desc=True).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+# ============================================================
+# Pre-Market Briefings
+# ============================================================
+
+def insert_pre_market_briefing(run_id, market_session, content, priority_assets):
+    client = _get_client()
+    client.table("pre_market_briefings").insert({
+        "run_id": run_id,
+        "market_session": market_session,
+        "content": content,
+        "priority_assets": priority_assets,
+    }).execute()
+
+
+def get_pre_market_briefings(limit=20):
+    client = _get_client()
+    result = client.table("pre_market_briefings").select("*").order("saved_at", desc=True).limit(limit).execute()
+    return result.data or []
+
+
+def get_latest_pre_market_briefing():
+    client = _get_client()
+    result = client.table("pre_market_briefings").select("*").order("saved_at", desc=True).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+# ============================================================
+# Processed Articles (deduplicazione)
+# ============================================================
+
+def is_article_processed(url):
+    client = _get_client()
+    result = client.table("processed_articles").select("url").eq("url", url).limit(1).execute()
+    return bool(result.data)
+
+
+def mark_article_processed(url):
+    client = _get_client()
+    client.table("processed_articles").upsert({
+        "url": url,
+        "processed_at": _now_iso(),
+    }).execute()
+
+
+def count_new_articles_since(hours=2):
+    client = _get_client()
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    result = client.table("processed_articles").select("url", count="exact").gte("processed_at", since).execute()
+    return result.count or 0
+
+
+def cleanup_old_processed_articles(days=7):
+    client = _get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    client.table("processed_articles").delete().lt("processed_at", cutoff).execute()
+
+
+# ============================================================
+# Portfolio Snapshots (equity curve)
+# ============================================================
+
+def insert_portfolio_snapshot(total_value, cash_balance):
+    client = _get_client()
+    client.table("portfolio_snapshots").insert({
+        "total_value": total_value,
+        "cash_balance": cash_balance,
+    }).execute()
+
+
+def get_portfolio_history(days=30):
+    client = _get_client()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    result = client.table("portfolio_snapshots").select("total_value, cash_balance, timestamp").gte("timestamp", since).order("timestamp").execute()
+    return result.data or []

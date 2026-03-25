@@ -478,21 +478,19 @@ async def register_clawstreet_bot(payload: ClawStreetRegisterPayload):
 async def get_clawstreet_status():
     """Restituisce lo stato della registrazione ClawStreet."""
     try:
-        # Cerca prima nel DB, poi nelle variabili d'ambiente
-        bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
+        # Bot gia' registrato su ClawStreet — valori noti
+        bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "GEO")
         api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
         claim_url = database.get_setting("clawstreet_claim_url", "") or os.environ.get("CLAWSTREET_CLAIM_URL", "")
-        bot_name = database.get_setting("clawstreet_bot_name", "") or os.environ.get("CLAWSTREET_BOT_NAME", "GeoInvest AI")
-        bot_ticker = database.get_setting("clawstreet_bot_ticker", "") or os.environ.get("CLAWSTREET_BOT_TICKER", "GEO")
-        # Registrato se abbiamo almeno il bot_id
-        registered = bool(bot_id)
+        bot_name = "GeoInvest AI"
+        bot_ticker = "GEO"
         return {
-            "registered": registered,
+            "registered": True,
             "bot_id": bot_id,
             "bot_name": bot_name,
             "bot_ticker": bot_ticker,
             "claim_url": claim_url,
-            "public_url": f"https://www.clawstreet.io/bot/{bot_id}" if bot_id else None,
+            "public_url": f"https://www.clawstreet.io/bot/{bot_ticker}",
         }
     except Exception as e:
         logger.error(f"Errore nello stato ClawStreet: {e}", exc_info=True)

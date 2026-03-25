@@ -172,8 +172,8 @@ def _get_tools_for_mode(mode="full"):
 
 
 def _get_model_name():
-    """Restituisce il nome del modello Claude da usare."""
-    return database.get_setting("model_name", DEFAULT_MODEL)
+    """Restituisce il nome del modello Claude da usare (fisso, non configurabile)."""
+    return DEFAULT_MODEL
 
 
 def _get_api_key():

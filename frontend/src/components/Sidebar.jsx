@@ -209,7 +209,7 @@ export default function Sidebar({
               disabled={false}
             >
               <Play />
-              Avvia Monitoraggio
+              Riavvia Monitoraggio
             </button>
           )}
           <button
