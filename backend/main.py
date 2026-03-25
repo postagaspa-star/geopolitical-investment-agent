@@ -41,19 +41,15 @@ async def lifespan(app: FastAPI):
     database.init_db()
     logger.info("Database inizializzato con successo.")
 
-    # Riavvia scheduler se era attivo prima del restart
-    agent_running = database.get_setting("agent_running")
-    if agent_running == "true":
-        logger.info("Riavvio automatico dello scheduler (era attivo prima del restart)...")
-        scheduler.start_scheduler()
-    else:
-        logger.info("Scheduler non avviato (agent_running != true).")
+    # Avvia SEMPRE lo scheduler al deploy — il monitoraggio è sempre attivo
+    logger.info("Avvio automatico dello scheduler (sempre attivo al deploy)...")
+    scheduler.start_scheduler()
 
     yield
 
-    # Fase di chiusura
-    logger.info("Arresto dello scheduler...")
-    scheduler.stop_scheduler()
+    # Fase di chiusura (deploy/restart — NON salvare stato nel DB)
+    logger.info("Arresto dello scheduler (deploy/restart, non persiste)...")
+    scheduler.stop_scheduler(persist=False)
     logger.info("Applicazione chiusa correttamente.")
 
 
@@ -470,12 +466,14 @@ async def register_clawstreet_bot(payload: ClawStreetRegisterPayload):
 async def get_clawstreet_status():
     """Restituisce lo stato della registrazione ClawStreet."""
     try:
-        bot_id = database.get_setting("clawstreet_bot_id", "")
-        api_key = database.get_setting("clawstreet_api_key", "")
-        claim_url = database.get_setting("clawstreet_claim_url", "")
-        bot_name = database.get_setting("clawstreet_bot_name", "")
-        bot_ticker = database.get_setting("clawstreet_bot_ticker", "")
-        registered = bool(bot_id and api_key)
+        # Cerca prima nel DB, poi nelle variabili d'ambiente
+        bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
+        api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
+        claim_url = database.get_setting("clawstreet_claim_url", "") or os.environ.get("CLAWSTREET_CLAIM_URL", "")
+        bot_name = database.get_setting("clawstreet_bot_name", "") or os.environ.get("CLAWSTREET_BOT_NAME", "GeoInvest AI")
+        bot_ticker = database.get_setting("clawstreet_bot_ticker", "") or os.environ.get("CLAWSTREET_BOT_TICKER", "GEO")
+        # Registrato se abbiamo almeno il bot_id
+        registered = bool(bot_id)
         return {
             "registered": registered,
             "bot_id": bot_id,

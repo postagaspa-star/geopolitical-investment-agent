@@ -232,8 +232,13 @@ def start_scheduler() -> AsyncIOScheduler:
     return _scheduler
 
 
-def stop_scheduler():
-    """Ferma lo scheduler e salva lo stato."""
+def stop_scheduler(persist=True):
+    """
+    Ferma lo scheduler.
+    Se persist=True (stop manuale da utente), salva lo stato nel DB.
+    Se persist=False (shutdown durante deploy), NON aggiorna il DB
+    cosi' al prossimo avvio lo scheduler riparte automaticamente.
+    """
     global _scheduler, current_mode
 
     if _scheduler is not None:
@@ -248,8 +253,8 @@ def stop_scheduler():
     else:
         logger.warning("Tentativo di arrestare lo scheduler, ma non era attivo.")
 
-    # Salva stato nel database
-    database.set_setting("agent_running", "false")
+    if persist:
+        database.set_setting("agent_running", "false")
 
 
 def is_scheduler_running() -> bool:

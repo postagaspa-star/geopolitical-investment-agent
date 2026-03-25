@@ -16,12 +16,8 @@ const DEFAULT_WATCHLIST = {
 const DEFAULT_SYSTEM_PROMPT =
   "Sei un agente di investimento geopolitico. Analizza le notizie geopolitiche globali e i dati tecnici di mercato per prendere decisioni di trading informate. Valuta i rischi, identifica opportunit\u00e0 e gestisci il portafoglio in modo prudente.";
 
-// Modelli disponibili (nomi API ufficiali Anthropic)
-const MODEL_OPTIONS = [
-  "claude-sonnet-4-20250514",
-  "claude-opus-4-20250514",
-  "claude-haiku-4-5-20251001",
-];
+// Modello fisso — non configurabile dall'utente
+const FIXED_MODEL = "claude-sonnet-4-20250514";
 
 // Stato iniziale diagnostica
 const INITIAL_DIAGNOSTICS = {
@@ -41,7 +37,6 @@ function Settings({ onBack, onDataRefresh }) {
 
   // === Stato Sezione 1: Profilo Agente ===
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
-  const [modelName, setModelName] = useState(MODEL_OPTIONS[0]);
   const [runInterval, setRunInterval] = useState(6);
 
   // === Stato Sezione 2: Documenti ===
@@ -56,11 +51,7 @@ function Settings({ onBack, onDataRefresh }) {
   const [newTickerInputs, setNewTickerInputs] = useState({});
   const [newSectorName, setNewSectorName] = useState("");
 
-  // === Stato Sezione 5: API Keys ===
-  const [anthropicKey, setAnthropicKey] = useState("");
-  const [newsApiKey, setNewsApiKey] = useState("");
-  const [finnhubKey, setFinnhubKey] = useState("");
-  const [connectionTest, setConnectionTest] = useState(null);
+  // (API Keys rimossi — configurati tramite variabili d'ambiente su Render)
 
   // === Stato Sezione 6: ClawStreet ===
   const [csStatus, setCsStatus] = useState(null);
@@ -224,7 +215,6 @@ function Settings({ onBack, onDataRefresh }) {
 
         // Profilo agente
         if (data.system_prompt) setSystemPrompt(data.system_prompt);
-        if (data.model_name) setModelName(data.model_name);
         if (data.agent_run_interval_hours)
           setRunInterval(Number(data.agent_run_interval_hours));
 
@@ -245,10 +235,7 @@ function Settings({ onBack, onDataRefresh }) {
           }
         }
 
-        // API Keys
-        if (data.anthropic_api_key) setAnthropicKey(data.anthropic_api_key);
-        if (data.news_api_key) setNewsApiKey(data.news_api_key);
-        if (data.finnhub_api_key) setFinnhubKey(data.finnhub_api_key);
+        // (API Keys configurati tramite env vars su Render)
       } catch (err) {
         console.error("Errore caricamento impostazioni:", err);
       }
@@ -316,7 +303,6 @@ function Settings({ onBack, onDataRefresh }) {
   const handleSaveProfile = () => {
     saveSettings({
       system_prompt: systemPrompt,
-      model_name: modelName,
       agent_run_interval_hours: runInterval,
     });
   };
@@ -469,28 +455,7 @@ function Settings({ onBack, onDataRefresh }) {
     setCsRegistering(false);
   };
 
-  // === Handler Sezione 5: Test connessione e salvataggio API keys ===
-  const handleTestConnection = async () => {
-    setConnectionTest({ loading: true });
-    try {
-      const res = await fetch(`${API}/api/test-connection`, {
-        method: "POST",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setConnectionTest(data);
-    } catch (err) {
-      setConnectionTest({ error: err.message });
-    }
-  };
-
-  const handleSaveApiKeys = () => {
-    const settings = {};
-    if (anthropicKey) settings.anthropic_api_key = anthropicKey;
-    if (newsApiKey) settings.news_api_key = newsApiKey;
-    if (finnhubKey) settings.finnhub_api_key = finnhubKey;
-    saveSettings(settings);
-  };
+  // (Handler API keys rimossi — configurati tramite variabili d'ambiente)
 
   // Re-run diagnostica manualmente
   const handleRerunDiagnostics = async () => {
@@ -521,16 +486,6 @@ function Settings({ onBack, onDataRefresh }) {
     lineHeight: "1.6",
     resize: "vertical",
     minHeight: "200px",
-  };
-
-  const selectStyle = {
-    ...inputStyle,
-    cursor: "pointer",
-    appearance: "none",
-    backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E\")",
-    backgroundRepeat: "no-repeat",
-    backgroundPosition: "right 12px center",
-    paddingRight: "32px",
   };
 
   const labelStyle = {
@@ -814,22 +769,20 @@ function Settings({ onBack, onDataRefresh }) {
             />
           </div>
 
-          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "flex-end" }}>
             <div style={{ ...fieldGroup, flex: "1 1 250px" }}>
               <label style={labelStyle}>Modello</label>
-              <select
-                style={selectStyle}
-                value={modelName}
-                onChange={(e) => setModelName(e.target.value)}
-                onFocus={handleFocus}
-                onBlur={handleBlur}
-              >
-                {MODEL_OPTIONS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+              <div style={{
+                padding: "10px 12px",
+                background: "#f9fafb",
+                border: "1px solid #e5e7eb",
+                borderRadius: "8px",
+                color: "#374151",
+                fontSize: "14px",
+                fontFamily: "'Inter', -apple-system, sans-serif",
+              }}>
+                {FIXED_MODEL}
+              </div>
             </div>
 
             <div style={{ ...fieldGroup, flex: "0 1 180px" }}>
@@ -1162,172 +1115,7 @@ function Settings({ onBack, onDataRefresh }) {
           </button>
         </div>
 
-        {/* ============================================= */}
-        {/* SEZIONE 5: CONFIGURAZIONE API                 */}
-        {/* ============================================= */}
-        <div style={cardStyle}>
-          <div style={sectionTitle}>Configurazione API</div>
-
-          <div style={fieldGroup}>
-            <label style={labelStyle}>Anthropic API Key</label>
-            <input
-              type="password"
-              style={inputStyle}
-              value={anthropicKey}
-              onChange={(e) => setAnthropicKey(e.target.value)}
-              placeholder="Configurata tramite variabile d'ambiente"
-              onFocus={handleFocus}
-              onBlur={handleBlur}
-            />
-          </div>
-
-          <div style={fieldGroup}>
-            <label style={labelStyle}>NewsAPI Key</label>
-            <input
-              type="password"
-              style={inputStyle}
-              value={newsApiKey}
-              onChange={(e) => setNewsApiKey(e.target.value)}
-              placeholder="Inserisci la chiave NewsAPI"
-              onFocus={handleFocus}
-              onBlur={handleBlur}
-            />
-          </div>
-
-          <div style={fieldGroup}>
-            <label style={labelStyle}>Finnhub API Key</label>
-            <input
-              type="password"
-              style={inputStyle}
-              value={finnhubKey}
-              onChange={(e) => setFinnhubKey(e.target.value)}
-              placeholder="Inserisci la chiave Finnhub (congressional trading)"
-              onFocus={handleFocus}
-              onBlur={handleBlur}
-            />
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              gap: "12px",
-              flexWrap: "wrap",
-              alignItems: "center",
-            }}
-          >
-            <button style={btnSecondary} onClick={handleTestConnection}>
-              Testa Connessione
-            </button>
-            <button
-              style={{
-                ...btnPrimary,
-                opacity: saving ? 0.6 : 1,
-                cursor: saving ? "not-allowed" : "pointer",
-              }}
-              onClick={handleSaveApiKeys}
-              disabled={saving}
-            >
-              {saving ? "Salvando..." : "Salva Chiavi API"}
-            </button>
-          </div>
-
-          {/* Risultato del test di connessione */}
-          {connectionTest && (
-            <div style={{ marginTop: "16px" }}>
-              {connectionTest.loading ? (
-                <div
-                  style={{
-                    color: "#9ca3af",
-                    fontSize: "14px",
-                  }}
-                >
-                  Test in corso...
-                </div>
-              ) : connectionTest.error ? (
-                <div
-                  style={{
-                    fontSize: "14px",
-                    color: "#991b1b",
-                    background: "#fef2f2",
-                    border: "1px solid #fecaca",
-                    borderRadius: "8px",
-                    padding: "10px 14px",
-                  }}
-                >
-                  Errore: {connectionTest.error}
-                </div>
-              ) : (
-                <div style={{ fontSize: "14px" }}>
-                  {connectionTest.anthropic != null && (
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "8px",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: "8px",
-                          height: "8px",
-                          borderRadius: "50%",
-                          background: connectionTest.anthropic
-                            ? "#10b981"
-                            : "#ef4444",
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span style={{ color: "#374151" }}>Anthropic API:</span>
-                      <span
-                        style={{
-                          color: connectionTest.anthropic
-                            ? "#065f46"
-                            : "#991b1b",
-                          fontWeight: 500,
-                        }}
-                      >
-                        {connectionTest.anthropic ? "Connessa" : "Non connessa"}
-                      </span>
-                    </div>
-                  )}
-                  {connectionTest.newsapi != null && (
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "8px",
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: "8px",
-                          height: "8px",
-                          borderRadius: "50%",
-                          background: connectionTest.newsapi
-                            ? "#10b981"
-                            : "#ef4444",
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span style={{ color: "#374151" }}>NewsAPI:</span>
-                      <span
-                        style={{
-                          color: connectionTest.newsapi
-                            ? "#065f46"
-                            : "#991b1b",
-                          fontWeight: 500,
-                        }}
-                      >
-                        {connectionTest.newsapi ? "Connessa" : "Non connessa"}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        {/* API Keys configurati tramite variabili d'ambiente su Render */}
 
         {/* ============================================= */}
         {/* SEZIONE 6: CLAWSTREET                         */}
