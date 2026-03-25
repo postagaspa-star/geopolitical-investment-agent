@@ -156,12 +156,12 @@ async def _keep_alive_ping():
     Pinga il proprio health endpoint per evitare che Render free tier
     metta il servizio in sleep dopo 15 minuti di inattivita'.
     """
-    import httpx
+    import aiohttp
     url = f"{_RENDER_EXTERNAL_URL}/health"
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url)
-            logger.debug("Keep-alive ping: %s -> %d", url, resp.status_code)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url) as resp:
+                logger.debug("Keep-alive ping: %s -> %d", url, resp.status)
     except Exception as e:
         logger.warning("Keep-alive ping fallito: %s", e)
 

@@ -42,8 +42,20 @@ async def lifespan(app: FastAPI):
     logger.info("Database inizializzato con successo.")
 
     # Avvia SEMPRE lo scheduler al deploy — il monitoraggio è sempre attivo
-    logger.info("Avvio automatico dello scheduler (sempre attivo al deploy)...")
-    scheduler.start_scheduler()
+    try:
+        logger.info("Avvio automatico dello scheduler (sempre attivo al deploy)...")
+        scheduler.start_scheduler()
+        logger.info("Scheduler avviato con successo al deploy.")
+    except Exception as e:
+        logger.error("ERRORE avvio scheduler al deploy: %s", e, exc_info=True)
+        # Ritenta dopo un breve delay (il DB potrebbe non essere pronto)
+        import asyncio
+        await asyncio.sleep(2)
+        try:
+            scheduler.start_scheduler()
+            logger.info("Scheduler avviato al secondo tentativo.")
+        except Exception as e2:
+            logger.error("Scheduler non avviato dopo 2 tentativi: %s", e2, exc_info=True)
 
     yield
 
