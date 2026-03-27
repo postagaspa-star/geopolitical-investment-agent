@@ -1,7 +1,7 @@
 # ============================================================
 # data_fetchers.py
 # Modulo per il recupero di dati geopolitici e di mercato.
-# Fonti: GDELT API, NewsAPI, yfinance.
+# Fonti: GDELT API, NewsAPI, yfinance, ClawStreet.
 # ============================================================
 
 import os
@@ -47,9 +47,10 @@ WATCHLIST: Dict[str, List[str]] = {
 }
 
 # Endpoint base di GDELT per la ricerca di articoli
+# Ridotto maxrecords da 25 a 10 per evitare rate-limit
 GDELT_BASE_URL = (
     "https://api.gdeltproject.org/api/v2/doc/doc"
-    "?query={keyword}&mode=artlist&maxrecords=25&timespan=24h&format=json"
+    "?query={keyword}&mode=artlist&maxrecords=10&timespan=24h&format=json"
 )
 
 # Parole chiave per le query GDELT
@@ -78,33 +79,55 @@ NEWSAPI_QUERIES: List[str] = [
 
 # ------------------------------------------------------------
 # Funzione interna per eseguire una singola richiesta GDELT
+# Con retry esponenziale per gestire 429 rate-limit
 # ------------------------------------------------------------
 async def _fetch_gdelt_single(
-    session: aiohttp.ClientSession, keyword: str
+    session: aiohttp.ClientSession, keyword: str, max_retries: int = 3
 ) -> Dict[str, Any]:
-    """Esegue una singola query verso GDELT e restituisce i risultati."""
+    """Esegue una singola query verso GDELT e restituisce i risultati.
+    Include retry con backoff esponenziale (2s/4s/8s) per 429 rate-limit."""
     url = GDELT_BASE_URL.format(keyword=keyword)
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-            if resp.status != 200:
+    for attempt in range(max_retries):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 429:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(
+                        "GDELT 429 rate limit per '%s', retry in %ds... (tentativo %d/%d)",
+                        keyword, wait, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                if resp.status != 200:
+                    logger.warning(
+                        "GDELT ha restituito stato %s per la keyword: %s",
+                        resp.status,
+                        keyword,
+                    )
+                    return {"keyword": keyword, "articles": [], "error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+                # GDELT restituisce gli articoli nella chiave "articles"
+                articles = data.get("articles", []) if isinstance(data, dict) else []
+                return {"keyword": keyword, "articles": articles, "error": None}
+        except Exception as exc:
+            if attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
                 logger.warning(
-                    "GDELT ha restituito stato %s per la keyword: %s",
-                    resp.status,
-                    keyword,
+                    "Errore GDELT per '%s' (tentativo %d/%d), retry in %ds: %s",
+                    keyword, attempt + 1, max_retries, wait, exc,
                 )
-                return {"keyword": keyword, "articles": [], "error": f"HTTP {resp.status}"}
-            data = await resp.json(content_type=None)
-            # GDELT restituisce gli articoli nella chiave "articles"
-            articles = data.get("articles", []) if isinstance(data, dict) else []
-            return {"keyword": keyword, "articles": articles, "error": None}
-    except Exception as exc:
-        logger.error("Errore durante il recupero GDELT per '%s': %s", keyword, exc)
-        return {"keyword": keyword, "articles": [], "error": str(exc)}
+                await asyncio.sleep(wait)
+                continue
+            logger.error("Errore durante il recupero GDELT per '%s': %s", keyword, exc)
+            return {"keyword": keyword, "articles": [], "error": str(exc)}
+    # Se tutti i retry sono falliti per 429
+    return {"keyword": keyword, "articles": [], "error": "429 rate limit dopo tutti i retry"}
 
 
 async def fetch_gdelt_data() -> Dict[str, Any]:
     """
-    Recupera dati geopolitici da GDELT in parallelo per tutte le keyword.
+    Recupera dati geopolitici da GDELT in sequenza con rate-limiting.
+    Le richieste sono distanziate di 1 secondo per evitare 429.
 
     Restituisce un dizionario con:
         - results: lista di risultati per ogni keyword
@@ -112,29 +135,13 @@ async def fetch_gdelt_data() -> Dict[str, Any]:
         - source: "gdelt"
     """
     try:
-        async with aiohttp.ClientSession() as session:
-            # Lancia tutte le richieste in parallelo
-            tasks = [
-                _fetch_gdelt_single(session, kw) for kw in GDELT_KEYWORDS
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Gestisce eventuali eccezioni restituite da gather
         cleaned: List[Dict[str, Any]] = []
-        for i, res in enumerate(results):
-            if isinstance(res, Exception):
-                logger.error(
-                    "Eccezione nella query GDELT '%s': %s",
-                    GDELT_KEYWORDS[i],
-                    res,
-                )
-                cleaned.append({
-                    "keyword": GDELT_KEYWORDS[i],
-                    "articles": [],
-                    "error": str(res),
-                })
-            else:
-                cleaned.append(res)
+        async with aiohttp.ClientSession() as session:
+            # Richieste in sequenza con 1s di pausa tra una e l'altra
+            for kw in GDELT_KEYWORDS:
+                result = await _fetch_gdelt_single(session, kw)
+                cleaned.append(result)
+                await asyncio.sleep(1.0)  # Rate limit tra keyword
 
         return {
             "results": cleaned,
@@ -231,12 +238,140 @@ async def fetch_newsapi_data() -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------
+# ClawStreet price fallback — usato quando yfinance fallisce
+# ------------------------------------------------------------
+async def fetch_clawstreet_price(ticker: str) -> Dict[str, Any]:
+    """
+    Recupera dati di prezzo per un singolo ticker da ClawStreet sentiment API.
+    Usato come fallback quando yfinance non è disponibile (429, dati vuoti, eccezioni).
+
+    Restituisce un dizionario con:
+        - ticker: simbolo del titolo
+        - price: prezzo corrente (se disponibile)
+        - data: dati grezzi dalla risposta ClawStreet
+        - error: eventuale messaggio di errore
+    """
+    url = f"{CLAWSTREET_BASE}/data/sentiment?symbol={ticker}&quant=1"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
+                if resp.status != 200:
+                    return {"ticker": ticker, "price": None, "data": None, "error": f"HTTP {resp.status}"}
+                data = await resp.json(content_type=None)
+                # Estrai prezzo dalla risposta ClawStreet
+                price = None
+                if isinstance(data, dict):
+                    # ClawStreet può restituire il prezzo in vari campi
+                    price = (
+                        data.get("price")
+                        or data.get("currentPrice")
+                        or data.get("last_price")
+                        or data.get("close")
+                    )
+                    # Cerca anche dentro un eventuale sotto-oggetto "quote" o "data"
+                    if price is None and isinstance(data.get("data"), dict):
+                        inner = data["data"]
+                        price = (
+                            inner.get("price")
+                            or inner.get("currentPrice")
+                            or inner.get("last_price")
+                            or inner.get("close")
+                        )
+                return {"ticker": ticker, "price": price, "data": data, "error": None}
+    except Exception as exc:
+        logger.warning("ClawStreet price fallback error for %s: %s", ticker, exc)
+        return {"ticker": ticker, "price": None, "data": None, "error": str(exc)}
+
+
+async def fetch_clawstreet_price_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
+    """
+    Recupera dati OHLCV-like da ClawStreet per un singolo ticker.
+    Drop-in fallback per fetch_market_data — restituisce lo stesso formato.
+
+    Parametri:
+        ticker: simbolo del titolo (es. "XOM")
+        period_days: ignorato (ClawStreet restituisce solo dati correnti)
+
+    Restituisce un dizionario con:
+        - ticker: simbolo del titolo
+        - data: lista di record OHLCV (un solo record con dati correnti)
+        - fetched_at: timestamp del recupero
+        - error: eventuale messaggio di errore
+        - source: "clawstreet"
+    """
+    price_result = await fetch_clawstreet_price(ticker)
+
+    if price_result.get("error") or price_result.get("price") is None:
+        # Prova a estrarre almeno qualcosa dai dati grezzi
+        raw_data = price_result.get("data")
+        if raw_data and isinstance(raw_data, dict):
+            # Costruisci un record parziale se ci sono dati utili
+            inner = raw_data.get("data", raw_data)
+            if isinstance(inner, dict):
+                price = inner.get("price") or inner.get("close") or inner.get("currentPrice")
+                if price is not None:
+                    try:
+                        price = float(price)
+                        record = {
+                            "date": datetime.utcnow().strftime("%Y-%m-%d"),
+                            "open": price,
+                            "high": price,
+                            "low": price,
+                            "close": price,
+                            "volume": int(inner.get("volume", 0) or 0),
+                        }
+                        return {
+                            "ticker": ticker,
+                            "data": [record],
+                            "fetched_at": datetime.utcnow().isoformat(),
+                            "error": None,
+                            "source": "clawstreet",
+                        }
+                    except (ValueError, TypeError):
+                        pass
+
+        return {
+            "ticker": ticker,
+            "data": [],
+            "fetched_at": datetime.utcnow().isoformat(),
+            "error": price_result.get("error") or "Nessun dato di prezzo da ClawStreet",
+            "source": "clawstreet",
+        }
+
+    # Costruisci un record OHLCV dal prezzo corrente
+    price = float(price_result["price"])
+    raw_data = price_result.get("data", {})
+    inner = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else {}
+    if not isinstance(inner, dict):
+        inner = {}
+
+    record = {
+        "date": datetime.utcnow().strftime("%Y-%m-%d"),
+        "open": float(inner.get("open", price)),
+        "high": float(inner.get("high", price)),
+        "low": float(inner.get("low", price)),
+        "close": price,
+        "volume": int(inner.get("volume", 0) or 0),
+    }
+
+    return {
+        "ticker": ticker,
+        "data": [record],
+        "fetched_at": datetime.utcnow().isoformat(),
+        "error": None,
+        "source": "clawstreet",
+    }
+
+
+# ------------------------------------------------------------
 # Recupero dati di mercato tramite yfinance (sincrono)
+# Con fallback a ClawStreet se yfinance fallisce
 # ------------------------------------------------------------
 def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
     """
     Scarica i dati OHLCV per un singolo ticker usando yfinance.
     Include cache in-memory (5 min TTL) per evitare rate-limit 429.
+    Se yfinance fallisce (dati vuoti, eccezione, 429), prova ClawStreet come fallback.
 
     Parametri:
         ticker: simbolo del titolo (es. "XOM")
@@ -257,6 +392,7 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
             logger.debug("yfinance cache hit per %s", cache_key)
             return cached_result
 
+    yfinance_error = None
     try:
         # Pausa breve tra richieste consecutive per evitare rate-limit
         time.sleep(0.5)
@@ -274,55 +410,83 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
         )
 
         if df.empty:
-            logger.warning("Nessun dato ricevuto da yfinance per il ticker: %s", ticker)
+            logger.warning("Nessun dato ricevuto da yfinance per il ticker: %s — provo ClawStreet fallback", ticker)
+            yfinance_error = "Nessun dato disponibile da yfinance"
+        else:
+            # yfinance >= 0.2.31 restituisce colonne multi-index (Price, Ticker).
+            # Appiattisci prendendo solo il primo livello.
+            if isinstance(df.columns, __import__('pandas').MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            # Converte il DataFrame in una lista di dizionari
+            records: List[Dict[str, Any]] = []
+            for idx, row in df.iterrows():
+                records.append({
+                    "date": idx.strftime("%Y-%m-%d"),
+                    "open": float(row.get("Open", 0)),
+                    "high": float(row.get("High", 0)),
+                    "low": float(row.get("Low", 0)),
+                    "close": float(row.get("Close", 0)),
+                    "volume": int(row.get("Volume", 0)),
+                })
+
             result = {
                 "ticker": ticker,
-                "data": [],
+                "data": records,
                 "fetched_at": datetime.utcnow().isoformat(),
-                "error": "Nessun dato disponibile",
+                "error": None,
             }
-            # Cache anche i risultati vuoti (per evitare richieste ripetute)
+            # Salva in cache
             _yfinance_cache[cache_key] = (now, result)
             return result
 
-        # yfinance >= 0.2.31 restituisce colonne multi-index (Price, Ticker).
-        # Appiattisci prendendo solo il primo livello.
-        if isinstance(df.columns, __import__('pandas').MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # Converte il DataFrame in una lista di dizionari
-        records: List[Dict[str, Any]] = []
-        for idx, row in df.iterrows():
-            records.append({
-                "date": idx.strftime("%Y-%m-%d"),
-                "open": float(row.get("Open", 0)),
-                "high": float(row.get("High", 0)),
-                "low": float(row.get("Low", 0)),
-                "close": float(row.get("Close", 0)),
-                "volume": int(row.get("Volume", 0)),
-            })
-
-        result = {
-            "ticker": ticker,
-            "data": records,
-            "fetched_at": datetime.utcnow().isoformat(),
-            "error": None,
-        }
-        # Salva in cache
-        _yfinance_cache[cache_key] = (now, result)
-        return result
-
     except Exception as exc:
-        logger.error("Errore durante il download di dati per '%s': %s", ticker, exc)
-        result = {
-            "ticker": ticker,
-            "data": [],
-            "fetched_at": datetime.utcnow().isoformat(),
-            "error": str(exc),
-        }
-        # Cache anche gli errori per 60 secondi (evita spam di retry)
-        _yfinance_cache[cache_key] = (now - _YFINANCE_CACHE_TTL + 60, result)
-        return result
+        logger.error("Errore yfinance per '%s': %s — provo ClawStreet fallback", ticker, exc)
+        yfinance_error = str(exc)
+
+    # ---- Fallback a ClawStreet ----
+    logger.info("Tentativo fallback ClawStreet per %s", ticker)
+    try:
+        # Esegui la funzione async in modo sincrono
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Siamo già in un event loop — crea un task con future
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                clawstreet_result = pool.submit(
+                    lambda: asyncio.run(fetch_clawstreet_price_data(ticker, period_days))
+                ).result(timeout=20)
+        else:
+            clawstreet_result = asyncio.run(fetch_clawstreet_price_data(ticker, period_days))
+
+        if clawstreet_result.get("data") and not clawstreet_result.get("error"):
+            logger.info("ClawStreet fallback riuscito per %s", ticker)
+            # Aggiungi nota che i dati vengono da ClawStreet
+            clawstreet_result["source"] = "clawstreet"
+            clawstreet_result["yfinance_error"] = yfinance_error
+            # Cache il risultato ClawStreet (TTL ridotto a 60s)
+            _yfinance_cache[cache_key] = (now - _YFINANCE_CACHE_TTL + 60, clawstreet_result)
+            return clawstreet_result
+        else:
+            logger.warning("Anche ClawStreet fallback ha fallito per %s: %s", ticker, clawstreet_result.get("error"))
+    except Exception as cs_exc:
+        logger.error("Errore nel fallback ClawStreet per '%s': %s", ticker, cs_exc)
+
+    # Entrambe le fonti hanno fallito
+    result = {
+        "ticker": ticker,
+        "data": [],
+        "fetched_at": datetime.utcnow().isoformat(),
+        "error": f"yfinance: {yfinance_error}; ClawStreet fallback anche fallito",
+    }
+    # Cache anche gli errori per 60 secondi (evita spam di retry)
+    _yfinance_cache[cache_key] = (now - _YFINANCE_CACHE_TTL + 60, result)
+    return result
 
 
 def get_all_watchlist_tickers() -> List[str]:
@@ -342,7 +506,7 @@ def get_all_watchlist_tickers() -> List[str]:
 # ============================================================
 
 CLAWSTREET_BASE = "https://www.clawstreet.io/api"
-CLAWSTREET_TIMEOUT = aiohttp.ClientTimeout(total=5)
+CLAWSTREET_TIMEOUT = aiohttp.ClientTimeout(total=15)  # Aumentato da 5s a 15s — API può essere lenta
 
 
 async def fetch_clawstreet_sentiment(ticker: str) -> Dict[str, Any]:

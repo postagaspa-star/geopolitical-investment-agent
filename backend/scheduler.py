@@ -175,6 +175,48 @@ def _sync_keep_alive_wrapper():
         pass
 
 
+async def _daily_recap_job():
+    """Job per il Daily Recap dello Scout (23:59 CET)."""
+    from uuid import uuid4
+    run_id = str(uuid4())
+    try:
+        from agents.scout import run_daily_recap
+        result = await run_daily_recap(run_id)
+        logger.info("Daily Recap completato: %s", result.get("macro_bias", "?"))
+    except Exception as e:
+        logger.error("Errore Daily Recap: %s", e, exc_info=True)
+
+
+def _sync_daily_recap_wrapper():
+    """Wrapper sincrono per il Daily Recap."""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_daily_recap_job())
+    except Exception as e:
+        logger.error("Errore avvio Daily Recap task: %s", e)
+
+
+async def _weekly_matrix_job():
+    """Job per la Weekly Matrix dello Scout (domenica 23:59 CET)."""
+    from uuid import uuid4
+    run_id = str(uuid4())
+    try:
+        from agents.scout import run_weekly_matrix
+        result = await run_weekly_matrix(run_id)
+        logger.info("Weekly Matrix completata: %s", result.get("macro_strategy", "?")[:100])
+    except Exception as e:
+        logger.error("Errore Weekly Matrix: %s", e, exc_info=True)
+
+
+def _sync_weekly_matrix_wrapper():
+    """Wrapper sincrono per la Weekly Matrix."""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_weekly_matrix_job())
+    except Exception as e:
+        logger.error("Errore avvio Weekly Matrix task: %s", e)
+
+
 # ============================================================
 # Gestione scheduler
 # ============================================================
@@ -220,6 +262,25 @@ def start_scheduler() -> AsyncIOScheduler:
         minutes=10,
         id="keep_alive_ping",
         name="Keep-alive ping (anti-sleep Render)",
+        replace_existing=True,
+    )
+
+    # Daily Recap: ogni giorno alle 23:59 CET
+    from apscheduler.triggers.cron import CronTrigger
+    _scheduler.add_job(
+        _sync_daily_recap_wrapper,
+        trigger=CronTrigger(hour=22, minute=59, timezone="Europe/Paris"),
+        id="scout_daily_recap",
+        name="Scout Daily Recap (23:59 CET)",
+        replace_existing=True,
+    )
+
+    # Weekly Matrix: ogni domenica alle 23:59 CET
+    _scheduler.add_job(
+        _sync_weekly_matrix_wrapper,
+        trigger=CronTrigger(day_of_week="sun", hour=23, minute=59, timezone="Europe/Paris"),
+        id="scout_weekly_matrix",
+        name="Scout Weekly Matrix (domenica 23:59 CET)",
         replace_existing=True,
     )
 

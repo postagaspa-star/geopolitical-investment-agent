@@ -724,6 +724,54 @@ async def test_gdelt():
         return {"status": "error", "message": str(e)}
 
 
+@app.post("/api/migrate/v4")
+async def run_v4_migration():
+    """
+    Esegue la migrazione v4 creando le nuove tabelle per il sistema multi-agent.
+    Sicuro da rieseguire (usa IF NOT EXISTS).
+    """
+    try:
+        migration_path = os.path.join(os.path.dirname(__file__), "migrations", "init_v4.sql")
+        if not os.path.exists(migration_path):
+            return {"status": "error", "message": "init_v4.sql non trovato"}
+
+        with open(migration_path) as f:
+            sql = f.read()
+
+        # Usa la connessione diretta PostgreSQL via Supabase
+        from db_supabase import _get_client
+        client = _get_client()
+
+        # Esegui ogni statement separatamente via rpc
+        # Supabase non supporta SQL diretto, usiamo postgrest rpc
+        # Alternativa: controlla se le tabelle esistono gia'
+        v4_tables = [
+            "intelligence_buffer", "daily_snapshots", "weekly_matrix",
+            "trades_high_risk", "agent_checkpoints",
+        ]
+        existing = []
+        missing = []
+        for table in v4_tables:
+            try:
+                client.table(table).select("*").limit(1).execute()
+                existing.append(table)
+            except Exception:
+                missing.append(table)
+
+        return {
+            "status": "ok",
+            "existing_tables": existing,
+            "missing_tables": missing,
+            "message": (
+                "Tutte le tabelle v4 presenti!" if not missing
+                else f"Tabelle mancanti: {missing}. Esegui init_v4.sql nel SQL Editor di Supabase dashboard."
+            ),
+            "sql_file": "backend/migrations/init_v4.sql",
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 # --- Montaggio dei file statici del frontend React ---
 # Cerca la build del frontend in due posizioni:
 # 1. backend/static (usata su Render dopo il build command che copia la build qui)

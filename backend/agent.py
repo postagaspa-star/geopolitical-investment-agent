@@ -246,46 +246,36 @@ async def run_agent(mode="full") -> dict:
     logger.info("Avvio esecuzione agente. Run ID: %s, Modalita': %s", run_id, mode.upper())
 
     try:
-        # --- FULL MODE: Sistema Multi-Agent ---
+        # --- FULL MODE: Multi-Agent Pipeline (Scout → Technical → Decision) ---
         if mode == "full":
-            logger.info("[%s] Avvio sistema MULTI-AGENT gerarchico...", run_id)
+            logger.info("[%s] Avvio pipeline MULTI-AGENT (Scout→Tech→Decision)...", run_id)
             database.insert_agent_log(
                 run_id=run_id, phase="INFO",
                 content=json.dumps({
                     "event": "multi_agent_start", "run_id": run_id,
-                    "mode": mode, "architecture": "manager-workers",
+                    "mode": mode, "architecture": "multi-agent",
                 }),
             )
 
-            from multi_agent import run_multi_agent
-            ma_result = await run_multi_agent(run_id=run_id, mode=mode)
+            from agents.orchestrator import run_full_pipeline
+            pipeline_result = await run_full_pipeline(run_id=run_id)
 
             run_end = datetime.now(timezone.utc).isoformat()
-            final_response = ma_result.get("final_response", "")
-
-            database.insert_agent_log(
-                run_id=run_id, phase="INFO",
-                content=json.dumps({
-                    "event": "multi_agent_complete",
-                    "duration": ma_result.get("duration_seconds"),
-                    "geo_risk": ma_result.get("geo_report_summary", {}).get("risk_level"),
-                    "tech_engine": ma_result.get("tech_report_summary", {}).get("engine"),
-                    "mode": mode,
-                }),
-            )
+            final_response = pipeline_result.get("final_response", "")
+            phases = pipeline_result.get("phases", {})
 
             summary = {
                 "run_id": run_id,
                 "started_at": run_start,
                 "completed_at": run_end,
-                "iterations": ma_result.get("manager_result", {}).get("iterations", 0),
-                "stop_reason": ma_result.get("manager_result", {}).get("stop_reason", "complete"),
+                "iterations": phases.get("decision", {}).get("iterations", 0),
+                "stop_reason": "complete",
                 "final_response": final_response,
                 "status": "completed",
                 "mode": mode,
                 "architecture": "multi-agent",
-                "geo_risk": ma_result.get("geo_report_summary", {}).get("risk_level"),
-                "tech_engine": ma_result.get("tech_report_summary", {}).get("engine"),
+                "duration_seconds": pipeline_result.get("duration_seconds"),
+                "phases": phases,
             }
 
             agent_status = {
@@ -296,7 +286,25 @@ async def run_agent(mode="full") -> dict:
                 "mode": mode,
             }
 
+            # Portfolio snapshot
+            try:
+                p = database.get_portfolio()
+                if p:
+                    database.insert_portfolio_snapshot(p["total_value"], p["cash_balance"])
+            except Exception:
+                pass
+
             return summary
+
+        # --- WEEKEND / PRE_MARKET: Scout-only + legacy single-agent ---
+        # Run Scout intelligence gathering first (always)
+        try:
+            from agents.orchestrator import run_scout_only
+            scout_result = await run_scout_only(run_id=run_id)
+            logger.info("[%s] Scout completato: %d micro-schede", run_id,
+                        scout_result.get("cards", 0))
+        except Exception as scout_err:
+            logger.warning("[%s] Scout fallito, proseguo con single-agent: %s", run_id, scout_err)
 
         # --- WEEKEND / PRE_MARKET: Single-Agent classico ---
         api_key = _get_api_key()

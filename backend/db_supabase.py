@@ -54,9 +54,39 @@ def init_db():
             }).execute()
             logger.info("Portafoglio iniziale creato su Supabase con saldo %.2f", bal)
         logger.info("Supabase connesso e operativo.")
+
+        # Auto-migrate v4 tables (safe: checks existence first)
+        _ensure_v4_tables(client)
+
     except Exception as e:
         logger.error("Errore connessione Supabase: %s", e, exc_info=True)
         raise
+
+
+def _ensure_v4_tables(client: Client):
+    """
+    Ensure v4 multi-agent tables exist by attempting to read from them.
+    If a table doesn't exist, log a warning. Tables must be created via
+    the SQL migration (init_v4.sql) in the Supabase dashboard.
+    """
+    v4_tables = [
+        "intelligence_buffer", "daily_snapshots", "weekly_matrix",
+        "trades_high_risk", "agent_checkpoints",
+    ]
+    missing = []
+    for table in v4_tables:
+        try:
+            client.table(table).select("*").limit(1).execute()
+        except Exception:
+            missing.append(table)
+
+    if missing:
+        logger.warning(
+            "V4 tables mancanti: %s. Esegui init_v4.sql nel SQL Editor di Supabase.",
+            missing,
+        )
+    else:
+        logger.info("Tutte le tabelle v4 presenti.")
 
 
 # ============================================================
