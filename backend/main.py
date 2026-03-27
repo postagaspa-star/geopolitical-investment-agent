@@ -492,7 +492,7 @@ async def get_clawstreet_status():
             "bot_name": bot_name,
             "bot_ticker": bot_ticker,
             "claim_url": claim_url,
-            "public_url": f"https://www.clawstreet.io/bot/{bot_ticker}",
+            "public_url": "https://www.clawstreet.io/agents/geoinvest-ai",
         }
     except Exception as e:
         logger.error(f"Errore nello stato ClawStreet: {e}", exc_info=True)

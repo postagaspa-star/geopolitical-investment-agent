@@ -151,6 +151,13 @@ export default function Sidebar({
           <div className="status-mode">Modalità</div>
           <div className="status-mode-value">{modeLabel}</div>
 
+          <div className="status-countdown" style={{ marginTop: '0.25rem' }}>
+            Arch:{' '}
+            <strong style={{ color: currentMode === 'full' ? '#a78bfa' : '#94a3b8' }}>
+              {currentMode === 'full' ? 'Multi-Agent (Scout→Tech→Decision)' : 'Single-Agent'}
+            </strong>
+          </div>
+
           {countdown && (
             <div className="status-countdown">
               Prossima esecuzione:{' '}
@@ -251,17 +258,15 @@ export default function Sidebar({
               <div className="status-countdown" style={{ marginTop: '0.25rem' }}>
                 Bot: <strong>{csStatus.bot_name || 'GeoInvest AI'}</strong>
               </div>
-              {csStatus.public_url && (
-                <a
-                  href={csStatus.public_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="status-countdown"
-                  style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', marginTop: '0.25rem', color: 'var(--primary)', textDecoration: 'none', fontSize: '0.75rem' }}
-                >
-                  <ExternalLink size={12} /> Pagina pubblica
-                </a>
-              )}
+              <a
+                href="https://www.clawstreet.io/agents/geoinvest-ai"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="status-countdown"
+                style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', marginTop: '0.25rem', color: 'var(--primary)', textDecoration: 'none', fontSize: '0.75rem' }}
+              >
+                <ExternalLink size={12} /> Pagina pubblica
+              </a>
             </>
           ) : (
             <button
