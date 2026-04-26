@@ -1,8 +1,16 @@
 """
-Orchestrator — Wires Scout → Technical → Decision agents.
+Orchestrator — Wires Scout → Watchdog → Technical → Decision agents.
 
-Replaces the old multi_agent.py with the new hierarchical async system.
-Ogni 20 min: Scout raccoglie intel → Technical analizza ticker caldi → Decision valuta e opera.
+Architettura a 4 agenti (budget ~€18/mese):
+  - Scout (Haiku 3, ogni ora): raccoglie intelligence nel buffer
+  - Watchdog (DeepSeek-V3, ogni 5 min): monitora e decide se triggerare
+  - Technical (DeepSeek-V3, on-demand): analisi tecnica quando Watchdog trigghera
+  - Decision (Sonnet 4.5, max 1/ora): decisione trading quando Watchdog trigghera
+
+Flussi:
+  run_watchdog_pipeline() — ogni 5 min durante ore di mercato
+  run_scout_pipeline()    — ogni ora, sempre
+  run_full_pipeline()     — legacy, usato per test manuali
 """
 
 import asyncio
@@ -17,76 +25,182 @@ import database
 logger = logging.getLogger(__name__)
 
 
-async def run_full_pipeline(run_id: str | None = None) -> dict:
-    """
-    Pipeline completa per il ciclo di mercato aperto (mode=full).
+# ============================================================
+# Pipeline principale: Watchdog (ogni 5 min, market hours)
+# ============================================================
 
-    Flusso:
-      1. Scout 20-min → micro-schede intelligence_buffer
-      2. Identifica hot tickers dal buffer + daily
-      3. Technical Worker → analisi tecnica sui tickers
-      4. Decision Agent → valutazione strategica + esecuzione trade
+async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
+    """
+    Ciclo veloce ogni 5 minuti:
+    1. Watchdog analizza mercato (DeepSeek-V3, ~2-3s)
+    2. Se trigger=True e non throttled → avvia Technical + Decision
+    3. Se trigger=False → exit subito (costo: quasi zero)
     """
     if not run_id:
         run_id = str(uuid4())
 
     start = time.time()
-    logger.info("[%s][ORCHESTRATOR] === Pipeline FULL avviata ===", run_id)
+
+    # ─── Watchdog ───
+    try:
+        from agents.watchdog import run_watchdog
+        watchdog_result = await run_watchdog(run_id)
+    except Exception as e:
+        logger.error("[%s][ORCHESTRATOR] Watchdog fallito: %s", run_id, e)
+        return {"run_id": run_id, "triggered": False, "error": str(e)}
+
+    should_trigger = watchdog_result.get("should_trigger", False)
+    urgency = watchdog_result.get("urgency", 0)
+    reason = watchdog_result.get("reason", "")
+    focus_tickers = watchdog_result.get("focus_tickers", [])
+
+    if not should_trigger:
+        logger.debug("[%s][WATCHDOG] No trigger (urgency=%d, reason='%s')",
+                     run_id, urgency, reason)
+        return {
+            "run_id": run_id,
+            "triggered": False,
+            "urgency": urgency,
+            "reason": reason,
+            "duration_seconds": round(time.time() - start, 2),
+        }
+
+    # Trigger! Avvia pipeline completa
+    logger.info("[%s][WATCHDOG] TRIGGER urgency=%d: %s — avvio Technical+Decision",
+                run_id, urgency, reason)
+
+    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+        "event": "watchdog_triggered",
+        "urgency": urgency,
+        "reason": reason,
+        "focus_tickers": focus_tickers,
+        "architecture": "multi-agent",
+    }))
+
+    # ─── Technical Worker ───
+    hot_tickers = focus_tickers if focus_tickers else _get_default_tickers()
+    hot_tickers = hot_tickers[:6]  # Max 6 tickers per contenere i costi
+
+    try:
+        from agents.technical import run_technical_analysis
+        tech_report = await run_technical_analysis(run_id, hot_tickers)
+    except Exception as e:
+        logger.error("[%s][ORCHESTRATOR] Technical fallito: %s", run_id, e)
+        tech_report = {"analyses": [], "engine": "error", "summary": str(e)}
+
+    # ─── Decision Agent ───
+    try:
+        from agents.decision import run_decision_agent
+        decision_result = await run_decision_agent(run_id, tech_report)
+    except Exception as e:
+        logger.error("[%s][ORCHESTRATOR] Decision fallito: %s", run_id, e)
+        decision_result = {"decision": "ERROR", "trades": [], "error": str(e)}
+
+    duration = round(time.time() - start, 1)
+
+    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+        "event": "watchdog_pipeline_complete",
+        "triggered": True,
+        "urgency": urgency,
+        "decision": decision_result.get("decision", "UNKNOWN"),
+        "trades": len(decision_result.get("trades", [])),
+        "duration_seconds": duration,
+    }))
+
+    return {
+        "run_id": run_id,
+        "triggered": True,
+        "urgency": urgency,
+        "reason": reason,
+        "tech_engine": tech_report.get("engine", "unknown"),
+        "decision": decision_result.get("decision", "UNKNOWN"),
+        "trades": decision_result.get("trades", []),
+        "duration_seconds": duration,
+    }
+
+
+# ============================================================
+# Pipeline Scout (ogni ora, sempre — non solo market hours)
+# ============================================================
+
+async def run_scout_pipeline(run_id: str | None = None) -> dict:
+    """
+    Ciclo orario: Scout raccoglie intelligence e popola il buffer.
+    Usa Claude Haiku 3 — economico per funzionare 24/7.
+    """
+    if not run_id:
+        run_id = str(uuid4())
+
+    start = time.time()
+    logger.info("[%s][ORCHESTRATOR] Scout pipeline avviata", run_id)
+
+    try:
+        from agents.scout import run_scout_20min
+        micro_cards = await run_scout_20min(run_id)
+        duration = round(time.time() - start, 1)
+
+        database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+            "event": "scout_pipeline_complete",
+            "micro_cards": len(micro_cards),
+            "duration_seconds": duration,
+        }))
+
+        return {
+            "run_id": run_id,
+            "architecture": "scout-only",
+            "cards": len(micro_cards),
+            "duration_seconds": duration,
+        }
+    except Exception as e:
+        logger.error("[%s][ORCHESTRATOR] Scout pipeline fallita: %s", run_id, e)
+        return {
+            "run_id": run_id,
+            "architecture": "scout-only",
+            "error": str(e),
+            "duration_seconds": round(time.time() - start, 1),
+        }
+
+
+# ============================================================
+# Pipeline legacy FULL (test manuali / backward compatibility)
+# ============================================================
+
+async def run_full_pipeline(run_id: str | None = None) -> dict:
+    """
+    Pipeline completa forzata (ignora throttle Watchdog).
+    Usata per il pulsante "Esegui Manuale" nel frontend.
+    """
+    if not run_id:
+        run_id = str(uuid4())
+
+    start = time.time()
+    logger.info("[%s][ORCHESTRATOR] Pipeline FULL manuale avviata", run_id)
 
     database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
         "event": "pipeline_start",
         "architecture": "multi-agent",
-        "mode": "full",
+        "mode": "full_manual",
     }))
 
-    result = {
-        "run_id": run_id,
-        "architecture": "multi-agent",
-        "mode": "full",
-        "phases": {},
-    }
+    result = {"run_id": run_id, "architecture": "multi-agent", "mode": "full", "phases": {}}
 
-    # ─── FASE 1: Scout 20-min ───
+    # 1. Scout
     try:
         from agents.scout import run_scout_20min
         micro_cards = await run_scout_20min(run_id)
-        result["phases"]["scout"] = {
-            "status": "ok",
-            "cards": len(micro_cards),
-        }
+        result["phases"]["scout"] = {"status": "ok", "cards": len(micro_cards)}
     except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Scout fallito: %s", run_id, e, exc_info=True)
+        logger.error("[%s] Scout fallito: %s", run_id, e)
         micro_cards = []
         result["phases"]["scout"] = {"status": "error", "error": str(e)}
 
-    # ─── FASE 2: Identifica tickers da analizzare ───
+    # 2. Tickers
     hot_tickers = _extract_hot_tickers(micro_cards)
-
-    # Arricchisci con daily snapshots hot tickers
-    try:
-        from agents.scout import get_latest_daily_snapshots
-        dailies = get_latest_daily_snapshots(database, n=1)
-        if dailies:
-            for d in dailies:
-                for t in d.get("hot_tickers", []):
-                    if t not in hot_tickers:
-                        hot_tickers.append(t)
-    except Exception:
-        pass
-
-    # Fallback: watchlist default
     if not hot_tickers:
-        hot_tickers = ["SPY", "XOM", "LMT", "GLD", "QQQ"]
+        hot_tickers = _get_default_tickers()
+    hot_tickers = hot_tickers[:6]
 
-    # Limita a 8 tickers
-    hot_tickers = hot_tickers[:8]
-
-    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
-        "event": "tickers_identified",
-        "tickers": hot_tickers,
-    }))
-
-    # ─── FASE 3: Technical Worker ───
+    # 3. Technical
     try:
         from agents.technical import run_technical_analysis
         tech_report = await run_technical_analysis(run_id, hot_tickers)
@@ -96,15 +210,11 @@ async def run_full_pipeline(run_id: str | None = None) -> dict:
             "analyses": len(tech_report.get("analyses", [])),
         }
     except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Technical Worker fallito: %s", run_id, e, exc_info=True)
-        tech_report = {
-            "analyses": [],
-            "engine": "none",
-            "summary": f"Technical analysis failed: {e}",
-        }
+        logger.error("[%s] Technical fallito: %s", run_id, e)
+        tech_report = {"analyses": [], "engine": "none", "summary": str(e)}
         result["phases"]["technical"] = {"status": "error", "error": str(e)}
 
-    # ─── FASE 4: Decision Agent ───
+    # 4. Decision
     try:
         from agents.decision import run_decision_agent
         decision_result = await run_decision_agent(run_id, tech_report)
@@ -113,62 +223,58 @@ async def run_full_pipeline(run_id: str | None = None) -> dict:
             "decision": decision_result.get("decision", "UNKNOWN"),
             "trades": len(decision_result.get("trades", [])),
             "model": decision_result.get("model", "unknown"),
-            "iterations": decision_result.get("iterations", 0),
         }
         result["final_response"] = decision_result.get("final_response", "")
     except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Decision Agent fallito: %s", run_id, e, exc_info=True)
+        logger.error("[%s] Decision fallito: %s", run_id, e)
         result["phases"]["decision"] = {"status": "error", "error": str(e)}
-        result["final_response"] = f"Decision Agent error: {e}"
+        result["final_response"] = f"Decision error: {e}"
 
-    # ─── Finalizzazione ───
-    duration = time.time() - start
-    result["duration_seconds"] = round(duration, 1)
+    duration = round(time.time() - start, 1)
+    result["duration_seconds"] = duration
 
     database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
         "event": "pipeline_complete",
-        "duration_seconds": result["duration_seconds"],
+        "duration_seconds": duration,
         "phases": result["phases"],
     }, default=str))
 
-    logger.info("[%s][ORCHESTRATOR] === Pipeline FULL completata in %.1fs ===",
-                run_id, duration)
+    logger.info("[%s][ORCHESTRATOR] Pipeline FULL completata in %.1fs", run_id, duration)
     return result
 
 
+# ============================================================
+# Scout-only (legacy per weekend/pre-market)
+# ============================================================
+
 async def run_scout_only(run_id: str | None = None) -> dict:
-    """
-    Pipeline per weekend/pre-market: solo Scout (intelligence gathering).
-    Non fa analisi tecnica ne' decisioni di trading.
-    """
-    if not run_id:
-        run_id = str(uuid4())
+    """Alias di run_scout_pipeline per compatibilità con agent.py."""
+    return await run_scout_pipeline(run_id)
 
-    start = time.time()
-    logger.info("[%s][ORCHESTRATOR] Scout-only pipeline avviata", run_id)
 
+# ============================================================
+# Helpers
+# ============================================================
+
+def _get_default_tickers() -> list[str]:
+    """Tickers di default se Watchdog non ne specifica."""
     try:
-        from agents.scout import run_scout_20min
-        micro_cards = await run_scout_20min(run_id)
-        duration = time.time() - start
-        return {
-            "run_id": run_id,
-            "architecture": "scout-only",
-            "cards": len(micro_cards),
-            "duration_seconds": round(duration, 1),
-        }
-    except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Scout-only fallito: %s", run_id, e)
-        return {
-            "run_id": run_id,
-            "architecture": "scout-only",
-            "error": str(e),
-            "duration_seconds": round(time.time() - start, 1),
-        }
+        import database as _db
+        watchlist = _db.get_setting("watchlist")
+        if watchlist:
+            import json as _json
+            wl = _json.loads(watchlist)
+            tickers = []
+            for tickers_list in wl.values():
+                tickers.extend(tickers_list[:2])
+            return tickers[:6]
+    except Exception:
+        pass
+    return ["SPY", "XOM", "LMT", "GLD", "QQQ", "EEM"]
 
 
 def _extract_hot_tickers(micro_cards: list[dict]) -> list[str]:
-    """Estrae tickers menzionati nelle micro-schede dello Scout."""
+    """Estrae tickers dalle micro-schede Scout."""
     tickers = []
     seen = set()
     for card in micro_cards:

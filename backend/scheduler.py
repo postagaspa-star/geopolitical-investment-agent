@@ -114,10 +114,60 @@ def get_next_market_open():
 # Job principale dello scheduler
 # ============================================================
 
+async def _watchdog_job():
+    """
+    Job Watchdog — ogni 5 minuti durante ore di mercato.
+    Ultra-leggero: DeepSeek-V3 decide se triggerare Technical+Decision.
+    Se trigger=False, costo quasi zero. Se trigger=True, avvia pipeline completa.
+    """
+    global current_mode
+
+    if not is_market_open():
+        return  # Watchdog attivo solo durante ore di mercato
+
+    current_mode = "full"
+    try:
+        from uuid import uuid4
+        from agents.orchestrator import run_watchdog_pipeline
+        run_id = str(uuid4())
+        result = await run_watchdog_pipeline(run_id=run_id)
+        if result.get("triggered"):
+            logger.info("Watchdog TRIGGER: urgency=%d, decision=%s",
+                        result.get("urgency", 0), result.get("decision", "?"))
+        else:
+            logger.debug("Watchdog: no trigger (reason='%s')", result.get("reason", ""))
+    except Exception as e:
+        logger.error("Errore nel job Watchdog: %s", e, exc_info=True)
+
+
+async def _scout_hourly_job():
+    """
+    Job Scout — ogni ora, sempre (anche weekend e pre-market).
+    Haiku 3 raccoglie intelligence e popola intelligence_buffer.
+    """
+    global current_mode
+
+    mode = get_current_mode()
+    current_mode = mode
+
+    try:
+        from uuid import uuid4
+        from agents.orchestrator import run_scout_pipeline
+        run_id = str(uuid4())
+        result = await run_scout_pipeline(run_id=run_id)
+        logger.info("Scout orario completato: %d micro-schede", result.get("cards", 0))
+
+        # Pulizia periodica
+        database.cleanup_old_processed_articles(days=7)
+
+    except Exception as e:
+        logger.error("Errore nel job Scout orario: %s", e, exc_info=True)
+
+
 async def _scheduled_agent_job():
     """
-    Job principale eseguito ogni 20 minuti.
-    Determina la modalita' e esegue l'agente di conseguenza.
+    Job legacy — mantenuto per compatibilità ma NON più usato dallo scheduler principale.
+    Sostituito da _watchdog_job (ogni 5 min) + _scout_hourly_job (ogni ora).
     """
     global current_mode
 
@@ -125,25 +175,38 @@ async def _scheduled_agent_job():
         mode = get_current_mode()
         current_mode = mode
 
-        logger.info("Scheduler job avviato - Modalita': %s", mode.upper())
+        logger.info("Scheduler job legacy avviato - Modalita': %s", mode.upper())
 
-        # Importazione ritardata per evitare dipendenze circolari
         from agent import run_agent
-
-        # Pulizia periodica degli articoli vecchi
         database.cleanup_old_processed_articles(days=7)
-
-        # Esegui l'agente con la modalita' appropriata
         await run_agent(mode=mode)
 
-        logger.info("Scheduler job completato - Modalita': %s", mode.upper())
+        logger.info("Scheduler job legacy completato - Modalita': %s", mode.upper())
 
     except Exception as e:
         logger.error("Errore nel job schedulato: %s", e, exc_info=True)
 
 
+def _sync_watchdog_wrapper():
+    """Wrapper sincrono per il job Watchdog (ogni 5 min)."""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_watchdog_job())
+    except Exception as e:
+        logger.error("Errore avvio Watchdog task: %s", e, exc_info=True)
+
+
+def _sync_scout_hourly_wrapper():
+    """Wrapper sincrono per il job Scout orario."""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_scout_hourly_job())
+    except Exception as e:
+        logger.error("Errore avvio Scout orario task: %s", e, exc_info=True)
+
+
 def _sync_job_wrapper():
-    """Wrapper sincrono che avvia il job asincrono nel loop corrente."""
+    """Wrapper sincrono legacy — non più usato dallo scheduler principale."""
     try:
         loop = asyncio.get_event_loop()
         loop.create_task(_scheduled_agent_job())
@@ -246,12 +309,23 @@ def start_scheduler() -> AsyncIOScheduler:
 
     _scheduler = AsyncIOScheduler()
 
+    # ── Watchdog: ogni 5 minuti (market hours only, check interno) ──
     _scheduler.add_job(
-        _sync_job_wrapper,
+        _sync_watchdog_wrapper,
         trigger="interval",
-        minutes=interval_minutes,
-        id="agent_continuous_job",
-        name="Monitoraggio continuo agente geopolitico",
+        minutes=5,
+        id="watchdog_job",
+        name="Watchdog 5min (DeepSeek-V3 trigger filter)",
+        replace_existing=True,
+    )
+
+    # ── Scout: ogni ora, 24/7 (Haiku 3) ──
+    _scheduler.add_job(
+        _sync_scout_hourly_wrapper,
+        trigger="interval",
+        minutes=60,
+        id="scout_hourly_job",
+        name="Scout orario (Haiku 3 intelligence buffer)",
         replace_existing=True,
     )
 
@@ -339,10 +413,10 @@ def get_scheduler_info() -> dict:
     }
 
     if _scheduler and running:
-        job = _scheduler.get_job("agent_continuous_job")
-        if job:
-            if job.next_run_time:
-                info["next_run"] = job.next_run_time.isoformat()
+        # Mostra prossimo run del Watchdog (ogni 5 min)
+        job = _scheduler.get_job("watchdog_job")
+        if job and job.next_run_time:
+            info["next_run"] = job.next_run_time.isoformat()
 
     # Prossima apertura mercato (se chiuso)
     if not market_open:

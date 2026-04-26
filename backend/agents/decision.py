@@ -1,11 +1,13 @@
 """
-Decision Agent — Opus 4.6
+Decision Agent — Claude Sonnet 4.5
 Orchestra gerarchica per decisioni di trading ad alto rischio.
+Attivato solo quando il Watchdog rileva un segnale significativo (urgency >= 5).
+Throttle: max 1 run per ora per rispettare il budget mensile (~$13-14/mese).
 
 Fasi:
-  A: Ingestione contesto globale (Weekly Matrix + Daily Snapshots + Buffer recente)
-  B: Valutazione strategica Si/No (con Extended Thinking)
-  C: Identificazione + Validazione tecnica + Esecuzione trade
+  A: Ingestione contesto (Weekly Matrix + 1 Daily Snapshot + Buffer recente)
+  B: Valutazione strategica (Sonnet 4.5 — context compresso max 6K token)
+  C: Esecuzione trade o motivazione no-trade
 """
 
 import asyncio
@@ -20,8 +22,10 @@ from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
 
-OPUS_MODEL = "claude-opus-4-20250514"
-SONNET_MODEL = "claude-sonnet-4-20250514"  # Fallback se Opus non disponibile
+# Claude Sonnet 4.5 — decisioni di trading (max 1/ora, ~$13/mese)
+# NOTA: verifica che questo ID sia corretto sulla tua dashboard Anthropic
+DECISION_MODEL = "claude-sonnet-4-5-20250929"
+DECISION_MODEL_FALLBACK = "claude-sonnet-4-20250514"  # Fallback a Sonnet 4 se 4.5 non disponibile
 
 # ============================================================
 # System Prompts
@@ -75,9 +79,8 @@ def _get_client() -> Anthropic:
 
 
 def _select_model() -> str:
-    """Seleziona il modello: Opus 4.6 se disponibile, altrimenti Sonnet 4.6."""
-    # Prova Opus, se fallisce usa Sonnet
-    return OPUS_MODEL
+    """Seleziona il modello Decision: Sonnet 4.5 con fallback a Sonnet 4."""
+    return DECISION_MODEL
 
 
 # ============================================================
@@ -329,13 +332,14 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
             messages=messages,
         )
         used_model = model
-    except Exception as opus_err:
-        if model == OPUS_MODEL:
-            logger.warning("[%s][DECISION] Opus non disponibile (%s), fallback Sonnet", run_id, opus_err)
-            model = SONNET_MODEL
+    except Exception as model_err:
+        if model == DECISION_MODEL:
+            logger.warning("[%s][DECISION] %s non disponibile (%s), fallback a %s",
+                           run_id, DECISION_MODEL, model_err, DECISION_MODEL_FALLBACK)
+            model = DECISION_MODEL_FALLBACK
             response = client.messages.create(
                 model=model,
-                max_tokens=16000,
+                max_tokens=8192,
                 system=DECISION_SYSTEM_PROMPT,
                 tools=DECISION_TOOLS,
                 messages=messages,

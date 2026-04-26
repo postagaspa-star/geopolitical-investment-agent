@@ -18,7 +18,10 @@ from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
 
-SCOUT_MODEL = "claude-sonnet-4-20250514"
+# Claude Haiku 3 — ultra-economico per raccolta intelligence 24/7
+# Costo stimato: ~$2.25/mese con run orari
+# Alternativa più capace: claude-haiku-3-5-20241022 (~$7/mese)
+SCOUT_MODEL = "claude-3-haiku-20240307"
 
 # ============================================================
 # Prompt Templates
