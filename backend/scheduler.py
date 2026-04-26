@@ -140,6 +140,28 @@ async def _watchdog_job():
         logger.error("Errore nel job Watchdog: %s", e, exc_info=True)
 
 
+async def _price_polling_job():
+    """
+    Job Price Polling — ogni 60 secondi.
+    Aggiorna price_quotes con prezzi yfinance per posizioni aperte + watchlist.
+    Frequenza ridotta a ogni 5 min se mercati chiusi (per snapshot di chiusura).
+    """
+    try:
+        from price_polling import update_price_cache
+        await update_price_cache()
+    except Exception as e:
+        logger.error("Errore Price Polling: %s", e, exc_info=False)
+
+
+def _sync_price_polling_wrapper():
+    """Wrapper sincrono per il job Price Polling."""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_price_polling_job())
+    except Exception as e:
+        logger.error("Errore avvio Price Polling task: %s", e)
+
+
 async def _scout_hourly_job():
     """
     Job Scout — ogni ora, sempre (anche weekend e pre-market).
@@ -308,6 +330,16 @@ def start_scheduler() -> AsyncIOScheduler:
     logger.info("Avvio scheduler autonomo (intervallo: %d minuti)...", interval_minutes)
 
     _scheduler = AsyncIOScheduler()
+
+    # ── Price Polling: ogni 60 secondi (yfinance → Supabase) ──
+    _scheduler.add_job(
+        _sync_price_polling_wrapper,
+        trigger="interval",
+        seconds=60,
+        id="price_polling_job",
+        name="Price Polling 60s (yfinance cache)",
+        replace_existing=True,
+    )
 
     # ── Watchdog: ogni 5 minuti (market hours only, check interno) ──
     _scheduler.add_job(

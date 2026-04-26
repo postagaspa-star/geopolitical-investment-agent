@@ -112,12 +112,61 @@ async def get_portfolio():
 
 @app.get("/api/positions")
 async def get_positions():
-    """Restituisce le posizioni aperte correnti."""
+    """
+    Restituisce le posizioni aperte con prezzi correnti dalla cache (price_quotes).
+    Se la cache è fresca (<2 min), sovrascrive current_price e ricalcola unrealized_pnl.
+    """
     try:
-        positions = database.get_positions()
+        positions = database.get_positions() or []
+        if not positions:
+            return positions
+
+        # Arricchisci con prezzi dalla cache
+        try:
+            from price_polling import get_cached_prices_bulk
+            tickers = [p.get("ticker") for p in positions if p.get("ticker")]
+            cached = get_cached_prices_bulk(tickers, max_age_seconds=120)
+
+            for p in positions:
+                t = p.get("ticker")
+                if t and t in cached:
+                    quote = cached[t]
+                    p["current_price"] = quote["price"]
+                    qty = p.get("quantity", 0)
+                    avg = p.get("avg_buy_price", 0)
+                    if qty and avg:
+                        p["unrealized_pnl"] = round((quote["price"] - avg) * qty, 2)
+                    p["price_age_seconds"] = quote["age_seconds"]
+                    p["price_change_pct"] = quote.get("change_pct", 0)
+        except Exception as cache_err:
+            logger.debug("Cache prezzi non disponibile: %s", cache_err)
+
         return positions
     except Exception as e:
         logger.error(f"Errore nel recupero delle posizioni: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
+@app.get("/api/prices/quotes")
+async def get_price_quotes(tickers: str = Query(default="")):
+    """
+    Restituisce gli ultimi prezzi cached per i ticker richiesti.
+    Esempio: /api/prices/quotes?tickers=SPY,XOM,LMT
+    Senza parametro: ritorna tutti i ticker presenti in cache.
+    """
+    try:
+        from price_polling import get_cached_prices_bulk
+        if tickers:
+            ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+            return get_cached_prices_bulk(ticker_list, max_age_seconds=300)
+        else:
+            client = database.get_client()
+            if not client:
+                return {}
+            rows = client.table("price_quotes").select("*").execute()
+            return {r["ticker"]: r for r in (rows.data or [])}
+    except Exception as e:
+        logger.error(f"Errore /api/prices/quotes: {e}", exc_info=True)
         return {"error": str(e)}
 
 

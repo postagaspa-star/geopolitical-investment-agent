@@ -140,26 +140,25 @@ def _get_recent_headlines(database, minutes: int = 10) -> list[str]:
 
 
 async def _get_price_snapshot() -> dict:
-    """Snapshot rapido prezzi: top movers da yfinance."""
+    """
+    Snapshot rapido prezzi dalla cache price_quotes (aggiornata ogni 60s).
+    Molto più veloce che chiamare yfinance ogni 5 min.
+    """
     snapshot = {}
     try:
-        import yfinance as yf
-        tickers = ["SPY", "QQQ", "XOM", "LMT", "GLD", "VIX"]
-        data = yf.download(tickers, period="1d", interval="5m",
-                           progress=False, auto_adjust=True)
-        if data is not None and not data.empty:
-            closes = data["Close"].iloc[-2:] if len(data) >= 2 else None
-            if closes is not None and len(closes) >= 2:
-                for t in tickers:
-                    if t in closes.columns:
-                        prev = float(closes[t].iloc[-2])
-                        curr = float(closes[t].iloc[-1])
-                        if prev > 0:
-                            pct = (curr - prev) / prev * 100
-                            snapshot[t] = {"price": round(curr, 2), "chg_pct": round(pct, 3)}
+        from price_polling import get_cached_prices_bulk
+        tickers = ["SPY", "QQQ", "XOM", "LMT", "GLD", "VIX",
+                   "AAPL", "MSFT", "NVDA", "TLT"]
+        # Cache fresca = max 5 min (Watchdog tolera dati leggermente stale)
+        cached = await asyncio.to_thread(get_cached_prices_bulk, tickers, 300)
+        for t, q in cached.items():
+            snapshot[t] = {
+                "price": round(q["price"], 2),
+                "chg_pct": round(q.get("change_pct", 0), 3),
+                "age_s": q.get("age_seconds", 0),
+            }
     except Exception as e:
-        logger.debug("Watchdog price snapshot error: %s", e)
-        # Fallback: dati vuoti — lascio la decisione alle headlines
+        logger.debug("Watchdog cache snapshot error: %s", e)
     return snapshot
 
 
