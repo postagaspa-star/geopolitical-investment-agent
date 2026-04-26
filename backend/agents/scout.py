@@ -362,7 +362,7 @@ def _save_checkpoint(run_id: str, agent_name: str, status: str, data: dict):
     """Salva checkpoint su Supabase per Render resilience."""
     try:
         import database
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             client.table("agent_checkpoints").upsert({
                 "run_id": run_id,
@@ -380,7 +380,7 @@ def _write_intelligence_buffer(database, run_id: str, source_type: str,
                                 sentiment_score: float):
     """Scrive una micro-scheda nell'intelligence_buffer."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             client.table("intelligence_buffer").insert({
                 "source_type": source_type,
@@ -404,7 +404,7 @@ def _write_intelligence_buffer(database, run_id: str, source_type: str,
 def _get_buffer_last_24h(database) -> list[dict]:
     """Recupera record intelligence_buffer delle ultime 24 ore."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
             result = client.table("intelligence_buffer") \
@@ -422,7 +422,7 @@ def _get_buffer_last_24h(database) -> list[dict]:
 def _cleanup_old_buffer(database, hours: int = 48):
     """Pulisce record buffer piu' vecchi di N ore."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
             client.table("intelligence_buffer") \
@@ -436,7 +436,7 @@ def _cleanup_old_buffer(database, hours: int = 48):
 def _save_daily_snapshot(database, date_str: str, snapshot: dict, buffer_count: int):
     """Salva daily snapshot su Supabase."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             client.table("daily_snapshots").upsert({
                 "date": date_str,
@@ -459,7 +459,7 @@ def _save_daily_snapshot(database, date_str: str, snapshot: dict, buffer_count: 
 def _get_last_n_daily_snapshots(database, n: int = 7) -> list[dict]:
     """Recupera ultime N daily snapshots."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             result = client.table("daily_snapshots") \
                 .select("*") \
@@ -475,7 +475,7 @@ def _get_last_n_daily_snapshots(database, n: int = 7) -> list[dict]:
 def _save_weekly_matrix(database, week_id: str, matrix: dict, dailies_used: int):
     """Salva weekly matrix su Supabase."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             client.table("weekly_matrix").upsert({
                 "week_id": week_id,
@@ -491,7 +491,7 @@ def _save_weekly_matrix(database, week_id: str, matrix: dict, dailies_used: int)
 def get_latest_weekly_matrix(database) -> dict | None:
     """Recupera l'ultima weekly matrix disponibile."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             result = client.table("weekly_matrix") \
                 .select("*") \
@@ -512,7 +512,7 @@ def get_latest_daily_snapshots(database, n: int = 3) -> list[dict]:
 def get_recent_buffer(database, minutes: int = 40) -> list[dict]:
     """Recupera intelligence buffer degli ultimi N minuti."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
             result = client.table("intelligence_buffer") \

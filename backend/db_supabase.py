@@ -31,6 +31,11 @@ def _get_client() -> Client:
     return _client
 
 
+def get_client() -> Client:
+    """Public alias for _get_client — used by agents/ modules via `database.get_client()`."""
+    return _get_client()
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

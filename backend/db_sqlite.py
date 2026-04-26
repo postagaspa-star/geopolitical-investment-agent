@@ -374,3 +374,8 @@ def get_portfolio_history(days=30):
             "WHERE timestamp >= datetime('now', ?) ORDER BY timestamp ASC",
             (f'-{days} days',)).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_client():
+    """SQLite stub — v4 tables not supported locally. Returns None."""
+    return None

@@ -518,7 +518,7 @@ def _save_high_risk_trade(database, run_id, ticker, action, price, qty,
                            logic_chain, stop_loss, take_profit, confidence):
     """Salva trade in trades_high_risk su Supabase."""
     try:
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             client.table("trades_high_risk").insert({
                 "ticker": ticker,
@@ -540,7 +540,7 @@ def _save_checkpoint(run_id: str, agent_name: str, status: str, data: dict):
     """Salva checkpoint per Render resilience."""
     try:
         import database
-        client = database._get_client() if hasattr(database, '_get_client') else None
+        client = database.get_client()
         if client:
             client.table("agent_checkpoints").upsert({
                 "run_id": run_id,
