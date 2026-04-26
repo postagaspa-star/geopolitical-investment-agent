@@ -1,21 +1,45 @@
 """
-Price Polling Service — yfinance → Supabase ogni 60 secondi.
+Price Polling Service — Massive API (primary) + yfinance (fallback) → Supabase ogni 60s.
 
 Aggiorna la tabella `price_quotes` con i prezzi correnti delle posizioni aperte
 e dei ticker della watchlist. Mantiene anche uno storico minuto-per-minuto
 in `price_history` per analisi e dashboard.
 
-Costo: $0 (yfinance gratis).
-Limite: dati USA con delay 15-20 min (limite di yfinance, non aggirabile gratis).
+Provider:
+  1. Massive API (https://massive.com) — se MASSIVE_API_KEY env var presente
+     - /v2/aggs/ticker/{ticker}/range/1/minute/{from}/{to} per current price
+     - /v2/aggs/ticker/{ticker}/prev per previous close
+     - Free tier: dati con delay ~15 min (US stocks)
+  2. yfinance — fallback se Massive non disponibile o errore
+
+Costo: $0 (entrambi gratuiti).
 """
 
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timezone, timedelta
 from typing import Iterable
 
+import aiohttp
+
 logger = logging.getLogger(__name__)
+
+MASSIVE_BASE_URL = "https://api.massive.com"
+MASSIVE_TIMEOUT = 10  # secondi
+
+
+def _get_massive_key() -> str:
+    """Recupera la API key di Massive da env var o database settings."""
+    key = os.environ.get("MASSIVE_API_KEY", "")
+    if not key:
+        try:
+            import database as _db
+            key = _db.get_setting("massive_api_key", "") or ""
+        except Exception:
+            pass
+    return key
 
 # Watchlist principale per polling continuo (max 25 ticker per non saturare yfinance)
 DEFAULT_WATCHLIST_TICKERS = [
@@ -65,6 +89,92 @@ def _collect_polling_tickers() -> list[str]:
 
     # Hard cap a 30 ticker
     return sorted(tickers)[:30]
+
+
+async def _fetch_massive_one(session, ticker: str, api_key: str) -> dict | None:
+    """
+    Chiama Massive API per un singolo ticker:
+    - /v2/aggs/ticker/{ticker}/range/1/minute/{from}/{to}?limit=1&sort=desc → ultima candela 1-min
+    - /v2/aggs/ticker/{ticker}/prev → previous close
+    Le 2 call sono lanciate in parallelo.
+    """
+    today = datetime.now(timezone.utc).date()
+    # Range di 4 giorni indietro per gestire weekend/festività
+    from_date = (today - timedelta(days=4)).isoformat()
+    to_date = today.isoformat()
+
+    url_current = f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker}/range/1/minute/{from_date}/{to_date}"
+    params_current = {"adjusted": "true", "sort": "desc", "limit": 1, "apiKey": api_key}
+
+    url_prev = f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker}/prev"
+    params_prev = {"adjusted": "true", "apiKey": api_key}
+
+    async def _get(url, params):
+        try:
+            async with session.get(url, params=params,
+                                   timeout=aiohttp.ClientTimeout(total=MASSIVE_TIMEOUT)) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+        except Exception:
+            return None
+
+    current_data, prev_data = await asyncio.gather(_get(url_current, params_current),
+                                                    _get(url_prev, params_prev))
+
+    if not current_data or not (current_data.get("results")):
+        return None
+
+    bar = current_data["results"][0]
+    price = float(bar.get("c") or 0)
+    if price <= 0:
+        return None
+
+    prev_close = price
+    if prev_data and prev_data.get("results"):
+        try:
+            prev_close = float(prev_data["results"][0].get("c") or price)
+        except Exception:
+            pass
+
+    change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
+    timestamp_ms = bar.get("t", 0)
+    bar_ts = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat() if timestamp_ms else datetime.now(timezone.utc).isoformat()
+
+    return {
+        "price": round(price, 4),
+        "prev_close": round(prev_close, 4),
+        "change_pct": round(change_pct, 4),
+        "volume": int(bar.get("v") or 0),
+        "day_high": round(float(bar.get("h") or price), 4),
+        "day_low": round(float(bar.get("l") or price), 4),
+        "timestamp": bar_ts,
+    }
+
+
+async def _fetch_massive_quotes(tickers: list[str], api_key: str) -> dict[str, dict]:
+    """Batch parallel fetch via Massive API. Ritorna {ticker: quote}."""
+    quotes: dict[str, dict] = {}
+    if not tickers or not api_key:
+        return quotes
+
+    # Concurrency cap a 10 per non saturare il free tier (~5 req/sec)
+    sem = asyncio.Semaphore(10)
+
+    async def _fetch_with_sem(session, t):
+        async with sem:
+            return t, await _fetch_massive_one(session, t, api_key)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            results = await asyncio.gather(*[_fetch_with_sem(session, t) for t in tickers])
+            for ticker, q in results:
+                if q is not None:
+                    quotes[ticker] = q
+    except Exception as e:
+        logger.warning("Massive batch error: %s", e)
+
+    return quotes
 
 
 def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
@@ -142,7 +252,7 @@ def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
     return quotes
 
 
-def _upsert_quotes(quotes: dict[str, dict], market_state: str = "REGULAR"):
+def _upsert_quotes(quotes: dict[str, dict], market_state: str = "REGULAR", source: str = "yfinance"):
     """Upsert dei prezzi correnti in price_quotes + insert in price_history."""
     if not quotes:
         return 0, 0
@@ -171,7 +281,7 @@ def _upsert_quotes(quotes: dict[str, dict], market_state: str = "REGULAR"):
                 "day_low": q.get("day_low"),
                 "market_state": market_state,
                 "updated_at": now_iso,
-                "source": "yfinance",
+                "source": source,
             })
         if rows_quotes:
             try:
@@ -230,20 +340,36 @@ async def update_price_cache() -> dict:
     except Exception:
         market_state = "UNKNOWN"
 
-    # yfinance è sincrono — esegui in thread pool per non bloccare event loop
-    quotes = await asyncio.to_thread(_fetch_yfinance_quotes, tickers)
+    # 1. Provider primario: Massive API (se key configurata)
+    quotes = {}
+    source_used = "yfinance"
+    massive_key = _get_massive_key()
+    if massive_key:
+        try:
+            quotes = await _fetch_massive_quotes(tickers, massive_key)
+            if quotes:
+                source_used = "massive"
+        except Exception as e:
+            logger.warning("Massive provider failed: %s — fallback yfinance", e)
+            quotes = {}
 
-    # Upsert in Supabase (anche questo sincrono → thread)
-    qw, hw = await asyncio.to_thread(_upsert_quotes, quotes, market_state)
+    # 2. Fallback yfinance se Massive vuoto/non disponibile
+    if not quotes:
+        quotes = await asyncio.to_thread(_fetch_yfinance_quotes, tickers)
+        source_used = "yfinance"
+
+    # 3. Upsert in Supabase (sincrono → thread)
+    qw, hw = await asyncio.to_thread(_upsert_quotes, quotes, market_state, source_used)
 
     duration = round(time.time() - start, 2)
-    logger.info("Price polling: %d tickers, %d quotes salvate, %d storia (%.1fs)",
-                len(tickers), qw, hw, duration)
+    logger.info("Price polling [%s]: %d tickers richiesti, %d quotes salvate, %d storia (%.1fs)",
+                source_used, len(tickers), qw, hw, duration)
 
     return {
         "tickers": len(tickers),
         "quotes_written": qw,
         "history_written": hw,
+        "source": source_used,
         "duration_seconds": duration,
         "market_state": market_state,
     }

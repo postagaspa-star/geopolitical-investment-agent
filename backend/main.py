@@ -730,6 +730,45 @@ async def test_finnhub():
         return {"status": "error", "message": str(e)}
 
 
+@app.post("/api/settings/massive-key")
+async def set_massive_key(payload: dict):
+    """Salva/aggiorna la API key di Massive (cifrata in DB Supabase)."""
+    key = (payload.get("api_key") or "").strip()
+    if not key:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "api_key vuota"})
+    try:
+        database.set_setting("massive_api_key", key)
+        return {"status": "ok", "message": "Massive API key salvata"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@app.get("/api/settings/test-massive")
+async def test_massive():
+    """Testa la connessione all'API Massive con la key configurata."""
+    key = os.environ.get("MASSIVE_API_KEY", "")
+    if not key:
+        try:
+            key = database.get_setting("massive_api_key", "") or ""
+        except Exception:
+            pass
+    if not key:
+        return {"status": "error", "message": "MASSIVE_API_KEY non configurata"}
+    try:
+        import aiohttp
+        url = f"https://api.massive.com/v2/aggs/ticker/AAPL/prev?adjusted=true&apiKey={key}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                body = await resp.json()
+                if resp.status == 200 and body.get("status") == "OK":
+                    return {"status": "ok", "endpoint": "/v2/aggs/ticker/AAPL/prev",
+                            "results_count": body.get("resultsCount", 0)}
+                return {"status": "error",
+                        "message": f"HTTP {resp.status}: {body.get('message', 'unknown')}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 @app.get("/api/settings/test-deepseek")
 async def test_deepseek():
     """Testa la connessione a DeepSeek API."""
