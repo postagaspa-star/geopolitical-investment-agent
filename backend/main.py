@@ -559,6 +559,97 @@ async def register_clawstreet_bot(payload: ClawStreetRegisterPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/api/clawstreet/set-credentials")
+async def set_clawstreet_credentials(payload: dict):
+    """
+    Salva manualmente le credenziali di un bot ClawStreet già esistente
+    (recuperate dall'utente — tipicamente quando ha registrato il bot in
+    precedenza e ha ancora salvato bot_id + api_key).
+    """
+    bot_id = (payload.get("bot_id") or "").strip()
+    api_key = (payload.get("api_key") or "").strip()
+    bot_name = (payload.get("bot_name") or "").strip()
+    bot_ticker = (payload.get("bot_ticker") or "").strip()
+
+    if not bot_id or not api_key:
+        return JSONResponse(status_code=400, content={
+            "status": "error", "message": "bot_id e api_key sono obbligatori"
+        })
+
+    # Verifica le credenziali con ClawStreet prima di salvare
+    try:
+        import aiohttp
+        url = f"https://www.clawstreet.io/api/bots/{bot_id}/balance"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers={"Authorization": f"Bearer {api_key}"},
+                                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status not in (200, 201):
+                    body = await resp.text()
+                    return JSONResponse(status_code=400, content={
+                        "status": "error",
+                        "message": f"Credenziali non valide (HTTP {resp.status}): {body[:200]}"
+                    })
+                bal_data = await resp.json()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "status": "error", "message": f"Errore verifica: {e}"
+        })
+
+    # Salva nel DB
+    database.set_setting("clawstreet_bot_id", bot_id)
+    database.set_setting("clawstreet_api_key", api_key)
+    if bot_name:
+        database.set_setting("clawstreet_bot_name", bot_name)
+    if bot_ticker:
+        database.set_setting("clawstreet_bot_ticker", bot_ticker)
+    return {"status": "ok", "bot_id": bot_id, "balance_data": bal_data}
+
+
+@app.post("/api/clawstreet/mirror-historical-trades")
+async def mirror_historical_trades(limit: int = Query(default=100, ge=1, le=1000)):
+    """
+    Replica tutti i trade già eseguiti nel paper trading interno
+    sul bot ClawStreet configurato. Utile per sincronizzare lo storico.
+    """
+    bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
+    api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
+    if not bot_id or not api_key or bot_id == "GEO":
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "message": "Credenziali ClawStreet mancanti. Salva bot_id+api_key con /api/clawstreet/set-credentials prima.",
+        })
+
+    try:
+        import data_fetchers
+        trades = database.get_trades(limit=limit) or []
+        results = {"mirrored": 0, "skipped": 0, "failed": 0, "details": []}
+        for t in trades:
+            ticker = t.get("ticker", "")
+            action = (t.get("action") or "").lower()
+            qty = int(t.get("quantity") or 0)
+            reasoning = (t.get("final_decision") or t.get("geopolitical_reasoning") or
+                         t.get("technical_reasoning") or f"Historical trade {t.get('timestamp','')}")[:280]
+            if not ticker or action not in ("buy", "sell", "short", "cover") or qty <= 0:
+                results["skipped"] += 1
+                continue
+            mirror = await data_fetchers.mirror_trade_to_clawstreet(
+                bot_id=bot_id, api_key=api_key,
+                symbol=ticker, action=action, qty=qty, reasoning=reasoning,
+            )
+            if mirror.get("mirrored"):
+                results["mirrored"] += 1
+            else:
+                results["failed"] += 1
+            results["details"].append({
+                "ticker": ticker, "action": action, "qty": qty,
+                "result": "ok" if mirror.get("mirrored") else f"fail: {mirror.get('reason') or mirror.get('error') or mirror.get('status')}",
+            })
+        return {"status": "ok", **results}
+    except Exception as e:
+        logger.error(f"Errore mirror storico: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @app.post("/api/clawstreet/clear-credentials")
 async def clear_clawstreet_credentials():
     """
