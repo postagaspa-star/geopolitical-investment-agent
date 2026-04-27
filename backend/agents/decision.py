@@ -164,11 +164,21 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
             logger.info("[%s][DECISION] TRADE: %s %d %s (conf: %.0f%%, SL: %s)",
                         run_id, action, quantity, ticker, confidence, stop_loss)
 
-            # Ottieni prezzo corrente
-            loop = asyncio.get_event_loop()
-            price_data = await loop.run_in_executor(
-                None, data_fetchers.fetch_market_data, ticker, 5
-            )
+            # Ottieni prezzo corrente — preferisci la cache price_quotes (60s fresh)
+            # per evitare hit a yfinance ogni volta
+            try:
+                from price_polling import get_cached_prices_bulk
+                cached = get_cached_prices_bulk([ticker], max_age_seconds=120)
+                if cached.get(ticker):
+                    price_data = {"data": [{"close": cached[ticker]["price"]}]}
+                else:
+                    raise RuntimeError("not in cache")
+            except Exception:
+                # Fallback a yfinance via thread-pool
+                loop = asyncio.get_running_loop()
+                price_data = await loop.run_in_executor(
+                    None, data_fetchers.fetch_market_data, ticker, 5
+                )
             if not price_data.get("data"):
                 return json.dumps({"error": f"Impossibile ottenere prezzo per {ticker}"})
 
@@ -201,18 +211,38 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
                     "stop_loss": stop_loss, "take_profit": take_profit,
                 }, default=str))
 
-            # ClawStreet mirror
+            # ClawStreet mirror — log SEMPRE l'esito (era silente, causa di trade non specchiati)
             try:
                 cs_bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
                 cs_api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
                 if cs_bot_id and cs_api_key:
-                    await data_fetchers.mirror_trade_to_clawstreet(
+                    cs_result = await data_fetchers.mirror_trade_to_clawstreet(
                         bot_id=cs_bot_id, api_key=cs_api_key,
                         symbol=ticker, action=action, qty=quantity,
                         reasoning=logic_chain[:280]
                     )
-            except Exception:
-                pass
+                    database.insert_agent_log(run_id, "CLAWSTREET_MIRROR", json.dumps({
+                        "ticker": ticker, "action": action, "qty": quantity,
+                        "mirrored": cs_result.get("mirrored", False),
+                        "status": cs_result.get("status"),
+                        "response": (cs_result.get("response") or cs_result.get("error", ""))[:300],
+                    }, default=str))
+                else:
+                    database.insert_agent_log(run_id, "CLAWSTREET_MIRROR", json.dumps({
+                        "ticker": ticker, "action": action, "qty": quantity,
+                        "mirrored": False,
+                        "skipped": "credentials_missing",
+                    }))
+            except Exception as cs_exc:
+                logger.error("[%s][DECISION] ClawStreet mirror exception: %s", run_id, cs_exc, exc_info=True)
+                try:
+                    database.insert_agent_log(run_id, "CLAWSTREET_MIRROR", json.dumps({
+                        "ticker": ticker, "action": action, "qty": quantity,
+                        "mirrored": False,
+                        "error": str(cs_exc)[:300],
+                    }))
+                except Exception:
+                    pass
 
             return json.dumps({
                 "executed": True, "ticker": ticker, "action": action,

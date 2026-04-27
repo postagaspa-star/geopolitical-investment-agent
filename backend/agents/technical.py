@@ -148,7 +148,10 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
     import technical_analysis
     import pandas as pd
 
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
     market_data = await loop.run_in_executor(
         None, data_fetchers.fetch_market_data, ticker, period_days
     )

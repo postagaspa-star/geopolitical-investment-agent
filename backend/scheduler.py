@@ -7,7 +7,7 @@ all'orario e al giorno (weekend / pre-market / mercato aperto).
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -158,15 +158,6 @@ async def _price_polling_job():
         logger.error("Errore Price Polling: %s", e, exc_info=False)
 
 
-def _sync_price_polling_wrapper():
-    """Wrapper sincrono per il job Price Polling."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_price_polling_job())
-    except Exception as e:
-        logger.error("Errore avvio Price Polling task: %s", e)
-
-
 async def _scout_hourly_job():
     """
     Job Scout — ogni 20 minuti, sempre (24/7, anche weekend e fuori orario).
@@ -215,33 +206,6 @@ async def _scheduled_agent_job():
         logger.error("Errore nel job schedulato: %s", e, exc_info=True)
 
 
-def _sync_watchdog_wrapper():
-    """Wrapper sincrono per il job Watchdog (ogni 5 min)."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_watchdog_job())
-    except Exception as e:
-        logger.error("Errore avvio Watchdog task: %s", e, exc_info=True)
-
-
-def _sync_scout_hourly_wrapper():
-    """Wrapper sincrono per il job Scout orario."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_scout_hourly_job())
-    except Exception as e:
-        logger.error("Errore avvio Scout orario task: %s", e, exc_info=True)
-
-
-def _sync_job_wrapper():
-    """Wrapper sincrono legacy — non più usato dallo scheduler principale."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_scheduled_agent_job())
-    except Exception as e:
-        logger.error("Errore nell'avvio del task schedulato: %s", e, exc_info=True)
-
-
 async def _keep_alive_ping():
     """
     Pinga il proprio health endpoint per evitare che Render free tier
@@ -257,15 +221,6 @@ async def _keep_alive_ping():
         logger.warning("Keep-alive ping fallito: %s", e)
 
 
-def _sync_keep_alive_wrapper():
-    """Wrapper sincrono per il keep-alive ping."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_keep_alive_ping())
-    except Exception:
-        pass
-
-
 async def _daily_recap_job():
     """Job per il Daily Recap dello Scout (23:59 CET)."""
     from uuid import uuid4
@@ -278,15 +233,6 @@ async def _daily_recap_job():
         logger.error("Errore Daily Recap: %s", e, exc_info=True)
 
 
-def _sync_daily_recap_wrapper():
-    """Wrapper sincrono per il Daily Recap."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_daily_recap_job())
-    except Exception as e:
-        logger.error("Errore avvio Daily Recap task: %s", e)
-
-
 async def _weekly_matrix_job():
     """Job per la Weekly Matrix dello Scout (domenica 23:59 CET)."""
     from uuid import uuid4
@@ -297,15 +243,6 @@ async def _weekly_matrix_job():
         logger.info("Weekly Matrix completata: %s", result.get("macro_strategy", "?")[:100])
     except Exception as e:
         logger.error("Errore Weekly Matrix: %s", e, exc_info=True)
-
-
-def _sync_weekly_matrix_wrapper():
-    """Wrapper sincrono per la Weekly Matrix."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(_weekly_matrix_job())
-    except Exception as e:
-        logger.error("Errore avvio Weekly Matrix task: %s", e)
 
 
 # ============================================================
@@ -338,63 +275,76 @@ def start_scheduler() -> AsyncIOScheduler:
     _scheduler = AsyncIOScheduler()
 
     # ── Price Polling: ogni 60 secondi (yfinance → Supabase) ──
+    # AsyncIOScheduler accetta funzioni async direttamente — niente sync wrapper.
     _scheduler.add_job(
-        _sync_price_polling_wrapper,
+        _price_polling_job,
         trigger="interval",
         seconds=60,
         id="price_polling_job",
         name="Price Polling 60s (yfinance cache)",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     # ── Watchdog: ogni 1 minuto, MA solo durante orari di mercato (US/UK/DE) ──
     # Il check interno is_market_open() fa exit immediato fuori orario.
     _scheduler.add_job(
-        _sync_watchdog_wrapper,
+        _watchdog_job,
         trigger="interval",
         minutes=1,
         id="watchdog_job",
         name="Watchdog 1min market-only (DeepSeek-V3 trigger filter)",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     # ── Scout: ogni 20 minuti, 24/7 (Sonnet 4.5 — raccolta intelligence) ──
     _scheduler.add_job(
-        _sync_scout_hourly_wrapper,
+        _scout_hourly_job,
         trigger="interval",
         minutes=20,
         id="scout_hourly_job",
         name="Scout 20min (Sonnet 4.5 intelligence buffer 24/7)",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        # Avvia il primo run dopo 30 secondi dall'avvio dello scheduler
+        next_run_time=datetime.now(pytz.utc) + timedelta(seconds=30),
     )
 
     # Keep-alive: pinga il servizio ogni 10 minuti per evitare lo sleep di Render
     _scheduler.add_job(
-        _sync_keep_alive_wrapper,
+        _keep_alive_ping,
         trigger="interval",
         minutes=10,
         id="keep_alive_ping",
         name="Keep-alive ping (anti-sleep Render)",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     # Daily Recap: ogni giorno alle 23:59 CET
     from apscheduler.triggers.cron import CronTrigger
     _scheduler.add_job(
-        _sync_daily_recap_wrapper,
+        _daily_recap_job,
         trigger=CronTrigger(hour=22, minute=59, timezone="Europe/Paris"),
         id="scout_daily_recap",
         name="Scout Daily Recap (23:59 CET)",
         replace_existing=True,
+        max_instances=1,
     )
 
     # Weekly Matrix: ogni domenica alle 23:59 CET
     _scheduler.add_job(
-        _sync_weekly_matrix_wrapper,
+        _weekly_matrix_job,
         trigger=CronTrigger(day_of_week="sun", hour=23, minute=59, timezone="Europe/Paris"),
         id="scout_weekly_matrix",
         name="Scout Weekly Matrix (domenica 23:59 CET)",
         replace_existing=True,
+        max_instances=1,
     )
 
     _scheduler.start()

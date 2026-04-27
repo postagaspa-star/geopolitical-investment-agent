@@ -36,26 +36,22 @@ Ricevi dati grezzi da multiple fonti:
   - YFINANCE_NEWS (news per ticker watchlist)
   - REDDIT (sentiment retail: wallstreetbets/stocks/investing/options)
   - X (sentiment finance Twitter)
-  - CLAWSTREET (contesto mercati)
+  - CLAWSTREET_MARKET / CLAWSTREET_ECONOMY (contesto mercati)
   - CONGRESSIONAL (insider trades USA)
 
-Il tuo compito:
-1. FILTRA il rumore — ignora contenuti irrilevanti per i mercati
-2. Per ogni evento/cluster di rilievo genera una MICRO-SCHEDA con:
-   - Sintesi azionabile in 2-3 frasi
-   - Sentiment score (-1 bearish a +1 bullish)
-   - Sentiment_type: "INSTITUTIONAL" (news, GDELT) o "RETAIL" (Reddit, X)
-   - Ticker impattati
-   - Keyword di rischio
-3. Se NON ci sono notizie significative restituisci comunque almeno UNA micro-scheda
-   con micro_summary="Nessun evento rilevante" e sentiment_score=0 — serve per dare
-   visibilita' del fatto che lo Scout ha girato.
+REGOLE FONDAMENTALI:
+1. Per OGNI fonte che ha ALMENO 1 articolo/post/trade non vuoto, DEVI generare almeno
+   1 micro-scheda. Se la fonte ha 5+ articoli interessanti puoi generarne fino a 3.
+2. Se una fonte e' VUOTA o ha solo errori, NON generare scheda per quella fonte.
+3. Anche se i contenuti sono "noise" produci comunque una micro-scheda di sintesi
+   (es. "Reddit: discussioni su FOMC senza catalizzatori specifici, sentiment neutro").
+4. NESSUN preambolo o testo extra. RISPONDI SOLO CON IL JSON ARRAY.
 
-OUTPUT JSON array di micro-schede:
+OUTPUT (SOLO JSON, nessun altro testo):
 [
   {
-    "source_type": "GDELT|NEWSAPI|YFINANCE_NEWS|REDDIT|X|CLAWSTREET|CONGRESSIONAL",
-    "micro_summary": "...",
+    "source_type": "GDELT|NEWSAPI|YFINANCE_NEWS|REDDIT|X|CLAWSTREET_MARKET|CLAWSTREET_ECONOMY|CONGRESSIONAL",
+    "micro_summary": "Sintesi azionabile in 2-3 frasi (max 280 char)",
     "sentiment_score": -1.0 to 1.0,
     "sentiment_type": "INSTITUTIONAL|RETAIL",
     "key_tickers": ["XOM", "LMT"],
@@ -203,6 +199,7 @@ async def run_scout_20min(run_id: str) -> list[dict]:
     _save_checkpoint(run_id, "scout", "RUNNING", {"phase": "analysis"})
 
     used_model = SCOUT_MODEL
+    response_text = ""
     try:
         client = _get_client()
         try:
@@ -230,17 +227,38 @@ async def run_scout_20min(run_id: str) -> list[dict]:
                 }],
             )
 
-        response_text = ""
         for block in response.content:
             if hasattr(block, "text"):
                 response_text += block.text
 
-        # Parse JSON
-        micro_cards = _parse_json_array(response_text)
+        # Parse JSON robusto: prova array, poi cerca blocchi ```json```, poi estrae oggetti singoli
+        micro_cards = _parse_json_array_robust(response_text)
+
+        # Se 0 schede ma response_text non vuoto -> logga raw per diagnostica
+        if not micro_cards and response_text.strip():
+            logger.warning("[%s][SCOUT] 0 schede da response non vuota (model=%s). Raw: %s",
+                           run_id, used_model, response_text[:500])
+            try:
+                database.insert_agent_log(run_id, "SCOUT_PARSE_FAIL", json.dumps({
+                    "event": "json_parse_failed",
+                    "model": used_model,
+                    "raw_response": response_text[:1500],
+                    "context_length": len(full_context),
+                }, default=str))
+            except Exception:
+                pass
 
     except Exception as e:
-        logger.error("[%s][SCOUT] Errore Sonnet: %s", run_id, e)
+        logger.error("[%s][SCOUT] Errore Sonnet: %s", run_id, e, exc_info=True)
         micro_cards = []
+        try:
+            database.insert_agent_log(run_id, "SCOUT_ERROR", json.dumps({
+                "event": "scout_sonnet_error",
+                "error": str(e)[:500],
+                "model_attempted": used_model,
+            }))
+        except Exception:
+            pass
 
     # 4. Scrivi nel buffer su Supabase
     written = 0
@@ -613,6 +631,59 @@ def _parse_json_array(text: str) -> list:
     except json.JSONDecodeError:
         pass
     return []
+
+
+def _parse_json_array_robust(text: str) -> list:
+    """
+    Parsing JSON array tollerante:
+      1. Prima prova array completo [...]
+      2. Poi prova a estrarre da ```json ... ```
+      3. Poi cerca tutti gli oggetti {...} e li raggruppa
+    """
+    if not text:
+        return []
+    # 1. Array completo
+    cards = _parse_json_array(text)
+    if cards:
+        return cards
+
+    # 2. Blocchi ```json ... ```
+    import re
+    code_blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    for block in code_blocks:
+        cards = _parse_json_array(block)
+        if cards:
+            return cards
+        # prova come oggetto singolo
+        try:
+            obj = json.loads(block.strip())
+            if isinstance(obj, dict):
+                return [obj]
+            if isinstance(obj, list):
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Estrai tutti gli oggetti {...} bilanciati
+    objects = []
+    depth = 0
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    obj = json.loads(text[start:i + 1])
+                    if isinstance(obj, dict) and obj.get("source_type"):
+                        objects.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                start = -1
+    return objects
 
 
 def _parse_json_object(text: str) -> dict:

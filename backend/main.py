@@ -699,6 +699,129 @@ async def mirror_historical_trades(limit: int = Query(default=100, ge=1, le=1000
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+@app.post("/api/clawstreet/reconcile")
+async def reconcile_clawstreet_trades(since_hours: int = Query(default=48, ge=1, le=720)):
+    """
+    Confronta i trade locali con quelli su ClawStreet e invia quelli mancanti.
+    Usa una semplice corrispondenza per (ticker, action, qty) sui trade locali
+    delle ultime 'since_hours' ore. Idempotente entro la finestra.
+    """
+    bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
+    api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
+    if not bot_id or not api_key or bot_id == "GEO":
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "message": "Credenziali ClawStreet mancanti.",
+        })
+
+    import data_fetchers
+    import aiohttp as _aiohttp
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    cutoff = _dt.now(_tz.utc) - _td(hours=since_hours)
+
+    # 1) Trade locali nella finestra
+    local_trades = database.get_trades(limit=500) or []
+    local_in_window = []
+    for t in local_trades:
+        ts_str = t.get("timestamp") or ""
+        try:
+            t_ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if t_ts < cutoff:
+            continue
+        action = (t.get("action") or "").lower()
+        ticker = t.get("ticker", "")
+        qty = int(t.get("quantity") or 0)
+        if not ticker or action not in ("buy", "sell") or qty <= 0:
+            continue
+        local_in_window.append({
+            "ticker": ticker, "action": action, "qty": qty,
+            "ts": t_ts,
+            "reasoning": (t.get("final_decision") or t.get("geopolitical_reasoning") or "")[:280],
+        })
+
+    # 2) Trade gia' su ClawStreet
+    cs_trades = []
+    try:
+        url = f"https://www.clawstreet.io/api/bots/{bot_id}/trades"
+        async with _aiohttp.ClientSession() as sess:
+            async with sess.get(url, headers={"Authorization": f"Bearer {api_key}"},
+                                 timeout=_aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    cs_trades = data.get("trades", []) if isinstance(data, dict) else []
+    except Exception as e:
+        logger.warning("Reconcile: impossibile leggere trade ClawStreet: %s", e)
+
+    # Counter (ticker, action, qty) gia' presenti su CS
+    from collections import Counter
+    cs_keys = Counter(
+        (t.get("symbol", "").upper(), (t.get("action") or "").lower(), int(t.get("qty") or 0))
+        for t in cs_trades
+    )
+
+    # 3) Per ogni local trade, controlla se gia' su CS; se no, invialo
+    missing = []
+    sent = []
+    failed = []
+    # Counter dei local in window per gestire multipli identici
+    local_counter = Counter()
+    for tr in sorted(local_in_window, key=lambda x: x["ts"]):
+        key = (tr["ticker"].upper(), tr["action"], tr["qty"])
+        local_counter[key] += 1
+        already_on_cs = cs_keys.get(key, 0)
+        if local_counter[key] <= already_on_cs:
+            continue  # gia' specchiato
+        missing.append(tr)
+
+    for tr in missing:
+        result = await data_fetchers.mirror_trade_to_clawstreet(
+            bot_id=bot_id, api_key=api_key,
+            symbol=tr["ticker"], action=tr["action"], qty=tr["qty"],
+            reasoning=tr["reasoning"] or f"Reconcile {tr['ts'].isoformat()}",
+        )
+        if result.get("mirrored"):
+            sent.append({"ticker": tr["ticker"], "action": tr["action"], "qty": tr["qty"]})
+        else:
+            failed.append({
+                "ticker": tr["ticker"], "action": tr["action"], "qty": tr["qty"],
+                "reason": str(result.get("response") or result.get("error") or result.get("status"))[:200],
+            })
+
+    return {
+        "status": "ok",
+        "window_hours": since_hours,
+        "local_trades_in_window": len(local_in_window),
+        "clawstreet_trades": len(cs_trades),
+        "missing": len(missing),
+        "sent": len(sent),
+        "failed": len(failed),
+        "details": {"sent": sent, "failed": failed},
+    }
+
+
+@app.post("/api/scout/run")
+async def trigger_scout_run(background_tasks: BackgroundTasks):
+    """
+    Avvia un singolo run dello Scout in background (per test/diagnostica).
+    """
+    import uuid as _uuid
+    run_id = str(_uuid.uuid4())
+
+    async def _do():
+        try:
+            from agents.orchestrator import run_scout_pipeline
+            result = await run_scout_pipeline(run_id=run_id)
+            logger.info("Manual scout run %s: %s", run_id, result)
+        except Exception as e:
+            logger.error("Manual scout run failed: %s", e, exc_info=True)
+
+    background_tasks.add_task(_do)
+    return {"status": "started", "run_id": run_id}
+
+
 @app.post("/api/clawstreet/clear-credentials")
 async def clear_clawstreet_credentials():
     """

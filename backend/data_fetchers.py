@@ -22,6 +22,19 @@ logger = logging.getLogger(__name__)
 _yfinance_cache: Dict[str, tuple] = {}
 _YFINANCE_CACHE_TTL = 300  # 5 minuti di TTL
 
+# Cache GDELT — singolo result globale (evita 429 su run consecutivi dello Scout)
+_gdelt_cache: Dict[str, tuple] = {}  # { "all": (timestamp, result) }
+_GDELT_CACHE_TTL = 600  # 10 minuti
+
+# Cache Reddit per evitare ban da User-Agent generico
+_reddit_cache: Dict[str, tuple] = {}
+_REDDIT_CACHE_TTL = 600  # 10 minuti
+
+# User-Agent realistico per evitare blocchi
+_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; GeoInvestAI/1.0; +https://geopolitical-investment-agent.onrender.com)"
+}
+
 # Chiave API per NewsAPI (fallback alla variabile d'ambiente)
 _NEWS_API_KEY_ENV: str = os.environ.get("NEWS_API_KEY", "")
 
@@ -53,13 +66,13 @@ GDELT_BASE_URL = (
     "?query={keyword}&mode=artlist&maxrecords=10&timespan=24h&format=json"
 )
 
-# Parole chiave per le query GDELT
+# Parole chiave GDELT — ridotte a 3 per minimizzare 429 (era 5).
+# Lo Scout gira ogni 20 min, quindi 3 keywords * 72 run/giorno = 216 chiamate/giorno
+# (sotto la soglia di rate-limit GDELT).
 GDELT_KEYWORDS: List[str] = [
-    "war conflict",
-    "sanctions economy",
-    "oil energy crisis",
-    "military escalation",
-    "trade war tariffs",
+    "war conflict sanctions",
+    "oil energy crisis tariffs",
+    "central bank rates inflation",
 ]
 
 # Endpoint base di NewsAPI
@@ -86,12 +99,14 @@ async def _fetch_gdelt_single(
 ) -> Dict[str, Any]:
     """Esegue una singola query verso GDELT e restituisce i risultati.
     Include retry con backoff esponenziale (2s/4s/8s) per 429 rate-limit."""
-    url = GDELT_BASE_URL.format(keyword=keyword)
+    from urllib.parse import quote_plus
+    url = GDELT_BASE_URL.format(keyword=quote_plus(keyword))
     for attempt in range(max_retries):
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30), headers=_HTTP_HEADERS) as resp:
                 if resp.status == 429:
-                    wait = 2 ** (attempt + 1)
+                    # Backoff piu' lungo: 5s, 10s, 20s
+                    wait = 5 * (2 ** attempt)
                     logger.warning(
                         "GDELT 429 rate limit per '%s', retry in %ds... (tentativo %d/%d)",
                         keyword, wait, attempt + 1, max_retries,
@@ -127,27 +142,40 @@ async def _fetch_gdelt_single(
 async def fetch_gdelt_data() -> Dict[str, Any]:
     """
     Recupera dati geopolitici da GDELT in sequenza con rate-limiting.
-    Le richieste sono distanziate di 1 secondo per evitare 429.
+    Le richieste sono distanziate di 2 secondi per evitare 429.
+    Usa cache globale (10 min TTL) — lo Scout gira ogni 20 min, quindi 1 hit reale ogni 2 run.
 
     Restituisce un dizionario con:
         - results: lista di risultati per ogni keyword
         - fetched_at: timestamp del recupero
         - source: "gdelt"
     """
+    # Cache check
+    now_ts = time.time()
+    if "all" in _gdelt_cache:
+        cached_time, cached_result = _gdelt_cache["all"]
+        if now_ts - cached_time < _GDELT_CACHE_TTL:
+            logger.debug("GDELT cache hit (age: %ds)", int(now_ts - cached_time))
+            return {**cached_result, "from_cache": True}
+
     try:
         cleaned: List[Dict[str, Any]] = []
-        async with aiohttp.ClientSession() as session:
-            # Richieste in sequenza con 1s di pausa tra una e l'altra
+        async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
+            # Richieste in sequenza con 2s di pausa tra una e l'altra (era 1s)
             for kw in GDELT_KEYWORDS:
                 result = await _fetch_gdelt_single(session, kw)
                 cleaned.append(result)
-                await asyncio.sleep(1.0)  # Rate limit tra keyword
+                await asyncio.sleep(2.0)
 
-        return {
+        result = {
             "results": cleaned,
             "fetched_at": datetime.utcnow().isoformat(),
             "source": "gdelt",
         }
+        # Salva in cache solo se almeno un risultato ha articoli (evita di cachare 429 globale)
+        if any(r.get("articles") for r in cleaned):
+            _gdelt_cache["all"] = (now_ts, result)
+        return result
     except Exception as exc:
         logger.error("Errore critico in fetch_gdelt_data: %s", exc)
         return {
@@ -401,12 +429,26 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
         end_date = datetime.utcnow()
         start_date = end_date - timedelta(days=period_days)
 
-        # Scarica i dati con yfinance (chiamata sincrona)
+        # Configura yfinance con User-Agent custom per ridurre 429.
+        # yfinance usa una sessione interna requests che spesso prende UA generico.
+        try:
+            import requests as _requests
+            _yf_session = _requests.Session()
+            _yf_session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                "Accept": "*/*",
+            })
+        except Exception:
+            _yf_session = None
+
+        # Scarica i dati con yfinance (chiamata sincrona). Con session passata, riduce 429.
         df = yfinance.download(
             ticker,
             start=start_date.strftime("%Y-%m-%d"),
             end=end_date.strftime("%Y-%m-%d"),
             progress=False,
+            session=_yf_session,
+            auto_adjust=False,
         )
 
         if df.empty:
@@ -618,22 +660,15 @@ async def mirror_trade_to_clawstreet(
     qty: int, reasoning: str
 ) -> Dict[str, Any]:
     """
-    Invia un trade mirror a ClawStreet. Restituisce il risultato.
-    Per azioni, verifica che il mercato sia aperto (skip per crypto X:).
+    Invia un trade mirror a ClawStreet. SEMPRE — anche se il mercato e' chiuso,
+    perche' ClawStreet e' una vetrina pubblica che mostra TUTTI i trade del bot
+    (non un broker). La feature "market check" precedente bloccava il mirror dopo
+    le 16:00 ET introducendo silenziosi fallimenti.
     """
     # Converti crypto prefix se necessario
-    is_crypto = symbol.startswith("X:") or symbol.endswith("USD") and len(symbol) > 5
+    is_crypto = symbol.startswith("X:") or (symbol.endswith("USD") and len(symbol) > 5)
     if is_crypto and not symbol.startswith("X:"):
         symbol = f"X:{symbol}"
-
-    # Per titoli azionari, controlla che i mercati siano aperti
-    if not is_crypto:
-        mkt = await check_clawstreet_market_status()
-        mkt_data = mkt.get("data", {})
-        # Se il campo open/isOpen esiste e indica chiuso, skippa
-        is_open = mkt_data.get("isOpen", mkt_data.get("open", True))
-        if not is_open:
-            return {"mirrored": False, "reason": "Mercati USA chiusi, trade non inviato a ClawStreet"}
 
     # Endpoint corretto: /trades (plurale), non /trade
     url = f"{CLAWSTREET_BASE}/bots/{bot_id}/trades"
@@ -652,9 +687,12 @@ async def mirror_trade_to_clawstreet(
             async with session.post(url, json=payload, headers=headers, timeout=CLAWSTREET_TIMEOUT) as resp:
                 body = await resp.text()
                 if resp.status in (200, 201):
-                    return {"mirrored": True, "status": resp.status, "response": body}
+                    logger.info("ClawStreet mirror OK: %s %d %s -> HTTP %d", action, qty, symbol, resp.status)
+                    return {"mirrored": True, "status": resp.status, "response": body[:500]}
                 else:
-                    return {"mirrored": False, "status": resp.status, "response": body}
+                    logger.warning("ClawStreet mirror FAIL: %s %d %s -> HTTP %d body=%s",
+                                   action, qty, symbol, resp.status, body[:200])
+                    return {"mirrored": False, "status": resp.status, "response": body[:500]}
     except Exception as exc:
         logger.warning("ClawStreet trade mirror error: %s", exc)
         return {"mirrored": False, "error": str(exc)}
@@ -807,7 +845,11 @@ async def fetch_yfinance_news(max_per_ticker: int = 3, max_tickers: int = 10) ->
                     tickers.append(t)
         tickers = tickers[:max_tickers]
 
-        loop = asyncio.get_event_loop()
+        # Usa il running loop (non get_event_loop, deprecato e bug-prone in 3.12+)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
 
         def _fetch_one(symbol: str) -> List[Dict[str, Any]]:
             try:
@@ -854,8 +896,20 @@ async def fetch_reddit_sentiment(max_per_sub: int = 8) -> Dict[str, Any]:
     Pesca i top post recenti dai subreddit retail-investing (no auth richiesta).
     Reddit consente accesso pubblico ai feed JSON con un User-Agent custom.
     """
+    # Cache check (10 min TTL)
+    now_ts = time.time()
+    if "all" in _reddit_cache:
+        cached_time, cached_result = _reddit_cache["all"]
+        if now_ts - cached_time < _REDDIT_CACHE_TTL:
+            logger.debug("Reddit cache hit (age: %ds)", int(now_ts - cached_time))
+            return {**cached_result, "from_cache": True}
+
     subs = ["wallstreetbets", "stocks", "investing", "options"]
-    headers = {"User-Agent": "GeoInvestAI/1.0 (sentiment-bot)"}
+    # User-Agent strict per Reddit: deve essere unico e descrittivo, altrimenti 429
+    headers = {
+        "User-Agent": "linux:com.geoinvest.ai:v1.0 (by /u/geoinvest_bot)",
+        "Accept": "application/json",
+    }
     posts: List[Dict[str, Any]] = []
 
     timeout = aiohttp.ClientTimeout(total=15)
@@ -898,13 +952,17 @@ async def fetch_reddit_sentiment(max_per_sub: int = 8) -> Dict[str, Any]:
     # Ordina per engagement (score + commenti)
     posts.sort(key=lambda x: x.get("score", 0) + x.get("num_comments", 0), reverse=True)
 
-    return {
+    result = {
         "posts": posts[:30],
         "count": len(posts),
         "fetched_at": datetime.utcnow().isoformat(),
         "source": "reddit_public",
         "error": None,
     }
+    # Salva in cache solo se abbiamo ottenuto qualcosa (non cachare risultati vuoti)
+    if posts:
+        _reddit_cache["all"] = (now_ts, result)
+    return result
 
 
 # ============================================================
