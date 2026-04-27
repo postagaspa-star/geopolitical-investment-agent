@@ -776,3 +776,213 @@ async def fetch_congressional_trades() -> Dict[str, Any]:
             "source": "finnhub_congressional",
             "error": str(exc),
         }
+
+
+# ============================================================
+# yFinance News — headlines per ticker watchlist
+# ============================================================
+
+async def fetch_yfinance_news(max_per_ticker: int = 3, max_tickers: int = 10) -> Dict[str, Any]:
+    """
+    Recupera le news piu' recenti via yfinance.Ticker(symbol).news per i ticker
+    della watchlist + posizioni aperte. Funziona senza API key.
+    """
+    items: List[Dict[str, Any]] = []
+    try:
+        import database as _db
+        # Combina watchlist + posizioni aperte
+        tickers: List[str] = []
+        try:
+            positions = _db.get_positions() or []
+            for p in positions:
+                if isinstance(p, dict):
+                    t = p.get("ticker") or p.get("symbol")
+                    if t and t not in tickers:
+                        tickers.append(t)
+        except Exception:
+            pass
+        for tlist in WATCHLIST.values():
+            for t in tlist[:2]:
+                if t not in tickers:
+                    tickers.append(t)
+        tickers = tickers[:max_tickers]
+
+        loop = asyncio.get_event_loop()
+
+        def _fetch_one(symbol: str) -> List[Dict[str, Any]]:
+            try:
+                t_obj = yfinance.Ticker(symbol)
+                news = getattr(t_obj, "news", None) or []
+                out = []
+                for n in news[:max_per_ticker]:
+                    out.append({
+                        "ticker": symbol,
+                        "title": n.get("title") or n.get("content", {}).get("title", ""),
+                        "publisher": n.get("publisher") or n.get("content", {}).get("provider", {}).get("displayName", ""),
+                        "link": n.get("link") or n.get("content", {}).get("canonicalUrl", {}).get("url", ""),
+                        "published": n.get("providerPublishTime") or 0,
+                    })
+                return out
+            except Exception as e:
+                logger.debug("yfinance news error %s: %s", symbol, e)
+                return []
+
+        # In parallelo (limitato dal GIL ma I/O di rete -> OK)
+        coros = [loop.run_in_executor(None, _fetch_one, t) for t in tickers]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        for r in results:
+            if isinstance(r, list):
+                items.extend(r)
+    except Exception as e:
+        logger.warning("fetch_yfinance_news error: %s", e)
+
+    return {
+        "items": items,
+        "count": len(items),
+        "fetched_at": datetime.utcnow().isoformat(),
+        "source": "yfinance_news",
+        "error": None,
+    }
+
+
+# ============================================================
+# Reddit — sentiment retail (no auth, public JSON API)
+# ============================================================
+
+async def fetch_reddit_sentiment(max_per_sub: int = 8) -> Dict[str, Any]:
+    """
+    Pesca i top post recenti dai subreddit retail-investing (no auth richiesta).
+    Reddit consente accesso pubblico ai feed JSON con un User-Agent custom.
+    """
+    subs = ["wallstreetbets", "stocks", "investing", "options"]
+    headers = {"User-Agent": "GeoInvestAI/1.0 (sentiment-bot)"}
+    posts: List[Dict[str, Any]] = []
+
+    timeout = aiohttp.ClientTimeout(total=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async def _one(sub: str) -> List[Dict[str, Any]]:
+                url = f"https://www.reddit.com/r/{sub}/hot.json?limit={max_per_sub}"
+                try:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            logger.debug("Reddit %s HTTP %d", sub, resp.status)
+                            return []
+                        data = await resp.json(content_type=None)
+                except Exception as e:
+                    logger.debug("Reddit %s err: %s", sub, e)
+                    return []
+                out = []
+                for child in (data.get("data", {}).get("children", []) or [])[:max_per_sub]:
+                    p = child.get("data", {}) or {}
+                    if p.get("stickied"):
+                        continue
+                    out.append({
+                        "subreddit": sub,
+                        "title": p.get("title", "")[:200],
+                        "score": p.get("score", 0),
+                        "num_comments": p.get("num_comments", 0),
+                        "upvote_ratio": p.get("upvote_ratio", 0),
+                        "permalink": "https://reddit.com" + (p.get("permalink") or ""),
+                        "created_utc": p.get("created_utc", 0),
+                    })
+                return out
+
+            results = await asyncio.gather(*[_one(s) for s in subs], return_exceptions=True)
+            for r in results:
+                if isinstance(r, list):
+                    posts.extend(r)
+    except Exception as e:
+        logger.warning("fetch_reddit_sentiment error: %s", e)
+
+    # Ordina per engagement (score + commenti)
+    posts.sort(key=lambda x: x.get("score", 0) + x.get("num_comments", 0), reverse=True)
+
+    return {
+        "posts": posts[:30],
+        "count": len(posts),
+        "fetched_at": datetime.utcnow().isoformat(),
+        "source": "reddit_public",
+        "error": None,
+    }
+
+
+# ============================================================
+# X (Twitter) — sentiment retail via API v2 con bearer token (opzionale)
+# ============================================================
+
+async def fetch_x_sentiment(max_results: int = 30) -> Dict[str, Any]:
+    """
+    Recupera tweet recenti sulle keyword finance. Richiede X_API_BEARER nelle
+    settings (chiave API X v2). Se assente, restituisce risultato vuoto silenzioso.
+    """
+    try:
+        import database as _db
+        bearer = _db.get_setting("x_api_bearer", "") or os.environ.get("X_API_BEARER", "")
+    except Exception:
+        bearer = os.environ.get("X_API_BEARER", "")
+
+    if not bearer:
+        return {
+            "tweets": [],
+            "count": 0,
+            "fetched_at": datetime.utcnow().isoformat(),
+            "source": "x_api_v2",
+            "error": "x_api_bearer_not_configured",
+        }
+
+    # Query mirata su sentiment finance + cashtag dei top ticker
+    from urllib.parse import quote as _urlquote
+    query = "(stocks OR market OR FOMC OR earnings) (lang:en) -is:retweet"
+    url = (
+        "https://api.twitter.com/2/tweets/search/recent"
+        f"?query={_urlquote(query, safe='')}"
+        f"&max_results={min(max_results, 100)}"
+        "&tweet.fields=public_metrics,created_at,lang"
+    )
+
+    tweets: List[Dict[str, Any]] = []
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"Authorization": f"Bearer {bearer}"}) as resp:
+                if resp.status != 200:
+                    body = (await resp.text())[:200]
+                    return {
+                        "tweets": [],
+                        "count": 0,
+                        "fetched_at": datetime.utcnow().isoformat(),
+                        "source": "x_api_v2",
+                        "error": f"HTTP {resp.status}: {body}",
+                    }
+                data = await resp.json(content_type=None)
+        for t in data.get("data", []) or []:
+            metrics = t.get("public_metrics", {}) or {}
+            tweets.append({
+                "id": t.get("id"),
+                "text": (t.get("text") or "")[:280],
+                "lang": t.get("lang"),
+                "created_at": t.get("created_at"),
+                "likes": metrics.get("like_count", 0),
+                "retweets": metrics.get("retweet_count", 0),
+                "replies": metrics.get("reply_count", 0),
+            })
+        # Ordina per engagement
+        tweets.sort(key=lambda x: x.get("likes", 0) + x.get("retweets", 0) * 2, reverse=True)
+    except Exception as e:
+        logger.warning("fetch_x_sentiment error: %s", e)
+        return {
+            "tweets": [],
+            "count": 0,
+            "fetched_at": datetime.utcnow().isoformat(),
+            "source": "x_api_v2",
+            "error": str(e),
+        }
+
+    return {
+        "tweets": tweets[:max_results],
+        "count": len(tweets),
+        "fetched_at": datetime.utcnow().isoformat(),
+        "source": "x_api_v2",
+        "error": None,
+    }

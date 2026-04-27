@@ -356,6 +356,55 @@ async def get_briefings(limit: int = Query(default=20, ge=1, le=100)):
         return {"error": str(e)}
 
 
+@app.get("/api/scout-buffer")
+async def get_scout_buffer(
+    limit: int = Query(default=80, ge=1, le=500),
+    hours: int = Query(default=24, ge=1, le=168),
+):
+    """
+    Restituisce il contenuto recente di intelligence_buffer (micro-schede Scout)
+    per la visualizzazione nel frontend. Include tutti i find dello Scout:
+    GDELT, NewsAPI, yFinance News, Reddit (sentiment retail), X, ClawStreet,
+    Congressional.
+    """
+    try:
+        client = database.get_client()
+        if not client:
+            return []
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        cutoff = (_dt.now(_tz.utc) - _td(hours=hours)).isoformat()
+        result = client.table("intelligence_buffer") \
+            .select("*") \
+            .gte("timestamp", cutoff) \
+            .order("timestamp", desc=True) \
+            .limit(limit) \
+            .execute()
+        rows = result.data if result.data else []
+        # Espandi raw_content (JSON) per esporre i campi originali
+        enriched = []
+        for r in rows:
+            raw = r.get("raw_content") or "{}"
+            try:
+                raw_obj = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                raw_obj = {}
+            enriched.append({
+                "id": r.get("id"),
+                "timestamp": r.get("timestamp"),
+                "source_type": r.get("source_type"),
+                "micro_summary": r.get("micro_summary"),
+                "sentiment_score": r.get("sentiment_score"),
+                "sentiment_type": raw_obj.get("sentiment_type", "INSTITUTIONAL"),
+                "key_tickers": raw_obj.get("key_tickers", []),
+                "risk_keywords": raw_obj.get("risk_keywords", []),
+                "run_id": r.get("run_id"),
+            })
+        return enriched
+    except Exception as e:
+        logger.error(f"Errore /api/scout-buffer: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
 # --- Endpoint delle impostazioni ---
 
 

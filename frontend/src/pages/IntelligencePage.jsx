@@ -253,12 +253,99 @@ function ThinkingProcess({ logs, loading }) {
   );
 }
 
+function ScoutBufferView({ items, loading }) {
+  const [filterSource, setFilterSource] = useState("ALL");
+  const [filterSentiment, setFilterSentiment] = useState("ALL");
+
+  if (loading) return <div className="empty-state">Caricamento Scout findings...</div>;
+  if (!items || items.length === 0) {
+    return <div className="empty-state">Nessuna scoperta dello Scout nelle ultime 24 ore. Lo Scout gira ogni 20 minuti — controlla di nuovo a breve.</div>;
+  }
+
+  const allSources = [...new Set(items.map(i => i.source_type || "UNKNOWN"))].sort();
+
+  let filtered = items;
+  if (filterSource !== "ALL") filtered = filtered.filter(i => (i.source_type || "UNKNOWN") === filterSource);
+  if (filterSentiment !== "ALL") filtered = filtered.filter(i => (i.sentiment_type || "INSTITUTIONAL") === filterSentiment);
+
+  const sourceColor = (s) => {
+    if (!s) return "#64748b";
+    if (s.includes("REDDIT") || s.includes("X")) return "#f97316";
+    if (s.includes("GDELT")) return "#0891b2";
+    if (s.includes("YFINANCE")) return "#16a34a";
+    if (s.includes("NEWSAPI") || s.includes("NEWS")) return "#10b981";
+    if (s.includes("CONGRESS")) return "#dc2626";
+    if (s.includes("CLAW")) return "#8b5cf6";
+    return "#64748b";
+  };
+
+  const sentimentBar = (score) => {
+    const s = Number(score) || 0;
+    const pct = Math.min(100, Math.abs(s) * 100);
+    const color = s > 0.2 ? "#10b981" : s < -0.2 ? "#ef4444" : "#94a3b8";
+    return (
+      <div style={{display:"flex",alignItems:"center",gap:"0.4rem",fontSize:"0.7rem"}}>
+        <span style={{color, fontWeight:600, minWidth:"3rem"}}>{s >= 0 ? "+" : ""}{s.toFixed(2)}</span>
+        <div style={{width:"60px", height:"6px", background:"#1e293b", borderRadius:"3px", overflow:"hidden"}}>
+          <div style={{width:`${pct}%`, height:"100%", background:color}} />
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <div className="thinking-header" style={{marginBottom:"1rem"}}>
+        <span className="thinking-count">{filtered.length} di {items.length} micro-schede</span>
+        <div style={{display:"flex",gap:"0.4rem",flexWrap:"wrap"}}>
+          <select className="phase-filter" value={filterSource} onChange={(e)=>setFilterSource(e.target.value)}>
+            <option value="ALL">Tutte le fonti ({items.length})</option>
+            {allSources.map(s => (
+              <option key={s} value={s}>{s} ({items.filter(i => (i.source_type||"UNKNOWN")===s).length})</option>
+            ))}
+          </select>
+          <select className="phase-filter" value={filterSentiment} onChange={(e)=>setFilterSentiment(e.target.value)}>
+            <option value="ALL">Tutti i sentiment</option>
+            <option value="INSTITUTIONAL">Istituzionale</option>
+            <option value="RETAIL">Retail (Reddit/X)</option>
+          </select>
+        </div>
+      </div>
+      {filtered.map((item) => (
+        <div key={item.id} className="intel-card" style={{padding:"0.8rem", marginBottom:"0.5rem"}}>
+          <div className="intel-card-header" style={{marginBottom:"0.4rem"}}>
+            <span className="badge" style={{background:sourceColor(item.source_type)}}>{item.source_type || "UNKNOWN"}</span>
+            {item.sentiment_type === "RETAIL" && <span className="badge" style={{background:"#f97316"}}>RETAIL</span>}
+            {sentimentBar(item.sentiment_score)}
+            <span className="intel-date" style={{marginLeft:"auto"}}>{fmtDate(item.timestamp)}</span>
+          </div>
+          <div style={{fontSize:"0.85rem", color:"var(--text-primary)", lineHeight:1.4}}>
+            {item.micro_summary || "(nessun summary)"}
+          </div>
+          {item.key_tickers && item.key_tickers.length > 0 && (
+            <div className="asset-tags" style={{marginTop:"0.4rem"}}>
+              {item.key_tickers.map((t,i) => <span key={i} className="ticker-tag">{t}</span>)}
+            </div>
+          )}
+          {item.risk_keywords && item.risk_keywords.length > 0 && (
+            <div style={{marginTop:"0.3rem", fontSize:"0.7rem", color:"#f87171"}}>
+              ⚠ {item.risk_keywords.join(" · ")}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function IntelligencePage() {
   const [intelligence, setIntelligence] = useState([]);
   const [briefings, setBriefings] = useState([]);
   const [agentLogs, setAgentLogs] = useState([]);
+  const [scoutBuffer, setScoutBuffer] = useState([]);
+  const [scoutLoading, setScoutLoading] = useState(false);
   const [logsLoading, setLogsLoading] = useState(false);
-  const [activeSection, setActiveSection] = useState("thinking");
+  const [activeSection, setActiveSection] = useState("scout");
   const [expandedId, setExpandedId] = useState(null);
 
   const fetchIntelligence = useCallback(async () => {
@@ -273,6 +360,18 @@ function IntelligencePage() {
       const res = await fetch(`${API}/api/briefings?limit=20`);
       if (res.ok) setBriefings(await res.json());
     } catch (err) { console.error(err); }
+  }, []);
+
+  const fetchScoutBuffer = useCallback(async () => {
+    setScoutLoading(true);
+    try {
+      const res = await fetch(`${API}/api/scout-buffer?limit=150&hours=24`);
+      if (res.ok) {
+        const data = await res.json();
+        setScoutBuffer(Array.isArray(data) ? data : []);
+      }
+    } catch (err) { console.error(err); }
+    setScoutLoading(false);
   }, []);
 
   const fetchLogs = useCallback(async () => {
@@ -291,7 +390,15 @@ function IntelligencePage() {
     fetchIntelligence();
     fetchBriefings();
     fetchLogs();
-  }, [fetchIntelligence, fetchBriefings, fetchLogs]);
+    fetchScoutBuffer();
+  }, [fetchIntelligence, fetchBriefings, fetchLogs, fetchScoutBuffer]);
+
+  // Auto-refresh dello Scout buffer ogni 30s
+  useEffect(() => {
+    if (activeSection !== "scout") return;
+    const interval = setInterval(fetchScoutBuffer, 30000);
+    return () => clearInterval(interval);
+  }, [activeSection, fetchScoutBuffer]);
 
   // Auto-refresh logs every 15s when on thinking tab
   useEffect(() => {
@@ -310,6 +417,9 @@ function IntelligencePage() {
       <h2 style={{fontSize:"1.3rem",marginBottom:"1.5rem",color:"var(--text-primary)"}}>Intelligence &amp; Thinking Process</h2>
 
       <div className="intel-tabs">
+        <button className={`intel-tab ${activeSection === "scout" ? "active" : ""}`} onClick={() => setActiveSection("scout")}>
+          Scout Findings ({scoutBuffer.length})
+        </button>
         <button className={`intel-tab ${activeSection === "thinking" ? "active" : ""}`} onClick={() => setActiveSection("thinking")}>
           Thinking Process ({agentLogs.length})
           {tradeCount > 0 && <span className="tab-badge-trade">{tradeCount}</span>}
@@ -321,6 +431,10 @@ function IntelligencePage() {
           Pre-Market Briefings ({Array.isArray(briefings) ? briefings.length : 0})
         </button>
       </div>
+
+      {activeSection === "scout" && (
+        <ScoutBufferView items={scoutBuffer} loading={scoutLoading} />
+      )}
 
       {activeSection === "thinking" && (
         <ThinkingProcess logs={agentLogs} loading={logsLoading} />

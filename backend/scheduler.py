@@ -35,35 +35,38 @@ current_mode: str = "idle"  # idle | weekend | pre_market | full
 
 def is_market_open():
     """
-    Controlla se almeno una borsa principale e' aperta.
-    Borse considerate: NYSE/NASDAQ (ET), LSE (GMT), Euronext (CET).
-    Restituisce True se almeno una e' aperta, False altrimenti.
+    Controlla se almeno una delle borse OBIETTIVO e' aperta.
+    Borse considerate (definite dall'utente): USA (NYSE/NASDAQ), UK (LSE),
+    Germania (XETRA/Francoforte). Restituisce True se almeno una e' aperta.
+
+    Watchdog e Decision Agent operano SOLO quando questa funzione restituisce True.
+    Lo Scout invece gira sempre (24/7).
     """
     now_utc = datetime.now(pytz.utc)
 
-    # Weekend: sabato e domenica = borse chiuse
+    # Weekend: sabato e domenica = borse chiuse ovunque
     if now_utc.weekday() >= 5:
         return False
 
-    # NYSE/NASDAQ: 9:30-16:00 ET
+    # USA — NYSE/NASDAQ: 9:30-16:00 ET (Eastern Time, gestisce DST automaticamente)
     now_et = now_utc.astimezone(pytz.timezone('America/New_York'))
     nyse_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
     nyse_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
     if nyse_open <= now_et <= nyse_close:
         return True
 
-    # LSE: 8:00-16:30 GMT
-    now_gmt = now_utc.astimezone(pytz.timezone('Europe/London'))
-    lse_open = now_gmt.replace(hour=8, minute=0, second=0, microsecond=0)
-    lse_close = now_gmt.replace(hour=16, minute=30, second=0, microsecond=0)
-    if lse_open <= now_gmt <= lse_close:
+    # UK — LSE: 8:00-16:30 ora di Londra (GMT/BST)
+    now_uk = now_utc.astimezone(pytz.timezone('Europe/London'))
+    lse_open = now_uk.replace(hour=8, minute=0, second=0, microsecond=0)
+    lse_close = now_uk.replace(hour=16, minute=30, second=0, microsecond=0)
+    if lse_open <= now_uk <= lse_close:
         return True
 
-    # Euronext (Parigi, Milano, Francoforte): 9:00-17:30 CET
-    now_cet = now_utc.astimezone(pytz.timezone('Europe/Paris'))
-    eu_open = now_cet.replace(hour=9, minute=0, second=0, microsecond=0)
-    eu_close = now_cet.replace(hour=17, minute=30, second=0, microsecond=0)
-    if eu_open <= now_cet <= eu_close:
+    # Germania — XETRA Francoforte: 9:00-17:30 ora di Berlino (CET/CEST)
+    now_de = now_utc.astimezone(pytz.timezone('Europe/Berlin'))
+    xetra_open = now_de.replace(hour=9, minute=0, second=0, microsecond=0)
+    xetra_close = now_de.replace(hour=17, minute=30, second=0, microsecond=0)
+    if xetra_open <= now_de <= xetra_close:
         return True
 
     return False
@@ -116,14 +119,16 @@ def get_next_market_open():
 
 async def _watchdog_job():
     """
-    Job Watchdog — ogni 5 minuti durante ore di mercato.
+    Job Watchdog — ogni 1 minuto SOLO durante ore di mercato (US/UK/DE).
     Ultra-leggero: DeepSeek-V3 decide se triggerare Technical+Decision.
     Se trigger=False, costo quasi zero. Se trigger=True, avvia pipeline completa.
+
+    Costo stimato: ~720 chiamate/giorno DeepSeek (~$0.50/mese) durante orario di borsa.
     """
     global current_mode
 
     if not is_market_open():
-        return  # Watchdog attivo solo durante ore di mercato
+        return  # Watchdog attivo solo durante ore di mercato US/UK/DE
 
     current_mode = "full"
     try:
@@ -164,8 +169,9 @@ def _sync_price_polling_wrapper():
 
 async def _scout_hourly_job():
     """
-    Job Scout — ogni ora, sempre (anche weekend e pre-market).
-    Haiku 3 raccoglie intelligence e popola intelligence_buffer.
+    Job Scout — ogni 20 minuti, sempre (24/7, anche weekend e fuori orario).
+    Sonnet 4.5 raccoglie e analizza notizie da GDELT, yFinance News, NewsAPI,
+    Reddit (sentiment retail) e X. Popola intelligence_buffer.
     """
     global current_mode
 
@@ -341,23 +347,24 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # ── Watchdog: ogni 5 minuti (market hours only, check interno) ──
+    # ── Watchdog: ogni 1 minuto, MA solo durante orari di mercato (US/UK/DE) ──
+    # Il check interno is_market_open() fa exit immediato fuori orario.
     _scheduler.add_job(
         _sync_watchdog_wrapper,
         trigger="interval",
-        minutes=5,
+        minutes=1,
         id="watchdog_job",
-        name="Watchdog 5min (DeepSeek-V3 trigger filter)",
+        name="Watchdog 1min market-only (DeepSeek-V3 trigger filter)",
         replace_existing=True,
     )
 
-    # ── Scout: ogni ora, 24/7 (Haiku 3) ──
+    # ── Scout: ogni 20 minuti, 24/7 (Sonnet 4.5 — raccolta intelligence) ──
     _scheduler.add_job(
         _sync_scout_hourly_wrapper,
         trigger="interval",
-        minutes=60,
+        minutes=20,
         id="scout_hourly_job",
-        name="Scout orario (Haiku 3 intelligence buffer)",
+        name="Scout 20min (Sonnet 4.5 intelligence buffer 24/7)",
         replace_existing=True,
     )
 

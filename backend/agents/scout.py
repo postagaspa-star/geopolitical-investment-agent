@@ -1,9 +1,10 @@
 """
-Scout Agent — Sonnet 4.6
+Scout Agent — Claude Sonnet 4.5
 Intelligence gathering 24/7 con compattazione temporale.
 
 Task:
-  - Ogni 20 min: Interroga API news, filtra rumore, scrive intelligence_buffer
+  - Ogni 20 min (24/7): Interroga GDELT, NewsAPI, yFinance News,
+    Reddit (sentiment retail) e X. Filtra rumore e scrive intelligence_buffer.
   - Ogni giorno 23:59 CET: Compatta buffer in Daily Snapshot
   - Ogni domenica 23:59 CET: Aggrega 7 Daily in Weekly Matrix
 """
@@ -18,33 +19,45 @@ from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
 
-# Claude Haiku 3 — ultra-economico per raccolta intelligence 24/7
-# Costo stimato: ~$2.25/mese con run orari
-# Alternativa più capace: claude-haiku-3-5-20241022 (~$7/mese)
-SCOUT_MODEL = "claude-3-haiku-20240307"
+# Claude Sonnet 4.5 — il modello "potente" che raccoglie e analizza notizie ogni 20 min.
+# Nota: Sonnet e' caro, ma il volume e' contenuto (72 run/giorno x ~3K token in/out)
+# Costo stimato: ~$8-12/mese (compatibile con il budget).
+SCOUT_MODEL = "claude-sonnet-4-5-20250929"
+SCOUT_MODEL_FALLBACK = "claude-sonnet-4-20250514"
 
 # ============================================================
 # Prompt Templates
 # ============================================================
 
-SCOUT_20MIN_PROMPT = """Sei uno Scout Agent specializzato in intelligence geopolitica per mercati finanziari.
-Ricevi dati grezzi da multiple fonti (GDELT, NewsAPI, ClawStreet, Congressional Trades).
+SCOUT_20MIN_PROMPT = """Sei uno Scout Agent specializzato in intelligence geopolitica e di mercato.
+Ricevi dati grezzi da multiple fonti:
+  - GDELT (eventi geopolitici globali)
+  - NEWSAPI (news mainstream)
+  - YFINANCE_NEWS (news per ticker watchlist)
+  - REDDIT (sentiment retail: wallstreetbets/stocks/investing/options)
+  - X (sentiment finance Twitter)
+  - CLAWSTREET (contesto mercati)
+  - CONGRESSIONAL (insider trades USA)
 
 Il tuo compito:
-1. FILTRA il rumore — ignora notizie irrilevanti per i mercati
-2. Per ogni fonte con dati significativi, genera una MICRO-SCHEDA con:
-   - Sintesi in 2-3 frasi
+1. FILTRA il rumore — ignora contenuti irrilevanti per i mercati
+2. Per ogni evento/cluster di rilievo genera una MICRO-SCHEDA con:
+   - Sintesi azionabile in 2-3 frasi
    - Sentiment score (-1 bearish a +1 bullish)
+   - Sentiment_type: "INSTITUTIONAL" (news, GDELT) o "RETAIL" (Reddit, X)
    - Ticker impattati
    - Keyword di rischio
-3. Se NON ci sono notizie significative, rispondi con un array vuoto
+3. Se NON ci sono notizie significative restituisci comunque almeno UNA micro-scheda
+   con micro_summary="Nessun evento rilevante" e sentiment_score=0 — serve per dare
+   visibilita' del fatto che lo Scout ha girato.
 
-OUTPUT: JSON array di micro-schede:
+OUTPUT JSON array di micro-schede:
 [
   {
-    "source_type": "GDELT|NEWSAPI|CLAWSTREET|CONGRESSIONAL",
+    "source_type": "GDELT|NEWSAPI|YFINANCE_NEWS|REDDIT|X|CLAWSTREET|CONGRESSIONAL",
     "micro_summary": "...",
     "sentiment_score": -1.0 to 1.0,
+    "sentiment_type": "INSTITUTIONAL|RETAIL",
     "key_tickers": ["XOM", "LMT"],
     "risk_keywords": ["conflict", "sanctions"]
   }
@@ -119,28 +132,55 @@ async def run_scout_20min(run_id: str) -> list[dict]:
     # Salva checkpoint
     _save_checkpoint(run_id, "scout", "RUNNING", {"phase": "data_collection"})
 
-    # 1. Raccogli dati in parallelo
+    # 1. Raccogli dati in parallelo da TUTTE le fonti
+    source_names = [
+        "GDELT", "NEWSAPI", "YFINANCE_NEWS",
+        "REDDIT", "X",
+        "CLAWSTREET_MARKET", "CONGRESSIONAL", "CLAWSTREET_ECONOMY",
+    ]
     tasks = [
         data_fetchers.fetch_gdelt_data(),
         data_fetchers.fetch_newsapi_data(),
+        data_fetchers.fetch_yfinance_news(),
+        data_fetchers.fetch_reddit_sentiment(),
+        data_fetchers.fetch_x_sentiment(),
         data_fetchers.fetch_clawstreet_market_context(),
         data_fetchers.fetch_congressional_trades(),
+        data_fetchers.fetch_clawstreet_economy(),
     ]
-    try:
-        economy_data_task = data_fetchers.fetch_clawstreet_economy()
-        tasks.append(economy_data_task)
-    except Exception:
-        pass
 
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # 2. Prepara contesto per Sonnet
+    # 2. Prepara contesto per Sonnet + summary per logging visibile
     context_parts = []
+    sources_summary = {}  # per agent_logs frontend
     for i, result in enumerate(raw_results):
-        source = ["GDELT", "NEWSAPI", "CLAWSTREET_MARKET", "CONGRESSIONAL", "CLAWSTREET_ECONOMY"][i] if i < 5 else f"SOURCE_{i}"
+        source = source_names[i] if i < len(source_names) else f"SOURCE_{i}"
         if isinstance(result, Exception):
             context_parts.append(f"[{source}] ERROR: {result}")
+            sources_summary[source] = {"status": "error", "error": str(result)[:120]}
         else:
+            # Calcola count items per il frontend
+            try:
+                if isinstance(result, dict):
+                    count = (
+                        len(result.get("items", []))
+                        or len(result.get("articles", []))
+                        or len(result.get("posts", []))
+                        or len(result.get("tweets", []))
+                        or len(result.get("trades", []))
+                        or len(result.get("data", []))
+                    )
+                else:
+                    count = len(result) if hasattr(result, "__len__") else 0
+            except Exception:
+                count = 0
+            err = result.get("error") if isinstance(result, dict) else None
+            sources_summary[source] = {
+                "status": "ok" if not err else "warn",
+                "count": count,
+                "error": str(err)[:120] if err else None,
+            }
             # Truncate per non superare il context window
             data_str = json.dumps(result, default=str, ensure_ascii=False)
             if len(data_str) > 4000:
@@ -149,20 +189,46 @@ async def run_scout_20min(run_id: str) -> list[dict]:
 
     full_context = "\n\n".join(context_parts)
 
+    # 2b. Logga SUBITO il riepilogo fonti — visibile nel frontend anche se Sonnet fallisce.
+    try:
+        database.insert_agent_log(run_id, "SCOUT", json.dumps({
+            "event": "scout_sources_fetched",
+            "sources": sources_summary,
+            "total_sources": len(source_names),
+        }, default=str))
+    except Exception:
+        pass
+
     # 3. Chiama Sonnet 4.6 per filtrare e sintetizzare
     _save_checkpoint(run_id, "scout", "RUNNING", {"phase": "analysis"})
 
+    used_model = SCOUT_MODEL
     try:
         client = _get_client()
-        response = client.messages.create(
-            model=SCOUT_MODEL,
-            max_tokens=4096,
-            system=SCOUT_20MIN_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Analizza questi dati e produci le micro-schede JSON:\n\n{full_context[:20000]}"
-            }],
-        )
+        try:
+            response = client.messages.create(
+                model=SCOUT_MODEL,
+                max_tokens=4096,
+                system=SCOUT_20MIN_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"Analizza questi dati e produci le micro-schede JSON:\n\n{full_context[:20000]}"
+                }],
+            )
+        except Exception as model_err:
+            # Fallback automatico se Sonnet 4.5 non disponibile
+            logger.warning("[%s][SCOUT] %s non disponibile (%s), fallback a %s",
+                           run_id, SCOUT_MODEL, model_err, SCOUT_MODEL_FALLBACK)
+            used_model = SCOUT_MODEL_FALLBACK
+            response = client.messages.create(
+                model=SCOUT_MODEL_FALLBACK,
+                max_tokens=4096,
+                system=SCOUT_20MIN_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"Analizza questi dati e produci le micro-schede JSON:\n\n{full_context[:20000]}"
+                }],
+            )
 
         response_text = ""
         for block in response.content:
@@ -192,7 +258,8 @@ async def run_scout_20min(run_id: str) -> list[dict]:
         except Exception as e:
             logger.warning("[%s][SCOUT] Errore scrittura buffer: %s", run_id, e)
 
-    # 5. Log
+    # 5. Log finale — SEMPRE scritto (anche se 0 schede), cosi' il frontend
+    # mostra ogni esecuzione dello Scout con count fonti e numero schede.
     database.insert_agent_log(
         run_id=run_id,
         phase="SCOUT",
@@ -201,7 +268,9 @@ async def run_scout_20min(run_id: str) -> list[dict]:
             "micro_cards": len(micro_cards),
             "written_to_buffer": written,
             "sources_queried": len(tasks),
-        }),
+            "sources_summary": sources_summary,
+            "model_used": used_model,
+        }, default=str),
     )
 
     _save_checkpoint(run_id, "scout", "COMPLETED", {
