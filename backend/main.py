@@ -147,6 +147,28 @@ async def get_positions():
         return {"error": str(e)}
 
 
+@app.get("/api/debug/massive-key-check")
+async def debug_massive_key():
+    """Diagnostica: verifica come viene letta la key da price_polling._get_massive_key()."""
+    from price_polling import _get_massive_key
+    key = _get_massive_key()
+    env_key = os.environ.get("MASSIVE_API_KEY", "")
+    db_key = ""
+    try:
+        db_key = database.get_setting("massive_api_key", "") or ""
+    except Exception as e:
+        db_key = f"ERROR: {e}"
+    return {
+        "key_found_via_helper": bool(key),
+        "key_helper_length": len(key) if key else 0,
+        "key_helper_prefix": key[:6] if key else "",
+        "key_in_env": bool(env_key),
+        "key_in_db": bool(db_key) and not str(db_key).startswith("ERROR"),
+        "key_db_prefix": db_key[:6] if db_key and not str(db_key).startswith("ERROR") else "",
+        "db_error": str(db_key) if str(db_key).startswith("ERROR") else None,
+    }
+
+
 @app.post("/api/prices/trigger-poll")
 async def trigger_price_poll():
     """Forza un ciclo di Price Polling (debug/test)."""
