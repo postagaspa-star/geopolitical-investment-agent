@@ -91,79 +91,121 @@ def _collect_polling_tickers() -> list[str]:
     return sorted(tickers)[:30]
 
 
-async def _fetch_massive_one(session, ticker: str, api_key: str) -> dict | None:
-    """
-    Chiama Massive API per un singolo ticker:
-    - /v2/aggs/ticker/{ticker}/range/1/minute/{from}/{to}?limit=1&sort=desc → ultima candela 1-min
-    - /v2/aggs/ticker/{ticker}/prev → previous close
-    Le 2 call sono lanciate in parallelo.
-    """
+# Cache giornaliera per prev_close (evita di chiamare l'endpoint ogni 60s)
+_prev_close_cache: dict[str, tuple[str, float]] = {}  # {ticker: (date_str, prev_close)}
+
+
+async def _fetch_massive_prev_close(session, ticker: str, api_key: str) -> float | None:
+    """Ritorna prev_close per il ticker, con cache giornaliera."""
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    cached = _prev_close_cache.get(ticker)
+    if cached and cached[0] == today_str:
+        return cached[1]
+
+    url = f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker}/prev"
+    params = {"adjusted": "true", "apiKey": api_key}
+    try:
+        async with session.get(url, params=params,
+                               timeout=aiohttp.ClientTimeout(total=MASSIVE_TIMEOUT)) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            results = data.get("results") or []
+            if results:
+                pc = float(results[0].get("c") or 0)
+                if pc > 0:
+                    _prev_close_cache[ticker] = (today_str, pc)
+                    return pc
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_massive_current(session, ticker: str, api_key: str,
+                                 retries: int = 2) -> dict | None:
+    """Ultimo close 1-min via Massive aggregates. Retry automatico su 429."""
     today = datetime.now(timezone.utc).date()
-    # Range di 4 giorni indietro per gestire weekend/festività
     from_date = (today - timedelta(days=4)).isoformat()
     to_date = today.isoformat()
+    url = f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker}/range/1/minute/{from_date}/{to_date}"
+    params = {"adjusted": "true", "sort": "desc", "limit": 1, "apiKey": api_key}
 
-    url_current = f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker}/range/1/minute/{from_date}/{to_date}"
-    params_current = {"adjusted": "true", "sort": "desc", "limit": 1, "apiKey": api_key}
-
-    url_prev = f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker}/prev"
-    params_prev = {"adjusted": "true", "apiKey": api_key}
-
-    async def _get(url, params):
+    for attempt in range(retries + 1):
         try:
             async with session.get(url, params=params,
                                    timeout=aiohttp.ClientTimeout(total=MASSIVE_TIMEOUT)) as resp:
+                if resp.status == 429:
+                    # Rate limit: backoff esponenziale
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+                    continue
                 if resp.status != 200:
                     return None
-                return await resp.json()
+                data = await resp.json()
+                results = data.get("results") or []
+                if not results:
+                    return None
+                bar = results[0]
+                price = float(bar.get("c") or 0)
+                if price <= 0:
+                    return None
+                ts_ms = bar.get("t", 0)
+                bar_ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat() \
+                         if ts_ms else datetime.now(timezone.utc).isoformat()
+                return {
+                    "price": round(price, 4),
+                    "volume": int(bar.get("v") or 0),
+                    "day_high": round(float(bar.get("h") or price), 4),
+                    "day_low": round(float(bar.get("l") or price), 4),
+                    "timestamp": bar_ts,
+                }
         except Exception:
+            if attempt < retries:
+                await asyncio.sleep(0.5 * (2 ** attempt))
+                continue
             return None
+    return None
 
-    current_data, prev_data = await asyncio.gather(_get(url_current, params_current),
-                                                    _get(url_prev, params_prev))
 
-    if not current_data or not (current_data.get("results")):
+async def _fetch_massive_one(session, ticker: str, api_key: str) -> dict | None:
+    """Combina current price + prev_close (con cache) in un singolo dict ticker."""
+    current = await _fetch_massive_current(session, ticker, api_key)
+    if not current:
         return None
 
-    bar = current_data["results"][0]
-    price = float(bar.get("c") or 0)
-    if price <= 0:
-        return None
+    prev_close = await _fetch_massive_prev_close(session, ticker, api_key)
+    if prev_close is None:
+        prev_close = current["price"]
 
-    prev_close = price
-    if prev_data and prev_data.get("results"):
-        try:
-            prev_close = float(prev_data["results"][0].get("c") or price)
-        except Exception:
-            pass
-
-    change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
-    timestamp_ms = bar.get("t", 0)
-    bar_ts = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).isoformat() if timestamp_ms else datetime.now(timezone.utc).isoformat()
-
+    change_pct = ((current["price"] - prev_close) / prev_close * 100) if prev_close > 0 else 0
     return {
-        "price": round(price, 4),
+        "price": current["price"],
         "prev_close": round(prev_close, 4),
         "change_pct": round(change_pct, 4),
-        "volume": int(bar.get("v") or 0),
-        "day_high": round(float(bar.get("h") or price), 4),
-        "day_low": round(float(bar.get("l") or price), 4),
-        "timestamp": bar_ts,
+        "volume": current["volume"],
+        "day_high": current["day_high"],
+        "day_low": current["day_low"],
+        "timestamp": current["timestamp"],
     }
 
 
 async def _fetch_massive_quotes(tickers: list[str], api_key: str) -> dict[str, dict]:
-    """Batch parallel fetch via Massive API. Ritorna {ticker: quote}."""
+    """
+    Batch fetch via Massive API con concurrency limitata e logging diagnostico.
+    Free tier: ~5 req/sec → cap concurrency a 4 e dilato richieste con piccoli delay.
+    """
     quotes: dict[str, dict] = {}
     if not tickers or not api_key:
         return quotes
 
-    # Concurrency cap a 10 per non saturare il free tier (~5 req/sec)
-    sem = asyncio.Semaphore(10)
+    sem = asyncio.Semaphore(4)
+    failed_tickers: list[str] = []
 
     async def _fetch_with_sem(session, t):
         async with sem:
-            return t, await _fetch_massive_one(session, t, api_key)
+            result = await _fetch_massive_one(session, t, api_key)
+            if result is None:
+                failed_tickers.append(t)
+            return t, result
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -173,6 +215,10 @@ async def _fetch_massive_quotes(tickers: list[str], api_key: str) -> dict[str, d
                     quotes[ticker] = q
     except Exception as e:
         logger.warning("Massive batch error: %s", e)
+
+    if failed_tickers:
+        logger.info("Massive: %d/%d ticker falliti (es. %s)",
+                    len(failed_tickers), len(tickers), ", ".join(failed_tickers[:5]))
 
     return quotes
 
@@ -341,35 +387,49 @@ async def update_price_cache() -> dict:
         market_state = "UNKNOWN"
 
     # 1. Provider primario: Massive API (se key configurata)
-    quotes = {}
-    source_used = "yfinance"
+    massive_quotes = {}
     massive_key = _get_massive_key()
     if massive_key:
         try:
-            quotes = await _fetch_massive_quotes(tickers, massive_key)
-            if quotes:
-                source_used = "massive"
+            massive_quotes = await _fetch_massive_quotes(tickers, massive_key)
         except Exception as e:
-            logger.warning("Massive provider failed: %s — fallback yfinance", e)
-            quotes = {}
+            logger.warning("Massive provider failed: %s", e)
 
-    # 2. Fallback yfinance se Massive vuoto/non disponibile
-    if not quotes:
-        quotes = await asyncio.to_thread(_fetch_yfinance_quotes, tickers)
+    # 2. Per i ticker mancanti, completa con yfinance
+    missing_tickers = [t for t in tickers if t not in massive_quotes]
+    yf_quotes = {}
+    if missing_tickers:
+        yf_quotes = await asyncio.to_thread(_fetch_yfinance_quotes, missing_tickers)
+
+    # 3. Combina e salva con source corretta per ogni ticker
+    qw_total, hw_total = 0, 0
+    if massive_quotes:
+        qw, hw = await asyncio.to_thread(_upsert_quotes, massive_quotes, market_state, "massive")
+        qw_total += qw; hw_total += hw
+    if yf_quotes:
+        qw, hw = await asyncio.to_thread(_upsert_quotes, yf_quotes, market_state, "yfinance")
+        qw_total += qw; hw_total += hw
+
+    if massive_quotes and yf_quotes:
+        source_used = f"massive+yfinance"
+    elif massive_quotes:
+        source_used = "massive"
+    elif yf_quotes:
         source_used = "yfinance"
-
-    # 3. Upsert in Supabase (sincrono → thread)
-    qw, hw = await asyncio.to_thread(_upsert_quotes, quotes, market_state, source_used)
+    else:
+        source_used = "none"
 
     duration = round(time.time() - start, 2)
-    logger.info("Price polling [%s]: %d tickers richiesti, %d quotes salvate, %d storia (%.1fs)",
-                source_used, len(tickers), qw, hw, duration)
+    logger.info("Price polling [%s]: %d ticker richiesti, %d quotes salvate (massive=%d, yf=%d), %d storia (%.1fs)",
+                source_used, len(tickers), qw_total, len(massive_quotes), len(yf_quotes), hw_total, duration)
 
     return {
         "tickers": len(tickers),
-        "quotes_written": qw,
-        "history_written": hw,
+        "quotes_written": qw_total,
+        "history_written": hw_total,
         "source": source_used,
+        "massive_count": len(massive_quotes),
+        "yfinance_count": len(yf_quotes),
         "duration_seconds": duration,
         "market_state": market_state,
     }
