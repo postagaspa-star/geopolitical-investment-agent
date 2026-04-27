@@ -635,7 +635,8 @@ async def mirror_trade_to_clawstreet(
         if not is_open:
             return {"mirrored": False, "reason": "Mercati USA chiusi, trade non inviato a ClawStreet"}
 
-    url = f"{CLAWSTREET_BASE}/bots/{bot_id}/trade"
+    # Endpoint corretto: /trades (plurale), non /trade
+    url = f"{CLAWSTREET_BASE}/bots/{bot_id}/trades"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
