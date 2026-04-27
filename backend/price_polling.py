@@ -73,6 +73,7 @@ def _collect_polling_tickers() -> list[str]:
     except Exception as e:
         logger.warning("Errore lettura posizioni per polling: %s", e)
 
+    custom_watchlist_loaded = False
     try:
         import database
         wl_raw = database.get_setting("watchlist", "")
@@ -81,10 +82,13 @@ def _collect_polling_tickers() -> list[str]:
             for sector_tickers in wl.values():
                 for t in sector_tickers:
                     tickers.add(t.upper().strip())
+            custom_watchlist_loaded = bool(wl)
     except Exception:
         pass
 
-    if not tickers:
+    # Se non c'e' watchlist personalizzata, integra con la default
+    # (sempre, anche se ci sono posizioni — vogliamo monitorare anche i ticker chiave)
+    if not custom_watchlist_loaded:
         tickers.update(DEFAULT_WATCHLIST_TICKERS)
 
     # Hard cap a 30 ticker
