@@ -147,6 +147,18 @@ async def get_positions():
         return {"error": str(e)}
 
 
+@app.post("/api/prices/trigger-poll")
+async def trigger_price_poll():
+    """Forza un ciclo di Price Polling (debug/test)."""
+    try:
+        from price_polling import update_price_cache
+        result = await update_price_cache()
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.error(f"Errore trigger price poll: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @app.get("/api/prices/quotes")
 async def get_price_quotes(tickers: str = Query(default="")):
     """
