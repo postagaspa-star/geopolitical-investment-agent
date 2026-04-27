@@ -559,6 +559,25 @@ async def register_clawstreet_bot(payload: ClawStreetRegisterPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/api/clawstreet/clear-credentials")
+async def clear_clawstreet_credentials():
+    """
+    Pulisce le credenziali ClawStreet dal DB. Utile se è stato registrato
+    un bot per errore — il sistema non tenterà più di mirrorare i trade.
+    Il bot remoto resta unclaimed (non genera costi finché non viene attivato).
+    """
+    try:
+        for k in ["clawstreet_bot_id", "clawstreet_api_key", "clawstreet_claim_url",
+                  "clawstreet_bot_name", "clawstreet_bot_ticker"]:
+            try:
+                database.set_setting(k, "")
+            except Exception:
+                pass
+        return {"status": "ok", "message": "Credenziali ClawStreet pulite dal DB"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @app.get("/api/clawstreet/status")
 async def get_clawstreet_status():
     """Restituisce lo stato della registrazione ClawStreet."""
