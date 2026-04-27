@@ -65,13 +65,13 @@ def _collect_polling_tickers() -> list[str]:
 
     try:
         import database
-        positions = database.get_open_positions() or []
+        positions = database.get_positions() or []
         for p in positions:
             t = (p.get("ticker") or "").upper().strip()
             if t:
                 tickers.add(t)
     except Exception as e:
-        logger.debug("Errore lettura posizioni: %s", e)
+        logger.warning("Errore lettura posizioni per polling: %s", e)
 
     try:
         import database
@@ -410,6 +410,17 @@ async def update_price_cache() -> dict:
         qw, hw = await asyncio.to_thread(_upsert_quotes, yf_quotes, market_state, "yfinance")
         qw_total += qw; hw_total += hw
 
+    # 4. Aggiorna current_price + unrealized_pnl di ogni posizione aperta
+    #    e salva uno snapshot del portfolio (per popolare l'equity curve).
+    #    Solo durante market hours per non gonfiare il DB con snapshot stagnanti.
+    all_quotes = {**yf_quotes, **massive_quotes}  # massive ha la precedenza
+    if market_state == "REGULAR":
+        positions_updated, snapshot_saved = await asyncio.to_thread(
+            _update_positions_and_snapshot, all_quotes
+        )
+    else:
+        positions_updated, snapshot_saved = 0, False
+
     if massive_quotes and yf_quotes:
         source_used = f"massive+yfinance"
     elif massive_quotes:
@@ -420,19 +431,94 @@ async def update_price_cache() -> dict:
         source_used = "none"
 
     duration = round(time.time() - start, 2)
-    logger.info("Price polling [%s]: %d ticker richiesti, %d quotes salvate (massive=%d, yf=%d), %d storia (%.1fs)",
-                source_used, len(tickers), qw_total, len(massive_quotes), len(yf_quotes), hw_total, duration)
+    logger.info(
+        "Price polling [%s]: %d ticker richiesti, %d quotes salvate (massive=%d, yf=%d), "
+        "%d storia, %d posizioni aggiornate, snapshot=%s (%.1fs)",
+        source_used, len(tickers), qw_total, len(massive_quotes), len(yf_quotes),
+        hw_total, positions_updated, snapshot_saved, duration,
+    )
 
     return {
         "tickers": len(tickers),
         "quotes_written": qw_total,
         "history_written": hw_total,
+        "positions_updated": positions_updated,
+        "snapshot_saved": snapshot_saved,
         "source": source_used,
         "massive_count": len(massive_quotes),
         "yfinance_count": len(yf_quotes),
         "duration_seconds": duration,
         "market_state": market_state,
     }
+
+
+def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bool]:
+    """
+    Per ogni posizione aperta aggiorna current_price + unrealized_pnl
+    usando il prezzo dalla cache. Poi salva uno snapshot del portfolio totale.
+    Ritorna (n_posizioni_aggiornate, snapshot_salvato).
+    """
+    positions_updated = 0
+    snapshot_saved = False
+
+    try:
+        import database
+        positions = database.get_positions() or []
+    except Exception as e:
+        logger.warning("Errore lettura positions: %s", e)
+        return 0, False
+
+    if not positions:
+        # Nessuna posizione aperta — comunque salva uno snapshot del portfolio
+        try:
+            import database
+            portfolio = database.get_portfolio()
+            if portfolio:
+                database.insert_portfolio_snapshot(
+                    portfolio.get("total_value", 0),
+                    portfolio.get("cash_balance", portfolio.get("cash", 0)),
+                )
+                snapshot_saved = True
+        except Exception as e:
+            logger.debug("Errore snapshot portfolio (no positions): %s", e)
+        return 0, snapshot_saved
+
+    # 1. Update current_price + pnl per ogni ticker con quote disponibile
+    total_position_value = 0.0
+    for p in positions:
+        ticker = p.get("ticker")
+        qty = float(p.get("quantity", 0) or 0)
+        avg = float(p.get("avg_buy_price", 0) or 0)
+        if not ticker or qty <= 0:
+            continue
+        quote = all_quotes.get(ticker)
+        if quote and "price" in quote:
+            current_price = float(quote["price"])
+            try:
+                import database
+                database.update_position_price(ticker, current_price)
+                positions_updated += 1
+            except Exception as e:
+                logger.debug("Errore update %s: %s", ticker, e)
+            total_position_value += current_price * qty
+        else:
+            # Quote non disponibile per questo ticker: usa l'ultimo current_price noto
+            cp = float(p.get("current_price") or avg)
+            total_position_value += cp * qty
+
+    # 2. Salva snapshot del portfolio totale (cash + valore posizioni)
+    try:
+        import database
+        portfolio = database.get_portfolio()
+        if portfolio:
+            cash = float(portfolio.get("cash_balance", portfolio.get("cash", 0)) or 0)
+            total_value = cash + total_position_value
+            database.insert_portfolio_snapshot(round(total_value, 2), round(cash, 2))
+            snapshot_saved = True
+    except Exception as e:
+        logger.debug("Errore insert portfolio_snapshot: %s", e)
+
+    return positions_updated, snapshot_saved
 
 
 def get_cached_price(ticker: str, max_age_seconds: int = 120) -> dict | None:
