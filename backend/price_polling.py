@@ -238,18 +238,7 @@ def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
     quotes: dict[str, dict] = {}
     try:
         import yfinance as yf
-        # Sessione con User-Agent realistico per ridurre 429
-        try:
-            import requests as _requests
-            _yf_session = _requests.Session()
-            _yf_session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                "Accept": "*/*",
-            })
-        except Exception:
-            _yf_session = None
-
-        # Batch download (più efficiente di chiamate singole)
+        # NB: yfinance ora richiede curl_cffi internamente — niente session=requests
         data = yf.download(
             tickers,
             period="2d",          # Serve almeno 2 giorni per avere prev_close affidabile
@@ -258,7 +247,6 @@ def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
             auto_adjust=True,
             threads=True,
             group_by="ticker",
-            session=_yf_session,
         )
 
         if data is None or data.empty:

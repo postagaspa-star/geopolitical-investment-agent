@@ -429,25 +429,14 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
         end_date = datetime.utcnow()
         start_date = end_date - timedelta(days=period_days)
 
-        # Configura yfinance con User-Agent custom per ridurre 429.
-        # yfinance usa una sessione interna requests che spesso prende UA generico.
-        try:
-            import requests as _requests
-            _yf_session = _requests.Session()
-            _yf_session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                "Accept": "*/*",
-            })
-        except Exception:
-            _yf_session = None
-
-        # Scarica i dati con yfinance (chiamata sincrona). Con session passata, riduce 429.
+        # IMPORTANTE: yfinance ora richiede curl_cffi (non requests). Lasciamolo
+        # gestire la sessione internamente — passare session=requests.Session()
+        # rompe le chiamate.
         df = yfinance.download(
             ticker,
             start=start_date.strftime("%Y-%m-%d"),
             end=end_date.strftime("%Y-%m-%d"),
             progress=False,
-            session=_yf_session,
             auto_adjust=False,
         )
 
@@ -689,10 +678,24 @@ async def mirror_trade_to_clawstreet(
                 if resp.status in (200, 201):
                     logger.info("ClawStreet mirror OK: %s %d %s -> HTTP %d", action, qty, symbol, resp.status)
                     return {"mirrored": True, "status": resp.status, "response": body[:500]}
-                else:
-                    logger.warning("ClawStreet mirror FAIL: %s %d %s -> HTTP %d body=%s",
-                                   action, qty, symbol, resp.status, body[:200])
-                    return {"mirrored": False, "status": resp.status, "response": body[:500]}
+
+                # Identifica errori "expected" (non-fatali) per skipparli senza spam
+                error_code = ""
+                try:
+                    err_obj = __import__("json").loads(body)
+                    error_code = (err_obj.get("error", {}) or {}).get("code", "") if isinstance(err_obj.get("error"), dict) else ""
+                except Exception:
+                    pass
+
+                if error_code in ("INVALID_SYMBOL", "INSUFFICIENT_BUYING_POWER", "INSUFFICIENT_POSITION"):
+                    logger.info("ClawStreet skip %s %d %s: %s",
+                                action, qty, symbol, error_code)
+                    return {"mirrored": False, "skipped": True, "reason": error_code,
+                            "status": resp.status, "response": body[:500]}
+
+                logger.warning("ClawStreet mirror FAIL: %s %d %s -> HTTP %d body=%s",
+                               action, qty, symbol, resp.status, body[:200])
+                return {"mirrored": False, "status": resp.status, "response": body[:500]}
     except Exception as exc:
         logger.warning("ClawStreet trade mirror error: %s", exc)
         return {"mirrored": False, "error": str(exc)}
