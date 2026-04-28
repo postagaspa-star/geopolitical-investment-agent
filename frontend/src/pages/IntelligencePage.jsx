@@ -253,13 +253,199 @@ function ThinkingProcess({ logs, loading }) {
   );
 }
 
+function ScoutInfoModal({ open, onClose }) {
+  if (!open) return null;
+  return (
+    <div className="modal-overlay" onClick={onClose} style={{
+      position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:9999,
+      display:"flex",alignItems:"center",justifyContent:"center",padding:"2rem"
+    }}>
+      <div onClick={(e)=>e.stopPropagation()} style={{
+        background:"#0f172a",
+        border:"1px solid #1f2937",
+        borderRadius:"12px",
+        width:"95vw", maxWidth:"900px",
+        height:"90vh",
+        overflowY:"auto",
+        padding:"2rem",
+        color:"#e2e8f0",
+        position:"relative"
+      }}>
+        <button onClick={onClose} style={{
+          position:"absolute", top:"1rem", right:"1rem",
+          background:"transparent", border:"1px solid #374151", color:"#94a3b8",
+          width:"32px", height:"32px", borderRadius:"50%",
+          cursor:"pointer", fontSize:"1.2rem"
+        }}>×</button>
+        <h2 style={{marginTop:0, color:"#f1f5f9"}}>Scout Findings — guida</h2>
+        <p style={{color:"#94a3b8", marginBottom:"2rem"}}>
+          Lo Scout e' l'agente AI (Claude Sonnet 4.5) che ogni 20 minuti, 24/7,
+          raccoglie notizie da 7 fonti diverse e le sintetizza in micro-schede
+          azionabili. Ogni scheda ti dice in 2-3 frasi cosa e' successo, su quali
+          ticker impatta, e se il sentiment e' positivo o negativo.
+        </p>
+
+        <h3 style={{color:"#f1f5f9"}}>Le fonti</h3>
+        <div style={{display:"grid", gap:"0.8rem", marginBottom:"2rem"}}>
+          <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
+              <span className="badge" style={{background:"#0891b2"}}>GDELT</span>
+              <strong>Eventi geopolitici globali</strong>
+            </div>
+            <div style={{fontSize:"0.85rem", color:"#cbd5e1"}}>
+              GDELT Project monitora la copertura mediatica mondiale per individuare
+              guerre, tensioni, sanzioni, crisi energetiche. E' la fonte piu' "macro" —
+              ti dice se sta succedendo qualcosa di grosso a livello geopolitico.
+            </div>
+          </div>
+
+          <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
+              <span className="badge" style={{background:"#10b981"}}>NEWSAPI</span>
+              <strong>News mainstream finanziarie</strong>
+            </div>
+            <div style={{fontSize:"0.85rem", color:"#cbd5e1"}}>
+              Aggregatore di news dei principali quotidiani finanziari (Reuters,
+              Bloomberg, FT, ecc.). Fonte istituzionale — copre quello che leggi
+              sui giornali di settore.
+            </div>
+          </div>
+
+          <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
+              <span className="badge" style={{background:"#16a34a"}}>YFINANCE_NEWS</span>
+              <strong>News specifiche per ticker</strong>
+            </div>
+            <div style={{fontSize:"0.85rem", color:"#cbd5e1"}}>
+              News pertinenti SOLO ai ticker che il bot detiene o monitora
+              (es. earnings di XOM, downgrade di LMT). Molto piu' mirato di
+              GDELT/NewsAPI.
+            </div>
+          </div>
+
+          <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
+              <span className="badge" style={{background:"#f97316"}}>REDDIT</span>
+              <span className="badge" style={{background:"#f97316"}}>RETAIL</span>
+              <strong>Sentiment dei retail trader</strong>
+            </div>
+            <div style={{fontSize:"0.85rem", color:"#cbd5e1"}}>
+              Top post da r/wallstreetbets, r/stocks, r/investing, r/options.
+              Ti dice cosa pensa "la massa" — utile per leggere FOMO, panic,
+              short squeeze e meme-stock movements. Spesso anticipa volatilita'
+              su singoli titoli.
+            </div>
+          </div>
+
+          <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
+              <span className="badge" style={{background:"#f97316"}}>X</span>
+              <span className="badge" style={{background:"#f97316"}}>RETAIL</span>
+              <strong>Sentiment Twitter/X finance</strong>
+            </div>
+            <div style={{fontSize:"0.85rem", color:"#cbd5e1"}}>
+              Tweet finance ad alto engagement. Richiede X_API_BEARER nelle
+              impostazioni — se non configurato non produce schede.
+            </div>
+          </div>
+
+          <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
+              <span className="badge" style={{background:"#8b5cf6"}}>CLAWSTREET</span>
+              <strong>Contesto mercati real-time</strong>
+            </div>
+            <div style={{fontSize:"0.85rem", color:"#cbd5e1"}}>
+              Snapshot quotato dei principali indici (SPY, NASDAQ, DOW, BTC) +
+              sentiment aggregato + performance settoriale dell'ultima sessione.
+            </div>
+          </div>
+
+          <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
+              <span className="badge" style={{background:"#dc2626"}}>CONGRESSIONAL</span>
+              <strong>Insider del Congresso USA</strong>
+            </div>
+            <div style={{fontSize:"0.85rem", color:"#cbd5e1"}}>
+              Trade dichiarati dai membri del Congresso americano (Pelosi,
+              Burr, ecc.). Sono "insider strong signal" perche' siedono nelle
+              commissioni che regolano i settori in cui investono. Filtrato a
+              trade &gt; $50.000 negli ultimi 30 giorni.
+            </div>
+          </div>
+        </div>
+
+        <h3 style={{color:"#f1f5f9"}}>Sentiment score</h3>
+        <p style={{color:"#cbd5e1", fontSize:"0.9rem"}}>
+          Va da <span style={{color:"#ef4444",fontWeight:600}}>-1.0</span> (molto
+          ribassista) a <span style={{color:"#10b981",fontWeight:600}}>+1.0</span>
+          (molto rialzista). La barra colorata accanto a ogni scheda lo visualizza:
+          larghezza = intensita', colore = direzione.
+        </p>
+
+        <h3 style={{color:"#f1f5f9"}}>Sentiment_type</h3>
+        <ul style={{color:"#cbd5e1", fontSize:"0.9rem"}}>
+          <li><strong>INSTITUTIONAL</strong>: viene da news ufficiali (GDELT,
+            NewsAPI, yFinance, ClawStreet, Congressional). Riflette la posizione
+            di analisti, fondi, governi.</li>
+          <li><strong>RETAIL</strong>: viene da social (Reddit, X). Riflette
+            cosa pensa la "folla" dei piccoli investitori. Spesso piu' rumoroso
+            ma utile per anticipare squeeze e meme moves.</li>
+        </ul>
+
+        <h3 style={{color:"#f1f5f9"}}>Come usa lo Scout queste schede</h3>
+        <p style={{color:"#cbd5e1", fontSize:"0.9rem"}}>
+          Le micro-schede vengono salvate in un buffer condiviso. Il Watchdog
+          (DeepSeek-V3, ogni 1 min) le legge insieme ai prezzi e decide se
+          c'e' urgenza sufficiente per attivare il Decision Agent (Claude
+          Sonnet 4.5, max 1 volta/ora). Se l'urgenza supera la soglia 5/10,
+          parte la pipeline completa che potrebbe culminare in un trade.
+        </p>
+
+        <h3 style={{color:"#f1f5f9"}}>Risk keywords</h3>
+        <p style={{color:"#cbd5e1", fontSize:"0.9rem"}}>
+          Parole-chiave di rischio estratte dallo Scout (es. "conflict",
+          "sanctions", "earnings_miss", "short_squeeze"). Le vedi in arancione
+          sotto la scheda quando presenti.
+        </p>
+
+        <h3 style={{color:"#f1f5f9"}}>Filtri</h3>
+        <p style={{color:"#cbd5e1", fontSize:"0.9rem"}}>
+          I due dropdown in alto ti permettono di filtrare per fonte
+          (es. solo Reddit per leggere il sentiment retail) o per tipo
+          (Istituzionale vs Retail).
+        </p>
+
+        <div style={{marginTop:"2rem", paddingTop:"1rem", borderTop:"1px solid #1f2937", textAlign:"center"}}>
+          <button onClick={onClose} className="btn btn-primary" style={{padding:"0.6rem 1.5rem"}}>
+            Ho capito
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ScoutBufferView({ items, loading }) {
   const [filterSource, setFilterSource] = useState("ALL");
   const [filterSentiment, setFilterSentiment] = useState("ALL");
+  const [infoOpen, setInfoOpen] = useState(false);
 
   if (loading) return <div className="empty-state">Caricamento Scout findings...</div>;
   if (!items || items.length === 0) {
-    return <div className="empty-state">Nessuna scoperta dello Scout nelle ultime 24 ore. Lo Scout gira ogni 20 minuti — controlla di nuovo a breve.</div>;
+    return (
+      <>
+        <ScoutInfoModal open={infoOpen} onClose={()=>setInfoOpen(false)} />
+        <div style={{display:"flex",justifyContent:"flex-end",marginBottom:"0.5rem"}}>
+          <button onClick={()=>setInfoOpen(true)} title="Cosa significa tutto questo?" style={{
+            width:"28px",height:"28px",borderRadius:"50%",
+            background:"#1e293b",color:"#60a5fa",
+            border:"1px solid #334155",cursor:"pointer",
+            fontSize:"0.85rem",fontWeight:600
+          }}>?</button>
+        </div>
+        <div className="empty-state">Nessuna scoperta dello Scout nelle ultime 24 ore. Lo Scout gira ogni 20 minuti — controlla di nuovo a breve.</div>
+      </>
+    );
   }
 
   const allSources = [...new Set(items.map(i => i.source_type || "UNKNOWN"))].sort();
@@ -295,9 +481,10 @@ function ScoutBufferView({ items, loading }) {
 
   return (
     <div>
+      <ScoutInfoModal open={infoOpen} onClose={()=>setInfoOpen(false)} />
       <div className="thinking-header" style={{marginBottom:"1rem"}}>
         <span className="thinking-count">{filtered.length} di {items.length} micro-schede</span>
-        <div style={{display:"flex",gap:"0.4rem",flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:"0.4rem",flexWrap:"wrap",alignItems:"center"}}>
           <select className="phase-filter" value={filterSource} onChange={(e)=>setFilterSource(e.target.value)}>
             <option value="ALL">Tutte le fonti ({items.length})</option>
             {allSources.map(s => (
@@ -309,6 +496,12 @@ function ScoutBufferView({ items, loading }) {
             <option value="INSTITUTIONAL">Istituzionale</option>
             <option value="RETAIL">Retail (Reddit/X)</option>
           </select>
+          <button onClick={()=>setInfoOpen(true)} title="Cosa significa tutto questo?" style={{
+            width:"28px",height:"28px",borderRadius:"50%",
+            background:"#1e293b",color:"#60a5fa",
+            border:"1px solid #334155",cursor:"pointer",
+            fontSize:"0.85rem",fontWeight:600
+          }}>?</button>
         </div>
       </div>
       {filtered.map((item) => (
@@ -407,7 +600,13 @@ function IntelligencePage() {
     return () => clearInterval(interval);
   }, [activeSection, fetchLogs]);
 
-  const parseJson = (str) => { try { return JSON.parse(str); } catch { return []; } };
+  // parseJson tollera sia stringhe (SQLite) sia array gia' decodificati (Supabase JSON)
+  const parseJson = (val) => {
+    if (val == null) return [];
+    if (Array.isArray(val)) return val;
+    if (typeof val === "object") return [val];
+    try { return JSON.parse(val); } catch { return []; }
+  };
 
   // Count trades in logs
   const tradeCount = agentLogs.filter(l => l.phase === "DECISION_TRADE").length;
@@ -442,8 +641,8 @@ function IntelligencePage() {
 
       {activeSection === "intelligence" && (
         <div>
-          {(!intelligence || intelligence.length === 0) ? (
-            <div className="empty-state">Nessuna intelligence weekend disponibile</div>
+          {(!Array.isArray(intelligence) || intelligence.length === 0) ? (
+            <div className="empty-state">Nessuna intelligence weekend disponibile. La Daily/Weekly Recap dello Scout viene generata alle 23:59 CET ogni giorno (e domenica per la Weekly).</div>
           ) : intelligence.map((item) => {
             const events = parseJson(item.key_events);
             const isExp = expandedId === `i-${item.id}`;
@@ -458,7 +657,24 @@ function IntelligencePage() {
                   <div className="intel-events">
                     <strong>Eventi chiave:</strong>
                     <ul>
-                      {events.slice(0, isExp ? events.length : 3).map((e,i) => <li key={i}>{e}</li>)}
+                      {events.slice(0, isExp ? events.length : 3).map((e, i) => {
+                        // Supporta sia stringhe sia oggetti {event, impact, tickers}
+                        if (typeof e === "string") return <li key={i}>{e}</li>;
+                        if (e && typeof e === "object") {
+                          return (
+                            <li key={i}>
+                              <strong>{e.event || "(senza titolo)"}</strong>
+                              {e.impact && <div style={{fontSize:"0.85em",color:"#94a3b8",marginTop:"0.2rem"}}>{e.impact}</div>}
+                              {Array.isArray(e.tickers) && e.tickers.length > 0 && (
+                                <div className="asset-tags" style={{marginTop:"0.3rem"}}>
+                                  {e.tickers.map((t,j) => <span key={j} className="ticker-tag">{t}</span>)}
+                                </div>
+                              )}
+                            </li>
+                          );
+                        }
+                        return <li key={i}>{String(e)}</li>;
+                      })}
                       {!isExp && events.length > 3 && <li className="more">+{events.length-3} altri...</li>}
                     </ul>
                   </div>
@@ -466,7 +682,7 @@ function IntelligencePage() {
                 {item.market_implications && (
                   <div className="intel-implications">
                     <strong>Implicazioni mercato:</strong>
-                    <p>{isExp ? item.market_implications : item.market_implications.substring(0,200) + (item.market_implications.length > 200 ? "..." : "")}</p>
+                    <p>{isExp ? item.market_implications : (item.market_implications || "").substring(0,200) + ((item.market_implications || "").length > 200 ? "..." : "")}</p>
                   </div>
                 )}
                 {isExp && item.content && (
@@ -496,7 +712,13 @@ function IntelligencePage() {
                 {assets.length > 0 && (
                   <div className="intel-assets">
                     <strong>Asset prioritari:</strong>
-                    <div className="asset-tags">{assets.map((a,i) => <span key={i} className="ticker-tag">{a}</span>)}</div>
+                    <div className="asset-tags">
+                      {assets.map((a, i) => (
+                        <span key={i} className="ticker-tag">
+                          {typeof a === "string" ? a : (a && a.ticker) || JSON.stringify(a).substring(0, 20)}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 )}
                 <div className="intel-content">

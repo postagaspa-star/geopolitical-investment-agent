@@ -233,6 +233,36 @@ async def _daily_recap_job():
         logger.error("Errore Daily Recap: %s", e, exc_info=True)
 
 
+async def _clawstreet_reconcile_job():
+    """
+    Riconciliazione automatica ClawStreet ogni ora durante orari di mercato.
+    Confronta i trade locali con quelli su ClawStreet e invia quelli mancanti.
+    Aiuta a mantenere allineata la vetrina pubblica con il portafoglio interno.
+    """
+    if not is_market_open():
+        return  # Eseguiamo solo durante orari di mercato per non spammare CS
+
+    try:
+        cs_bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
+        cs_api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
+        if not cs_bot_id or not cs_api_key or cs_bot_id == "GEO":
+            return
+
+        # Riusa la stessa logica dell'endpoint /api/clawstreet/reconcile
+        # importandolo direttamente
+        import aiohttp
+        url = f"https://geopolitical-investment-agent.onrender.com/api/clawstreet/reconcile?since_hours=24"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    sent = data.get("sent", 0)
+                    if sent > 0:
+                        logger.info("ClawStreet reconcile: %d trade specchiati automaticamente", sent)
+    except Exception as e:
+        logger.warning("Errore reconcile ClawStreet automatico: %s", e)
+
+
 async def _weekly_matrix_job():
     """Job per la Weekly Matrix dello Scout (domenica 23:59 CET)."""
     from uuid import uuid4
@@ -345,6 +375,18 @@ def start_scheduler() -> AsyncIOScheduler:
         name="Scout Weekly Matrix (domenica 23:59 CET)",
         replace_existing=True,
         max_instances=1,
+    )
+
+    # ClawStreet auto-reconcile: ogni ora durante orari di mercato
+    _scheduler.add_job(
+        _clawstreet_reconcile_job,
+        trigger="interval",
+        minutes=60,
+        id="clawstreet_reconcile",
+        name="ClawStreet auto-reconcile (60 min, market-only)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     _scheduler.start()

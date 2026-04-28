@@ -933,9 +933,20 @@ async def test_api_connection():
 
 @app.get("/api/portfolio/history")
 async def get_portfolio_history(period: str = Query(default="30d")):
-    """Restituisce lo storico del valore del portafoglio."""
+    """Restituisce lo storico del valore del portafoglio.
+
+    Periodi supportati:
+      1h, 4h, 1d  -> intraday (ultimo giorno, snapshot ogni minuto via price polling)
+      7d/1w, 30d/1m, 90d/3m, all
+    """
     try:
-        days_map = {"7d": 7, "1w": 7, "30d": 30, "1m": 30, "90d": 90, "3m": 90, "all": 3650}
+        days_map = {
+            "1h": 1, "4h": 1, "1d": 1,
+            "7d": 7, "1w": 7,
+            "30d": 30, "1m": 30,
+            "90d": 90, "3m": 90,
+            "all": 3650,
+        }
         days = days_map.get(period.lower(), 30)
         history = database.get_portfolio_history(days=days)
         if not history:
