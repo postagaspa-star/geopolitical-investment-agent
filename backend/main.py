@@ -776,6 +776,7 @@ async def reconcile_clawstreet_trades(since_hours: int = Query(default=48, ge=1,
             continue  # gia' specchiato
         missing.append(tr)
 
+    skipped = []
     for tr in missing:
         result = await data_fetchers.mirror_trade_to_clawstreet(
             bot_id=bot_id, api_key=api_key,
@@ -784,6 +785,14 @@ async def reconcile_clawstreet_trades(since_hours: int = Query(default=48, ge=1,
         )
         if result.get("mirrored"):
             sent.append({"ticker": tr["ticker"], "action": tr["action"], "qty": tr["qty"]})
+        elif result.get("skipped"):
+            # Errori "expected" (INVALID_SYMBOL, INSUFFICIENT_BUYING_POWER, ecc.):
+            # ClawStreet non supporta il simbolo o non ha capitale virtuale sufficiente.
+            # Non e' un bug dell'app — e' un limite della piattaforma vetrina.
+            skipped.append({
+                "ticker": tr["ticker"], "action": tr["action"], "qty": tr["qty"],
+                "reason": result.get("reason", "skip"),
+            })
         else:
             failed.append({
                 "ticker": tr["ticker"], "action": tr["action"], "qty": tr["qty"],
@@ -797,8 +806,9 @@ async def reconcile_clawstreet_trades(since_hours: int = Query(default=48, ge=1,
         "clawstreet_trades": len(cs_trades),
         "missing": len(missing),
         "sent": len(sent),
+        "skipped": len(skipped),
         "failed": len(failed),
-        "details": {"sent": sent, "failed": failed},
+        "details": {"sent": sent, "skipped": skipped, "failed": failed},
     }
 
 
