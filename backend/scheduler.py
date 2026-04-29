@@ -223,16 +223,64 @@ async def _keep_alive_ping():
         logger.warning("Keep-alive ping fallito: %s", e)
 
 
-async def _daily_recap_job():
-    """Job per il Daily Recap dello Scout (23:59 CET)."""
+async def _scout_8h_report_job():
+    """
+    Job aggregato 8H — ogni 8 ore.
+    Lo Scout legge le micro-cards delle ultime 8h dal buffer, le sintetizza
+    in un report 8H, e ELIMINA le micro-cards consumate.
+    """
     from uuid import uuid4
     run_id = str(uuid4())
     try:
-        from agents.scout import run_daily_recap
-        result = await run_daily_recap(run_id)
-        logger.info("Daily Recap completato: %s", result.get("macro_bias", "?"))
+        from agents.scout import run_8h_report
+        result = await run_8h_report(run_id)
+        if result.get("skipped"):
+            logger.info("Scout 8H skipped: %s", result.get("reason"))
+        else:
+            logger.info("Scout 8H completato: bias=%s, consumed=%d",
+                        result.get("macro_bias", "?"), result.get("consumed_records", 0))
     except Exception as e:
-        logger.error("Errore Daily Recap: %s", e, exc_info=True)
+        logger.error("Errore Scout 8H: %s", e, exc_info=True)
+
+
+async def _scout_4d_report_job():
+    """
+    Job aggregato 4D — ogni 4 giorni.
+    Lo Scout legge i report 8H degli ultimi 4 giorni, li sintetizza in un
+    report 4D, e ELIMINA i report 8H consumati.
+    """
+    from uuid import uuid4
+    run_id = str(uuid4())
+    try:
+        from agents.scout import run_4d_report
+        result = await run_4d_report(run_id)
+        if result.get("skipped"):
+            logger.info("Scout 4D skipped: %s", result.get("reason"))
+        else:
+            logger.info("Scout 4D completato: bias=%s, consumed=%d 8H-reports",
+                        result.get("macro_bias", "?"), result.get("consumed_records", 0))
+    except Exception as e:
+        logger.error("Errore Scout 4D: %s", e, exc_info=True)
+
+
+async def _scout_3w_report_job():
+    """
+    Job aggregato 3W — ogni 3 settimane (21 giorni).
+    Lo Scout legge i report 4D delle ultime 3 settimane, produce un report
+    macro 3W di lungo periodo, e ELIMINA i report 4D consumati.
+    """
+    from uuid import uuid4
+    run_id = str(uuid4())
+    try:
+        from agents.scout import run_3w_report
+        result = await run_3w_report(run_id)
+        if result.get("skipped"):
+            logger.info("Scout 3W skipped: %s", result.get("reason"))
+        else:
+            logger.info("Scout 3W completato: regime=%s, consumed=%d 4D-reports",
+                        result.get("regime", "?"), result.get("consumed_records", 0))
+    except Exception as e:
+        logger.error("Errore Scout 3W: %s", e, exc_info=True)
 
 
 async def _clawstreet_reconcile_job():
@@ -265,16 +313,6 @@ async def _clawstreet_reconcile_job():
         logger.warning("Errore reconcile ClawStreet automatico: %s", e)
 
 
-async def _weekly_matrix_job():
-    """Job per la Weekly Matrix dello Scout (domenica 23:59 CET)."""
-    from uuid import uuid4
-    run_id = str(uuid4())
-    try:
-        from agents.scout import run_weekly_matrix
-        result = await run_weekly_matrix(run_id)
-        logger.info("Weekly Matrix completata: %s", result.get("macro_strategy", "?")[:100])
-    except Exception as e:
-        logger.error("Errore Weekly Matrix: %s", e, exc_info=True)
 
 
 # ============================================================
@@ -358,25 +396,49 @@ def start_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # Daily Recap: ogni giorno alle 23:59 CET
-    from apscheduler.triggers.cron import CronTrigger
+    # ── Cascade aggregation: 8h → 4d → 3w (sostituisce daily/weekly) ──
+    # Ogni livello consuma il precedente e lo elimina dopo aver scritto il
+    # report aggregato. Storage: tutti su intelligence_buffer con tier =
+    # AGG_8H / AGG_4D / AGG_3W (vedi backend/agents/scout.py).
+    now_utc = datetime.now(pytz.utc)
+
+    # 8H — ogni 8 ore. Primo run dopo 1h (per accumulare almeno 3 cicli Scout).
     _scheduler.add_job(
-        _daily_recap_job,
-        trigger=CronTrigger(hour=22, minute=59, timezone="Europe/Paris"),
-        id="scout_daily_recap",
-        name="Scout Daily Recap (23:59 CET)",
+        _scout_8h_report_job,
+        trigger="interval",
+        hours=8,
+        id="scout_8h_report",
+        name="Scout 8H Report (consume L0 micro-cards)",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
+        next_run_time=now_utc + timedelta(hours=1),
     )
 
-    # Weekly Matrix: ogni domenica alle 23:59 CET
+    # 4D — ogni 4 giorni. Primo run dopo 24h (per avere almeno 3 report 8H).
     _scheduler.add_job(
-        _weekly_matrix_job,
-        trigger=CronTrigger(day_of_week="sun", hour=23, minute=59, timezone="Europe/Paris"),
-        id="scout_weekly_matrix",
-        name="Scout Weekly Matrix (domenica 23:59 CET)",
+        _scout_4d_report_job,
+        trigger="interval",
+        days=4,
+        id="scout_4d_report",
+        name="Scout 4D Report (consume L1 8H-reports)",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
+        next_run_time=now_utc + timedelta(hours=24),
+    )
+
+    # 3W — ogni 21 giorni. Primo run dopo 5 giorni (per avere almeno 1-2 report 4D).
+    _scheduler.add_job(
+        _scout_3w_report_job,
+        trigger="interval",
+        days=21,
+        id="scout_3w_report",
+        name="Scout 3W Report (consume L2 4D-reports)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=now_utc + timedelta(days=5),
     )
 
     # ClawStreet auto-reconcile: ogni ora durante orari di mercato
@@ -461,9 +523,12 @@ def get_scheduler_info() -> dict:
     mode = get_current_mode() if running else "idle"
     market_open = is_market_open()
 
-    # --- Per i job APScheduler (Watchdog, Scout) leggiamo direttamente next_run_time ---
+    # --- Per i job APScheduler leggiamo direttamente next_run_time ---
     watchdog_next = None
     scout_next = None
+    scout_8h_next = None
+    scout_4d_next = None
+    scout_3w_next = None
     if _scheduler and running:
         wj = _scheduler.get_job("watchdog_job")
         if wj and wj.next_run_time:
@@ -471,10 +536,22 @@ def get_scheduler_info() -> dict:
         sj = _scheduler.get_job("scout_hourly_job")
         if sj and sj.next_run_time:
             scout_next = sj.next_run_time.isoformat()
+        s8 = _scheduler.get_job("scout_8h_report")
+        if s8 and s8.next_run_time:
+            scout_8h_next = s8.next_run_time.isoformat()
+        s4 = _scheduler.get_job("scout_4d_report")
+        if s4 and s4.next_run_time:
+            scout_4d_next = s4.next_run_time.isoformat()
+        s3 = _scheduler.get_job("scout_3w_report")
+        if s3 and s3.next_run_time:
+            scout_3w_next = s3.next_run_time.isoformat()
 
     # --- Per i job on-demand cerchiamo l'ultimo log corrispondente ---
     watchdog_last = _last_log_for_phases(["WATCHDOG_"])
-    scout_last = _last_log_for_phases(["SCOUT_20MIN", "SCOUT_DAILY", "SCOUT_WEEKLY"])
+    scout_last = _last_log_for_phases(["SCOUT_20MIN", "SCOUT", "SCOUT_8H", "SCOUT_4D", "SCOUT_3W"])
+    scout_8h_last = _last_log_for_phases(["SCOUT_8H"])
+    scout_4d_last = _last_log_for_phases(["SCOUT_4D"])
+    scout_3w_last = _last_log_for_phases(["SCOUT_3W"])
     technical_last = _last_log_for_phases(["TECH_", "TECHNICAL_"])
     decision_last = _last_log_for_phases(["DECISION_"])
 
@@ -489,6 +566,24 @@ def get_scheduler_info() -> dict:
             "schedule": "ogni 20 min (24/7)",
             "next_run": scout_next,
             "last_run": scout_last,
+            "active": running,
+        },
+        "scout_8h": {
+            "schedule": "ogni 8 ore (aggrega micro-cards)",
+            "next_run": scout_8h_next,
+            "last_run": scout_8h_last,
+            "active": running,
+        },
+        "scout_4d": {
+            "schedule": "ogni 4 giorni (aggrega report 8H)",
+            "next_run": scout_4d_next,
+            "last_run": scout_4d_last,
+            "active": running,
+        },
+        "scout_3w": {
+            "schedule": "ogni 3 settimane (aggrega report 4D)",
+            "next_run": scout_3w_next,
+            "last_run": scout_3w_last,
             "active": running,
         },
         "technical": {

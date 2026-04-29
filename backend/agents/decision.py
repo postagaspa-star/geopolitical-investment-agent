@@ -5,7 +5,8 @@ Attivato solo quando il Watchdog rileva un segnale significativo (urgency >= 5).
 Throttle: max 1 run per ora per rispettare il budget mensile (~$13-14/mese).
 
 Fasi:
-  A: Ingestione contesto (Weekly Matrix + 1 Daily Snapshot + Buffer recente)
+  A: Ingestione contesto a cascata (3W macro + 4D mid-term + 8H short-term +
+     buffer L0 ultimi 40 min + Tech Report + Portfolio)
   B: Valutazione strategica (Sonnet 4.5 — context compresso max 6K token)
   C: Esecuzione trade o motivazione no-trade
 """
@@ -36,12 +37,13 @@ DECISION_SYSTEM_PROMPT_DEFAULT = """Sei il Decision Agent di GeoInvest AI — un
 HAI PIENA AUTONOMIA DECISIONALE. Non ci sono restrizioni conservative.
 Il tuo obiettivo è massimizzare i rendimenti accettando rischi calcolati.
 
-CONTESTO CHE RICEVI:
-1. Weekly Matrix: visione macro della settimana
-2. Ultime 3 Daily Snapshots: trend recenti
-3. Intelligence Buffer recente: notizie degli ultimi 20-40 minuti
-4. Report Tecnico: analisi quantitativa da DeepSeek-V3
-5. Stato Portafoglio corrente
+CONTESTO CHE RICEVI (sintesi a cascata prodotte dallo Scout):
+1. Report 3W (macro 3 settimane): regime di mercato, trend strutturali, rischi sistemici
+2. Report 4D (medio termine, ultimi 2): trend consolidati, rotazioni settoriali
+3. Report 8H (breve termine, ultimi 3): bias di periodo, hot tickers, catalisti
+4. Intelligence Buffer L0 recente: micro-cards degli ultimi 20-40 minuti
+5. Report Tecnico: analisi quantitativa da DeepSeek-V3
+6. Stato Portafoglio corrente
 
 PROCEDURA DECISIONALE:
 Fase A — VALUTAZIONE: Analizza il contesto globale. Rispondi: "Esiste un'opportunita' ad alto rischio che giustifica un'operazione?"
@@ -328,7 +330,10 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     """
     import database
     import portfolio
-    from agents.scout import get_latest_weekly_matrix, get_latest_daily_snapshots, get_recent_buffer
+    from agents.scout import (
+        get_latest_aggregated_reports, get_recent_buffer,
+        TIER_8H, TIER_4D, TIER_3W,
+    )
 
     logger.info("[%s][DECISION] === Avvio Decision Agent ===", run_id)
     start_time = datetime.now(timezone.utc)
@@ -336,20 +341,24 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     # Checkpoint
     _save_checkpoint(run_id, "decision", "RUNNING", {"phase": "context_loading"})
 
-    # --- FASE A: Ingestione Contesto Globale ---
+    # --- FASE A: Ingestione Contesto a Cascata ---
     context_loaded = {}
 
-    # Weekly Matrix
-    weekly = get_latest_weekly_matrix(database)
-    context_loaded["weekly_matrix"] = weekly is not None
+    # 3W macro (lungo termine)
+    rep_3w = get_latest_aggregated_reports(database, TIER_3W, n=1)
+    context_loaded["report_3w"] = len(rep_3w) > 0
 
-    # Ultime 3 Daily Snapshots
-    dailies = get_latest_daily_snapshots(database, n=3)
-    context_loaded["daily_snapshots"] = len(dailies) > 0
+    # 4D (medio termine, ultimi 2)
+    rep_4d = get_latest_aggregated_reports(database, TIER_4D, n=2)
+    context_loaded["report_4d"] = len(rep_4d)
 
-    # Buffer recente (ultimi 40 min)
+    # 8H (breve termine, ultimi 3)
+    rep_8h = get_latest_aggregated_reports(database, TIER_8H, n=3)
+    context_loaded["report_8h"] = len(rep_8h)
+
+    # Buffer L0 recente (ultimi 40 min) - solo micro-cards, esclude i tier aggregati
     recent_buffer = get_recent_buffer(database, minutes=40)
-    context_loaded["intelligence_buffer"] = len(recent_buffer) > 0
+    context_loaded["intelligence_buffer"] = len(recent_buffer)
 
     # Stato portafoglio
     portfolio_state = portfolio.get_portfolio_state()
@@ -368,7 +377,7 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 
     # --- Costruisci messaggio utente ---
     user_message = _build_context_message(
-        weekly, dailies, recent_buffer, tech_report, portfolio_state, docs
+        rep_3w, rep_4d, rep_8h, recent_buffer, tech_report, portfolio_state, docs
     )
 
     database.insert_agent_log(run_id, "DECISION_CONTEXT",
@@ -509,37 +518,66 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 # Context Builder
 # ============================================================
 
-def _build_context_message(weekly, dailies, buffer, tech_report, portfolio_state, docs) -> str:
-    """Costruisce il messaggio di contesto per il Decision Agent."""
+def _build_context_message(rep_3w, rep_4d, rep_8h, buffer, tech_report, portfolio_state, docs) -> str:
+    """
+    Costruisce il messaggio di contesto per il Decision Agent.
+    Riceve liste di report aggregati (dal nuovo sistema cascata 3W/4D/8H).
+    """
     parts = []
 
-    # Weekly Matrix
-    if weekly:
-        parts.append(f"""=== WEEKLY MATRIX ({weekly.get('week_id', '?')}) ===
-Sintesi: {weekly.get('synthesis', 'N/A')}
-Rischi: {weekly.get('long_term_risks', 'N/A')}
-Strategia: {weekly.get('macro_strategy', 'N/A')}
-Rotazioni settoriali: {json.dumps(weekly.get('sector_rotation_signals', {}), ensure_ascii=False)}""")
+    # === Report 3W (macro, lungo termine) ===
+    if rep_3w:
+        r = rep_3w[0]["report"]
+        ts = rep_3w[0].get("timestamp", "?")
+        parts.append(f"""=== REPORT MACRO 3W ({ts}) ===
+Regime: {r.get('regime', '?')}
+Sintesi: {r.get('synthesis', r.get('summary_text', 'N/A'))}
+Rischi strutturali: {', '.join(r.get('structural_risks', []))[:600]}
+Temi lungo termine: {', '.join(r.get('long_term_themes', []))[:400]}
+Rotazione settoriale: {json.dumps(r.get('sector_rotation', {}), ensure_ascii=False)[:300]}
+Strategia macro: {r.get('macro_strategy', 'N/A')[:500]}""")
     else:
-        parts.append("=== WEEKLY MATRIX === Non disponibile (prima settimana)")
+        parts.append("=== REPORT MACRO 3W === Non ancora disponibile (servono almeno 3 settimane di history)")
 
-    # Daily Snapshots
-    if dailies:
-        daily_text = ""
-        for d in dailies[:3]:
-            daily_text += f"\n--- {d.get('date', '?')} (Bias: {d.get('macro_bias', '?')}) ---\n{d.get('summary_text', '')[:500]}\n"
-        parts.append(f"=== ULTIME DAILY SNAPSHOTS ({len(dailies)}) ==={daily_text}")
+    # === Report 4D (medio termine, ultimi 2) ===
+    if rep_4d:
+        lines = []
+        for r in rep_4d[:2]:
+            rep = r["report"]
+            lines.append(
+                f"\n--- {r.get('timestamp', '?')} | Bias: {rep.get('macro_bias', '?')} ---\n"
+                f"{rep.get('summary_text', '')[:500]}\n"
+                f"Trend consolidati: {', '.join(rep.get('consolidating_trends', []))[:300]}\n"
+                f"Rischi accumulo: {', '.join(rep.get('accumulating_risks', []))[:300]}\n"
+                f"Strategia 4d: {rep.get('next_4d_strategy', '')[:300]}"
+            )
+        parts.append(f"=== REPORT 4D (ultimi {len(rep_4d)}) ===" + "".join(lines))
     else:
-        parts.append("=== DAILY SNAPSHOTS === Non disponibili")
+        parts.append("=== REPORT 4D === Non ancora disponibili")
 
-    # Intelligence Buffer recente
+    # === Report 8H (breve termine, ultimi 3) ===
+    if rep_8h:
+        lines = []
+        for r in rep_8h[:3]:
+            rep = r["report"]
+            lines.append(
+                f"\n--- {r.get('timestamp', '?')} | Bias: {rep.get('macro_bias', '?')} ---\n"
+                f"{rep.get('summary_text', '')[:400]}\n"
+                f"Hot tickers: {', '.join(rep.get('hot_tickers', []))[:200]}\n"
+                f"Catalisti next 8h: {', '.join(rep.get('next_8h_catalysts', []))[:300]}"
+            )
+        parts.append(f"=== REPORT 8H (ultimi {len(rep_8h)}) ===" + "".join(lines))
+    else:
+        parts.append("=== REPORT 8H === Non ancora disponibili")
+
+    # === Buffer L0 recente (micro-cards ultimi 40 min) ===
     if buffer:
         buf_text = ""
         for b in buffer[:15]:
             buf_text += f"\n[{b.get('source_type', '?')}] {b.get('micro_summary', b.get('raw_content', '')[:200])}"
-        parts.append(f"=== INTELLIGENCE BUFFER (ultimi 40 min, {len(buffer)} record) ==={buf_text}")
+        parts.append(f"=== INTELLIGENCE BUFFER L0 (ultimi 40 min, {len(buffer)} micro-cards) ==={buf_text}")
     else:
-        parts.append("=== INTELLIGENCE BUFFER === Vuoto")
+        parts.append("=== INTELLIGENCE BUFFER L0 === Vuoto (ultime micro-cards consumate dal report 8H)")
 
     # Technical Report
     if tech_report:
