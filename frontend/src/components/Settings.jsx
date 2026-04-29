@@ -111,35 +111,38 @@ function Settings({ onBack, onDataRefresh }) {
   // === Caricamento iniziale ===
   useEffect(() => {
     const loadAll = async () => {
-      // Carica le impostazioni esistenti
+      // Prima carico i default — servono come fallback se il custom e' vuoto
+      let defaults = { prompt_scout: "", prompt_technical: "", prompt_decision: "" };
+      try {
+        const res = await fetch(`${API}/api/settings/prompt-defaults`);
+        if (res.ok) {
+          const data = await res.json();
+          defaults = {
+            prompt_scout: data.prompt_scout || "",
+            prompt_technical: data.prompt_technical || "",
+            prompt_decision: data.prompt_decision || "",
+          };
+          setPromptDefaults(defaults);
+        }
+      } catch (err) {
+        console.error("Errore caricamento prompt default:", err);
+      }
+
+      // Poi carico i custom: se vuoto/inesistente, pre-carico il default cosi' l'utente
+      // vede il testo e puo' modificarlo direttamente (non solo placeholder grigio)
       try {
         const res = await fetch(`${API}/api/settings`);
         if (res.ok) {
           const raw = await res.json();
           const data = raw.settings ?? raw;
           setPrompts({
-            prompt_scout: data.prompt_scout || "",
-            prompt_technical: data.prompt_technical || "",
-            prompt_decision: data.prompt_decision || "",
+            prompt_scout: (data.prompt_scout && data.prompt_scout.trim()) || defaults.prompt_scout || "",
+            prompt_technical: (data.prompt_technical && data.prompt_technical.trim()) || defaults.prompt_technical || "",
+            prompt_decision: (data.prompt_decision && data.prompt_decision.trim()) || defaults.prompt_decision || "",
           });
         }
       } catch (err) {
         console.error("Errore caricamento impostazioni:", err);
-      }
-
-      // Carica i prompt di default
-      try {
-        const res = await fetch(`${API}/api/settings/prompt-defaults`);
-        if (res.ok) {
-          const data = await res.json();
-          setPromptDefaults({
-            prompt_scout: data.prompt_scout || "",
-            prompt_technical: data.prompt_technical || "",
-            prompt_decision: data.prompt_decision || "",
-          });
-        }
-      } catch (err) {
-        console.error("Errore caricamento prompt default:", err);
       }
 
       // Carica documenti
@@ -197,7 +200,8 @@ function Settings({ onBack, onDataRefresh }) {
 
   const handleResetPrompt = (key) => {
     if (!window.confirm("Ripristinare il prompt di default per questo agente?")) return;
-    setPrompts((prev) => ({ ...prev, [key]: "" }));
+    // Reset: ripristino il testo del default nel textarea + cancello l'override sul DB
+    setPrompts((prev) => ({ ...prev, [key]: promptDefaults[key] || "" }));
     saveSettings({ [key]: "" });
   };
 

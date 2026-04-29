@@ -41,6 +41,9 @@ Ricevi dati grezzi da multiple fonti:
   - X (sentiment finance Twitter, anche crypto twitter)
   - CLAWSTREET_MARKET / CLAWSTREET_ECONOMY (contesto mercati)
   - CONGRESSIONAL (insider trades USA)
+  - COINGECKO (dati crypto: top 25 coin con prezzo/volume/change_1h/24h/7d, BTC dominance,
+    Fear&Greed Index, trending coins del giorno. Usa questi dati per identificare
+    pump/dump crypto e generare schede CRYPTO_MARKET con sentiment basato sui movimenti.)
 
 IMPORTANTE: Quando vedi sentiment Reddit dai subreddit crypto, marca sentiment_type="RETAIL"
 e usa key_tickers in formato yfinance: BTC-USD, ETH-USD, SOL-USD, ecc.
@@ -56,7 +59,7 @@ REGOLE FONDAMENTALI:
 OUTPUT (SOLO JSON, nessun altro testo):
 [
   {
-    "source_type": "GDELT|NEWSAPI|YFINANCE_NEWS|REDDIT|X|CLAWSTREET_MARKET|CLAWSTREET_ECONOMY|CONGRESSIONAL",
+    "source_type": "GDELT|NEWSAPI|YFINANCE_NEWS|REDDIT|X|CLAWSTREET_MARKET|CLAWSTREET_ECONOMY|CONGRESSIONAL|CRYPTO_MARKET",
     "micro_summary": "Sintesi azionabile in 2-3 frasi (max 280 char)",
     "sentiment_score": -1.0 to 1.0,
     "sentiment_type": "INSTITUTIONAL|RETAIL",
@@ -155,6 +158,7 @@ async def run_scout_20min(run_id: str) -> list[dict]:
         "GDELT", "NEWSAPI", "YFINANCE_NEWS",
         "REDDIT", "X",
         "CLAWSTREET_MARKET", "CONGRESSIONAL", "CLAWSTREET_ECONOMY",
+        "COINGECKO",
     ]
     tasks = [
         data_fetchers.fetch_gdelt_data(),
@@ -165,6 +169,7 @@ async def run_scout_20min(run_id: str) -> list[dict]:
         data_fetchers.fetch_clawstreet_market_context(),
         data_fetchers.fetch_congressional_trades(),
         data_fetchers.fetch_clawstreet_economy(),
+        data_fetchers.fetch_coingecko_data(),
     ]
 
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)

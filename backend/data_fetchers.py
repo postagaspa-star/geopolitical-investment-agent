@@ -30,6 +30,10 @@ _GDELT_CACHE_TTL = 600  # 10 minuti
 _reddit_cache: Dict[str, tuple] = {}
 _REDDIT_CACHE_TTL = 600  # 10 minuti
 
+# Cache CoinGecko (rate limit free tier: 30 req/min)
+_coingecko_cache: Dict[str, tuple] = {}
+_COINGECKO_CACHE_TTL = 300  # 5 minuti
+
 # User-Agent realistico per evitare blocchi
 _HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; GeoInvestAI/1.0; +https://geopolitical-investment-agent.onrender.com)"
@@ -1052,3 +1056,131 @@ async def fetch_x_sentiment(max_results: int = 30) -> Dict[str, Any]:
         "source": "x_api_v2",
         "error": None,
     }
+
+
+# ============================================================
+# CoinGecko — dati di mercato crypto (top coin + trending + dominance + Fear&Greed)
+# Free tier: nessuna chiave necessaria, 30 req/min
+# Doc: https://www.coingecko.com/en/api/documentation
+# ============================================================
+
+async def fetch_coingecko_data(top_n: int = 25) -> Dict[str, Any]:
+    """
+    Recupera dati di mercato crypto da CoinGecko (free, no auth):
+      - Top N coin per market cap (price, 24h change, volume)
+      - Global market: total market cap, BTC dominance, ETH dominance
+      - Trending: 7 cripto trending del giorno
+      - Fear & Greed Index (via alternative.me, sempre free no auth)
+
+    Cache: 5 min TTL — rispetta il rate limit del free tier.
+    """
+    cache_key = f"all:{top_n}"
+    now_ts = time.time()
+    if cache_key in _coingecko_cache:
+        cached_time, cached_result = _coingecko_cache[cache_key]
+        if now_ts - cached_time < _COINGECKO_CACHE_TTL:
+            return {**cached_result, "from_cache": True}
+
+    base_url = "https://api.coingecko.com/api/v3"
+    headers = {**_HTTP_HEADERS, "Accept": "application/json"}
+    timeout = aiohttp.ClientTimeout(total=20)
+
+    out: Dict[str, Any] = {
+        "top_coins": [],
+        "global": {},
+        "trending": [],
+        "fear_greed": None,
+        "fetched_at": datetime.utcnow().isoformat(),
+        "source": "coingecko",
+        "error": None,
+    }
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            # 1) Top N coins per market cap
+            try:
+                url = f"{base_url}/coins/markets"
+                params = {
+                    "vs_currency": "usd",
+                    "order": "market_cap_desc",
+                    "per_page": min(top_n, 50),
+                    "page": 1,
+                    "price_change_percentage": "1h,24h,7d",
+                }
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        out["top_coins"] = [
+                            {
+                                "symbol": c.get("symbol", "").upper(),
+                                "name": c.get("name"),
+                                "yfinance_ticker": f"{c.get('symbol', '').upper()}-USD",
+                                "price_usd": c.get("current_price"),
+                                "market_cap": c.get("market_cap"),
+                                "volume_24h": c.get("total_volume"),
+                                "change_1h": c.get("price_change_percentage_1h_in_currency"),
+                                "change_24h": c.get("price_change_percentage_24h"),
+                                "change_7d": c.get("price_change_percentage_7d_in_currency"),
+                                "ath_change_pct": c.get("ath_change_percentage"),
+                            }
+                            for c in (data or [])
+                        ]
+                    else:
+                        logger.warning("CoinGecko markets HTTP %d", resp.status)
+            except Exception as e:
+                logger.warning("CoinGecko markets fail: %s", e)
+
+            # 2) Global market overview
+            try:
+                async with session.get(f"{base_url}/global") as resp:
+                    if resp.status == 200:
+                        g = (await resp.json()).get("data", {})
+                        mcap = g.get("market_cap_percentage", {}) or {}
+                        out["global"] = {
+                            "total_market_cap_usd": (g.get("total_market_cap") or {}).get("usd"),
+                            "total_volume_24h_usd": (g.get("total_volume") or {}).get("usd"),
+                            "market_cap_change_24h_pct": g.get("market_cap_change_percentage_24h_usd"),
+                            "btc_dominance": mcap.get("btc"),
+                            "eth_dominance": mcap.get("eth"),
+                            "active_cryptocurrencies": g.get("active_cryptocurrencies"),
+                        }
+            except Exception as e:
+                logger.warning("CoinGecko global fail: %s", e)
+
+            # 3) Trending coins (top 7 della giornata su CG)
+            try:
+                async with session.get(f"{base_url}/search/trending") as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        out["trending"] = [
+                            {
+                                "symbol": (c.get("item") or {}).get("symbol", "").upper(),
+                                "name": (c.get("item") or {}).get("name"),
+                                "yfinance_ticker": f"{(c.get('item') or {}).get('symbol', '').upper()}-USD",
+                                "market_cap_rank": (c.get("item") or {}).get("market_cap_rank"),
+                                "score": (c.get("item") or {}).get("score"),
+                            }
+                            for c in (data.get("coins") or [])
+                        ]
+            except Exception as e:
+                logger.warning("CoinGecko trending fail: %s", e)
+
+            # 4) Fear & Greed (alternative.me — gratis, no auth)
+            try:
+                async with session.get("https://api.alternative.me/fng/?limit=1") as resp:
+                    if resp.status == 200:
+                        fg = (await resp.json()).get("data", [{}])[0]
+                        out["fear_greed"] = {
+                            "value": int(fg.get("value", 0)) if fg.get("value") else None,
+                            "classification": fg.get("value_classification"),
+                            "timestamp": fg.get("timestamp"),
+                        }
+            except Exception as e:
+                logger.warning("Fear&Greed fail: %s", e)
+
+    except Exception as e:
+        out["error"] = str(e)
+        logger.error("CoinGecko global error: %s", e)
+
+    _coingecko_cache[cache_key] = (now_ts, out)
+    return out
