@@ -1,5 +1,5 @@
 """
-Scout Agent — Claude Sonnet 4.5
+Scout Agent — DeepSeek-V3 (primary) + Claude Sonnet (fallback)
 Intelligence gathering 24/7 con compattazione temporale.
 
 Task:
@@ -7,6 +7,11 @@ Task:
     Reddit (sentiment retail) e X. Filtra rumore e scrive intelligence_buffer.
   - Ogni giorno 23:59 CET: Compatta buffer in Daily Snapshot
   - Ogni domenica 23:59 CET: Aggrega 7 Daily in Weekly Matrix
+
+Modello: DeepSeek-V3 (~$0.27/M token) per ridurre i costi rispetto a Sonnet 4.5.
+Il task dello Scout (estrazione JSON strutturata da news) non richiede il
+ragionamento profondo di Sonnet — DeepSeek eccelle in output JSON strutturato.
+Fallback automatico a Claude Sonnet se DeepSeek non è disponibile.
 """
 
 import asyncio
@@ -15,14 +20,15 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 
-from anthropic import Anthropic
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Claude Sonnet 4.5 — il modello "potente" che raccoglie e analizza notizie ogni 20 min.
-# Nota: Sonnet e' caro, ma il volume e' contenuto (72 run/giorno x ~3K token in/out)
-# Costo stimato: ~$8-12/mese (compatibile con il budget).
-SCOUT_MODEL = "claude-sonnet-4-5-20250929"
+# DeepSeek-V3 — modello primario per lo Scout (JSON extraction, molto più economico di Sonnet)
+DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+
+# Claude Sonnet — fallback se DeepSeek non risponde
 SCOUT_MODEL_FALLBACK = "claude-sonnet-4-20250514"
 
 # ============================================================
@@ -121,8 +127,67 @@ def _get_scout_prompt() -> str:
     return SCOUT_20MIN_PROMPT_DEFAULT
 
 
-def _get_client() -> Anthropic:
-    """Crea client Anthropic con API key da env."""
+def _get_deepseek_key() -> str:
+    """Legge DEEPSEEK_API_KEY da env."""
+    return os.environ.get("DEEPSEEK_API_KEY", "")
+
+
+async def _call_deepseek(system_prompt: str, user_content: str, max_retries: int = 3) -> tuple[str, str]:
+    """
+    Chiama DeepSeek-V3 con retry esponenziale.
+    Ritorna (response_text, engine_used).
+    Lancia eccezione se tutti i retry falliscono.
+    """
+    api_key = _get_deepseek_key()
+    if not api_key:
+        raise ValueError("DEEPSEEK_API_KEY non configurata")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "max_tokens": 4096,
+        "temperature": 0.2,
+    }
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    DEEPSEEK_API_URL, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["choices"][0]["message"]["content"], "deepseek-v3"
+                    elif resp.status == 429:
+                        wait = 2 ** (attempt + 1)
+                        logger.warning("[SCOUT] DeepSeek 429, retry in %ds...", wait)
+                        await asyncio.sleep(wait)
+                        continue
+                    else:
+                        body = await resp.text()
+                        last_error = f"HTTP {resp.status}: {body[:200]}"
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** (attempt + 1))
+                continue
+
+    raise ValueError(f"DeepSeek failed after {max_retries} attempts: {last_error}")
+
+
+def _call_claude_fallback(system_prompt: str, user_content: str) -> tuple[str, str]:
+    """Fallback sincrono: usa Claude Sonnet se DeepSeek non risponde."""
+    from anthropic import Anthropic
+
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         try:
@@ -130,7 +195,19 @@ def _get_client() -> Anthropic:
             key = _db.get_setting("anthropic_api_key", "")
         except Exception:
             pass
-    return Anthropic(api_key=key)
+
+    client = Anthropic(api_key=key)
+    response = client.messages.create(
+        model=SCOUT_MODEL_FALLBACK,
+        max_tokens=4096,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    text = ""
+    for block in response.content:
+        if hasattr(block, "text"):
+            text += block.text
+    return text, f"claude-sonnet-fallback ({SCOUT_MODEL_FALLBACK})"
 
 
 # ============================================================
@@ -139,7 +216,7 @@ def _get_client() -> Anthropic:
 
 async def run_scout_20min(run_id: str) -> list[dict]:
     """
-    Interroga le API, filtra il rumore con Sonnet 4.6,
+    Interroga le API, filtra il rumore con DeepSeek-V3 (fallback: Claude Sonnet),
     e scrive le micro-schede nell'intelligence_buffer su Supabase.
 
     Returns:
@@ -174,7 +251,7 @@ async def run_scout_20min(run_id: str) -> list[dict]:
 
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # 2. Prepara contesto per Sonnet + summary per logging visibile
+    # 2. Prepara contesto per DeepSeek + summary per logging visibile
     context_parts = []
     sources_summary = {}  # per agent_logs frontend
     for i, result in enumerate(raw_results):
@@ -222,42 +299,20 @@ async def run_scout_20min(run_id: str) -> list[dict]:
     except Exception:
         pass
 
-    # 3. Chiama Sonnet 4.6 per filtrare e sintetizzare
+    # 3. Chiama DeepSeek-V3 per filtrare e sintetizzare (fallback: Claude Sonnet)
     _save_checkpoint(run_id, "scout", "RUNNING", {"phase": "analysis"})
 
-    used_model = SCOUT_MODEL
+    used_model = DEEPSEEK_MODEL
     response_text = ""
     scout_prompt = _get_scout_prompt()
-    try:
-        client = _get_client()
-        try:
-            response = client.messages.create(
-                model=SCOUT_MODEL,
-                max_tokens=4096,
-                system=scout_prompt,
-                messages=[{
-                    "role": "user",
-                    "content": f"Analizza questi dati e produci le micro-schede JSON:\n\n{full_context[:20000]}"
-                }],
-            )
-        except Exception as model_err:
-            # Fallback automatico se Sonnet 4.5 non disponibile
-            logger.warning("[%s][SCOUT] %s non disponibile (%s), fallback a %s",
-                           run_id, SCOUT_MODEL, model_err, SCOUT_MODEL_FALLBACK)
-            used_model = SCOUT_MODEL_FALLBACK
-            response = client.messages.create(
-                model=SCOUT_MODEL_FALLBACK,
-                max_tokens=4096,
-                system=scout_prompt,
-                messages=[{
-                    "role": "user",
-                    "content": f"Analizza questi dati e produci le micro-schede JSON:\n\n{full_context[:20000]}"
-                }],
-            )
+    user_msg = f"Analizza questi dati e produci le micro-schede JSON:\n\n{full_context[:20000]}"
 
-        for block in response.content:
-            if hasattr(block, "text"):
-                response_text += block.text
+    try:
+        try:
+            response_text, used_model = await _call_deepseek(scout_prompt, user_msg)
+        except Exception as ds_err:
+            logger.warning("[%s][SCOUT] DeepSeek non disponibile (%s), fallback a Claude Sonnet", run_id, ds_err)
+            response_text, used_model = _call_claude_fallback(scout_prompt, user_msg)
 
         # Parse JSON robusto: prova array, poi cerca blocchi ```json```, poi estrae oggetti singoli
         micro_cards = _parse_json_array_robust(response_text)
@@ -277,11 +332,11 @@ async def run_scout_20min(run_id: str) -> list[dict]:
                 pass
 
     except Exception as e:
-        logger.error("[%s][SCOUT] Errore Sonnet: %s", run_id, e, exc_info=True)
+        logger.error("[%s][SCOUT] Errore analisi: %s", run_id, e, exc_info=True)
         micro_cards = []
         try:
             database.insert_agent_log(run_id, "SCOUT_ERROR", json.dumps({
-                "event": "scout_sonnet_error",
+                "event": "scout_analysis_error",
                 "error": str(e)[:500],
                 "model_attempted": used_model,
             }))
@@ -356,20 +411,14 @@ async def run_daily_recap(run_id: str) -> dict:
         summaries.append(f"[{rec.get('source_type', '?')}] {rec.get('micro_summary', rec.get('raw_content', '')[:200])}")
     context = f"Intelligence buffer delle ultime 24 ore ({len(buffer_records)} record):\n\n" + "\n".join(summaries)
 
-    # 3. Chiama Sonnet per compattazione
+    # 3. Chiama DeepSeek-V3 per compattazione (fallback: Claude Sonnet)
     try:
-        client = _get_client()
-        response = client.messages.create(
-            model=SCOUT_MODEL,
-            max_tokens=4096,
-            system=DAILY_RECAP_PROMPT,
-            messages=[{"role": "user", "content": context[:20000]}],
-        )
-        response_text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                response_text += block.text
-
+        try:
+            response_text, used_model = await _call_deepseek(DAILY_RECAP_PROMPT, context[:20000])
+        except Exception as ds_err:
+            logger.warning("[%s][SCOUT] DeepSeek fallback daily recap (%s)", run_id, ds_err)
+            response_text, used_model = _call_claude_fallback(DAILY_RECAP_PROMPT, context[:20000])
+        logger.info("[%s][SCOUT] Daily recap generato con %s", run_id, used_model)
         snapshot = _parse_json_object(response_text)
     except Exception as e:
         logger.error("[%s][SCOUT] Errore daily recap: %s", run_id, e)
@@ -432,20 +481,14 @@ async def run_weekly_matrix(run_id: str) -> dict:
         context_parts.append(f"=== {d.get('date', '?')} (Bias: {d.get('macro_bias', '?')}) ===\n{d.get('summary_text', '')}")
     context = f"Daily Snapshots degli ultimi 7 giorni ({len(dailies)} disponibili):\n\n" + "\n\n".join(context_parts)
 
-    # 3. Chiama Sonnet
+    # 3. Chiama DeepSeek-V3 (fallback: Claude Sonnet)
     try:
-        client = _get_client()
-        response = client.messages.create(
-            model=SCOUT_MODEL,
-            max_tokens=4096,
-            system=WEEKLY_MATRIX_PROMPT,
-            messages=[{"role": "user", "content": context[:20000]}],
-        )
-        response_text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                response_text += block.text
-
+        try:
+            response_text, used_model = await _call_deepseek(WEEKLY_MATRIX_PROMPT, context[:20000])
+        except Exception as ds_err:
+            logger.warning("[%s][SCOUT] DeepSeek fallback weekly matrix (%s)", run_id, ds_err)
+            response_text, used_model = _call_claude_fallback(WEEKLY_MATRIX_PROMPT, context[:20000])
+        logger.info("[%s][SCOUT] Weekly matrix generata con %s", run_id, used_model)
         matrix = _parse_json_object(response_text)
     except Exception as e:
         logger.error("[%s][SCOUT] Errore weekly matrix: %s", run_id, e)
