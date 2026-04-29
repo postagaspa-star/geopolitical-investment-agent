@@ -428,26 +428,91 @@ def is_scheduler_running() -> bool:
     return _scheduler is not None and _scheduler.running
 
 
+def _last_log_for_phases(phase_prefixes: list[str], limit: int = 200) -> str | None:
+    """
+    Cerca tra gli ultimi N log la prima entry il cui phase inizia con uno
+    dei prefissi forniti. Restituisce il timestamp ISO o None.
+    Usato per ricostruire l'ultimo run di Technical/Decision (job on-demand).
+    """
+    try:
+        logs = database.get_agent_logs(limit=limit) or []
+        for log in logs:
+            phase = (log.get("phase") or "").upper()
+            for prefix in phase_prefixes:
+                if phase.startswith(prefix.upper()):
+                    return log.get("timestamp")
+    except Exception:
+        return None
+    return None
+
+
 def get_scheduler_info() -> dict:
-    """Restituisce informazioni sullo stato dello scheduler."""
+    """
+    Restituisce informazioni sullo stato dello scheduler.
+    Espone next_run / last_run per ogni agente del workflow:
+      - watchdog (mini-Scout, ogni 1min market-only)
+      - scout (Sonnet 4.5, ogni 20min 24/7)
+      - technical (on-demand, triggerato da watchdog)
+      - decision (on-demand, max 1/h, triggerato da watchdog)
+    """
     running = is_scheduler_running()
     mode = get_current_mode() if running else "idle"
     market_open = is_market_open()
+
+    # --- Per i job APScheduler (Watchdog, Scout) leggiamo direttamente next_run_time ---
+    watchdog_next = None
+    scout_next = None
+    if _scheduler and running:
+        wj = _scheduler.get_job("watchdog_job")
+        if wj and wj.next_run_time:
+            watchdog_next = wj.next_run_time.isoformat()
+        sj = _scheduler.get_job("scout_hourly_job")
+        if sj and sj.next_run_time:
+            scout_next = sj.next_run_time.isoformat()
+
+    # --- Per i job on-demand cerchiamo l'ultimo log corrispondente ---
+    watchdog_last = _last_log_for_phases(["WATCHDOG_"])
+    scout_last = _last_log_for_phases(["SCOUT_20MIN", "SCOUT_DAILY", "SCOUT_WEEKLY"])
+    technical_last = _last_log_for_phases(["TECH_", "TECHNICAL_"])
+    decision_last = _last_log_for_phases(["DECISION_"])
+
+    agents = {
+        "watchdog": {
+            "schedule": "ogni 1 min (solo durante orari di mercato)",
+            "next_run": watchdog_next if market_open else None,
+            "last_run": watchdog_last,
+            "active": market_open and running,
+        },
+        "scout": {
+            "schedule": "ogni 20 min (24/7)",
+            "next_run": scout_next,
+            "last_run": scout_last,
+            "active": running,
+        },
+        "technical": {
+            "schedule": "on-demand (trigger Watchdog)",
+            "next_run": None,
+            "last_run": technical_last,
+            "active": market_open and running,
+        },
+        "decision": {
+            "schedule": "on-demand (trigger Watchdog, max 1/ora)",
+            "next_run": None,
+            "last_run": decision_last,
+            "active": market_open and running,
+        },
+    }
 
     info = {
         "running": running,
         "mode": mode,
         "market_open": market_open,
         "is_weekend": is_weekend(),
-        "next_run": None,
-        "last_run": None,
+        # Backward compat: next_run = watchdog (il job piu' frequente)
+        "next_run": watchdog_next,
+        "last_run": watchdog_last,
+        "agents": agents,
     }
-
-    if _scheduler and running:
-        # Mostra prossimo run del Watchdog (ogni 5 min)
-        job = _scheduler.get_job("watchdog_job")
-        if job and job.next_run_time:
-            info["next_run"] = job.next_run_time.isoformat()
 
     # Prossima apertura mercato (se chiuso)
     if not market_open:

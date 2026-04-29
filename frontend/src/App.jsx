@@ -24,6 +24,7 @@ function AppContent() {
   const [countdown, setCountdown] = useState("");
   const [marketCountdown, setMarketCountdown] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [agentsInfo, setAgentsInfo] = useState({});
 
   const countdownRef = useRef(null);
 
@@ -54,6 +55,7 @@ function AppContent() {
       setMarketOpen(!!statusData.market_open);
       setNextRun(statusData.next_run || null);
       setNextMarketOpen(statusData.next_market_open || null);
+      setAgentsInfo(statusData.agents || {});
     }
   }, [fetchData]);
 
@@ -137,9 +139,9 @@ function AppContent() {
         countdown={countdown}
         marketCountdown={marketCountdown}
         marketOpen={marketOpen}
-        logs={logs}
         portfolio={portfolio}
         agentStatus={agentStatus}
+        agentsInfo={agentsInfo}
         onStartMonitoring={handleStartMonitoring}
         onStopMonitoring={handleStopMonitoring}
         onRunOnce={handleRunOnce}

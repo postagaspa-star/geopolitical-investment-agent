@@ -21,7 +21,7 @@ DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 FALLBACK_MODEL = "claude-sonnet-4-20250514"
 
-TECH_PROMPT = """You are a quantitative technical analyst. You receive raw OHLCV data and pre-calculated indicators.
+TECH_PROMPT_DEFAULT = """You are a quantitative technical analyst. You receive raw OHLCV data and pre-calculated indicators.
 
 RULES:
 - Analyze ALL indicators: RSI, MACD, Bollinger Bands, SMA crossovers, Stochastic, ATR, Volume
@@ -57,6 +57,22 @@ OUTPUT MUST be valid JSON:
 }"""
 
 
+def _get_tech_prompt() -> str:
+    """
+    Carica il system prompt del Technical Agent.
+    Override utente: chiave 'prompt_technical' nelle impostazioni DB.
+    Fallback: TECH_PROMPT_DEFAULT.
+    """
+    try:
+        import database as _db
+        custom = _db.get_setting("prompt_technical", "")
+        if custom and isinstance(custom, str) and custom.strip():
+            return custom
+    except Exception:
+        pass
+    return TECH_PROMPT_DEFAULT
+
+
 def _get_deepseek_key() -> str:
     return os.environ.get("DEEPSEEK_API_KEY", "")
 
@@ -78,7 +94,7 @@ async def _call_deepseek(context: str, max_retries: int = 3) -> tuple[str, str]:
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": TECH_PROMPT},
+            {"role": "system", "content": _get_tech_prompt()},
             {"role": "user", "content": context},
         ],
         "max_tokens": 4096,
@@ -129,7 +145,7 @@ async def _call_claude_fallback(context: str) -> tuple[str, str]:
     response = client.messages.create(
         model=FALLBACK_MODEL,
         max_tokens=4096,
-        system=TECH_PROMPT,
+        system=_get_tech_prompt(),
         messages=[{"role": "user", "content": context}],
     )
     text = ""

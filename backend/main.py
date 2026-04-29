@@ -325,6 +325,7 @@ async def get_agent_status():
             "is_weekend": scheduler_info["is_weekend"],
             "next_run": scheduler_info.get("next_run"),
             "next_market_open": scheduler_info.get("next_market_open"),
+            "agents": scheduler_info.get("agents", {}),
             "architecture": "multi-agent" if scheduler_info["mode"] == "full" else "single-agent",
             "deepseek_available": bool(os.environ.get("DEEPSEEK_API_KEY")),
         })
@@ -433,6 +434,26 @@ async def save_settings(payload: SettingsPayload):
         return {"status": "saved", "count": len(payload.settings)}
     except Exception as e:
         logger.error(f"Errore nel salvataggio delle impostazioni: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/settings/prompt-defaults")
+async def get_prompt_defaults():
+    """
+    Restituisce i prompt di default per Scout, Technical e Decision.
+    Usato dal frontend per mostrare placeholder o ripristinare i default.
+    """
+    try:
+        from agents.scout import SCOUT_20MIN_PROMPT_DEFAULT
+        from agents.technical import TECH_PROMPT_DEFAULT
+        from agents.decision import DECISION_SYSTEM_PROMPT_DEFAULT
+        return {
+            "prompt_scout": SCOUT_20MIN_PROMPT_DEFAULT,
+            "prompt_technical": TECH_PROMPT_DEFAULT,
+            "prompt_decision": DECISION_SYSTEM_PROMPT_DEFAULT,
+        }
+    except Exception as e:
+        logger.error(f"Errore caricamento prompt default: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

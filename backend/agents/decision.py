@@ -31,7 +31,7 @@ DECISION_MODEL_FALLBACK = "claude-sonnet-4-20250514"  # Fallback a Sonnet 4 se 4
 # System Prompts
 # ============================================================
 
-DECISION_SYSTEM_PROMPT = """Sei il Decision Agent di GeoInvest AI — un sistema di trading autonomo ad alto rischio.
+DECISION_SYSTEM_PROMPT_DEFAULT = """Sei il Decision Agent di GeoInvest AI — un sistema di trading autonomo ad alto rischio.
 
 HAI PIENA AUTONOMIA DECISIONALE. Non ci sono restrizioni conservative.
 Il tuo obiettivo è massimizzare i rendimenti accettando rischi calcolati.
@@ -64,6 +64,22 @@ REGOLE:
 - Confidence threshold per operare: >= 50%
 - Ogni decisione deve avere un logic_chain dettagliato che integra geo+tech
 - In modalita' Pure Macro (senza dati tecnici): puoi operare con sola analisi geopolitica se confidence >= 70%"""
+
+
+def _get_decision_prompt() -> str:
+    """
+    Carica il system prompt del Decision Agent.
+    Override utente: chiave 'prompt_decision' nelle impostazioni DB.
+    Fallback: DECISION_SYSTEM_PROMPT_DEFAULT.
+    """
+    try:
+        import database as _db
+        custom = _db.get_setting("prompt_decision", "")
+        if custom and isinstance(custom, str) and custom.strip():
+            return custom
+    except Exception:
+        pass
+    return DECISION_SYSTEM_PROMPT_DEFAULT
 
 
 def _get_client() -> Anthropic:
@@ -349,6 +365,7 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 
     model = _select_model()
     client = _get_client()
+    system_prompt = _get_decision_prompt()
 
     # Prima prova Opus, se non disponibile usa Sonnet
     try:
@@ -357,7 +374,7 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
         response = client.messages.create(
             model=model,
             max_tokens=16000,
-            system=DECISION_SYSTEM_PROMPT,
+            system=system_prompt,
             tools=DECISION_TOOLS,
             messages=messages,
         )
@@ -370,7 +387,7 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
             response = client.messages.create(
                 model=model,
                 max_tokens=8192,
-                system=DECISION_SYSTEM_PROMPT,
+                system=system_prompt,
                 tools=DECISION_TOOLS,
                 messages=messages,
             )
@@ -421,7 +438,7 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
         response = client.messages.create(
             model=used_model,
             max_tokens=16000,
-            system=DECISION_SYSTEM_PROMPT,
+            system=system_prompt,
             tools=DECISION_TOOLS,
             messages=messages,
         )

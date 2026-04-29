@@ -29,7 +29,7 @@ SCOUT_MODEL_FALLBACK = "claude-sonnet-4-20250514"
 # Prompt Templates
 # ============================================================
 
-SCOUT_20MIN_PROMPT = """Sei uno Scout Agent specializzato in intelligence geopolitica e di mercato.
+SCOUT_20MIN_PROMPT_DEFAULT = """Sei uno Scout Agent specializzato in intelligence geopolitica e di mercato.
 Ricevi dati grezzi da multiple fonti:
   - GDELT (eventi geopolitici globali)
   - NEWSAPI (news mainstream)
@@ -94,6 +94,22 @@ OUTPUT JSON:
   "sector_rotation_signals": {"energy": "OVERWEIGHT", "tech": "UNDERWEIGHT", ...},
   "macro_strategy": "Strategia suggerita..."
 }"""
+
+
+def _get_scout_prompt() -> str:
+    """
+    Carica il system prompt dello Scout.
+    Override utente: chiave 'prompt_scout' nelle impostazioni DB.
+    Fallback: SCOUT_20MIN_PROMPT_DEFAULT.
+    """
+    try:
+        import database as _db
+        custom = _db.get_setting("prompt_scout", "")
+        if custom and isinstance(custom, str) and custom.strip():
+            return custom
+    except Exception:
+        pass
+    return SCOUT_20MIN_PROMPT_DEFAULT
 
 
 def _get_client() -> Anthropic:
@@ -200,13 +216,14 @@ async def run_scout_20min(run_id: str) -> list[dict]:
 
     used_model = SCOUT_MODEL
     response_text = ""
+    scout_prompt = _get_scout_prompt()
     try:
         client = _get_client()
         try:
             response = client.messages.create(
                 model=SCOUT_MODEL,
                 max_tokens=4096,
-                system=SCOUT_20MIN_PROMPT,
+                system=scout_prompt,
                 messages=[{
                     "role": "user",
                     "content": f"Analizza questi dati e produci le micro-schede JSON:\n\n{full_context[:20000]}"
@@ -220,7 +237,7 @@ async def run_scout_20min(run_id: str) -> list[dict]:
             response = client.messages.create(
                 model=SCOUT_MODEL_FALLBACK,
                 max_tokens=4096,
-                system=SCOUT_20MIN_PROMPT,
+                system=scout_prompt,
                 messages=[{
                     "role": "user",
                     "content": f"Analizza questi dati e produci le micro-schede JSON:\n\n{full_context[:20000]}"
