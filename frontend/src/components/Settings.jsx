@@ -372,7 +372,8 @@ function Settings({ onBack, onDataRefresh }) {
             {diagItems.map(({ key, name }, index) => {
               const diag = diagnostics[key];
               const dotColor = diag.status === "ok" ? "#10b981"
-                : diag.status === "error" ? "#ef4444" : "#9ca3af";
+                : diag.status === "error" ? "#ef4444"
+                : diag.status === "warn" ? "#f59e0b" : "#9ca3af";
               return (
                 <div key={key}>
                   <div style={{ display: "flex", alignItems: "center",
@@ -388,6 +389,7 @@ function Settings({ onBack, onDataRefresh }) {
                     <span style={{ fontSize: "13px", color: "#6b7280" }}>
                       {diag.status === "loading" && "Verifica..."}
                       {diag.status === "ok" && `OK${diag.message ? ` — ${diag.message}` : ""}`}
+                      {diag.status === "warn" && `Avviso${diag.message ? `: ${diag.message}` : ""}`}
                       {diag.status === "error" && `Errore${diag.message ? `: ${diag.message}` : ""}`}
                     </span>
                   </div>

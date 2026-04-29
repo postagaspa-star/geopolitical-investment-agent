@@ -1156,18 +1156,42 @@ async def test_deepseek():
 
 @app.get("/api/settings/test-gdelt")
 async def test_gdelt():
-    """Testa la connessione a GDELT."""
+    """
+    Testa la connessione a GDELT.
+    Usa prima la cache di data_fetchers (10 min TTL) così non genera traffico
+    inutile e non si fa bloccare dai 429 frequenti dell'endpoint pubblico.
+    Se la cache è vuota fa una chiamata di test, e tratta 429/HTML come WARN
+    (non error): è il comportamento normale di GDELT free tier.
+    """
+    # 1) Se abbiamo un risultato in cache recente, GDELT è funzionante
+    try:
+        import data_fetchers
+        cache = getattr(data_fetchers, "_gdelt_cache", {})
+        if cache.get("all"):
+            cached_time, _ = cache["all"]
+            import time as _t
+            age = int(_t.time() - cached_time)
+            if age < 600:  # entro la finestra TTL
+                return {"status": "ok", "message": f"Cache attiva (age {age}s)"}
+    except Exception:
+        pass
+
+    # 2) Test live tollerante a 429 e a body non-JSON
     try:
         import aiohttp
         url = "https://api.gdeltproject.org/api/v2/doc/doc?query=test&mode=artlist&maxrecords=1&format=json"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    return {"status": "ok"}
-                else:
+                if resp.status == 429:
+                    return {"status": "warn", "message": "Rate-limited (429) — comportamento normale GDELT, lo Scout retry-a in automatico"}
+                if resp.status != 200:
                     return {"status": "error", "message": f"HTTP {resp.status}"}
+                body = (await resp.text()).lstrip()
+                if not body or body[0] not in "{[":
+                    return {"status": "warn", "message": "Risposta non-JSON (probabile rate-limit camuffato)"}
+                return {"status": "ok"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": str(e)[:200]}
 
 
 @app.post("/api/migrate/v4")
