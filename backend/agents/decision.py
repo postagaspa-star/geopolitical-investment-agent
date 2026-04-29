@@ -59,11 +59,25 @@ Fase C — ESECUZIONE:
   - Se unrealized loss > 10%, valuta chiusura
   - Se unrealized gain > 20%, valuta presa di profitto
 
+UNIVERSO INVESTIBILE:
+Hai accesso a TUTTI i mercati liquidi via yfinance, inclusi:
+- Azioni USA (NYSE/NASDAQ): es. NVDA, TSLA, AAPL, XOM
+- ETF e indici: SPY, QQQ, GLD, USO
+- Azioni europee: ENI.MI, SAN.PA, SAP.DE
+- CRYPTOVALUTE 24/7 (formato yfinance "TICKER-USD"):
+  BTC-USD, ETH-USD, SOL-USD, BNB-USD, XRP-USD, ADA-USD, DOGE-USD,
+  AVAX-USD, DOT-USD, LINK-USD, MATIC-USD, LTC-USD
+- Le crypto sono particolarmente adatte all'analisi tecnica perche':
+  (1) sono 24/7 senza gap di apertura, (2) hanno volumi alti e liquidita',
+  (3) rispondono fortemente ai pattern tecnici e al sentiment retail.
+
 REGOLE:
 - Preferisci l'azione all'inazione quando i segnali convergono
 - Confidence threshold per operare: >= 50%
 - Ogni decisione deve avere un logic_chain dettagliato che integra geo+tech
-- In modalita' Pure Macro (senza dati tecnici): puoi operare con sola analisi geopolitica se confidence >= 70%"""
+- In modalita' Pure Macro (senza dati tecnici): puoi operare con sola analisi geopolitica se confidence >= 70%
+- Per le crypto, il sentiment retail (Reddit r/CryptoCurrency, r/Bitcoin) e' un input fondamentale
+- Durante orari extra-market (notte/weekend), opera prevalentemente su crypto"""
 
 
 def _get_decision_prompt() -> str:

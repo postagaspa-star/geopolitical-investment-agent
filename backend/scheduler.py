@@ -119,18 +119,20 @@ def get_next_market_open():
 
 async def _watchdog_job():
     """
-    Job Watchdog — ogni 1 minuto SOLO durante ore di mercato (US/UK/DE).
+    Job Watchdog — ogni 1 minuto, 24/7.
     Ultra-leggero: DeepSeek-V3 decide se triggerare Technical+Decision.
     Se trigger=False, costo quasi zero. Se trigger=True, avvia pipeline completa.
 
-    Costo stimato: ~720 chiamate/giorno DeepSeek (~$0.50/mese) durante orario di borsa.
+    NOTA: gira 24/7 perche' le crypto (BTC-USD, ETH-USD, ecc.) vivono sempre,
+    e movimenti rilevanti accadono spesso di notte e nel weekend.
+    Il filtro DeepSeek decide autonomamente se l'evento merita la pipeline pesante.
+
+    Costo stimato: ~1440 chiamate/giorno DeepSeek (~$1/mese).
     """
     global current_mode
 
-    if not is_market_open():
-        return  # Watchdog attivo solo durante ore di mercato US/UK/DE
-
-    current_mode = "full"
+    # Modalita' dinamica: 'full' durante orari di mercato, 'crypto_24h' fuori orario
+    current_mode = "full" if is_market_open() else "crypto_24h"
     try:
         from uuid import uuid4
         from agents.orchestrator import run_watchdog_pipeline
@@ -478,10 +480,10 @@ def get_scheduler_info() -> dict:
 
     agents = {
         "watchdog": {
-            "schedule": "ogni 1 min (solo durante orari di mercato)",
-            "next_run": watchdog_next if market_open else None,
+            "schedule": "ogni 1 min (24/7, equity + crypto)",
+            "next_run": watchdog_next,
             "last_run": watchdog_last,
-            "active": market_open and running,
+            "active": running,
         },
         "scout": {
             "schedule": "ogni 20 min (24/7)",
@@ -493,13 +495,13 @@ def get_scheduler_info() -> dict:
             "schedule": "on-demand (trigger Watchdog)",
             "next_run": None,
             "last_run": technical_last,
-            "active": market_open and running,
+            "active": running,
         },
         "decision": {
             "schedule": "on-demand (trigger Watchdog, max 1/ora)",
             "next_run": None,
             "last_run": decision_last,
-            "active": market_open and running,
+            "active": running,
         },
     }
 

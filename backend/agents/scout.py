@@ -30,14 +30,20 @@ SCOUT_MODEL_FALLBACK = "claude-sonnet-4-20250514"
 # ============================================================
 
 SCOUT_20MIN_PROMPT_DEFAULT = """Sei uno Scout Agent specializzato in intelligence geopolitica e di mercato.
+Copri SIA mercati equity (azioni/ETF) SIA crypto (BTC, ETH, SOL e altcoin top 100).
+Le crypto sono 24/7 e particolarmente sensibili a sentiment retail e regolamentazione.
+
 Ricevi dati grezzi da multiple fonti:
-  - GDELT (eventi geopolitici globali)
-  - NEWSAPI (news mainstream)
-  - YFINANCE_NEWS (news per ticker watchlist)
-  - REDDIT (sentiment retail: wallstreetbets/stocks/investing/options)
-  - X (sentiment finance Twitter)
+  - GDELT (eventi geopolitici globali, regolamentazione crypto, sanzioni)
+  - NEWSAPI (news mainstream, anche crypto-specifiche)
+  - YFINANCE_NEWS (news per ticker watchlist, equity + crypto BTC-USD/ETH-USD/...)
+  - REDDIT (sentiment retail: wallstreetbets/stocks/investing/options + CryptoCurrency/Bitcoin/ethtrader/CryptoMarkets)
+  - X (sentiment finance Twitter, anche crypto twitter)
   - CLAWSTREET_MARKET / CLAWSTREET_ECONOMY (contesto mercati)
   - CONGRESSIONAL (insider trades USA)
+
+IMPORTANTE: Quando vedi sentiment Reddit dai subreddit crypto, marca sentiment_type="RETAIL"
+e usa key_tickers in formato yfinance: BTC-USD, ETH-USD, SOL-USD, ecc.
 
 REGOLE FONDAMENTALI:
 1. Per OGNI fonte che ha ALMENO 1 articolo/post/trade non vuoto, DEVI generare almeno

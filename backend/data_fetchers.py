@@ -907,7 +907,12 @@ async def fetch_reddit_sentiment(max_per_sub: int = 8) -> Dict[str, Any]:
             logger.debug("Reddit cache hit (age: %ds)", int(now_ts - cached_time))
             return {**cached_result, "from_cache": True}
 
-    subs = ["wallstreetbets", "stocks", "investing", "options"]
+    subs = [
+        # Equity / opzioni retail
+        "wallstreetbets", "stocks", "investing", "options",
+        # Crypto retail (le crypto sono 24/7, sentiment Reddit e' un leading indicator)
+        "CryptoCurrency", "CryptoMarkets", "Bitcoin", "ethtrader",
+    ]
     # User-Agent strict per Reddit: deve essere unico e descrittivo, altrimenti 429
     headers = {
         "User-Agent": "linux:com.geoinvest.ai:v1.0 (by /u/geoinvest_bot)",
