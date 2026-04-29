@@ -19,8 +19,8 @@ const INITIAL_DIAGNOSTICS = {
 const PROMPT_AGENTS = [
   {
     key: "prompt_scout",
-    label: "Scout (Sonnet 4.5)",
-    description: "Raccoglie e analizza notizie da 7 fonti ogni 20 minuti, 24/7.",
+    label: "Scout (DeepSeek-V3)",
+    description: "Raccoglie e analizza notizie da 9 fonti ogni 20 minuti, 24/7. Produce inoltre report aggregati 8H e 4D.",
   },
   {
     key: "prompt_technical",
@@ -410,8 +410,8 @@ function Settings({ onBack, onDataRefresh }) {
           <p style={{ color: "#6b7280", fontSize: "0.85rem", margin: "0 0 20px 0", lineHeight: 1.5 }}>
             Personalizza il comportamento di ogni agente del workflow. Lasciando vuoto il campo,
             verra' usato il prompt di default integrato.
-            Il modello e l'intervallo di esecuzione sono fissi e non configurabili: Watchdog (DeepSeek-V3) ogni 1 min market-only,
-            Scout (Sonnet 4.5) ogni 20 min 24/7, Technical (DeepSeek-V3) e Decision (Sonnet 4.5) on-demand.
+            Il modello e l'intervallo di esecuzione sono fissi e non configurabili: Watchdog (DeepSeek-V3) ogni 1 min 24/7,
+            Scout (DeepSeek-V3) ogni 20 min 24/7 + report aggregati 8H/4D, Technical (DeepSeek-V3) e Decision (Sonnet 4.5) on-demand.
           </p>
 
           {PROMPT_AGENTS.map(({ key, label, description }) => (

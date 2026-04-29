@@ -124,8 +124,43 @@ async def _fetch_gdelt_single(
                         keyword,
                     )
                     return {"keyword": keyword, "articles": [], "error": f"HTTP {resp.status}"}
-                data = await resp.json(content_type=None)
-                # GDELT restituisce gli articoli nella chiave "articles"
+
+                # ROBUST PARSING: GDELT a volte ritorna HTTP 200 con body HTML
+                # (rate-limit camuffato, "Your query rate is too high", maintenance page).
+                # Per questo non possiamo fidarci di resp.json() — leggiamo come testo
+                # e proviamo a parsare manualmente, gestendo tutti i fallimenti.
+                try:
+                    body = await resp.text()
+                except Exception as read_err:
+                    logger.warning("GDELT body read fallita per '%s': %s", keyword, read_err)
+                    return {"keyword": keyword, "articles": [], "error": f"body_read: {read_err}"}
+
+                stripped = body.lstrip()
+                # Heuristics per HTML / messaggi di rate-limit lato server
+                if not stripped or stripped[0] not in "{[":
+                    snippet = stripped[:200].replace("\n", " ")
+                    logger.warning(
+                        "GDELT body non-JSON per '%s' (probabile rate-limit/HTML). Inizio body: %s",
+                        keyword, snippet,
+                    )
+                    # Backoff e retry se sembra un rate-limit, altrimenti exit
+                    if attempt < max_retries - 1 and ("query rate" in body.lower() or "<html" in body.lower()[:500]):
+                        wait = 5 * (2 ** attempt)
+                        logger.warning("GDELT soft rate-limit, retry in %ds...", wait)
+                        await asyncio.sleep(wait)
+                        continue
+                    return {"keyword": keyword, "articles": [], "error": "html_or_rate_limit"}
+
+                try:
+                    import json as _json
+                    data = _json.loads(body)
+                except Exception as parse_err:
+                    logger.warning(
+                        "GDELT JSON parse fallita per '%s': %s. Body: %s",
+                        keyword, parse_err, body[:200].replace("\n", " "),
+                    )
+                    return {"keyword": keyword, "articles": [], "error": f"json_parse: {parse_err}"}
+
                 articles = data.get("articles", []) if isinstance(data, dict) else []
                 return {"keyword": keyword, "articles": articles, "error": None}
         except Exception as exc:

@@ -38,12 +38,11 @@ HAI PIENA AUTONOMIA DECISIONALE. Non ci sono restrizioni conservative.
 Il tuo obiettivo è massimizzare i rendimenti accettando rischi calcolati.
 
 CONTESTO CHE RICEVI (sintesi a cascata prodotte dallo Scout):
-1. Report 3W (macro 3 settimane): regime di mercato, trend strutturali, rischi sistemici
-2. Report 4D (medio termine, ultimi 2): trend consolidati, rotazioni settoriali
-3. Report 8H (breve termine, ultimi 3): bias di periodo, hot tickers, catalisti
-4. Intelligence Buffer L0 recente: micro-cards degli ultimi 20-40 minuti
-5. Report Tecnico: analisi quantitativa da DeepSeek-V3
-6. Stato Portafoglio corrente
+1. Report 4D (visione macro / medio-lungo termine, ultimi 2): trend consolidati, rotazioni settoriali, strategia
+2. Report 8H (breve termine, ultimi 3): bias di periodo, hot tickers, catalisti delle prossime 8h
+3. Intelligence Buffer L0 recente: micro-cards degli ultimi 20-40 minuti
+4. Report Tecnico: analisi quantitativa da DeepSeek-V3
+5. Stato Portafoglio corrente
 
 PROCEDURA DECISIONALE:
 Fase A — VALUTAZIONE: Analizza il contesto globale. Rispondi: "Esiste un'opportunita' ad alto rischio che giustifica un'operazione?"
@@ -332,7 +331,7 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     import portfolio
     from agents.scout import (
         get_latest_aggregated_reports, get_recent_buffer,
-        TIER_8H, TIER_4D, TIER_3W,
+        TIER_8H, TIER_4D,
     )
 
     logger.info("[%s][DECISION] === Avvio Decision Agent ===", run_id)
@@ -341,14 +340,10 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     # Checkpoint
     _save_checkpoint(run_id, "decision", "RUNNING", {"phase": "context_loading"})
 
-    # --- FASE A: Ingestione Contesto a Cascata ---
+    # --- FASE A: Ingestione Contesto a Cascata (8H + 4D, no più 3W) ---
     context_loaded = {}
 
-    # 3W macro (lungo termine)
-    rep_3w = get_latest_aggregated_reports(database, TIER_3W, n=1)
-    context_loaded["report_3w"] = len(rep_3w) > 0
-
-    # 4D (medio termine, ultimi 2)
+    # 4D (visione macro/medio-lungo termine, top tier; ultimi 2)
     rep_4d = get_latest_aggregated_reports(database, TIER_4D, n=2)
     context_loaded["report_4d"] = len(rep_4d)
 
@@ -377,7 +372,7 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 
     # --- Costruisci messaggio utente ---
     user_message = _build_context_message(
-        rep_3w, rep_4d, rep_8h, recent_buffer, tech_report, portfolio_state, docs
+        rep_4d, rep_8h, recent_buffer, tech_report, portfolio_state, docs
     )
 
     database.insert_agent_log(run_id, "DECISION_CONTEXT",
@@ -518,28 +513,14 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 # Context Builder
 # ============================================================
 
-def _build_context_message(rep_3w, rep_4d, rep_8h, buffer, tech_report, portfolio_state, docs) -> str:
+def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state, docs) -> str:
     """
     Costruisce il messaggio di contesto per il Decision Agent.
-    Riceve liste di report aggregati (dal nuovo sistema cascata 3W/4D/8H).
+    Riceve liste di report aggregati (sistema cascata 4D/8H).
     """
     parts = []
 
-    # === Report 3W (macro, lungo termine) ===
-    if rep_3w:
-        r = rep_3w[0]["report"]
-        ts = rep_3w[0].get("timestamp", "?")
-        parts.append(f"""=== REPORT MACRO 3W ({ts}) ===
-Regime: {r.get('regime', '?')}
-Sintesi: {r.get('synthesis', r.get('summary_text', 'N/A'))}
-Rischi strutturali: {', '.join(r.get('structural_risks', []))[:600]}
-Temi lungo termine: {', '.join(r.get('long_term_themes', []))[:400]}
-Rotazione settoriale: {json.dumps(r.get('sector_rotation', {}), ensure_ascii=False)[:300]}
-Strategia macro: {r.get('macro_strategy', 'N/A')[:500]}""")
-    else:
-        parts.append("=== REPORT MACRO 3W === Non ancora disponibile (servono almeno 3 settimane di history)")
-
-    # === Report 4D (medio termine, ultimi 2) ===
+    # === Report 4D (visione macro/medio termine, ultimi 2) ===
     if rep_4d:
         lines = []
         for r in rep_4d[:2]:

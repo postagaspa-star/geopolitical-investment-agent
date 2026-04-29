@@ -42,9 +42,11 @@ const PHASE_COLORS = {
 
 const PHASE_LABELS = {
   ORCHESTRATOR: "Orchestratore",
-  SCOUT: "Scout (Sonnet)",
-  SCOUT_DAILY: "Daily Recap",
-  SCOUT_WEEKLY: "Weekly Matrix",
+  SCOUT: "Scout (DeepSeek-V3)",
+  SCOUT_8H: "Scout Report 8H",
+  SCOUT_4D: "Scout Report 4D",
+  SCOUT_DAILY: "Daily Recap (legacy)",
+  SCOUT_WEEKLY: "Weekly Matrix (legacy)",
   SCOUT_BUFFER_GDELT: "Scout GDELT",
   SCOUT_BUFFER_NEWSAPI: "Scout NewsAPI",
   SCOUT_BUFFER_CLAWSTREET: "Scout ClawStreet",
@@ -279,10 +281,12 @@ function ScoutInfoModal({ open, onClose }) {
         }}>×</button>
         <h2 style={{marginTop:0, color:"#f1f5f9"}}>Scout Findings — guida</h2>
         <p style={{color:"#94a3b8", marginBottom:"2rem"}}>
-          Lo Scout e' l'agente AI (Claude Sonnet 4.5) che ogni 20 minuti, 24/7,
-          raccoglie notizie da 7 fonti diverse e le sintetizza in micro-schede
+          Lo Scout e' l'agente AI (DeepSeek-V3) che ogni 20 minuti, 24/7,
+          raccoglie notizie da 9 fonti diverse e le sintetizza in micro-schede
           azionabili. Ogni scheda ti dice in 2-3 frasi cosa e' successo, su quali
-          ticker impatta, e se il sentiment e' positivo o negativo.
+          ticker impatta, e se il sentiment e' positivo o negativo. Inoltre produce
+          report aggregati ogni 8 ore e ogni 4 giorni per sintetizzare il contesto
+          macro letto dal Decision Agent.
         </p>
 
         <h3 style={{color:"#f1f5f9"}}>Le fonti</h3>

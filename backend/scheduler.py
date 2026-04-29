@@ -263,26 +263,6 @@ async def _scout_4d_report_job():
         logger.error("Errore Scout 4D: %s", e, exc_info=True)
 
 
-async def _scout_3w_report_job():
-    """
-    Job aggregato 3W — ogni 3 settimane (21 giorni).
-    Lo Scout legge i report 4D delle ultime 3 settimane, produce un report
-    macro 3W di lungo periodo, e ELIMINA i report 4D consumati.
-    """
-    from uuid import uuid4
-    run_id = str(uuid4())
-    try:
-        from agents.scout import run_3w_report
-        result = await run_3w_report(run_id)
-        if result.get("skipped"):
-            logger.info("Scout 3W skipped: %s", result.get("reason"))
-        else:
-            logger.info("Scout 3W completato: regime=%s, consumed=%d 4D-reports",
-                        result.get("regime", "?"), result.get("consumed_records", 0))
-    except Exception as e:
-        logger.error("Errore Scout 3W: %s", e, exc_info=True)
-
-
 async def _clawstreet_reconcile_job():
     """
     Riconciliazione automatica ClawStreet ogni ora durante orari di mercato.
@@ -428,18 +408,6 @@ def start_scheduler() -> AsyncIOScheduler:
         next_run_time=now_utc + timedelta(hours=24),
     )
 
-    # 3W — ogni 21 giorni. Primo run dopo 5 giorni (per avere almeno 1-2 report 4D).
-    _scheduler.add_job(
-        _scout_3w_report_job,
-        trigger="interval",
-        days=21,
-        id="scout_3w_report",
-        name="Scout 3W Report (consume L2 4D-reports)",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        next_run_time=now_utc + timedelta(days=5),
-    )
 
     # ClawStreet auto-reconcile: ogni ora durante orari di mercato
     _scheduler.add_job(
@@ -528,7 +496,6 @@ def get_scheduler_info() -> dict:
     scout_next = None
     scout_8h_next = None
     scout_4d_next = None
-    scout_3w_next = None
     if _scheduler and running:
         wj = _scheduler.get_job("watchdog_job")
         if wj and wj.next_run_time:
@@ -542,16 +509,12 @@ def get_scheduler_info() -> dict:
         s4 = _scheduler.get_job("scout_4d_report")
         if s4 and s4.next_run_time:
             scout_4d_next = s4.next_run_time.isoformat()
-        s3 = _scheduler.get_job("scout_3w_report")
-        if s3 and s3.next_run_time:
-            scout_3w_next = s3.next_run_time.isoformat()
 
     # --- Per i job on-demand cerchiamo l'ultimo log corrispondente ---
     watchdog_last = _last_log_for_phases(["WATCHDOG_"])
-    scout_last = _last_log_for_phases(["SCOUT_20MIN", "SCOUT", "SCOUT_8H", "SCOUT_4D", "SCOUT_3W"])
+    scout_last = _last_log_for_phases(["SCOUT_20MIN", "SCOUT", "SCOUT_8H", "SCOUT_4D"])
     scout_8h_last = _last_log_for_phases(["SCOUT_8H"])
     scout_4d_last = _last_log_for_phases(["SCOUT_4D"])
-    scout_3w_last = _last_log_for_phases(["SCOUT_3W"])
     technical_last = _last_log_for_phases(["TECH_", "TECHNICAL_"])
     decision_last = _last_log_for_phases(["DECISION_"])
 
@@ -575,15 +538,9 @@ def get_scheduler_info() -> dict:
             "active": running,
         },
         "scout_4d": {
-            "schedule": "ogni 4 giorni (aggrega report 8H)",
+            "schedule": "ogni 4 giorni (aggrega report 8H — top tier macro)",
             "next_run": scout_4d_next,
             "last_run": scout_4d_last,
-            "active": running,
-        },
-        "scout_3w": {
-            "schedule": "ogni 3 settimane (aggrega report 4D)",
-            "next_run": scout_3w_next,
-            "last_run": scout_3w_last,
             "active": running,
         },
         "technical": {

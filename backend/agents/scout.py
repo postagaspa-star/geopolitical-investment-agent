@@ -440,6 +440,13 @@ async def run_scout_20min(run_id: str) -> list[dict]:
         "cards_produced": len(micro_cards),
     })
 
+    # Cleanup periodico: hard-delete record con processed=true e age > 7 giorni
+    # (free pass: lo facciamo qui per evitare un job dedicato)
+    try:
+        _purge_stale_buffer(database, ttl_days=7)
+    except Exception:
+        pass
+
     logger.info("[%s][SCOUT] Completato: %d micro-schede prodotte, %d scritte nel buffer",
                 run_id, len(micro_cards), written)
     return micro_cards
@@ -580,8 +587,8 @@ async def _cascade_aggregate(
         logger.error("[%s][SCOUT] Errore scrittura report %s: %s", run_id, tier_label, e)
         return {"error": f"write_failed: {e}"}
 
-    # 5. ELIMINA i record consumati (solo dopo write riuscita)
-    deleted = _delete_buffer_records_by_ids(database, [r.get("id") for r in records if r.get("id")])
+    # 5. SOFT-DELETE: marca i record come processed=true (TTL hard-delete a 7 giorni)
+    marked = _mark_buffer_records_processed(database, [r.get("id") for r in records if r.get("id")])
 
     # 6. Log
     database.insert_agent_log(
@@ -591,7 +598,7 @@ async def _cascade_aggregate(
             "event": f"{tier_label.lower()}_complete",
             "tier": tier_label,
             "consumed": len(records),
-            "deleted": deleted,
+            "marked_processed": marked,
             "model": used_model,
             "macro_bias": report_obj.get("macro_bias"),
             "regime": report_obj.get("regime"),
@@ -599,10 +606,10 @@ async def _cascade_aggregate(
     )
 
     _save_checkpoint(run_id, f"scout_{tier_label.lower()}", "COMPLETED",
-                     {"tier": tier_label, "consumed": len(records), "deleted": deleted})
+                     {"tier": tier_label, "consumed": len(records), "marked": marked})
 
-    logger.info("[%s][SCOUT] %s completato: %d record consumati, %d eliminati",
-                run_id, tier_label, len(records), deleted)
+    logger.info("[%s][SCOUT] %s completato: %d record consumati, %d marcati processed",
+                run_id, tier_label, len(records), marked)
     return report_obj
 
 
@@ -635,17 +642,12 @@ async def run_4d_report(run_id: str) -> dict:
 
 
 async def run_3w_report(run_id: str) -> dict:
-    """L3 — Sintetizza i report 4d delle ultime 3 settimane in un report macro 3w."""
-    return await _cascade_aggregate(
-        run_id,
-        tier_label="3W",
-        source_types_to_consume=[TIER_4D],
-        output_source_type=TIER_3W,
-        window_hours=24 * 21,
-        prompt=REPORT_3W_PROMPT,
-        min_records=2,  # almeno 2 report 4d (= ~8 giorni di history)
-        log_phase="SCOUT_3W",
-    )
+    """
+    DEPRECATO — il tier 3W è stato rimosso dopo evidenza di valore marginale
+    (sintesi della sintesi della sintesi → diminishing returns).
+    Lasciato per backward-compat. Ritorna immediatamente.
+    """
+    return {"skipped": True, "reason": "3w_tier_deprecated"}
 
 
 # ============================================================
@@ -711,10 +713,12 @@ def _write_intelligence_buffer(database, run_id: str, source_type: str,
 
 
 def _read_buffer_by_types(database, source_types: list[str], window_hours: int,
-                           limit: int = 1000) -> list[dict]:
+                           limit: int = 1000, only_unprocessed: bool = True) -> list[dict]:
     """
     Legge record dell'intelligence_buffer filtrando per source_type IN (lista)
     e timestamp nell'ultima finestra `window_hours`.
+    Se only_unprocessed=True (default), include solo record con processed=false
+    o processed NULL (non ancora consumati da un'aggregazione).
     Ritorna ordinato per timestamp ASCENDENTE (cronologico).
     """
     try:
@@ -722,23 +726,27 @@ def _read_buffer_by_types(database, source_types: list[str], window_hours: int,
         if not client:
             return []
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
-        result = client.table("intelligence_buffer") \
+        query = client.table("intelligence_buffer") \
             .select("*") \
             .in_("source_type", source_types) \
-            .gte("timestamp", cutoff) \
-            .order("timestamp", desc=False) \
-            .limit(limit) \
-            .execute()
+            .gte("timestamp", cutoff)
+        if only_unprocessed:
+            # Supabase/PostgREST: per "processed != true" usiamo .neq
+            # (i record con processed NULL passano il filtro)
+            query = query.neq("processed", True)
+        result = query.order("timestamp", desc=False).limit(limit).execute()
         return result.data if result.data else []
     except Exception as e:
         logger.warning("Errore lettura buffer (types=%s): %s", source_types, e)
         return []
 
 
-def _delete_buffer_records_by_ids(database, ids: list) -> int:
+def _mark_buffer_records_processed(database, ids: list) -> int:
     """
-    Elimina i record di intelligence_buffer la cui colonna `id` è nella lista.
-    Ritorna il numero di id passati (Supabase non torna un count affidabile).
+    SOFT-DELETE: marca i record come processed=true invece di eliminarli.
+    Mantiene un periodo di grazia (~7 giorni) per recupero/diagnosi prima
+    della cancellazione definitiva (gestita da _purge_stale_buffer).
+    Ritorna il numero di id processati.
     """
     ids = [i for i in ids if i is not None]
     if not ids:
@@ -747,11 +755,36 @@ def _delete_buffer_records_by_ids(database, ids: list) -> int:
         client = database.get_client()
         if not client:
             return 0
-        # Supabase: delete in_('id', ids) — funziona con liste
-        client.table("intelligence_buffer").delete().in_("id", ids).execute()
+        client.table("intelligence_buffer") \
+            .update({"processed": True}) \
+            .in_("id", ids) \
+            .execute()
         return len(ids)
     except Exception as e:
-        logger.warning("Errore delete buffer per id: %s", e)
+        logger.warning("Errore mark processed buffer per id: %s", e)
+        return 0
+
+
+def _purge_stale_buffer(database, ttl_days: int = 7) -> int:
+    """
+    Hard-delete dei record marcati processed=true e più vecchi di ttl_days.
+    Da chiamare periodicamente (es. dal job Scout 20min) per evitare crescita
+    indefinita della tabella.
+    """
+    try:
+        client = database.get_client()
+        if not client:
+            return 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=ttl_days)).isoformat()
+        client.table("intelligence_buffer") \
+            .delete() \
+            .eq("processed", True) \
+            .lt("timestamp", cutoff) \
+            .execute()
+        logger.debug("Purge buffer: rimossi record processed=true < %s", cutoff)
+        return 1
+    except Exception as e:
+        logger.warning("Errore purge buffer: %s", e)
         return 0
 
 
@@ -800,18 +833,7 @@ def _build_macro_context_for_scout(database) -> str:
     """
     parts = []
 
-    # 3W (lungo termine, regime)
-    rep_3w = get_latest_aggregated_reports(database, TIER_3W, n=1)
-    if rep_3w:
-        r = rep_3w[0]["report"]
-        parts.append(
-            f"=== CONTESTO MACRO 3W ({rep_3w[0]['timestamp']}) ===\n"
-            f"Regime: {r.get('regime', '?')}\n"
-            f"Sintesi: {(r.get('synthesis') or r.get('summary_text', ''))[:600]}\n"
-            f"Strategia: {r.get('macro_strategy', '')[:300]}"
-        )
-
-    # 4D (medio termine, ultimi 2)
+    # 4D (visione di medio-lungo termine, top tier dopo rimozione 3W; ultimi 2)
     rep_4d = get_latest_aggregated_reports(database, TIER_4D, n=2)
     if rep_4d:
         lines = ["=== CONTESTO 4D (ultimi 2 report) ==="]
