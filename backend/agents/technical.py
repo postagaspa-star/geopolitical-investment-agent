@@ -21,21 +21,6 @@ DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 FALLBACK_MODEL = "claude-sonnet-4-20250514"
 
-# ============================================================
-# Core crypto coverage — costante hardcoded
-# ============================================================
-# Queste 4 crypto vengono SEMPRE incluse in ogni run del Technical Agent,
-# indipendentemente dal prompt utilizzato e dalla watchlist del Watchdog.
-# Sono i 4 ticker crypto a maggior capitalizzazione e liquidità su yfinance,
-# garanzia di coverage 24/7 per il Decision Agent (le crypto sono mercati
-# always-on e particolarmente sensibili ad analisi tecnica).
-CORE_CRYPTO_TICKERS: list[str] = [
-    "BTC-USD",   # Bitcoin
-    "ETH-USD",   # Ethereum
-    "SOL-USD",   # Solana
-    "BNB-USD",   # BNB
-]
-
 TECH_PROMPT_DEFAULT = """You are a quantitative technical analyst. You receive raw OHLCV data and pre-calculated indicators.
 
 RULES:
@@ -254,34 +239,10 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
                 run_id, len(tickers), tickers[:10])
 
     if not tickers:
-        tickers = []
-
-    # ────────────────────────────────────────────────────────────
-    # CORE CRYPTO COVERAGE: assicura che le 4 crypto core siano SEMPRE
-    # nella lista, indipendentemente da chi ha chiamato il Technical Agent.
-    # Costante hardcoded, non controllabile da prompt utente.
-    # Le crypto vanno in TESTA (priorità) per essere sicuri che non vengano
-    # tagliate dal limite max=10.
-    # ────────────────────────────────────────────────────────────
-    seen = set()
-    forced_tickers: list[str] = []
-    for t in CORE_CRYPTO_TICKERS:
-        if t.upper() not in seen:
-            forced_tickers.append(t)
-            seen.add(t.upper())
-    for t in tickers:
-        if t and t.upper() not in seen:
-            forced_tickers.append(t)
-            seen.add(t.upper())
-    tickers = forced_tickers
-
-    if not tickers:
         return {"analyses": [], "summary": "Nessun ticker da analizzare", "engine": "none"}
 
-    # Limita a 10 tickers (le 4 crypto core sono garantite perché in testa)
+    # Limita a 10 tickers
     tickers = tickers[:10]
-    logger.info("[%s][TECH] Coverage finale (4 crypto core + %d altri): %s",
-                run_id, max(0, len(tickers) - 4), tickers)
 
     # 1. Recupera indicatori in parallelo
     tasks = [_fetch_ticker_indicators(t) for t in tickers]
