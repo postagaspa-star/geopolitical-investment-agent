@@ -78,7 +78,18 @@ REGOLE:
 - Ogni decisione deve avere un logic_chain dettagliato che integra geo+tech
 - In modalita' Pure Macro (senza dati tecnici): puoi operare con sola analisi geopolitica se confidence >= 70%
 - Per le crypto, il sentiment retail (Reddit r/CryptoCurrency, r/Bitcoin) e' un input fondamentale
-- Durante orari extra-market (notte/weekend), opera prevalentemente su crypto"""
+
+CHIUSURA / RIDUZIONE POSIZIONI (importante):
+Il tool `execute_trade` è L'UNICO modo per operare e gestisce sia BUY sia SELL.
+Per CHIUDERE o RIDURRE una posizione esistente:
+  1. Chiama get_portfolio_state per leggere la quantity esatta detenuta
+  2. Chiama execute_trade(ticker=..., action='SELL', quantity=..., logic_chain=...)
+     - quantity = quantity totale per chiusura completa
+     - quantity < totale per riduzione parziale (profit-taking parziale)
+NON esistono tool separati 'close_position', 'reduce_position' o 'sell_all'.
+Se ritieni di dover chiudere una posizione (profit-taking, stop-loss manuale,
+rotation, de-risk per regime change), USA execute_trade con action='SELL'.
+Mai dire "non ho strumenti per chiudere": ce li hai, usali."""
 
 
 def _get_decision_prompt() -> str:
@@ -122,18 +133,28 @@ DECISION_TOOLS = [
     {
         "name": "execute_trade",
         "description": (
-            "Esegue un ordine BUY o SELL. Allocazione fino al 50% del portafoglio. "
-            "Stop-loss opzionale (decidi tu in base all'ATR e al contesto)."
+            "Esegue un ordine sui mercati. Questo è l'UNICO tool per operare e "
+            "copre SIA l'apertura SIA la chiusura/riduzione di posizioni:\n"
+            "  - action='BUY': apre o incrementa una posizione long su `ticker`. "
+            "Allocazione fino al 50% del portafoglio.\n"
+            "  - action='SELL': CHIUDE o RIDUCE una posizione esistente su `ticker`. "
+            "Usa quantity = numero azioni da chiudere (può essere parziale o totale). "
+            "Per chiudere completamente una posizione, leggi prima get_portfolio_state "
+            "per conoscere la quantity esatta detenuta.\n"
+            "Stop-loss e take-profit sono opzionali (decidi tu in base all'ATR e al "
+            "contesto). NON esistono tool separati come 'close_position': la chiusura "
+            "si fa SEMPRE con execute_trade(action='SELL')."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "ticker": {"type": "string", "description": "Ticker azionario"},
-                "action": {"type": "string", "enum": ["BUY", "SELL"]},
-                "quantity": {"type": "integer", "description": "Numero azioni", "minimum": 1},
+                "ticker": {"type": "string", "description": "Ticker azionario o crypto (es. AAPL, BTC-USD)"},
+                "action": {"type": "string", "enum": ["BUY", "SELL"],
+                           "description": "BUY = apre/incrementa long. SELL = chiude/riduce posizione esistente."},
+                "quantity": {"type": "integer", "description": "Numero azioni/unità. Per chiudere full position, usa la quantity dalla posizione corrente.", "minimum": 1},
                 "stop_loss": {"type": "number", "description": "Prezzo stop-loss (0 = nessuno)"},
                 "take_profit": {"type": "number", "description": "Prezzo take-profit (0 = nessuno)"},
-                "logic_chain": {"type": "string", "description": "Chain of Thought completo: integra geo+tech reasoning"},
+                "logic_chain": {"type": "string", "description": "Chain of Thought completo: integra geo+tech reasoning. Per SELL specifica se è profit-taking, stop-loss manuale, rotation, o de-risk."},
                 "confidence_level": {"type": "number", "minimum": 0, "maximum": 100},
             },
             "required": ["ticker", "action", "quantity", "logic_chain", "confidence_level"],
@@ -336,6 +357,31 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 
     logger.info("[%s][DECISION] === Avvio Decision Agent ===", run_id)
     start_time = datetime.now(timezone.utc)
+
+    # ──────────────────────────────────────────────────────────────
+    # MARKET-OPEN GATE (difensivo): Decision Agent opera SOLO con
+    # almeno una borsa principale aperta. Questo gate è ridondante
+    # rispetto a quello in run_watchdog_pipeline, ma protegge i
+    # percorsi alternativi (run_full_pipeline manuale, test, ecc.).
+    # ──────────────────────────────────────────────────────────────
+    try:
+        from scheduler import is_market_open
+        if not is_market_open():
+            logger.info("[%s][DECISION] Mercati chiusi — exit immediato senza analisi.", run_id)
+            try:
+                database.insert_agent_log(run_id, "DECISION_BLOCKED",
+                    json.dumps({"event": "market_closed_skip"}))
+            except Exception:
+                pass
+            return {
+                "run_id": run_id,
+                "decision": "SKIPPED",
+                "trades": [],
+                "reason": "market_closed",
+                "duration_seconds": 0.0,
+            }
+    except Exception:
+        pass  # se non riesco a determinare lo stato, proseguo (fail-open per safety dei test)
 
     # Checkpoint
     _save_checkpoint(run_id, "decision", "RUNNING", {"phase": "context_loading"})

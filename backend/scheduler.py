@@ -324,14 +324,18 @@ def start_scheduler() -> AsyncIOScheduler:
 
     _scheduler = AsyncIOScheduler()
 
-    # ── Price Polling: ogni 60 secondi (yfinance → Supabase) ──
+    # ── Price Polling: ogni 10 minuti (yfinance/Massive → Supabase) ──
+    # Frequenza ridotta da 60s a 600s per:
+    #   1. Ridurre la pressione di rate-limit su yfinance (1800/h → 180/h)
+    #   2. Eliminare i "buchi" causati da 429 di yfinance free tier
+    #   3. Allinearsi al delay nativo dei provider (~15 min su free tier)
     # AsyncIOScheduler accetta funzioni async direttamente — niente sync wrapper.
     _scheduler.add_job(
         _price_polling_job,
         trigger="interval",
-        seconds=60,
+        seconds=600,
         id="price_polling_job",
-        name="Price Polling 60s (yfinance cache)",
+        name="Price Polling 10min (massive+yfinance)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

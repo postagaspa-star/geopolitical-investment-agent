@@ -65,6 +65,40 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
             "duration_seconds": round(time.time() - start, 2),
         }
 
+    # ──────────────────────────────────────────────────────────────
+    # MARKET-OPEN GATE: il Decision Agent può operare SOLO se almeno
+    # una delle borse principali (NYSE/LSE/XETRA) è aperta.
+    # Anche se il Watchdog rileva un evento urgente fuori orario
+    # (es. notizie crypto alle 4 di mattina), non triggeriamo trade:
+    # le borse equity sono chiuse e i mercati crypto, sebbene 24/7,
+    # non sono coperti dalla strategia attuale (Decision non opera
+    # autonomamente sulle crypto durante orari "morti").
+    # ──────────────────────────────────────────────────────────────
+    try:
+        from scheduler import is_market_open
+        market_open = is_market_open()
+    except Exception:
+        market_open = False
+
+    if not market_open:
+        logger.info("[%s][ORCHESTRATOR] Watchdog ha triggerato (urgency=%d, '%s') ma "
+                    "tutte le borse sono chiuse — Decision Agent NON viene avviato.",
+                    run_id, urgency, reason)
+        database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+            "event": "decision_blocked_market_closed",
+            "urgency": urgency,
+            "reason": reason,
+            "focus_tickers": focus_tickers,
+        }))
+        return {
+            "run_id": run_id,
+            "triggered": False,
+            "urgency": urgency,
+            "reason": reason,
+            "blocked": "market_closed",
+            "duration_seconds": round(time.time() - start, 2),
+        }
+
     # Trigger! Avvia pipeline completa
     logger.info("[%s][WATCHDOG] TRIGGER urgency=%d: %s — avvio Technical+Decision",
                 run_id, urgency, reason)

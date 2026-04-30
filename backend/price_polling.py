@@ -231,26 +231,47 @@ def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
     """
     Scarica gli ultimi prezzi 1-min via yfinance.
     Ritorna: {ticker: {price, prev_close, change_pct, volume, day_high, day_low}}
+
+    Robustezza: retry con backoff su errori transitori (429, network, timeouts).
+    Tre tentativi totali con pause 2s/4s.
     """
     if not tickers:
         return {}
 
     quotes: dict[str, dict] = {}
+    import time as _t
     try:
         import yfinance as yf
         # NB: yfinance ora richiede curl_cffi internamente — niente session=requests
-        data = yf.download(
-            tickers,
-            period="2d",          # Serve almeno 2 giorni per avere prev_close affidabile
-            interval="1m",
-            progress=False,
-            auto_adjust=True,
-            threads=True,
-            group_by="ticker",
-        )
+
+        # Retry con backoff: yfinance free è frequentemente rate-limitato (429)
+        # o ritorna body vuoto sotto carico. Riproviamo fino a 3 volte.
+        data = None
+        last_error = None
+        for attempt in range(3):
+            try:
+                data = yf.download(
+                    tickers,
+                    period="2d",          # Serve almeno 2 giorni per avere prev_close affidabile
+                    interval="1m",
+                    progress=False,
+                    auto_adjust=True,
+                    threads=True,
+                    group_by="ticker",
+                )
+                if data is not None and not data.empty:
+                    break  # successo
+                last_error = "empty_response"
+            except Exception as ex:
+                last_error = str(ex)
+                logger.warning("yfinance attempt %d/3 fallito: %s", attempt + 1, str(ex)[:200])
+            if attempt < 2:
+                wait = 2 * (attempt + 1)
+                _t.sleep(wait)
 
         if data is None or data.empty:
-            logger.warning("yfinance: dati vuoti per %d ticker", len(tickers))
+            logger.warning("yfinance: %d ticker, tutti i 3 tentativi falliti (last=%s)",
+                           len(tickers), last_error)
             return {}
 
         for ticker in tickers:
