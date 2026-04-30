@@ -227,6 +227,43 @@ async def _fetch_massive_quotes(tickers: list[str], api_key: str) -> dict[str, d
     return quotes
 
 
+def _fetch_yfinance_per_ticker_fallback(tickers: list[str]) -> dict[str, dict]:
+    """
+    Fallback per-ticker: chiama yf.Ticker(t).fast_info uno alla volta
+    quando il batch download fallisce. Ritorna best-effort: ticker che
+    rispondono singolarmente vengono salvati, gli altri saltati.
+    """
+    quotes: dict[str, dict] = {}
+    try:
+        import yfinance as yf
+        for t in tickers:
+            try:
+                ticker_obj = yf.Ticker(t)
+                fi = ticker_obj.fast_info
+                price = float(fi.get("last_price") or fi.get("lastPrice") or 0)
+                prev = float(fi.get("previous_close") or fi.get("previousClose") or price)
+                if price <= 0:
+                    continue
+                change_pct = ((price - prev) / prev * 100) if prev > 0 else 0
+                quotes[t] = {
+                    "price": round(price, 4),
+                    "prev_close": round(prev, 4),
+                    "change_pct": round(change_pct, 4),
+                    "volume": int(fi.get("last_volume", 0) or 0),
+                    "day_high": round(float(fi.get("day_high", price) or price), 4),
+                    "day_low": round(float(fi.get("day_low", price) or price), 4),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            except Exception as e:
+                logger.debug("yfinance per-ticker fallback fail %s: %s", t, e)
+                continue
+        if quotes:
+            logger.info("yfinance fallback per-ticker: recuperati %d/%d ticker", len(quotes), len(tickers))
+    except Exception as e:
+        logger.warning("yfinance fallback critico: %s", e)
+    return quotes
+
+
 def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
     """
     Scarica gli ultimi prezzi 1-min via yfinance.
@@ -246,14 +283,17 @@ def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
 
         # Retry con backoff: yfinance free è frequentemente rate-limitato (429)
         # o ritorna body vuoto sotto carico. Riproviamo fino a 3 volte.
+        # Query LIGHT: period=5d, interval=5m → ~390 bars/ticker invece di
+        # ~780 con interval=1m. Riduce drasticamente il payload e i 429.
+        # 5m granularity è più che sufficiente per prezzo corrente + prev_close.
         data = None
         last_error = None
         for attempt in range(3):
             try:
                 data = yf.download(
                     tickers,
-                    period="2d",          # Serve almeno 2 giorni per avere prev_close affidabile
-                    interval="1m",
+                    period="5d",          # Serve >= 2 giorni per prev_close affidabile (5d copre weekend)
+                    interval="5m",        # 5-min bars: light, abbastanza fresco, meno rate-limit
                     progress=False,
                     auto_adjust=True,
                     threads=True,
@@ -270,9 +310,12 @@ def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
                 _t.sleep(wait)
 
         if data is None or data.empty:
-            logger.warning("yfinance: %d ticker, tutti i 3 tentativi falliti (last=%s)",
+            logger.warning("yfinance: %d ticker, tutti i 3 tentativi falliti (last=%s) — "
+                           "tento fallback per-ticker singolo",
                            len(tickers), last_error)
-            return {}
+            # Fallback per-ticker: alcuni ticker potrebbero rispondere singolarmente
+            # anche se il batch fallisce. Costoso ma più resiliente.
+            return _fetch_yfinance_per_ticker_fallback(tickers)
 
         for ticker in tickers:
             try:
@@ -437,14 +480,16 @@ async def update_price_cache() -> dict:
 
     # 4. Aggiorna current_price + unrealized_pnl di ogni posizione aperta
     #    e salva uno snapshot del portfolio (per popolare l'equity curve).
-    #    Solo durante market hours per non gonfiare il DB con snapshot stagnanti.
+    #    SEMPRE — anche fuori orario di mercato:
+    #      - le crypto (BTC-USD, ETH-USD, ...) si muovono 24/7
+    #      - per le equity i prezzi restano fermi al last close, ma è
+    #        comunque corretto aggiornare current_price = last close
+    #        e mantenere snapshot continui per l'equity curve.
+    #    Era gated su REGULAR e creava "buchi" dei dati portfolio.
     all_quotes = {**yf_quotes, **massive_quotes}  # massive ha la precedenza
-    if market_state == "REGULAR":
-        positions_updated, snapshot_saved = await asyncio.to_thread(
-            _update_positions_and_snapshot, all_quotes
-        )
-    else:
-        positions_updated, snapshot_saved = 0, False
+    positions_updated, snapshot_saved = await asyncio.to_thread(
+        _update_positions_and_snapshot, all_quotes
+    )
 
     if massive_quotes and yf_quotes:
         source_used = f"massive+yfinance"

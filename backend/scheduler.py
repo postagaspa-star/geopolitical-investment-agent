@@ -329,7 +329,8 @@ def start_scheduler() -> AsyncIOScheduler:
     #   1. Ridurre la pressione di rate-limit su yfinance (1800/h → 180/h)
     #   2. Eliminare i "buchi" causati da 429 di yfinance free tier
     #   3. Allinearsi al delay nativo dei provider (~15 min su free tier)
-    # AsyncIOScheduler accetta funzioni async direttamente — niente sync wrapper.
+    # next_run_time: primo run dopo 15s dall'avvio scheduler — così dopo
+    # un deploy non aspettiamo 10 min per vedere i prezzi aggiornati.
     _scheduler.add_job(
         _price_polling_job,
         trigger="interval",
@@ -339,6 +340,7 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        next_run_time=datetime.now(pytz.utc) + timedelta(seconds=15),
     )
 
     # ── Watchdog: ogni 1 minuto, MA solo durante orari di mercato (US/UK/DE) ──
