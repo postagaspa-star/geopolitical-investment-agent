@@ -198,6 +198,32 @@ function Settings({ onBack, onDataRefresh }) {
     saveSettings({ [key]: prompts[key] });
   };
 
+  // === Trigger manuale yfinance / Massive poll ===
+  const [pollStatus, setPollStatus] = useState({ running: false, result: null });
+  const handleManualPoll = async () => {
+    if (pollStatus.running) return;
+    setPollStatus({ running: true, result: null });
+    try {
+      const res = await fetch(`${API}/api/prices/trigger-poll`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const summary =
+        `${data.tickers ?? 0} ticker richiesti — ${data.quotes_written ?? 0} salvati ` +
+        `(massive=${data.massive_count ?? 0}, yf=${data.yfinance_count ?? 0}) ` +
+        `posizioni ${data.positions_updated ?? 0}, snapshot=${data.snapshot_saved ? "sì" : "no"} ` +
+        `[${data.duration_seconds}s]`;
+      setPollStatus({ running: false, result: { ok: true, summary } });
+      showMessage(`Poll manuale OK: ${summary}`);
+      // Re-run diagnostics per aggiornare gli indicatori
+      runDiagnostics(documents);
+      // Notifica il parent (App) per aggiornare dashboard
+      if (typeof onDataRefresh === "function") onDataRefresh();
+    } catch (err) {
+      setPollStatus({ running: false, result: { ok: false, summary: err.message } });
+      showMessage(`Errore poll manuale: ${err.message}`, true);
+    }
+  };
+
   const handleResetPrompt = (key) => {
     if (!window.confirm("Ripristinare il prompt di default per questo agente?")) return;
     // Reset: ripristino il testo del default nel textarea + cancello l'override sul DB
@@ -399,6 +425,45 @@ function Settings({ onBack, onDataRefresh }) {
                 </div>
               );
             })}
+          </div>
+
+          {/* Trigger manuale Price Polling */}
+          <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid #f3f4f6" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: 600, color: "#111827" }}>
+                  Aggiornamento prezzi manuale
+                </div>
+                <div style={{ fontSize: "12px", color: "#6b7280", marginTop: "2px" }}>
+                  Forza un ciclo immediato di Price Polling (Massive + yFinance) — utile dopo un deploy o se i prezzi sembrano fermi.
+                </div>
+              </div>
+              <button
+                style={{
+                  ...btnSecondary,
+                  background: pollStatus.running ? "#e5e7eb" : "#3b82f6",
+                  color: pollStatus.running ? "#6b7280" : "#fff",
+                  borderColor: pollStatus.running ? "#d1d5db" : "#3b82f6",
+                  cursor: pollStatus.running ? "not-allowed" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+                onClick={handleManualPoll}
+                disabled={pollStatus.running}
+              >
+                {pollStatus.running ? "In corso..." : "Aggiorna prezzi"}
+              </button>
+            </div>
+            {pollStatus.result && (
+              <div style={{
+                marginTop: "8px", padding: "8px 12px", borderRadius: "6px",
+                fontSize: "12px",
+                background: pollStatus.result.ok ? "#ecfdf5" : "#fef2f2",
+                color: pollStatus.result.ok ? "#065f46" : "#991b1b",
+                border: `1px solid ${pollStatus.result.ok ? "#a7f3d0" : "#fecaca"}`,
+              }}>
+                {pollStatus.result.summary}
+              </div>
+            )}
           </div>
         </div>
 

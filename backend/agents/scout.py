@@ -38,12 +38,22 @@ SCOUT_MODEL_FALLBACK = "claude-sonnet-4-20250514"
 # Source-type taxonomy
 # ============================================================
 
-# Micro-cards di livello L0 (prodotte da run_scout_20min ogni 20 min)
+# Micro-cards di livello L0 (prodotte da run_scout_20min ogni 20 min).
+# Include sia i nomi canonici interni sia gli alias usati nei prompt utente
+# (es. ROLE.txt usa YFINANCE/TWITTER mentre il codice usa YFINANCE_NEWS/X).
+# La consistenza è essenziale altrimenti il cascade aggregator esclude i
+# record dei prompt utente.
 MICRO_CARD_TYPES = [
-    "GDELT", "NEWSAPI", "YFINANCE_NEWS",
-    "REDDIT", "X",
-    "CLAWSTREET_MARKET", "CLAWSTREET_ECONOMY", "CONGRESSIONAL",
+    "GDELT",
+    "NEWSAPI",
+    "YFINANCE_NEWS", "YFINANCE",          # alias yfinance news
+    "REDDIT",
+    "X", "TWITTER",                        # alias twitter/X
+    "CLAWSTREET_MARKET",
+    "CLAWSTREET_ECONOMY",
+    "CONGRESSIONAL",
     "CRYPTO_MARKET",
+    "SYSTEM",                              # error/diagnostic cards (vedi ROLE.txt § ERROR HANDLING)
 ]
 
 # Tier aggregati: source_type identificativi

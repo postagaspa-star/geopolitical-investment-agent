@@ -241,6 +241,8 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     if not tickers:
         return {"analyses": [], "summary": "Nessun ticker da analizzare", "engine": "none"}
 
+    # Normalizza ticker UPPERCASE (yfinance è case-sensitive su crypto: btc-usd ≠ BTC-USD)
+    tickers = [t.upper().strip() for t in tickers if t]
     # Limita a 10 tickers
     tickers = tickers[:10]
 
@@ -249,11 +251,39 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     ticker_data = []
+    failed_tickers: list[str] = []
     for i, result in enumerate(raw_results):
         if isinstance(result, Exception):
-            ticker_data.append({"ticker": tickers[i], "error": str(result)})
-        else:
-            ticker_data.append(result)
+            failed_tickers.append(tickers[i])
+            continue
+        # _fetch_ticker_indicators ritorna un dict con 'error' se i dati non sono disponibili
+        if isinstance(result, dict) and result.get("error") and not result.get("current_price"):
+            failed_tickers.append(tickers[i])
+            continue
+        # Solo ticker con dati validi vanno al LLM (evita "?" values nel report)
+        ticker_data.append(result)
+
+    if failed_tickers:
+        logger.warning("[%s][TECH] %d/%d ticker senza dati indicatori (saltati): %s",
+                       run_id, len(failed_tickers), len(tickers), failed_tickers)
+
+    # Se TUTTI i ticker sono falliti, esci subito con un report vuoto coerente
+    # invece di mandare un contesto vuoto a DeepSeek (che produrrebbe '?' values).
+    if not ticker_data:
+        try:
+            database.insert_agent_log(run_id, "TECH_WORKER", json.dumps({
+                "event": "technical_skipped_no_data",
+                "tickers_requested": len(tickers),
+                "tickers_failed": failed_tickers,
+            }))
+        except Exception:
+            pass
+        return {
+            "analyses": [],
+            "summary": f"Nessun dato disponibile per i {len(tickers)} ticker richiesti (yfinance/Massive falliti). Decision Agent userà Pure Macro mode.",
+            "engine": "skipped_no_data",
+            "failed_tickers": failed_tickers,
+        }
 
     # 2. Prepara contesto per DeepSeek
     context = json.dumps({

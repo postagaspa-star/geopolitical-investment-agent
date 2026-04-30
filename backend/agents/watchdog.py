@@ -141,16 +141,18 @@ def _get_recent_headlines(database, minutes: int = 10) -> list[str]:
 
 async def _get_price_snapshot() -> dict:
     """
-    Snapshot rapido prezzi dalla cache price_quotes (aggiornata ogni 60s).
-    Molto più veloce che chiamare yfinance ogni 5 min.
+    Snapshot rapido prezzi dalla cache price_quotes (aggiornata ogni 10 min
+    da price_polling). Molto più veloce che chiamare yfinance ogni minuto.
     """
     snapshot = {}
     try:
         from price_polling import get_cached_prices_bulk
         tickers = ["SPY", "QQQ", "XOM", "LMT", "GLD", "VIX",
-                   "AAPL", "MSFT", "NVDA", "TLT"]
-        # Cache fresca = max 5 min (Watchdog tolera dati leggermente stale)
-        cached = await asyncio.to_thread(get_cached_prices_bulk, tickers, 300)
+                   "AAPL", "MSFT", "NVDA", "TLT",
+                   "BTC-USD", "ETH-USD"]  # crypto incluse — si muovono 24/7
+        # Cache age max 15 min (polling è ogni 10 min, lascio 5 min di margine
+        # per evitare buchi se un ciclo di polling tarda).
+        cached = await asyncio.to_thread(get_cached_prices_bulk, tickers, 900)
         for t, q in cached.items():
             snapshot[t] = {
                 "price": round(q["price"], 2),
@@ -191,10 +193,27 @@ async def _call_deepseek(context: str) -> dict:
                     return {"trigger": False, "urgency": 0, "reason": f"http_{resp.status}", "focus_tickers": []}
                 data = await resp.json()
                 text = data["choices"][0]["message"]["content"].strip()
-                # Estrai JSON dalla risposta
+                # Estrai JSON dalla risposta in modo tollerante:
+                # 1. Se c'è un blocco ``` ... ``` prendilo
+                # 2. Altrimenti cerca il primo { e l'ultimo }
+                payload = None
                 if "```" in text:
-                    text = text.split("```")[1].replace("json", "").strip()
-                return json.loads(text)
+                    try:
+                        chunk = text.split("```")[1].replace("json", "", 1).strip()
+                        payload = json.loads(chunk)
+                    except Exception:
+                        pass
+                if payload is None:
+                    j_start = text.find("{")
+                    j_end = text.rfind("}") + 1
+                    if j_start >= 0 and j_end > j_start:
+                        try:
+                            payload = json.loads(text[j_start:j_end])
+                        except Exception:
+                            pass
+                if payload is None:
+                    payload = json.loads(text)  # tenta diretto, lascia che fallisca se invalido
+                return payload
     except json.JSONDecodeError as e:
         logger.warning("Watchdog JSON parse error: %s", e)
         return {"trigger": False, "urgency": 0, "reason": "json_parse_error", "focus_tickers": []}
