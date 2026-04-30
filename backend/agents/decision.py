@@ -431,30 +431,29 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     client = _get_client()
     system_prompt = _get_decision_prompt()
 
-    # Prima prova Opus, se non disponibile usa Sonnet
-    try:
-        messages = [{"role": "user", "content": user_message}]
+    # Prima prova Opus, se non disponibile usa Sonnet.
+    # CRITICO: Anthropic SDK è sincrono → wrap in asyncio.to_thread per non
+    # bloccare l'event loop (evita di fermare polling, watchdog, ecc.).
+    messages = [{"role": "user", "content": user_message}]
 
-        response = client.messages.create(
-            model=model,
-            max_tokens=16000,
+    def _create_message(model_id: str, max_tokens: int):
+        return client.messages.create(
+            model=model_id,
+            max_tokens=max_tokens,
             system=system_prompt,
             tools=DECISION_TOOLS,
             messages=messages,
         )
+
+    try:
+        response = await asyncio.to_thread(_create_message, model, 16000)
         used_model = model
     except Exception as model_err:
         if model == DECISION_MODEL:
             logger.warning("[%s][DECISION] %s non disponibile (%s), fallback a %s",
                            run_id, DECISION_MODEL, model_err, DECISION_MODEL_FALLBACK)
             model = DECISION_MODEL_FALLBACK
-            response = client.messages.create(
-                model=model,
-                max_tokens=8192,
-                system=system_prompt,
-                tools=DECISION_TOOLS,
-                messages=messages,
-            )
+            response = await asyncio.to_thread(_create_message, model, 8192)
             used_model = model
         else:
             raise
@@ -499,13 +498,9 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 
         messages.append({"role": "user", "content": tool_results})
 
-        response = client.messages.create(
-            model=used_model,
-            max_tokens=16000,
-            system=system_prompt,
-            tools=DECISION_TOOLS,
-            messages=messages,
-        )
+        # Wrap in to_thread per non bloccare l'event loop durante il tool loop
+        # (15 iterazioni × ~10s = 2-3 min di blocking se non wrappato)
+        response = await asyncio.to_thread(_create_message, used_model, 16000)
 
     # --- Estrai risposta finale ---
     final_text = ""

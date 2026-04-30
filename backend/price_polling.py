@@ -553,28 +553,59 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
             logger.debug("Errore snapshot portfolio (no positions): %s", e)
         return 0, snapshot_saved
 
-    # 1. Update current_price + pnl per ogni ticker con quote disponibile
+    # 1. Update current_price + pnl per ogni ticker con quote disponibile.
+    # Sanity check: rifiuta prezzi che si discostano >40% dal previous_close
+    # (probabile bad data: pre-market spike, fat-finger, ticker mismatch).
     total_position_value = 0.0
     for p in positions:
         ticker = p.get("ticker")
         qty = float(p.get("quantity", 0) or 0)
         avg = float(p.get("avg_buy_price", 0) or 0)
+        old_current = float(p.get("current_price") or avg)
         if not ticker or qty <= 0:
             continue
         quote = all_quotes.get(ticker)
+
+        # Sanity check sul prezzo del quote PRIMA di usarlo
+        if quote and "price" in quote:
+            new_price = float(quote.get("price") or 0)
+            prev_close = float(quote.get("prev_close") or 0)
+            # Reference per il sanity check: prev_close dal quote, fallback a old_current
+            ref = prev_close if prev_close > 0 else old_current
+            if new_price > 0 and ref > 0:
+                ratio = new_price / ref
+                if ratio < 0.6 or ratio > 1.4:
+                    logger.warning(
+                        "[POLLING] Prezzo IMPLAUSIBILE per %s: nuovo=%.2f, ref=%.2f (ratio %.2f). "
+                        "Aggiornamento RIFIUTATO. Source=%s",
+                        ticker, new_price, ref, ratio, quote.get("source", "?")
+                    )
+                    quote = None  # forza fallback al prezzo precedente
+            elif new_price <= 0:
+                logger.warning("[POLLING] Prezzo NULLO/NEGATIVO per %s: %.4f, scartato", ticker, new_price)
+                quote = None
         if quote and "price" in quote:
             current_price = float(quote["price"])
             try:
                 import database
                 database.update_position_price(ticker, current_price)
                 positions_updated += 1
+                # Log esplicito quando il prezzo cambia significativamente — utile diagnostica
+                if old_current > 0:
+                    delta_pct = ((current_price - old_current) / old_current) * 100
+                    if abs(delta_pct) > 5:
+                        logger.info("[POLLING] %s: %.2f → %.2f (%+.1f%%)",
+                                    ticker, old_current, current_price, delta_pct)
             except Exception as e:
-                logger.debug("Errore update %s: %s", ticker, e)
+                # Era debug, ora warning: vogliamo VEDERE i fallimenti DB
+                logger.warning("[POLLING] Errore update_position_price %s: %s", ticker, e)
             total_position_value += current_price * qty
         else:
-            # Quote non disponibile per questo ticker: usa l'ultimo current_price noto
+            # Quote non disponibile per questo ticker: usa l'ultimo current_price noto.
+            # Logghiamo se è > 24h che non si aggiorna (potenziale stale data).
             cp = float(p.get("current_price") or avg)
             total_position_value += cp * qty
+            logger.debug("[POLLING] %s: nessun quote, mantengo current_price=%.2f", ticker, cp)
 
     # 2. Salva snapshot del portfolio totale (cash + valore posizioni)
     try:

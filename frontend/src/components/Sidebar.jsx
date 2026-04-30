@@ -10,6 +10,7 @@ import {
   Zap,
   Trophy,
   ExternalLink,
+  RefreshCw,
 } from 'lucide-react';
 
 const MODE_LABELS = {
@@ -142,6 +143,57 @@ export default function Sidebar({
   const [csRegistering, setCsRegistering] = useState(false);
   const API = window.location.origin;
 
+  // Manual price polling
+  const [polling, setPolling] = useState(false);
+  const [pollFeedback, setPollFeedback] = useState(null);
+  const handleRefreshPrices = async () => {
+    if (polling) return;
+    setPolling(true);
+    setPollFeedback(null);
+    try {
+      const res = await fetch(`${API}/api/prices/trigger-poll`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const ok = (data.quotes_written ?? 0) > 0;
+      setPollFeedback({
+        ok,
+        text: ok
+          ? `${data.quotes_written}/${data.tickers} aggiornati (${data.duration_seconds}s)`
+          : `Nessun dato (${data.source ?? 'none'})`,
+      });
+    } catch (err) {
+      setPollFeedback({ ok: false, text: err.message });
+    }
+    setPolling(false);
+    setTimeout(() => setPollFeedback(null), 5000);
+  };
+
+  // Audit + force-fix dei current_price posizioni (chiama yfinance fresh)
+  const [auditing, setAuditing] = useState(false);
+  const [auditFeedback, setAuditFeedback] = useState(null);
+  const handleAuditPrices = async () => {
+    if (auditing) return;
+    setAuditing(true);
+    setAuditFeedback(null);
+    try {
+      const res = await fetch(`${API}/api/admin/audit-position-prices`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const fixed = data.fixed ?? 0;
+      const audited = data.positions_audited ?? 0;
+      setAuditFeedback({
+        ok: true,
+        text: fixed > 0
+          ? `Fix ${fixed}/${audited} posizioni (delta >5%)`
+          : `OK — ${audited} posizioni allineate`,
+      });
+    } catch (err) {
+      setAuditFeedback({ ok: false, text: err.message });
+    }
+    setAuditing(false);
+    setTimeout(() => setAuditFeedback(null), 8000);
+  };
+
   useEffect(() => {
     fetch(`${API}/api/clawstreet/status`)
       .then(r => r.json())
@@ -265,6 +317,46 @@ export default function Sidebar({
             onClick={onRunOnce} disabled={isRunning}>
             <Zap /> Esegui Manuale
           </button>
+          <button className="btn btn-secondary"
+            onClick={handleRefreshPrices} disabled={polling}
+            style={{ opacity: polling ? 0.6 : 1 }}>
+            <RefreshCw style={{
+              animation: polling ? 'spin 1s linear infinite' : 'none',
+            }} /> {polling ? 'Aggiornando…' : 'Aggiorna prezzi'}
+          </button>
+          {pollFeedback && (
+            <div style={{
+              fontSize: '0.7rem',
+              padding: '0.3rem 0.5rem',
+              borderRadius: '4px',
+              background: pollFeedback.ok ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)',
+              color: pollFeedback.ok ? 'var(--positive)' : 'var(--negative)',
+              border: `1px solid ${pollFeedback.ok ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
+            }}>
+              {pollFeedback.text}
+            </div>
+          )}
+          <button className="btn btn-secondary"
+            onClick={handleAuditPrices} disabled={auditing}
+            style={{ opacity: auditing ? 0.6 : 1, fontSize: '0.78rem' }}
+            title="Confronta i current_price salvati con yfinance live e applica fix se delta > 5%">
+            <RefreshCw style={{
+              animation: auditing ? 'spin 1s linear infinite' : 'none',
+            }} /> {auditing ? 'Verifica…' : 'Verifica prezzi posizioni'}
+          </button>
+          {auditFeedback && (
+            <div style={{
+              fontSize: '0.7rem',
+              padding: '0.3rem 0.5rem',
+              borderRadius: '4px',
+              background: auditFeedback.ok ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)',
+              color: auditFeedback.ok ? 'var(--positive)' : 'var(--negative)',
+              border: `1px solid ${auditFeedback.ok ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`,
+            }}>
+              {auditFeedback.text}
+            </div>
+          )}
+          <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         </div>
 
         {/* Portfolio summary */}

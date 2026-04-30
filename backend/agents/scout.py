@@ -245,8 +245,13 @@ async def _call_deepseek(system_prompt: str, user_content: str, max_retries: int
     raise ValueError(f"DeepSeek failed after {max_retries} attempts: {last_error}")
 
 
-def _call_claude_fallback(system_prompt: str, user_content: str) -> tuple[str, str]:
-    """Fallback sincrono: usa Claude Sonnet se DeepSeek non risponde."""
+async def _call_claude_fallback(system_prompt: str, user_content: str) -> tuple[str, str]:
+    """
+    Fallback async: usa Claude Sonnet se DeepSeek non risponde.
+    Wrappa la chiamata SDK sincrona in asyncio.to_thread per non bloccare
+    l'event loop (era un bug serio: una chiamata Sonnet fermava polling,
+    watchdog e tutti gli altri agenti per 5-30 secondi).
+    """
     from anthropic import Anthropic
 
     key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -258,12 +263,16 @@ def _call_claude_fallback(system_prompt: str, user_content: str) -> tuple[str, s
             pass
 
     client = Anthropic(api_key=key)
-    response = client.messages.create(
-        model=SCOUT_MODEL_FALLBACK,
-        max_tokens=4096,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_content}],
-    )
+
+    def _sync_call():
+        return client.messages.create(
+            model=SCOUT_MODEL_FALLBACK,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+        )
+
+    response = await asyncio.to_thread(_sync_call)
     text = ""
     for block in response.content:
         if hasattr(block, "text"):
@@ -383,7 +392,7 @@ async def run_scout_20min(run_id: str) -> list[dict]:
             response_text, used_model = await _call_deepseek(scout_prompt, user_msg)
         except Exception as ds_err:
             logger.warning("[%s][SCOUT] DeepSeek non disponibile (%s), fallback a Claude Sonnet", run_id, ds_err)
-            response_text, used_model = _call_claude_fallback(scout_prompt, user_msg)
+            response_text, used_model = await _call_claude_fallback(scout_prompt, user_msg)
 
         # Parse JSON robusto: prova array, poi cerca blocchi ```json```, poi estrae oggetti singoli
         micro_cards = _parse_json_array_robust(response_text)
@@ -547,7 +556,7 @@ async def _cascade_aggregate(
             response_text, used_model = await _call_deepseek(prompt, context[:20000])
         except Exception as ds_err:
             logger.warning("[%s][SCOUT] DeepSeek fallback %s (%s)", run_id, tier_label, ds_err)
-            response_text, used_model = _call_claude_fallback(prompt, context[:20000])
+            response_text, used_model = await _call_claude_fallback(prompt, context[:20000])
         report_obj = _parse_json_object(response_text)
         if not report_obj:
             raise ValueError("Empty JSON object from model")
@@ -741,9 +750,11 @@ def _read_buffer_by_types(database, source_types: list[str], window_hours: int,
             .in_("source_type", source_types) \
             .gte("timestamp", cutoff)
         if only_unprocessed:
-            # Supabase/PostgREST: per "processed != true" usiamo .neq
-            # (i record con processed NULL passano il filtro)
-            query = query.neq("processed", True)
+            # Supabase/PostgREST: includiamo record con processed=false E
+            # quelli con processed=NULL (legacy data, record non ancora settati).
+            # `.neq("processed", True)` da solo NON include i NULL perché
+            # `NULL != TRUE` valuta a NULL/falsy. Usiamo `.or_` esplicito.
+            query = query.or_("processed.is.null,processed.eq.false")
         result = query.order("timestamp", desc=False).limit(limit).execute()
         return result.data if result.data else []
     except Exception as e:

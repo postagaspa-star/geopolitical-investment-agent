@@ -181,6 +181,77 @@ async def trigger_price_poll():
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+@app.post("/api/admin/audit-position-prices")
+async def audit_position_prices():
+    """
+    Confronta il `current_price` salvato per ogni posizione con un fetch
+    fresco da yfinance. Riporta le discrepanze (>5%) e applica il fix.
+
+    Uso: chiamare se sospetti che i current_price delle posizioni siano stale
+    o corrotti (es. MSFT a $420 quando in realtà è a $350).
+    """
+    import asyncio
+    try:
+        positions = database.get_positions() or []
+        if not positions:
+            return {"status": "ok", "positions_audited": 0, "discrepancies": [], "fixed": 0}
+
+        tickers = [p.get("ticker") for p in positions if p.get("ticker")]
+        # Fetch fresco via per-ticker (più affidabile del batch)
+        from price_polling import _fetch_yfinance_per_ticker_fallback
+        fresh = await asyncio.to_thread(_fetch_yfinance_per_ticker_fallback, tickers)
+
+        discrepancies = []
+        fixed = 0
+        for p in positions:
+            ticker = p.get("ticker")
+            stored = float(p.get("current_price") or 0)
+            avg_buy = float(p.get("avg_buy_price") or 0)
+            quote = fresh.get(ticker) if ticker else None
+            if not quote:
+                discrepancies.append({
+                    "ticker": ticker,
+                    "stored_current": stored,
+                    "fresh": None,
+                    "status": "NO_FRESH_DATA",
+                })
+                continue
+            fresh_price = float(quote.get("price") or 0)
+            if fresh_price <= 0:
+                continue
+            delta_pct = ((stored - fresh_price) / fresh_price) * 100 if fresh_price > 0 else 0
+            entry = {
+                "ticker": ticker,
+                "stored_current": round(stored, 2),
+                "fresh_yfinance": round(fresh_price, 2),
+                "avg_buy": round(avg_buy, 2),
+                "delta_pct": round(delta_pct, 1),
+            }
+            # Se delta > 5%, applica il fix (sovrascrive con il valore fresco)
+            if abs(delta_pct) > 5:
+                try:
+                    database.update_position_price(ticker, fresh_price)
+                    fixed += 1
+                    entry["status"] = "FIXED"
+                except Exception as e:
+                    entry["status"] = f"FIX_FAILED: {e}"
+                discrepancies.append(entry)
+            else:
+                entry["status"] = "OK"
+                # Non aggiungiamo gli OK alla lista (rumore), salvo che voglia vederli
+
+        return {
+            "status": "ok",
+            "positions_audited": len(positions),
+            "discrepancies_found": len([d for d in discrepancies if d.get("status") == "FIXED"]),
+            "fixed": fixed,
+            "details": discrepancies,
+        }
+    except Exception as e:
+        logger.error(f"Errore audit-position-prices: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @app.get("/api/prices/quotes")
 async def get_price_quotes(tickers: str = Query(default="")):
     """

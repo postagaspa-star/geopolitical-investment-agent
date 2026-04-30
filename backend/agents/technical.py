@@ -130,7 +130,12 @@ async def _call_deepseek(context: str, max_retries: int = 3) -> tuple[str, str]:
 
 
 async def _call_claude_fallback(context: str) -> tuple[str, str]:
-    """Fallback: usa Claude Sonnet se DeepSeek non risponde."""
+    """
+    Fallback: usa Claude Sonnet se DeepSeek non risponde.
+    Wrappa la chiamata SDK sincrona in asyncio.to_thread per non bloccare
+    l'event loop (era un bug: una chiamata Sonnet fermava polling, watchdog,
+    e tutti gli altri agenti per 5-30 secondi).
+    """
     from anthropic import Anthropic
 
     key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -142,12 +147,16 @@ async def _call_claude_fallback(context: str) -> tuple[str, str]:
             pass
 
     client = Anthropic(api_key=key)
-    response = client.messages.create(
-        model=FALLBACK_MODEL,
-        max_tokens=4096,
-        system=_get_tech_prompt(),
-        messages=[{"role": "user", "content": context}],
-    )
+
+    def _sync_call():
+        return client.messages.create(
+            model=FALLBACK_MODEL,
+            max_tokens=4096,
+            system=_get_tech_prompt(),
+            messages=[{"role": "user", "content": context}],
+        )
+
+    response = await asyncio.to_thread(_sync_call)
     text = ""
     for block in response.content:
         if hasattr(block, "text"):
