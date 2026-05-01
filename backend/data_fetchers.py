@@ -744,10 +744,20 @@ async def mirror_trade_to_clawstreet(
     (non un broker). La feature "market check" precedente bloccava il mirror dopo
     le 16:00 ET introducendo silenziosi fallimenti.
     """
-    # Converti crypto prefix se necessario
-    is_crypto = symbol.startswith("X:") or (symbol.endswith("USD") and len(symbol) > 5)
-    if is_crypto and not symbol.startswith("X:"):
-        symbol = f"X:{symbol}"
+    # Converti il formato crypto da yfinance a ClawStreet.
+    # yfinance: "BTC-USD", "ETH-USD", "SOL-USD" (con trattino prima di USD)
+    # ClawStreet: "X:BTCUSD", "X:ETHUSD", "X:SOLUSD" (X: prefix, senza trattino)
+    # BUG FIX: il codice precedente produceva "X:BTC-USD" (con trattino) che
+    # ClawStreet rifiutava silenziosamente con INVALID_SYMBOL.
+    if not symbol.startswith("X:"):
+        if "-USD" in symbol and len(symbol) > 5:
+            # BTC-USD → BTCUSD → X:BTCUSD
+            clean = symbol.replace("-USD", "USD")
+            symbol = f"X:{clean}"
+        elif symbol.endswith("USD") and len(symbol) > 5 and "-" not in symbol:
+            # BTCUSD (già senza trattino, ma senza X: prefix) → X:BTCUSD
+            symbol = f"X:{symbol}"
+    # Se già "X:BTCUSD" o ticker azionario (AAPL, MSFT...) → lascia invariato
 
     # Endpoint corretto: /trades (plurale), non /trade
     url = f"{CLAWSTREET_BASE}/bots/{bot_id}/trades"

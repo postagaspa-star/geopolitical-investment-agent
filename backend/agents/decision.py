@@ -1,8 +1,12 @@
 """
-Decision Agent — Claude Sonnet 4.5
+Decision Agent — Claude Sonnet 4.5 (production) | DeepSeek-R1 (tournament)
 Orchestra gerarchica per decisioni di trading ad alto rischio.
 Attivato solo quando il Watchdog rileva un segnale significativo (urgency >= 5).
 Throttle: max 1 run per ora per rispettare il budget mensile (~$13-14/mese).
+
+Dual Engine:
+  - DECISION_ENGINE=claude  (default): Claude Sonnet 4.5, usa Anthropic SDK + tool_use nativo
+  - DECISION_ENGINE=deepseek-r1: DeepSeek-R1, usa HTTP OpenAI-compatible + tool_calls JSON
 
 Fasi:
   A: Ingestione contesto a cascata (3W macro + 4D mid-term + 8H short-term +
@@ -15,18 +19,54 @@ import asyncio
 import json
 import logging
 import os
+import re as _re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+import aiohttp
 from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
 
-# Claude Sonnet 4.5 — decisioni di trading (max 1/ora, ~$13/mese)
+# ── Claude Sonnet 4.5 (production) ──────────────────────────────────────────
 # NOTA: verifica che questo ID sia corretto sulla tua dashboard Anthropic
 DECISION_MODEL = "claude-sonnet-4-5-20250929"
 DECISION_MODEL_FALLBACK = "claude-sonnet-4-20250514"  # Fallback a Sonnet 4 se 4.5 non disponibile
+
+# ── DeepSeek-R1 (tournament, cost-optimized) ────────────────────────────────
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_R1_MODEL = "deepseek-reasoner"   # DeepSeek-R1 (reasoning model)
+
+
+def _get_decision_engine() -> str:
+    """Legge DECISION_ENGINE da env var. Default 'claude' (production)."""
+    return os.environ.get("DECISION_ENGINE", "claude").lower()
+
+
+def _get_deepseek_key() -> str:
+    """Recupera DEEPSEEK_API_KEY da env o DB settings."""
+    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not key:
+        try:
+            import database as _db
+            key = _db.get_setting("deepseek_api_key", "") or ""
+        except Exception:
+            pass
+    return key
+
+
+def _tools_for_openai():
+    """Converte DECISION_TOOLS da Anthropic format a OpenAI/DeepSeek format.
+    Anthropic usa 'input_schema', OpenAI/DeepSeek usa 'parameters' — stessa struttura JSON."""
+    return [
+        {"type": "function", "function": {
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["input_schema"],
+        }}
+        for t in DECISION_TOOLS
+    ]
 
 # ============================================================
 # System Prompts
@@ -427,6 +467,53 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     # --- FASE B+C: Valutazione e Esecuzione ---
     _save_checkpoint(run_id, "decision", "RUNNING", {"phase": "evaluation"})
 
+    # ── Branch DeepSeek-R1 (variante tournament, costo ridotto ~10x) ────────
+    # Attivato da env var: DECISION_ENGINE=deepseek-r1
+    # Il codice Anthropic sotto non viene eseguito in questa modalità.
+    if _get_decision_engine() == "deepseek-r1":
+        logger.info("[%s][DECISION] Engine: DeepSeek-R1 (tournament mode)", run_id)
+        try:
+            trades_executed, final_text, iteration = await _run_deepseek_decision_loop(
+                run_id, _get_decision_prompt(), user_message
+            )
+            used_model = DEEPSEEK_R1_MODEL
+        except Exception as ds_err:
+            logger.error("[%s][DECISION] DeepSeek-R1 fallito: %s", run_id, ds_err, exc_info=True)
+            # Fail-safe: ritorna no-trade, non crashare l'intero pipeline
+            trades_executed, final_text, iteration = [], f"DeepSeek-R1 error: {ds_err}", 0
+            used_model = "deepseek-r1-error"
+
+        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        try:
+            p = database.get_portfolio()
+            if p:
+                database.insert_portfolio_snapshot(p["total_value"], p["cash_balance"])
+        except Exception:
+            pass
+        database.insert_agent_log(run_id, "DECISION_COMPLETE", json.dumps({
+            "event": "decision_complete", "model": used_model,
+            "iterations": iteration, "trades_executed": len(trades_executed),
+            "duration_seconds": round(duration, 1),
+            "final_text": final_text[:500],
+        }, default=str))
+        _save_checkpoint(run_id, "decision", "COMPLETED", {
+            "trades": len(trades_executed), "duration": duration,
+        })
+        logger.info("[%s][DECISION] [R1] Completato in %.1fs, %d trades, %d iterazioni",
+                    run_id, duration, len(trades_executed), iteration)
+        return {
+            "run_id": run_id,
+            "decision": "TRADE" if trades_executed else "NO_TRADE",
+            "trades": trades_executed,
+            "no_trade_reasoning": final_text if not trades_executed else "",
+            "context_loaded": context_loaded,
+            "duration_seconds": duration,
+            "model": used_model,
+            "iterations": iteration,
+            "final_response": final_text,
+        }
+    # ── Fine branch DeepSeek-R1 ─────────────────────────────────────────────
+
     model = _select_model()
     client = _get_client()
     system_prompt = _get_decision_prompt()
@@ -548,6 +635,113 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
         "iterations": iteration,
         "final_response": final_text,
     }
+
+
+# ============================================================
+# DeepSeek-R1 Decision Loop (variante tournament, API OpenAI-compatible)
+# ============================================================
+
+async def _run_deepseek_decision_loop(
+    run_id: str, system_prompt: str, user_message: str
+) -> tuple[list, str, int]:
+    """
+    Tool loop per DeepSeek-R1 tramite API OpenAI-compatible di DeepSeek.
+
+    Differenze chiave vs Anthropic SDK:
+    - finish_reason == "tool_calls"  (Anthropic: "tool_use")
+    - tool call in response["choices"][0]["message"]["tool_calls"]
+    - tool result: {"role": "tool", "tool_call_id": tc["id"], "content": ...}
+    - tc["function"]["arguments"] è una STRINGA JSON → json.loads() obbligatorio
+    - R1 genera token di reasoning (<think>...</think>) nella content → da strippare
+
+    Ritorna: (trades_executed_list, final_text, n_iterations)
+    """
+    api_key = _get_deepseek_key()
+    if not api_key:
+        raise ValueError("DEEPSEEK_API_KEY non configurata — impossibile avviare motore DeepSeek-R1")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    messages: list[dict] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    trades_executed: list[dict] = []
+    iteration = 0
+    max_iterations = 10   # R1 è più lento di Sonnet, riduco da 15 a 10
+    final_text = ""
+
+    async with aiohttp.ClientSession() as session:
+        while iteration < max_iterations:
+            payload = {
+                "model": DEEPSEEK_R1_MODEL,
+                "messages": messages,
+                "tools": _tools_for_openai(),
+                "tool_choice": "auto",
+                "max_tokens": 8000,
+            }
+            async with session.post(
+                DEEPSEEK_API_URL, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise ValueError(f"DeepSeek HTTP {resp.status}: {body[:300]}")
+                data = await resp.json()
+
+            choice = data["choices"][0]
+            finish_reason = choice.get("finish_reason", "")
+            msg = choice["message"]
+
+            # Estrai testo finale (stripping token di reasoning <think>...</think> di R1)
+            raw_text = msg.get("content") or ""
+            final_text = _re.sub(r"<think>.*?</think>", "", raw_text, flags=_re.DOTALL).strip()
+
+            # Nessuna tool call → ciclo terminato
+            if finish_reason != "tool_calls" or not msg.get("tool_calls"):
+                break
+
+            iteration += 1
+            logger.info("[%s][DECISION-R1] Iterazione %d — tool calls: %d",
+                        run_id, iteration, len(msg["tool_calls"]))
+
+            # Aggiungi risposta dell'assistente alla storia della conversazione
+            messages.append({
+                "role": "assistant",
+                "content": msg.get("content"),   # può essere None in R1
+                "tool_calls": msg["tool_calls"],
+            })
+
+            for tc in msg["tool_calls"]:
+                tool_name = tc["function"]["name"]
+                # IMPORTANTE: arguments è una stringa JSON, non un dict
+                tool_input = json.loads(tc["function"]["arguments"])
+                result = await _handle_decision_tool(tool_name, tool_input, run_id)
+
+                # Track trade eseguiti
+                if tool_name == "execute_trade":
+                    try:
+                        parsed = json.loads(result)
+                        if parsed.get("executed"):
+                            trades_executed.append({
+                                "ticker": tool_input.get("ticker"),
+                                "action": tool_input.get("action"),
+                                "quantity": tool_input.get("quantity"),
+                                "confidence": tool_input.get("confidence_level"),
+                            })
+                    except Exception:
+                        pass
+
+                # Tool result nel formato OpenAI (role=tool, non Anthropic's role=user+type=tool_result)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
+
+    return trades_executed, final_text, iteration
 
 
 # ============================================================
