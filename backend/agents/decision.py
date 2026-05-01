@@ -1,17 +1,21 @@
 """
-Decision Agent — Claude Sonnet 4.5 (production) | DeepSeek-R1 (tournament)
+Decision Agent — Claude Sonnet 4.5 (market open) | DeepSeek-R1 (market closed)
 Orchestra gerarchica per decisioni di trading ad alto rischio.
 Attivato solo quando il Watchdog rileva un segnale significativo (urgency >= 5).
-Throttle: max 1 run per ora per rispettare il budget mensile (~$13-14/mese).
+Throttle: max 1 run per ora durante orari mercato, 1 ogni 2h30 fuori orario.
 
-Dual Engine:
-  - DECISION_ENGINE=claude  (default): Claude Sonnet 4.5, usa Anthropic SDK + tool_use nativo
-  - DECISION_ENGINE=deepseek-r1: DeepSeek-R1, usa HTTP OpenAI-compatible + tool_calls JSON
+Engine selection (env DECISION_ENGINE):
+  - claude       → SEMPRE Claude Sonnet 4.5 (override esplicito)
+  - deepseek-r1  → SEMPRE DeepSeek-R1 (override esplicito; usato da GR1 tournament)
+  - hybrid       → Sonnet 4.5 quando market OPEN, R1 quando CLOSED  (default GEO)
+
+In modalità hybrid, R1 subentra automaticamente fuori orario per gestire le
+crypto 24/7 con costo ridotto (~10× più economico di Sonnet 4.5).
 
 Fasi:
-  A: Ingestione contesto a cascata (3W macro + 4D mid-term + 8H short-term +
+  A: Ingestione contesto a cascata (4D mid-term + 8H short-term +
      buffer L0 ultimi 40 min + Tech Report + Portfolio)
-  B: Valutazione strategica (Sonnet 4.5 — context compresso max 6K token)
+  B: Valutazione strategica
   C: Esecuzione trade o motivazione no-trade
 """
 
@@ -40,8 +44,68 @@ DEEPSEEK_R1_MODEL = "deepseek-reasoner"   # DeepSeek-R1 (reasoning model)
 
 
 def _get_decision_engine() -> str:
-    """Legge DECISION_ENGINE da env var. Default 'claude' (production)."""
-    return os.environ.get("DECISION_ENGINE", "claude").lower()
+    """Legge DECISION_ENGINE da env var. Default 'hybrid' (production GEO).
+
+    Valori validi:
+      - 'claude'      → Sonnet 4.5 sempre
+      - 'deepseek-r1' → R1 sempre (GR1 tournament)
+      - 'hybrid'      → Sonnet 4.5 in market hours, R1 fuori orario (default GEO)
+    """
+    return os.environ.get("DECISION_ENGINE", "hybrid").lower()
+
+
+def _resolve_engine_for_run() -> str:
+    """
+    Risolve l'engine da usare per QUESTO run, considerando lo stato del mercato.
+    In hybrid: market open → claude, market closed → deepseek-r1.
+    """
+    engine = _get_decision_engine()
+    if engine != "hybrid":
+        return engine
+
+    # hybrid: scegli in base allo stato del mercato
+    try:
+        from scheduler import is_market_open
+        return "claude" if is_market_open() else "deepseek-r1"
+    except Exception:
+        return "claude"  # fail-open: Sonnet è il default più "safe"
+
+
+# Cooldown timestamp per R1 overnight (settings key)
+R1_LAST_RUN_KEY = "last_decision_r1_run_at"
+R1_COOLDOWN_SECONDS = 9000   # 2h30
+
+
+def record_r1_run_timestamp() -> None:
+    """Aggiorna il timestamp dell'ultimo run R1 nel DB. Usato per cooldown 2h30."""
+    try:
+        import database as _db
+        ts = datetime.now(timezone.utc).isoformat()
+        _db.set_setting(R1_LAST_RUN_KEY, ts)
+    except Exception as exc:
+        logger.warning("Impossibile salvare timestamp R1 last-run: %s", exc)
+
+
+def is_r1_cooldown_active() -> tuple[bool, int]:
+    """
+    Ritorna (True, seconds_left) se il cooldown 2h30 è ancora attivo.
+    Altrimenti (False, 0). Usato dall'orchestrator per skip overnight.
+    """
+    try:
+        import database as _db
+        last_iso = _db.get_setting(R1_LAST_RUN_KEY, "") or ""
+        if not last_iso:
+            return False, 0
+        last_dt = datetime.fromisoformat(last_iso)
+        # Compatibilità: se non ha tzinfo, assumi UTC
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+        if elapsed < R1_COOLDOWN_SECONDS:
+            return True, int(R1_COOLDOWN_SECONDS - elapsed)
+    except Exception as exc:
+        logger.debug("Errore lettura cooldown R1 (ignoro, fail-open): %s", exc)
+    return False, 0
 
 
 def _get_deepseek_key() -> str:
@@ -162,20 +226,78 @@ rotation, de-risk per regime change), USA execute_trade con action='SELL'.
 Mai dire "non ho strumenti per chiudere": ce li hai, usali."""
 
 
-def _get_decision_prompt() -> str:
+# ─── Prompt DEFAULT per DeepSeek-R1 (overnight crypto-focused) ─────────────
+# Versione tarata per il reasoning model R1: più conciso, focus crypto
+# (perché R1 subentra solo a mercati equity chiusi), e riferimenti espliciti
+# al fatto che durante l'overnight la priorità sono BTC/ETH/SOL/etc.
+DECISION_R1_SYSTEM_PROMPT_DEFAULT = """Sei il Decision Agent di GeoInvest AI in MODALITÀ OVERNIGHT (mercati equity chiusi).
+Engine: DeepSeek-R1 (reasoning model). Subentri a Claude Sonnet 4.5 fuori orario.
+
+CONTESTO OVERNIGHT:
+NYSE/LSE/XETRA chiuse. Le crypto sono il SOLO universo tradabile in tempo reale.
+Le azioni S&P 500 restano nello stato della sessione precedente — non puoi aprire
+posizioni equity perché ClawStreet non eseguirà BUY su titoli a mercato chiuso.
+
+UNIVERSO INVESTIBILE (ridotto, overnight):
+✓ 14 CRYPTO (formato yfinance "X-USD"):
+  BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD, LTC-USD,
+  DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD.
+✗ Azioni S&P 500 (mercati chiusi → BUY rifiutato da ClawStreet).
+✗ Altre crypto (BNB, SHIB, AAVE, PEPE, FIL, etc. → fuori universo ClawStreet).
+✗ ETF indicizzati (SPY, QQQ, TLT) → non supportati neanche di giorno.
+
+Hai il tool execute_trade per BUY/SELL e do_nothing per non operare.
+SELL su posizioni equity esistenti è permesso (chiusura emergency overnight),
+ma generalmente meglio aspettare l'apertura del mercato.
+
+PROCEDURA OVERNIGHT:
+1. Leggi il portafoglio (get_portfolio_state) e identifica posizioni crypto aperte.
+2. Valuta sentiment retail (Reddit r/CryptoCurrency, r/Bitcoin) dal buffer Scout.
+3. Cerca pattern tecnici crypto dal Tech Report (RSI, MACD, support/resistance).
+4. Cerca catalisti macro overnight (annunci Fed, geopolitica, hack, regulation).
+
+REGOLE OPERATIVE:
+- Allocazione max 30% del portafoglio per singola posizione crypto (vs 50% di giorno:
+  liquidità minore di notte = slippage maggiore).
+- Stop-loss CONSIGLIATO sulle crypto overnight (volatilità elevata).
+- Confidence threshold ≥ 55% (lievemente più alta del giorno per filtrare il rumore).
+- Se geo + tech concordano forte (entrambi BUY), confidence boost +15%.
+- Max 5 posizioni aperte totali (compreso ciò che è già aperto da Sonnet).
+
+CHIUSURA POSIZIONI:
+Per chiudere/ridurre, chiama execute_trade con action='SELL' e quantity dalla
+get_portfolio_state. NON esistono tool separati 'close_position' o 'sell_all'.
+
+OUTPUT:
+Sii conciso. Niente bullet point ripetitivi. Logic_chain in 3-4 frasi:
+geo-trigger → conferma tecnica → ragione di entrata/uscita.
+Se il caso non è chiaro, usa do_nothing senza forzare l'operazione."""
+
+
+def _get_decision_prompt(engine: str | None = None) -> str:
     """
     Carica il system prompt del Decision Agent.
-    Override utente: chiave 'prompt_decision' nelle impostazioni DB.
-    Fallback: DECISION_SYSTEM_PROMPT_DEFAULT.
+
+    Args:
+        engine: 'claude' o 'deepseek-r1'. Se None, viene risolto da _resolve_engine_for_run().
+
+    Per Claude:    setting key 'prompt_decision'    → fallback DECISION_SYSTEM_PROMPT_DEFAULT
+    Per R1:        setting key 'prompt_decision_r1' → fallback DECISION_R1_SYSTEM_PROMPT_DEFAULT
     """
+    if engine is None:
+        engine = _resolve_engine_for_run()
+
+    setting_key = "prompt_decision_r1" if engine == "deepseek-r1" else "prompt_decision"
+    default = DECISION_R1_SYSTEM_PROMPT_DEFAULT if engine == "deepseek-r1" else DECISION_SYSTEM_PROMPT_DEFAULT
+
     try:
         import database as _db
-        custom = _db.get_setting("prompt_decision", "")
+        custom = _db.get_setting(setting_key, "")
         if custom and isinstance(custom, str) and custom.strip():
             return custom
     except Exception:
         pass
-    return DECISION_SYSTEM_PROMPT_DEFAULT
+    return default
 
 
 def _get_client() -> Anthropic:
@@ -467,29 +589,14 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     start_time = datetime.now(timezone.utc)
 
     # ──────────────────────────────────────────────────────────────
-    # MARKET-OPEN GATE (difensivo): Decision Agent opera SOLO con
-    # almeno una borsa principale aperta. Questo gate è ridondante
-    # rispetto a quello in run_watchdog_pipeline, ma protegge i
-    # percorsi alternativi (run_full_pipeline manuale, test, ecc.).
+    # Engine selection (hybrid: Claude per market-open, R1 per overnight)
+    # Il vecchio gate "market_closed → SKIPPED" è stato RIMOSSO: ora
+    # quando il mercato è chiuso, l'engine R1 si attiva automaticamente
+    # per gestire le crypto 24/7. L'orchestrator filtra le crypto e
+    # applica il cooldown 2h30 prima di chiamarci.
     # ──────────────────────────────────────────────────────────────
-    try:
-        from scheduler import is_market_open
-        if not is_market_open():
-            logger.info("[%s][DECISION] Mercati chiusi — exit immediato senza analisi.", run_id)
-            try:
-                database.insert_agent_log(run_id, "DECISION_BLOCKED",
-                    json.dumps({"event": "market_closed_skip"}))
-            except Exception:
-                pass
-            return {
-                "run_id": run_id,
-                "decision": "SKIPPED",
-                "trades": [],
-                "reason": "market_closed",
-                "duration_seconds": 0.0,
-            }
-    except Exception:
-        pass  # se non riesco a determinare lo stato, proseguo (fail-open per safety dei test)
+    resolved_engine = _resolve_engine_for_run()
+    logger.info("[%s][DECISION] Engine risolto: %s", run_id, resolved_engine)
 
     # Checkpoint
     _save_checkpoint(run_id, "decision", "RUNNING", {"phase": "context_loading"})
@@ -535,16 +642,19 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     # --- FASE B+C: Valutazione e Esecuzione ---
     _save_checkpoint(run_id, "decision", "RUNNING", {"phase": "evaluation"})
 
-    # ── Branch DeepSeek-R1 (variante tournament, costo ridotto ~10x) ────────
-    # Attivato da env var: DECISION_ENGINE=deepseek-r1
-    # Il codice Anthropic sotto non viene eseguito in questa modalità.
-    if _get_decision_engine() == "deepseek-r1":
-        logger.info("[%s][DECISION] Engine: DeepSeek-R1 (tournament mode)", run_id)
+    # ── Branch DeepSeek-R1 (overnight crypto / tournament) ────────────────
+    # Attivato quando resolved_engine == 'deepseek-r1':
+    #   - DECISION_ENGINE=deepseek-r1   (override esplicito, usato da GR1)
+    #   - DECISION_ENGINE=hybrid + market closed (default GEO overnight)
+    if resolved_engine == "deepseek-r1":
+        logger.info("[%s][DECISION] Engine: DeepSeek-R1 (overnight/tournament)", run_id)
         try:
             trades_executed, final_text, iteration = await _run_deepseek_decision_loop(
-                run_id, _get_decision_prompt(), user_message
+                run_id, _get_decision_prompt("deepseek-r1"), user_message
             )
             used_model = DEEPSEEK_R1_MODEL
+            # Registra timestamp per cooldown 2h30 (solo se il run ha completato senza errore)
+            record_r1_run_timestamp()
         except Exception as ds_err:
             logger.error("[%s][DECISION] DeepSeek-R1 fallito: %s", run_id, ds_err, exc_info=True)
             # Fail-safe: ritorna no-trade, non crashare l'intero pipeline
@@ -584,7 +694,7 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 
     model = _select_model()
     client = _get_client()
-    system_prompt = _get_decision_prompt()
+    system_prompt = _get_decision_prompt("claude")
 
     # Prima prova Opus, se non disponibile usa Sonnet.
     # CRITICO: Anthropic SDK è sincrono → wrap in asyncio.to_thread per non

@@ -29,8 +29,13 @@ const PROMPT_AGENTS = [
   },
   {
     key: "prompt_decision",
-    label: "Decision (Sonnet 4.5)",
-    description: "Decide buy/sell/hold incrociando geopolitica + tecnico. Max 1 esecuzione/ora.",
+    label: "Decision (Sonnet 4.5) — orari di mercato",
+    description: "Decide buy/sell/hold incrociando geopolitica + tecnico durante le ore di apertura di NYSE/LSE/XETRA. Max 1 esecuzione/ora.",
+  },
+  {
+    key: "prompt_decision_r1",
+    label: "Decision R1 (DeepSeek-R1) — overnight crypto",
+    description: "Subentra a Sonnet 4.5 quando i mercati equity sono chiusi (notti, weekend). Focus crypto 24/7. Max 1 esecuzione ogni 2h30.",
   },
 ];
 
@@ -38,16 +43,18 @@ function Settings({ onBack, onDataRefresh }) {
   // === Diagnostica ===
   const [diagnostics, setDiagnostics] = useState(INITIAL_DIAGNOSTICS);
 
-  // === Prompt per i 3 agenti ===
+  // === Prompt per i 4 agenti ===
   const [prompts, setPrompts] = useState({
     prompt_scout: "",
     prompt_technical: "",
     prompt_decision: "",
+    prompt_decision_r1: "",
   });
   const [promptDefaults, setPromptDefaults] = useState({
     prompt_scout: "",
     prompt_technical: "",
     prompt_decision: "",
+    prompt_decision_r1: "",
   });
 
   // === Documenti ===
@@ -112,7 +119,7 @@ function Settings({ onBack, onDataRefresh }) {
   useEffect(() => {
     const loadAll = async () => {
       // Prima carico i default — servono come fallback se il custom e' vuoto
-      let defaults = { prompt_scout: "", prompt_technical: "", prompt_decision: "" };
+      let defaults = { prompt_scout: "", prompt_technical: "", prompt_decision: "", prompt_decision_r1: "" };
       try {
         const res = await fetch(`${API}/api/settings/prompt-defaults`);
         if (res.ok) {
@@ -121,6 +128,7 @@ function Settings({ onBack, onDataRefresh }) {
             prompt_scout: data.prompt_scout || "",
             prompt_technical: data.prompt_technical || "",
             prompt_decision: data.prompt_decision || "",
+            prompt_decision_r1: data.prompt_decision_r1 || "",
           };
           setPromptDefaults(defaults);
         }
@@ -139,6 +147,7 @@ function Settings({ onBack, onDataRefresh }) {
             prompt_scout: (data.prompt_scout && data.prompt_scout.trim()) || defaults.prompt_scout || "",
             prompt_technical: (data.prompt_technical && data.prompt_technical.trim()) || defaults.prompt_technical || "",
             prompt_decision: (data.prompt_decision && data.prompt_decision.trim()) || defaults.prompt_decision || "",
+            prompt_decision_r1: (data.prompt_decision_r1 && data.prompt_decision_r1.trim()) || defaults.prompt_decision_r1 || "",
           });
         }
       } catch (err) {
@@ -478,7 +487,9 @@ function Settings({ onBack, onDataRefresh }) {
             Personalizza il comportamento di ogni agente del workflow. Lasciando vuoto il campo,
             verra' usato il prompt di default integrato.
             Il modello e l'intervallo di esecuzione sono fissi e non configurabili: Watchdog (DeepSeek-V3) ogni 1 min 24/7,
-            Scout (DeepSeek-V3) ogni 20 min 24/7 + report aggregati 8H/4D, Technical (DeepSeek-V3) e Decision (Sonnet 4.5) on-demand.
+            Scout (DeepSeek-V3) ogni 20 min 24/7 + report aggregati 8H/4D, Technical (DeepSeek-V3) on-demand.
+            Il Decision Agent ha due profili: <strong>Sonnet 4.5</strong> durante orari di mercato (max 1/h) e
+            <strong>DeepSeek-R1</strong> overnight per crypto 24/7 (max 1 ogni 2h30).
           </p>
 
           {PROMPT_AGENTS.map(({ key, label, description }) => (

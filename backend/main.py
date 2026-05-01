@@ -511,17 +511,22 @@ async def save_settings(payload: SettingsPayload):
 @app.get("/api/settings/prompt-defaults")
 async def get_prompt_defaults():
     """
-    Restituisce i prompt di default per Scout, Technical e Decision.
-    Usato dal frontend per mostrare placeholder o ripristinare i default.
+    Restituisce i prompt di default per Scout, Technical, Decision (Sonnet) e
+    Decision R1 (overnight crypto). Usato dal frontend per mostrare placeholder
+    o ripristinare i default.
     """
     try:
         from agents.scout import SCOUT_20MIN_PROMPT_DEFAULT
         from agents.technical import TECH_PROMPT_DEFAULT
-        from agents.decision import DECISION_SYSTEM_PROMPT_DEFAULT
+        from agents.decision import (
+            DECISION_SYSTEM_PROMPT_DEFAULT,
+            DECISION_R1_SYSTEM_PROMPT_DEFAULT,
+        )
         return {
             "prompt_scout": SCOUT_20MIN_PROMPT_DEFAULT,
             "prompt_technical": TECH_PROMPT_DEFAULT,
             "prompt_decision": DECISION_SYSTEM_PROMPT_DEFAULT,
+            "prompt_decision_r1": DECISION_R1_SYSTEM_PROMPT_DEFAULT,
         }
     except Exception as e:
         logger.error(f"Errore caricamento prompt default: {e}", exc_info=True)

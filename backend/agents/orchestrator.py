@@ -66,13 +66,16 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         }
 
     # ──────────────────────────────────────────────────────────────
-    # MARKET-OPEN GATE: il Decision Agent può operare SOLO se almeno
-    # una delle borse principali (NYSE/LSE/XETRA) è aperta.
-    # Anche se il Watchdog rileva un evento urgente fuori orario
-    # (es. notizie crypto alle 4 di mattina), non triggeriamo trade:
-    # le borse equity sono chiuse e i mercati crypto, sebbene 24/7,
-    # non sono coperti dalla strategia attuale (Decision non opera
-    # autonomamente sulle crypto durante orari "morti").
+    # GATE IBRIDO: market-open vs overnight crypto
+    #
+    # Mercati equity APERTI (NYSE/LSE/XETRA):
+    #     → Decision Agent gira con engine Sonnet 4.5 (default GEO).
+    #
+    # Mercati equity CHIUSI (notti, weekend):
+    #     → Decision Agent gira con engine DeepSeek-R1 SOLO se:
+    #       1) almeno un focus_ticker è una crypto (BTC-USD, ETH-USD, ...)
+    #       2) il cooldown 2h30 dall'ultimo run R1 è scaduto
+    #     → Altrimenti blocca: niente da fare overnight.
     # ──────────────────────────────────────────────────────────────
     try:
         from scheduler import is_market_open
@@ -81,23 +84,61 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         market_open = False
 
     if not market_open:
-        logger.info("[%s][ORCHESTRATOR] Watchdog ha triggerato (urgency=%d, '%s') ma "
-                    "tutte le borse sono chiuse — Decision Agent NON viene avviato.",
-                    run_id, urgency, reason)
-        database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
-            "event": "decision_blocked_market_closed",
-            "urgency": urgency,
-            "reason": reason,
-            "focus_tickers": focus_tickers,
-        }))
-        return {
-            "run_id": run_id,
-            "triggered": False,
-            "urgency": urgency,
-            "reason": reason,
-            "blocked": "market_closed",
-            "duration_seconds": round(time.time() - start, 2),
-        }
+        # Filtra crypto dai focus tickers (overnight: solo crypto è tradabile)
+        crypto_in_focus = [t for t in focus_tickers if _is_crypto_ticker(t)]
+
+        if not crypto_in_focus:
+            logger.info("[%s][ORCHESTRATOR] Mercati equity chiusi e nessuna crypto nei "
+                        "focus_tickers (focus=%s) — Decision NON avviato.",
+                        run_id, focus_tickers)
+            database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+                "event": "decision_blocked_no_crypto_overnight",
+                "urgency": urgency,
+                "reason": reason,
+                "focus_tickers": focus_tickers,
+            }))
+            return {
+                "run_id": run_id,
+                "triggered": False,
+                "urgency": urgency,
+                "reason": reason,
+                "blocked": "no_crypto_overnight",
+                "duration_seconds": round(time.time() - start, 2),
+            }
+
+        # Cooldown 2h30 R1
+        try:
+            from agents.decision import is_r1_cooldown_active
+            cooldown_active, seconds_left = is_r1_cooldown_active()
+        except Exception:
+            cooldown_active, seconds_left = False, 0
+
+        if cooldown_active:
+            logger.info("[%s][ORCHESTRATOR] Cooldown R1 attivo: ancora %ds (~%.1fh) — "
+                        "Decision NON avviato.",
+                        run_id, seconds_left, seconds_left / 3600.0)
+            database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+                "event": "decision_blocked_r1_cooldown",
+                "urgency": urgency,
+                "reason": reason,
+                "seconds_left": seconds_left,
+            }))
+            return {
+                "run_id": run_id,
+                "triggered": False,
+                "urgency": urgency,
+                "reason": reason,
+                "blocked": "r1_cooldown",
+                "cooldown_seconds_left": seconds_left,
+                "duration_seconds": round(time.time() - start, 2),
+            }
+
+        # Restringi focus_tickers SOLO alle crypto (overnight): non ha senso
+        # passare AAPL/TSLA al Decision quando le borse sono chiuse.
+        focus_tickers = crypto_in_focus
+        logger.info("[%s][ORCHESTRATOR] OVERNIGHT MODE: market closed, %d crypto in focus "
+                    "(%s), cooldown R1 OK — avvio R1 Decision.",
+                    run_id, len(crypto_in_focus), crypto_in_focus)
 
     # Trigger! Avvia pipeline completa
     logger.info("[%s][WATCHDOG] TRIGGER urgency=%d: %s — avvio Technical+Decision",
@@ -318,3 +359,23 @@ def _extract_hot_tickers(micro_cards: list[dict]) -> list[str]:
                 tickers.append(t_upper)
                 seen.add(t_upper)
     return tickers
+
+
+def _is_crypto_ticker(ticker: str) -> bool:
+    """
+    True se il ticker è una crypto (universo ClawStreet 24/7).
+
+    Riconosce sia il formato yfinance ("BTC-USD") sia ClawStreet ("X:BTCUSD").
+    Usata dall'orchestrator per decidere se overnight + watchdog trigger
+    deve effettivamente avviare il Decision Agent (engine R1).
+    """
+    if not ticker:
+        return False
+    t = ticker.upper().strip()
+    # Formato ClawStreet: "X:BTCUSD"
+    if t.startswith("X:"):
+        return True
+    # Formato yfinance: "BTC-USD", "ETH-USD", ...
+    if t.endswith("-USD") and len(t) > 4:
+        return True
+    return False
