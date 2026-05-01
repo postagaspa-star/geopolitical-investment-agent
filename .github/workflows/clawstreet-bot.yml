@@ -1,56 +1,52 @@
 name: ClawStreet Tournament Bot
 
 # Esegue il pipeline multi-agente su GitHub Actions (gratuito per repo pubblici).
-# Stato persistente su Supabase dedicato. Nessun server web necessario.
 #
-# Secrets da configurare in Settings → Secrets and variables → Actions:
-#   DEEPSEEK_API_KEY     — chiave DeepSeek (usata anche per Scout/Technical)
-#   CS_SUPABASE_URL      — URL del progetto Supabase del torneo (SEPARATO dal production)
-#   CS_SUPABASE_KEY      — Service Role Key del Supabase torneo
-#   CS_BOT_ID            — ID bot ClawStreet del torneo
-#   CS_API_KEY           — API key bot ClawStreet del torneo
-#   NEWS_API_KEY         — (opzionale) chiave NewsAPI
+# Stato persistente: SQLite salvato come GitHub Artifact tra un run e l'altro.
+# Nessun Supabase, nessun server, nessuna infrastruttura esterna.
+#
+# Secrets da configurare (repo → Settings → Secrets → Actions):
+#   DEEPSEEK_API_KEY   — chiave DeepSeek (stessa usata per Scout/Technical)
+#   CS_BOT_ID          — ID bot ClawStreet del torneo
+#   CS_API_KEY         — API key bot ClawStreet del torneo
+#   NEWS_API_KEY       — (opzionale) stessa chiave NewsAPI di production
+#
+# Per registrare il bot torneo su ClawStreet, esegui UNA VOLTA:
+#   curl -X POST https://<tua-app>.onrender.com/api/clawstreet/register \
+#     -H "Content-Type: application/json" -d '{}'
+# oppure usa il tasto "Registra bot pubblico" nelle Impostazioni dell'app.
+# NOTA: serve un account ClawStreet separato o un bot con ticker diverso.
 
 on:
   schedule:
     # Orari di mercato USA (Mon-Fri): 13:30-21:00 UTC = 9:30-17:00 ET
-    # Esegue ogni ~2 ore durante market hours
-    - cron: '30 13 * * 1-5'   # 9:30 ET  — apertura mercati
+    - cron: '30 13 * * 1-5'   # 09:30 ET — apertura mercati
     - cron: '30 15 * * 1-5'   # 11:30 ET
     - cron: '30 17 * * 1-5'   # 13:30 ET
-    - cron: '30 19 * * 1-5'   # 15:30 ET — 30 min prima della chiusura
-    # Crypto overnight (24/7): ogni 4 ore fuori orario di mercato
-    - cron: '0 0 * * *'        # 00:00 UTC
-    - cron: '0 4 * * *'        # 04:00 UTC
-    - cron: '0 8 * * *'        # 08:00 UTC
-    - cron: '0 23 * * *'       # 23:00 UTC
-  workflow_dispatch:
-    # Trigger manuale: GitHub → Actions → "ClawStreet Tournament Bot" → "Run workflow"
-    # Utile per testare e per forzare un ciclo al di fuori dello schedule
+    - cron: '30 19 * * 1-5'   # 15:30 ET — 30 min prima chiusura
+    # Crypto overnight (24/7): ogni 4 ore fuori orario
+    - cron: '0  0 * * *'
+    - cron: '0  4 * * *'
+    - cron: '0  8 * * *'
+    - cron: '0 23 * * *'
+  workflow_dispatch:   # trigger manuale da GitHub UI per test
 
 jobs:
   run-agent:
     name: Run trading pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 25   # Kill se impiega più di 25 min (DeepSeek-R1 è lento)
+    timeout-minutes: 25   # kill se impiega più di 25 min
 
     env:
-      # ── Motore Decision ──────────────────────────────────────────────────
       DECISION_ENGINE: deepseek-r1
-
-      # ── API Keys (da GitHub Secrets) ─────────────────────────────────────
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
-
-      # ── Database Torneo (Supabase separato dalla production) ─────────────
-      SUPABASE_URL: ${{ secrets.CS_SUPABASE_URL }}
-      SUPABASE_KEY: ${{ secrets.CS_SUPABASE_KEY }}
-
-      # ── ClawStreet Bot Torneo (credenziali SEPARATE dalla production) ─────
-      CLAWSTREET_BOT_ID: ${{ secrets.CS_BOT_ID }}
+      DEEPSEEK_API_KEY:   ${{ secrets.DEEPSEEK_API_KEY }}
+      NEWS_API_KEY:       ${{ secrets.NEWS_API_KEY }}
+      CLAWSTREET_BOT_ID:  ${{ secrets.CS_BOT_ID }}
       CLAWSTREET_API_KEY: ${{ secrets.CS_API_KEY }}
-
-      # ── (nessuna ANTHROPIC_API_KEY → zero spesa su Anthropic) ────────────
+      # DB SQLite locale — ripristinato dall'artifact del run precedente
+      DB_PATH: /tmp/tournament/portfolio.db
+      DOCUMENTS_PATH: /tmp/tournament/documents
+      # Nessuna ANTHROPIC_API_KEY → zero spesa su Anthropic
 
     steps:
       - name: Checkout repository
@@ -67,6 +63,28 @@ jobs:
         working-directory: ./backend
         run: pip install -r requirements.txt
 
+      # ── Ripristina il DB SQLite dall'artifact del run precedente ──────────
+      - name: Restore tournament database
+        uses: actions/download-artifact@v4
+        with:
+          name: tournament-db
+          path: /tmp/tournament/
+        continue-on-error: true   # primo run: non esiste ancora, va bene
+
+      - name: Prepare database directory
+        run: mkdir -p /tmp/tournament/documents
+
+      # ── Esegui il pipeline ────────────────────────────────────────────────
       - name: Run agent pipeline (one shot)
         working-directory: ./backend
         run: python run_once.py
+
+      # ── Salva il DB aggiornato come artifact per il prossimo run ──────────
+      - name: Save tournament database
+        uses: actions/upload-artifact@v4
+        if: always()   # salva anche se il run ha avuto errori parziali
+        with:
+          name: tournament-db
+          path: /tmp/tournament/
+          retention-days: 90   # basta per l'intera durata del torneo (45gg)
+          overwrite: true
