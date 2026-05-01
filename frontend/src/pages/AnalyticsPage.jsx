@@ -13,8 +13,9 @@ const API = window.location.origin;
 // Helpers
 // ============================================================
 
-const fmtEur = (n) =>
-  new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(n ?? 0);
+// Portafoglio in USD (yfinance/Massive ritornano sempre USD; nessuna conversione FX nel backend)
+const fmtUsd = (n) =>
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n ?? 0);
 
 const fmtPct = (n, decimals = 2) =>
   `${(Number(n ?? 0) >= 0 ? '+' : '')}${Number(n ?? 0).toFixed(decimals)}%`;
@@ -221,7 +222,7 @@ function EquityCurveCard({ history }) {
           <YAxis
             yAxisId="left"
             tick={{ fill: '#64748b', fontSize: 10 }}
-            tickFormatter={(v) => `€${(v / 1000).toFixed(0)}k`}
+            tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
           />
           <YAxis
             yAxisId="right"
@@ -236,7 +237,7 @@ function EquityCurveCard({ history }) {
               payload={payload}
               label={label}
               labelFormatter={(l) => l ? new Date(l).toLocaleString('it-IT') : ''}
-              formatter={(v, name) => name === 'Drawdown' ? fmtPct(v) : fmtEur(v)}
+              formatter={(v, name) => name === 'Drawdown' ? fmtPct(v) : fmtUsd(v)}
             />
           )} />
           <Area
@@ -298,7 +299,7 @@ function CumulativePnlCard({ closedTrades }) {
         />
         <YAxis
           tick={{ fill: '#64748b', fontSize: 10 }}
-          tickFormatter={(v) => `€${v.toFixed(0)}`}
+          tickFormatter={(v) => `$${v.toFixed(0)}`}
         />
         <Tooltip content={({ active, payload }) => {
           if (!active || !payload?.length) return null;
@@ -306,8 +307,8 @@ function CumulativePnlCard({ closedTrades }) {
           return (
             <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
               <div style={{ color: '#94a3b8' }}>Trade #{d?.idx} · {d?.ticker}</div>
-              <div>Cumulativo: <strong>{fmtEur(d?.cum)}</strong></div>
-              <div>P&L: <strong style={{ color: d?.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtEur(d?.pnl)}</strong></div>
+              <div>Cumulativo: <strong>{fmtUsd(d?.cum)}</strong></div>
+              <div>P&L: <strong style={{ color: d?.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d?.pnl)}</strong></div>
             </div>
           );
         }} />
@@ -401,7 +402,7 @@ function PnlByTickerCard({ closedTrades }) {
         <XAxis
           type="number"
           tick={{ fill: '#64748b', fontSize: 10 }}
-          tickFormatter={(v) => `€${v.toFixed(0)}`}
+          tickFormatter={(v) => `$${v.toFixed(0)}`}
         />
         <YAxis
           type="category"
@@ -415,7 +416,7 @@ function PnlByTickerCard({ closedTrades }) {
           return (
             <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
               <div style={{ color: '#94a3b8' }}>{d.ticker}</div>
-              <div>P&L: <strong style={{ color: d.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtEur(d.pnl)}</strong></div>
+              <div>P&L: <strong style={{ color: d.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d.pnl)}</strong></div>
               <div>Trade chiusi: <strong>{d.count}</strong></div>
             </div>
           );
@@ -469,8 +470,8 @@ function ExposurePieCard({ positions }) {
           return (
             <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
               <div style={{ color: '#94a3b8' }}>{d.name}</div>
-              <div>Esposizione: <strong>{fmtEur(d.value)}</strong></div>
-              <div>P&L non realizzato: <strong style={{ color: d.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtEur(d.pnl)}</strong></div>
+              <div>Esposizione: <strong>{fmtUsd(d.value)}</strong></div>
+              <div>P&L non realizzato: <strong style={{ color: d.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d.pnl)}</strong></div>
             </div>
           );
         }} />
@@ -659,13 +660,13 @@ export default function AnalyticsPage() {
       }}>
         <KpiCard
           label="P&L Realizzato"
-          value={fmtEur(kpis.realizedPnl)}
+          value={fmtUsd(kpis.realizedPnl)}
           subValue={`${kpis.winnersCount} win · ${kpis.losersCount} loss`}
           color={realizedColor}
         />
         <KpiCard
           label="P&L Non Realizzato"
-          value={fmtEur(kpis.unrealizedPnl)}
+          value={fmtUsd(kpis.unrealizedPnl)}
           subValue={`${kpis.totalPositions} posizioni aperte`}
           color={unrealizedColor}
         />
@@ -683,13 +684,13 @@ export default function AnalyticsPage() {
         <KpiCard
           label="Best Trade"
           value={kpis.bestTrade ? fmtPct(kpis.bestTrade.pnlPct, 2) : '—'}
-          subValue={kpis.bestTrade ? `${kpis.bestTrade.ticker} · ${fmtEur(kpis.bestTrade.pnl)}` : ''}
+          subValue={kpis.bestTrade ? `${kpis.bestTrade.ticker} · ${fmtUsd(kpis.bestTrade.pnl)}` : ''}
           color="#10b981"
         />
         <KpiCard
           label="Worst Trade"
           value={kpis.worstTrade ? fmtPct(kpis.worstTrade.pnlPct, 2) : '—'}
-          subValue={kpis.worstTrade ? `${kpis.worstTrade.ticker} · ${fmtEur(kpis.worstTrade.pnl)}` : ''}
+          subValue={kpis.worstTrade ? `${kpis.worstTrade.ticker} · ${fmtUsd(kpis.worstTrade.pnl)}` : ''}
           color="#ef4444"
         />
       </div>

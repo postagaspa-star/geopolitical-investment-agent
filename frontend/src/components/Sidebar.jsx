@@ -27,8 +27,10 @@ const AGENT_LABELS = {
   decision: { name: 'Decision', tone: '#10b981' },
 };
 
-const formatEUR = (value) =>
-  new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(value ?? 0);
+// Portafoglio denominato in USD (yfinance/Massive ritornano sempre USD;
+// non c'è conversione FX nel codebase). Il simbolo $ riflette la realtà dei dati.
+const formatUSD = (value) =>
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value ?? 0);
 
 // Calcola tempo restante in formato umano (1h 5m, 4m 12s, ...)
 function formatCountdown(isoString) {
@@ -125,6 +127,7 @@ export default function Sidebar({
   onStartMonitoring,
   onStopMonitoring,
   onRunOnce,
+  onDataRefresh,
   sidebarOpen,
   onCloseSidebar,
 }) {
@@ -161,6 +164,12 @@ export default function Sidebar({
           ? `${data.quotes_written}/${data.tickers} aggiornati (${data.duration_seconds}s)`
           : `Nessun dato (${data.source ?? 'none'})`,
       });
+      // Trigger refresh nel parent così l'UI mostra subito i nuovi prezzi
+      // (altrimenti aspetterebbe il prossimo tick periodico di App.jsx, 15s)
+      if (ok && typeof onDataRefresh === 'function') {
+        // Piccolo delay per dare al DB il tempo di committare l'upsert
+        setTimeout(() => onDataRefresh(), 400);
+      }
     } catch (err) {
       setPollFeedback({ ok: false, text: err.message });
     }
@@ -187,6 +196,11 @@ export default function Sidebar({
           ? `Fix ${fixed}/${audited} posizioni (delta >5%)`
           : `OK — ${audited} posizioni allineate`,
       });
+      // Refresh dei dati anche qui: se l'audit ha sistemato dei prezzi,
+      // l'utente deve vedere subito i nuovi current_price.
+      if (typeof onDataRefresh === 'function') {
+        setTimeout(() => onDataRefresh(), 400);
+      }
     } catch (err) {
       setAuditFeedback({ ok: false, text: err.message });
     }
@@ -362,13 +376,13 @@ export default function Sidebar({
         {/* Portfolio summary */}
         <div className="sidebar-portfolio">
           <div className="portfolio-label">Portafoglio</div>
-          <div className="portfolio-value">{formatEUR(totalValue)}</div>
+          <div className="portfolio-value">{formatUSD(totalValue)}</div>
           <div className="portfolio-change"
             style={{ color: pnlPositive ? 'var(--positive)' : 'var(--negative)' }}>
             {pnlPositive ? '+' : ''}{pnlPct.toFixed(2)}%
           </div>
           <div className="status-countdown" style={{ marginTop: '0.35rem' }}>
-            Liquidità: <strong>{formatEUR(cashBalance)}</strong>
+            Liquidità: <strong>{formatUSD(cashBalance)}</strong>
           </div>
         </div>
 

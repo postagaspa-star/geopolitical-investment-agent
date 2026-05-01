@@ -11,8 +11,11 @@ import {
 
 const API = window.location.origin;
 
-const formatEUR = (val) =>
-  new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(val);
+// Portafoglio in USD: i prezzi nel DB sono numeri raw da yfinance/Massive
+// (entrambi ritornano USD). Non c'è conversione FX nel codebase, quindi il
+// simbolo $ è la rappresentazione corretta.
+const formatUSD = (val) =>
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(val ?? 0);
 
 const PERIOD_OPTIONS = [
   { label: "1H", value: "1h" },
@@ -110,7 +113,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
         >
           <div style={{ color: "#9ca3af", marginBottom: 2 }}>{formatXAxis(label)}</div>
           <div style={{ color: lineColor, fontWeight: 600 }}>
-            {formatEUR(payload[0].value)}
+            {formatUSD(payload[0].value)}
           </div>
         </div>
       );
@@ -128,7 +131,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
       <div className="metrics-bar">
         <div className="metric-card">
           <div className="metric-label">Patrimonio Totale</div>
-          <div className="metric-value">{formatEUR(totalValue)}</div>
+          <div className="metric-value">{formatUSD(totalValue)}</div>
         </div>
 
         <div className="metric-card">
@@ -138,7 +141,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
             style={{ color: pnl >= 0 ? "#10b981" : "#ef4444" }}
           >
             {pnl >= 0 ? "+" : ""}
-            {formatEUR(pnl)}
+            {formatUSD(pnl)}
           </div>
         </div>
 
@@ -170,7 +173,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                 fontWeight:600,
                 color: periodDelta >= 0 ? "#10b981" : "#ef4444",
               }}>
-                {periodDelta >= 0 ? "+" : ""}{formatEUR(periodDelta)} ({periodDelta >= 0 ? "+" : ""}{periodDeltaPct.toFixed(2)}%)
+                {periodDelta >= 0 ? "+" : ""}{formatUSD(periodDelta)} ({periodDelta >= 0 ? "+" : ""}{periodDeltaPct.toFixed(2)}%)
                 <span style={{color:"#6b7280",fontWeight:400,marginLeft:"0.4rem"}}>
                   nel periodo
                 </span>
@@ -205,7 +208,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                 minTickGap={30}
               />
               <YAxis
-                tickFormatter={(v) => formatEUR(v)}
+                tickFormatter={(v) => formatUSD(v)}
                 tick={{ fill: "#6b7280", fontSize: 11 }}
                 axisLine={{ stroke: "#374151" }}
                 tickLine={false}
@@ -288,7 +291,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                             </span>
                           </td>
                           <td>{trade.quantity}</td>
-                          <td>{formatEUR(trade.price)}</td>
+                          <td>{formatUSD(trade.price)}</td>
                           <td>
                             {trade.confidence_score != null
                               ? `${Number(trade.confidence_score).toFixed(0)}%`
@@ -345,11 +348,11 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                   <tr key={idx} className={rowClass}>
                     <td style={{ fontWeight: 600 }}>{pos.ticker}</td>
                     <td>{pos.quantity}</td>
-                    <td>{formatEUR(pos.avg_buy_price)}</td>
-                    <td>{formatEUR(pos.current_price)}</td>
+                    <td>{formatUSD(pos.avg_buy_price)}</td>
+                    <td>{formatUSD(pos.current_price)}</td>
                     <td style={{ color: pnlColor, fontWeight: 500 }}>
                       {pnlPos >= 0 ? "+" : ""}
-                      {formatEUR(pnlPos)}
+                      {formatUSD(pnlPos)}
                     </td>
                     <td style={{ color: pnlColor, fontWeight: 500 }}>
                       {pnlPctPos >= 0 ? "+" : ""}

@@ -145,6 +145,7 @@ function AppContent() {
         onStartMonitoring={handleStartMonitoring}
         onStopMonitoring={handleStopMonitoring}
         onRunOnce={handleRunOnce}
+        onDataRefresh={fetchAll}
         sidebarOpen={sidebarOpen}
         onCloseSidebar={() => setSidebarOpen(false)}
       />

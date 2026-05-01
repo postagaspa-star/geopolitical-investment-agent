@@ -85,13 +85,22 @@ NEWSAPI_BASE_URL = (
     "?q={query}&language=en&sortBy=publishedAt&pageSize=20&apiKey={api_key}"
 )
 
-# Query per NewsAPI
+# Query per NewsAPI — ridotto da 4 a 2 per stare nel free tier (100 req/giorno).
+# Con Scout ogni 20 min e cache 1h: 2 query * 24 run/giorno = 48 chiamate/giorno.
 NEWSAPI_QUERIES: List[str] = [
-    "geopolitical risk",
-    "armed conflict",
-    "economic sanctions",
-    "energy crisis",
+    "geopolitical risk OR armed conflict",   # accorpa le due query precedenti
+    "economic sanctions OR energy crisis",   # accorpa le altre due
 ]
+
+# Cache NewsAPI per query (TTL 1h: NewsAPI free è in delay 1h comunque)
+_newsapi_cache: Dict[str, tuple] = {}  # { query: (timestamp, articles) }
+_NEWSAPI_CACHE_TTL = 3600  # 1 ora
+
+# Cooldown globale dopo un 429: NewsAPI free reset ogni 24h. Quando riceviamo
+# 429, fermiamo le chiamate per 6h (compromesso fra "aspetta il reset" e
+# "potrebbero essere transienti"). Salviamo l'epoch fino a cui restare zitti.
+_newsapi_cooldown_until: float = 0.0
+_NEWSAPI_COOLDOWN_AFTER_429 = 6 * 3600  # 6h
 
 
 # ------------------------------------------------------------
@@ -231,7 +240,30 @@ async def fetch_gdelt_data() -> Dict[str, Any]:
 async def _fetch_newsapi_single(
     session: aiohttp.ClientSession, query: str
 ) -> Dict[str, Any]:
-    """Esegue una singola query verso NewsAPI e restituisce i risultati."""
+    """Esegue una singola query verso NewsAPI e restituisce i risultati.
+
+    Robustezza:
+    - Cache in-memory 1h per query (NewsAPI free è già delayed di 1h)
+    - Cooldown globale 6h dopo un 429 (rate limit free = 100/giorno)
+    - Anche durante il cooldown, ritorna l'ultima cache valida se presente
+    """
+    global _newsapi_cooldown_until
+    now_ts = time.time()
+
+    # 1. Cache hit?
+    cached = _newsapi_cache.get(query)
+    if cached and (now_ts - cached[0]) < _NEWSAPI_CACHE_TTL:
+        return {"query": query, "articles": cached[1], "error": None, "cached": True}
+
+    # 2. Siamo in cooldown post-429? Ritorna cache stale (se c'è) o lista vuota.
+    if now_ts < _newsapi_cooldown_until:
+        if cached:
+            logger.debug("NewsAPI in cooldown, uso cache stale per '%s'", query)
+            return {"query": query, "articles": cached[1], "error": None,
+                    "cached": True, "stale": True}
+        return {"query": query, "articles": [],
+                "error": "rate_limit_cooldown", "cached": False}
+
     api_key = _get_news_api_key()
     if not api_key:
         logger.warning("NEWS_API_KEY non configurata; la query '%s' viene saltata.", query)
@@ -240,6 +272,18 @@ async def _fetch_newsapi_single(
     url = NEWSAPI_BASE_URL.format(query=query, api_key=api_key)
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 429:
+                # Quota giornaliera esaurita: attiva cooldown per 6h e ritorna
+                # cache stale se disponibile.
+                _newsapi_cooldown_until = now_ts + _NEWSAPI_COOLDOWN_AFTER_429
+                logger.warning(
+                    "NewsAPI 429 (quota giornaliera esaurita). Cooldown attivato per 6h. Query: %s",
+                    query,
+                )
+                if cached:
+                    return {"query": query, "articles": cached[1], "error": None,
+                            "cached": True, "stale": True}
+                return {"query": query, "articles": [], "error": "HTTP 429"}
             if resp.status != 200:
                 logger.warning(
                     "NewsAPI ha restituito stato %s per la query: %s",
@@ -249,9 +293,16 @@ async def _fetch_newsapi_single(
                 return {"query": query, "articles": [], "error": f"HTTP {resp.status}"}
             data = await resp.json(content_type=None)
             articles = data.get("articles", []) if isinstance(data, dict) else []
-            return {"query": query, "articles": articles, "error": None}
+            # Salva in cache solo se abbiamo articoli (evita di cachare empty)
+            if articles:
+                _newsapi_cache[query] = (now_ts, articles)
+            return {"query": query, "articles": articles, "error": None, "cached": False}
     except Exception as exc:
         logger.error("Errore durante il recupero NewsAPI per '%s': %s", query, exc)
+        # Su errore di rete, ritorna cache stale se c'è
+        if cached:
+            return {"query": query, "articles": cached[1], "error": str(exc),
+                    "cached": True, "stale": True}
         return {"query": query, "articles": [], "error": str(exc)}
 
 
