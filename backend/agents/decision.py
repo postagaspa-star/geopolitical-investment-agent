@@ -100,17 +100,47 @@ Fase C — ESECUZIONE:
   - Se unrealized loss > 10%, valuta chiusura
   - Se unrealized gain > 20%, valuta presa di profitto
 
-UNIVERSO INVESTIBILE:
-Hai accesso a TUTTI i mercati liquidi via yfinance, inclusi:
-- Azioni USA (NYSE/NASDAQ): es. NVDA, TSLA, AAPL, XOM
-- ETF e indici: SPY, QQQ, GLD, USO
-- Azioni europee: ENI.MI, SAN.PA, SAP.DE
-- CRYPTOVALUTE 24/7 (formato yfinance "TICKER-USD"):
-  BTC-USD, ETH-USD, SOL-USD, BNB-USD, XRP-USD, ADA-USD, DOGE-USD,
-  AVAX-USD, DOT-USD, LINK-USD, MATIC-USD, LTC-USD
-- Le crypto sono particolarmente adatte all'analisi tecnica perche':
-  (1) sono 24/7 senza gap di apertura, (2) hanno volumi alti e liquidita',
-  (3) rispondono fortemente ai pattern tecnici e al sentiment retail.
+UNIVERSO INVESTIBILE — VINCOLO RIGIDO ClawStreet:
+Il portfolio è specchiato live su ClawStreet (vetrina pubblica del bot, leaderboard
+del torneo Season One). ClawStreet supporta SOLO ~498 simboli specifici. Trade su
+ticker NON supportati vengono rifiutati con INVALID_SYMBOL: il portfolio interno
+si aggiorna ma ClawStreet no → divergenza → leaderboard sballata. È il difetto
+critico da evitare.
+
+✓ AZIONI TRADABILI: ~484 titoli S&P 500 (es. NVDA, TSLA, AAPL, XOM, MSFT, AMZN,
+  GOOGL, META, JPM, V, MA, JNJ, UNH, PG, KO, PEP, COST, WMT, HD, CVX, MRK, LLY,
+  AVGO, ORCL, CSCO, ACN, ABT, TMO, NEE, ADBE, NKE, BMY, AMGN, BA, QCOM, IBM,
+  CAT, GS, MS, BLK, AMD, GE, T, AXP, C, BKNG, TXN, SBUX, PFE, MDT, CMCSA, NOW,
+  VZ, ELV, INTU, AMAT, ADI, GILD, PLD, TGT, MO, MU, SCHW, REGN, EOG, MDLZ, FDX,
+  WFC, F, etc.). Se in dubbio: verifica con request_extra_analysis.
+
+✓ ETF COMMODITY: GLD (oro), SLV (argento), USO (petrolio). Solo questi 3.
+
+✗ ETF/INDICI INDICIZZATI **NON SUPPORTATI**: SPY, QQQ, IWM, DIA, VTI, VOO, TLT,
+  XLE, XLF, XLK, XLV, etc. Per esposizione settoriale, scegli SINGOLI titoli
+  rappresentativi (es. invece di XLE → XOM/CVX, invece di XLK → MSFT/NVDA,
+  invece di SPY → mix di top mega-cap).
+
+✗ AZIONI EUROPEE/EXTRA-USA **NON SUPPORTATE**: ENI.MI, SAN.PA, SAP.DE, ASML.AS
+  e qualsiasi suffisso `.MI/.PA/.DE/.L/.AS/.HK/.TO`. Solo NYSE/NASDAQ USA.
+
+✓ CRYPTOVALUTE — SOLO QUESTI 14 TICKER (formato yfinance "X-USD"):
+  BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD, LTC-USD,
+  DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD.
+
+✗ CRYPTO **NON SUPPORTATE** (NON tradare): BNB-USD, SHIB-USD, AAVE-USD,
+  PEPE-USD, FIL-USD, ALGO-USD, XMR-USD, ICP-USD, e qualsiasi altro alt-coin
+  fuori dalla lista sopra. Anche se Scout/Reddit ne parla, ignora i segnali
+  di trading: puoi citarli nell'analisi macro ma non puoi entrare in posizione.
+
+Le crypto restano particolarmente adatte all'analisi tecnica: (1) 24/7 senza
+gap di apertura, (2) volumi alti, (3) rispondono a pattern tecnici e sentiment
+retail. Privilegiale quando il mercato USA è chiuso.
+
+REGOLA DI OPERATIVITÀ:
+Se identifichi un'opportunità su un ticker NON supportato (es. SPY, BNB-USD,
+ENI.MI), NON tentare execute_trade — verrà rifiutato. Cerca un sostituto
+tradabile dello stesso settore/tema, oppure usa do_nothing motivando.
 
 REGOLE:
 - Preferisci l'azione all'inazione quando i segnali convergono
@@ -255,6 +285,44 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
 
             logger.info("[%s][DECISION] TRADE: %s %d %s (conf: %.0f%%, SL: %s)",
                         run_id, action, quantity, ticker, confidence, stop_loss)
+
+            # ── Pre-validazione universo ClawStreet ──────────────────────────
+            # I trade BUY su ticker non supportati da ClawStreet vengono
+            # rifiutati prima dell'esecuzione, così il portfolio interno NON
+            # diverge da quello pubblico ClawStreet (= leaderboard del torneo).
+            # I SELL sono permessi sempre (per chiusura di posizioni legacy
+            # eventualmente aperte prima di questo controllo).
+            try:
+                from clawstreet_universe import is_supported, to_clawstreet_format
+                if action == "BUY" and not is_supported(ticker):
+                    cs_format = to_clawstreet_format(ticker)
+                    error_msg = (
+                        f"REJECTED: '{ticker}' (formato ClawStreet: '{cs_format}') "
+                        f"non è nell'universo tradabile ClawStreet (498 simboli: "
+                        f"~484 azioni S&P 500 + 14 crypto + GLD/SLV/USO). "
+                        f"Eseguire questo BUY desincronizzerebbe il portfolio interno "
+                        f"dal portfolio ClawStreet pubblico → leaderboard sballata. "
+                        f"Sostituisci con un ticker supportato dello stesso settore/tema, "
+                        f"oppure usa do_nothing con motivazione."
+                    )
+                    logger.warning(
+                        "[%s][DECISION] BUY rejected: %s non supportato su ClawStreet",
+                        run_id, ticker,
+                    )
+                    database.insert_agent_log(run_id, "DECISION_REJECTED", json.dumps({
+                        "ticker": ticker,
+                        "cs_format": cs_format,
+                        "action": action,
+                        "reason": "not_in_clawstreet_universe",
+                    }))
+                    return json.dumps({"error": error_msg, "ticker": ticker, "rejected": True})
+            except ImportError:
+                # Modulo non disponibile (es. test isolati): degrade graceful
+                logger.warning(
+                    "[%s][DECISION] clawstreet_universe non importabile, "
+                    "skip pre-validazione (potrebbero verificarsi divergenze)",
+                    run_id,
+                )
 
             # Ottieni prezzo corrente — preferisci la cache price_quotes (60s fresh)
             # per evitare hit a yfinance ogni volta

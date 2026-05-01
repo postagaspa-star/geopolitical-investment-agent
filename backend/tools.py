@@ -351,6 +351,28 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
                 run_id, action, quantity, ticker, confidence_score,
             )
 
+            # ── Pre-validazione universo ClawStreet ────────────────────────
+            # Stesso check di agents/decision.py: BUY su ticker fuori
+            # dall'universo ClawStreet (498 simboli) viene rifiutato per
+            # evitare che il portfolio interno diverga da quello pubblico.
+            try:
+                from clawstreet_universe import is_supported, to_clawstreet_format
+                if action == "BUY" and not is_supported(ticker):
+                    cs_format = to_clawstreet_format(ticker)
+                    error_msg = (
+                        f"REJECTED: '{ticker}' (CS: '{cs_format}') non è "
+                        f"tradabile su ClawStreet. Sostituisci con un ticker "
+                        f"S&P 500 / commodity ETF (GLD/SLV/USO) / crypto "
+                        f"supportata, oppure rinuncia al trade."
+                    )
+                    logger.warning(
+                        "[%s] BUY rejected: %s non supportato su ClawStreet",
+                        run_id, ticker,
+                    )
+                    return json.dumps({"error": error_msg, "rejected": True})
+            except ImportError:
+                pass
+
             # Ottieni il prezzo corrente del titolo (in executor per non bloccare)
             loop = asyncio.get_event_loop()
             price_data = await loop.run_in_executor(

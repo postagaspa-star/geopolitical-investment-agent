@@ -744,20 +744,41 @@ async def mirror_trade_to_clawstreet(
     (non un broker). La feature "market check" precedente bloccava il mirror dopo
     le 16:00 ET introducendo silenziosi fallimenti.
     """
-    # Converti il formato crypto da yfinance a ClawStreet.
-    # yfinance: "BTC-USD", "ETH-USD", "SOL-USD" (con trattino prima di USD)
-    # ClawStreet: "X:BTCUSD", "X:ETHUSD", "X:SOLUSD" (X: prefix, senza trattino)
-    # BUG FIX: il codice precedente produceva "X:BTC-USD" (con trattino) che
-    # ClawStreet rifiutava silenziosamente con INVALID_SYMBOL.
-    if not symbol.startswith("X:"):
-        if "-USD" in symbol and len(symbol) > 5:
-            # BTC-USD → BTCUSD → X:BTCUSD
-            clean = symbol.replace("-USD", "USD")
-            symbol = f"X:{clean}"
-        elif symbol.endswith("USD") and len(symbol) > 5 and "-" not in symbol:
-            # BTCUSD (già senza trattino, ma senza X: prefix) → X:BTCUSD
-            symbol = f"X:{symbol}"
-    # Se già "X:BTCUSD" o ticker azionario (AAPL, MSFT...) → lascia invariato
+    # Conversione formato simbolo (yfinance → ClawStreet) tramite il modulo
+    # canonico. Questo evita duplicazioni di logica e garantisce che
+    # is_supported() e mirror_trade usino la STESSA normalizzazione.
+    #   yfinance "BTC-USD" → ClawStreet "X:BTCUSD"
+    #   yfinance "AAPL"     → ClawStreet "AAPL"
+    try:
+        from clawstreet_universe import to_clawstreet_format, is_supported
+        original_symbol = symbol
+        symbol = to_clawstreet_format(symbol)
+        # Pre-validazione: se il simbolo non è nel universo ClawStreet, evita
+        # del tutto la chiamata HTTP (saving 1 round-trip) e logga un warning
+        # esplicito. Nota: questo intercetta anche residui che il pre-check di
+        # decision.py non ha catturato (es. mirror invocato da reconcile o da
+        # legacy paths).
+        if not is_supported(symbol):
+            logger.warning(
+                "ClawStreet mirror SKIP %s %d %s: '%s' (canon='%s') non è "
+                "nell'universo tradabile ClawStreet — il portfolio interno e "
+                "quello pubblico divergeranno per questo trade.",
+                action, qty, original_symbol, original_symbol, symbol,
+            )
+            return {
+                "mirrored": False, "skipped": True,
+                "reason": "NOT_IN_CLAWSTREET_UNIVERSE",
+                "original_symbol": original_symbol,
+                "canonical_symbol": symbol,
+            }
+    except ImportError:
+        # Fallback: conversione inline come prima (degrade graceful)
+        if not symbol.startswith("X:"):
+            if "-USD" in symbol and len(symbol) > 5:
+                clean = symbol.replace("-USD", "USD")
+                symbol = f"X:{clean}"
+            elif symbol.endswith("USD") and len(symbol) > 5 and "-" not in symbol:
+                symbol = f"X:{symbol}"
 
     # Endpoint corretto: /trades (plurale), non /trade
     url = f"{CLAWSTREET_BASE}/bots/{bot_id}/trades"
