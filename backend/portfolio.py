@@ -145,7 +145,7 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
 
     # Registra l'operazione nel log delle transazioni
     decision_text = f"BUY {quantity} {ticker} @ {price:.2f}"
-    insert_trade(
+    trade_id = insert_trade(
         ticker, "BUY", quantity, price,
         geo_reasoning, tech_reasoning,
         decision_text, confidence,
@@ -160,6 +160,7 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
         "total_cost": round(cost, 2),
         "remaining_cash": round(new_cash, 2),
         "portfolio_total_value": round(new_total, 2),
+        "trade_id": trade_id,   # ID del trade per linkare al mirror status
     }
 
 
@@ -211,7 +212,7 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
 
     # Registra l'operazione nel log delle transazioni
     decision_text = f"SELL {quantity} {ticker} @ {price:.2f}"
-    insert_trade(
+    trade_id = insert_trade(
         ticker, "SELL", quantity, price,
         geo_reasoning, tech_reasoning,
         decision_text, confidence,
@@ -227,6 +228,7 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
         "realized_pnl": round(realized_pnl, 2),
         "remaining_cash": round(new_cash, 2),
         "portfolio_total_value": round(new_total, 2),
+        "trade_id": trade_id,   # ID del trade per linkare al mirror status
     }
 
 

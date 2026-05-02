@@ -909,6 +909,155 @@ async def reconcile_clawstreet_trades(since_hours: int = Query(default=48, ge=1,
     }
 
 
+@app.get("/api/clawstreet/diagnostics")
+async def clawstreet_diagnostics():
+    """
+    Diagnostica completa del mirroring ClawStreet:
+      - Posizioni locali vs posizioni ClawStreet (diff per ticker)
+      - Cash balance locale vs ClawStreet
+      - Conteggio trade per stato mirror (ok/failed/skipped/pending) ultimi 7gg
+      - Lista dei pending mirrors da riprovare
+
+    Usato dal frontend per mostrare un pannello "ClawStreet sync health".
+    """
+    import aiohttp as _aiohttp
+
+    bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
+    api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
+    if not bot_id or not api_key or bot_id == "GEO":
+        return {
+            "status": "no_credentials",
+            "message": "Credenziali ClawStreet non configurate.",
+        }
+
+    # 1) Stato locale
+    local_portfolio = database.get_portfolio() or {}
+    local_positions = database.get_positions() or []
+    local_cash = float(local_portfolio.get("cash_balance") or 0)
+
+    # 2) Stato ClawStreet (balance + positions)
+    headers = {"Authorization": f"Bearer {api_key}"}
+    cs_balance = None
+    cs_positions = []
+    cs_error = None
+    try:
+        async with _aiohttp.ClientSession() as sess:
+            async with sess.get(f"https://www.clawstreet.io/api/bots/{bot_id}/balance",
+                                 headers=headers,
+                                 timeout=_aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    cs_balance = await resp.json(content_type=None)
+            async with sess.get(f"https://www.clawstreet.io/api/bots/{bot_id}/positions",
+                                 headers=headers,
+                                 timeout=_aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    pdata = await resp.json(content_type=None)
+                    cs_positions = pdata.get("positions", []) if isinstance(pdata, dict) else (pdata or [])
+    except Exception as exc:
+        cs_error = str(exc)[:200]
+
+    cs_cash = None
+    if cs_balance:
+        # ClawStreet può ritornare balance in vari formati
+        cs_cash = (cs_balance.get("cash")
+                   or cs_balance.get("cash_balance")
+                   or cs_balance.get("balance")
+                   or (cs_balance.get("data", {}) or {}).get("cash"))
+        if cs_cash is not None:
+            try:
+                cs_cash = float(cs_cash)
+            except (ValueError, TypeError):
+                cs_cash = None
+
+    # 3) Confronto posizioni: ticker → (local_qty, cs_qty)
+    from clawstreet_universe import to_clawstreet_format
+    local_by_cs_symbol = {}
+    for p in local_positions:
+        cs_sym = to_clawstreet_format(p.get("ticker", ""))
+        local_by_cs_symbol[cs_sym] = float(p.get("quantity") or 0)
+
+    cs_by_symbol = {}
+    for p in cs_positions:
+        sym = (p.get("symbol") or p.get("ticker") or "").upper()
+        qty = float(p.get("qty") or p.get("quantity") or 0)
+        if sym:
+            cs_by_symbol[sym] = qty
+
+    all_symbols = sorted(set(local_by_cs_symbol.keys()) | set(cs_by_symbol.keys()))
+    position_diffs = []
+    in_sync = 0
+    out_of_sync = 0
+    for sym in all_symbols:
+        loc = local_by_cs_symbol.get(sym, 0)
+        cs = cs_by_symbol.get(sym, 0)
+        delta = loc - cs
+        if abs(delta) < 0.001:
+            in_sync += 1
+        else:
+            out_of_sync += 1
+            position_diffs.append({
+                "symbol": sym, "local_qty": loc, "cs_qty": cs, "delta": delta,
+            })
+
+    # 4) Riepilogo mirror status
+    mirror_summary = {}
+    pending_mirrors = []
+    try:
+        mirror_summary = database.get_mirror_status_summary()
+        pending_mirrors = database.get_pending_mirror_trades(window_hours=72, max_attempts=10, limit=20)
+    except Exception as exc:
+        logger.warning("Mirror summary fallita: %s", exc)
+
+    return {
+        "status": "ok",
+        "credentials_ok": True,
+        "cs_error": cs_error,
+        "local": {
+            "cash_balance": round(local_cash, 2),
+            "positions_count": len(local_positions),
+            "total_value": float(local_portfolio.get("total_value") or 0),
+        },
+        "clawstreet": {
+            "cash_balance": cs_cash,
+            "positions_count": len(cs_positions),
+            "raw_balance_response": cs_balance,
+        },
+        "positions_sync": {
+            "in_sync": in_sync,
+            "out_of_sync": out_of_sync,
+            "diffs": position_diffs[:30],   # primi 30 per UI
+        },
+        "mirror_status_7d": mirror_summary,
+        "pending_mirrors": [
+            {
+                "trade_id": t.get("id"),
+                "ticker": t.get("ticker"),
+                "action": t.get("action"),
+                "quantity": t.get("quantity"),
+                "status": t.get("cs_mirror_status"),
+                "reason": t.get("cs_mirror_reason"),
+                "attempts": t.get("cs_mirror_attempts"),
+                "timestamp": t.get("timestamp"),
+            } for t in pending_mirrors
+        ],
+    }
+
+
+@app.post("/api/clawstreet/retry-mirrors")
+async def retry_failed_mirrors(window_hours: int = Query(default=24, ge=1, le=168)):
+    """
+    Forza il retry dei mirror falliti (ultimi window_hours ore).
+    Utile come trigger manuale dal pulsante della UI.
+    """
+    try:
+        from clawstreet_mirror import retry_pending_mirrors
+        result = await retry_pending_mirrors(window_hours=window_hours, limit=50)
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.error("Errore retry mirror: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @app.post("/api/scout/run")
 async def trigger_scout_run(background_tasks: BackgroundTasks):
     """

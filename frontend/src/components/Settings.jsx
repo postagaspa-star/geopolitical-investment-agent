@@ -64,6 +64,9 @@ function Settings({ onBack, onDataRefresh }) {
   // === ClawStreet ===
   const [csStatus, setCsStatus] = useState(null);
   const [csRegistering, setCsRegistering] = useState(false);
+  const [csDiag, setCsDiag] = useState(null);
+  const [csDiagLoading, setCsDiagLoading] = useState(false);
+  const [csRetrying, setCsRetrying] = useState(false);
 
   // === UI ===
   const [saving, setSaving] = useState(false);
@@ -162,6 +165,9 @@ function Settings({ onBack, onDataRefresh }) {
         const csRes = await fetch(`${API}/api/clawstreet/status`);
         if (csRes.ok) setCsStatus(await csRes.json());
       } catch {}
+
+      // ClawStreet sync diagnostics (best-effort)
+      loadCsDiagnostics();
 
       // Diagnostica
       runDiagnostics(docs);
@@ -281,6 +287,38 @@ function Settings({ onBack, onDataRefresh }) {
       day: "2-digit", month: "short", year: "numeric",
       hour: "2-digit", minute: "2-digit",
     });
+
+  // === ClawStreet sync diagnostics ===
+  const loadCsDiagnostics = async () => {
+    setCsDiagLoading(true);
+    try {
+      const res = await fetch(`${API}/api/clawstreet/diagnostics`);
+      if (res.ok) setCsDiag(await res.json());
+    } catch (err) {
+      console.error("Errore CS diagnostics:", err);
+    } finally {
+      setCsDiagLoading(false);
+    }
+  };
+
+  const handleCsRetryMirrors = async () => {
+    setCsRetrying(true);
+    try {
+      const res = await fetch(`${API}/api/clawstreet/retry-mirrors?window_hours=72`, { method: "POST" });
+      const data = await res.json();
+      const ok = data.succeeded ?? 0;
+      const failed = data.still_failed ?? 0;
+      const skipped = data.skipped ?? 0;
+      showMessage(
+        `Retry completato: ${ok} OK, ${skipped} skippati, ${failed} ancora falliti`,
+        failed > 0 && ok === 0,
+      );
+      await loadCsDiagnostics();
+    } catch (err) {
+      showMessage(`Errore retry: ${err.message}`, true);
+    }
+    setCsRetrying(false);
+  };
 
   // === ClawStreet ===
   const handleRegisterClawStreet = async () => {
@@ -626,6 +664,227 @@ function Settings({ onBack, onDataRefresh }) {
             </div>
           )}
         </div>
+
+        {/* === CLAWSTREET SYNC DIAGNOSTICS === */}
+        {csStatus?.registered && (
+          <div style={cardStyle}>
+            <div style={{ display: "flex", alignItems: "center",
+              justifyContent: "space-between", marginBottom: "12px" }}>
+              <div style={{ ...sectionTitle, marginBottom: 0 }}>Sincronizzazione ClawStreet</div>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <button style={btnSecondary} onClick={loadCsDiagnostics} disabled={csDiagLoading}>
+                  {csDiagLoading ? "..." : "Riaggiorna"}
+                </button>
+                <button
+                  style={{
+                    ...btnSecondary,
+                    background: csRetrying ? "#e5e7eb" : "#3b82f6",
+                    color: csRetrying ? "#6b7280" : "#fff",
+                    borderColor: csRetrying ? "#d1d5db" : "#3b82f6",
+                  }}
+                  onClick={handleCsRetryMirrors}
+                  disabled={csRetrying}>
+                  {csRetrying ? "Retry..." : "Riprova mirror falliti"}
+                </button>
+              </div>
+            </div>
+            <p style={{ color: "#6b7280", fontSize: "0.85rem", margin: "0 0 16px 0", lineHeight: 1.5 }}>
+              Confronto in tempo reale tra il portafoglio interno e quello pubblico ClawStreet.
+              Il retry job automatico gira ogni 15 min, ma puoi forzarlo manualmente qui.
+            </p>
+
+            {!csDiag && csDiagLoading && (
+              <div style={{ color: "#9ca3af", fontSize: "13px" }}>Carico diagnostica...</div>
+            )}
+
+            {csDiag && csDiag.status === "no_credentials" && (
+              <div style={{ color: "#92400e", background: "#fef3c7", padding: "10px 14px",
+                borderRadius: "8px", fontSize: "13px" }}>
+                {csDiag.message}
+              </div>
+            )}
+
+            {csDiag && csDiag.status === "ok" && (
+              <>
+                {/* Cash + Position summary */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px",
+                  marginBottom: "16px" }}>
+                  <div style={{ background: "#f9fafb", padding: "12px", borderRadius: "8px",
+                    border: "1px solid #e5e7eb" }}>
+                    <div style={{ fontSize: "12px", color: "#6b7280", marginBottom: "6px" }}>
+                      Cash locale
+                    </div>
+                    <div style={{ fontSize: "18px", fontWeight: 600, color: "#111827" }}>
+                      ${csDiag.local?.cash_balance?.toFixed(2) ?? "0.00"}
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#9ca3af", marginTop: "4px" }}>
+                      {csDiag.local?.positions_count ?? 0} posizioni
+                    </div>
+                  </div>
+                  <div style={{ background: "#f9fafb", padding: "12px", borderRadius: "8px",
+                    border: "1px solid #e5e7eb" }}>
+                    <div style={{ fontSize: "12px", color: "#6b7280", marginBottom: "6px" }}>
+                      Cash ClawStreet
+                    </div>
+                    <div style={{ fontSize: "18px", fontWeight: 600, color: "#111827" }}>
+                      {csDiag.clawstreet?.cash_balance != null
+                        ? `$${Number(csDiag.clawstreet.cash_balance).toFixed(2)}`
+                        : "—"}
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#9ca3af", marginTop: "4px" }}>
+                      {csDiag.clawstreet?.positions_count ?? 0} posizioni
+                    </div>
+                  </div>
+                </div>
+
+                {/* Position diff table */}
+                <div style={{ marginBottom: "16px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px",
+                    marginBottom: "8px" }}>
+                    <strong style={{ fontSize: "14px", color: "#111827" }}>
+                      Posizioni:
+                    </strong>
+                    <span style={{ fontSize: "13px", color: "#10b981" }}>
+                      {csDiag.positions_sync?.in_sync ?? 0} sincronizzate
+                    </span>
+                    {(csDiag.positions_sync?.out_of_sync ?? 0) > 0 && (
+                      <span style={{ fontSize: "13px", color: "#ef4444" }}>
+                        · {csDiag.positions_sync.out_of_sync} fuori sync
+                      </span>
+                    )}
+                  </div>
+                  {(csDiag.positions_sync?.diffs ?? []).length > 0 && (
+                    <div style={{ borderRadius: "8px", border: "1px solid #fecaca",
+                      overflow: "hidden" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse",
+                        fontSize: "13px" }}>
+                        <thead style={{ background: "#fef2f2" }}>
+                          <tr>
+                            <th style={{ textAlign: "left", padding: "8px 12px",
+                              color: "#991b1b", fontWeight: 600 }}>Simbolo</th>
+                            <th style={{ textAlign: "right", padding: "8px 12px",
+                              color: "#991b1b", fontWeight: 600 }}>Locale</th>
+                            <th style={{ textAlign: "right", padding: "8px 12px",
+                              color: "#991b1b", fontWeight: 600 }}>ClawStreet</th>
+                            <th style={{ textAlign: "right", padding: "8px 12px",
+                              color: "#991b1b", fontWeight: 600 }}>Δ</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {csDiag.positions_sync.diffs.map((d) => (
+                            <tr key={d.symbol} style={{ borderTop: "1px solid #fecaca" }}>
+                              <td style={{ padding: "8px 12px", fontFamily: "monospace" }}>{d.symbol}</td>
+                              <td style={{ padding: "8px 12px", textAlign: "right" }}>{d.local_qty}</td>
+                              <td style={{ padding: "8px 12px", textAlign: "right" }}>{d.cs_qty}</td>
+                              <td style={{ padding: "8px 12px", textAlign: "right",
+                                color: d.delta > 0 ? "#dc2626" : "#2563eb",
+                                fontWeight: 600 }}>
+                                {d.delta > 0 ? "+" : ""}{d.delta}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Mirror status counts */}
+                <div style={{ marginBottom: "16px" }}>
+                  <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "8px",
+                    color: "#111827" }}>
+                    Mirror status (ultimi 7 gg)
+                  </div>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {Object.entries(csDiag.mirror_status_7d || {}).map(([k, v]) => {
+                      const color = k === "ok" ? "#065f46"
+                        : k === "failed" ? "#991b1b"
+                        : k === "skipped" ? "#92400e"
+                        : "#6b7280";
+                      const bg = k === "ok" ? "#ecfdf5"
+                        : k === "failed" ? "#fef2f2"
+                        : k === "skipped" ? "#fef3c7"
+                        : "#f3f4f6";
+                      return (
+                        <div key={k} style={{
+                          padding: "6px 12px", borderRadius: "6px",
+                          background: bg, color, fontSize: "12px", fontWeight: 500,
+                        }}>
+                          {k}: <strong>{v}</strong>
+                        </div>
+                      );
+                    })}
+                    {Object.keys(csDiag.mirror_status_7d || {}).length === 0 && (
+                      <div style={{ color: "#9ca3af", fontSize: "13px" }}>
+                        Nessun trade negli ultimi 7 gg
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Pending mirrors list */}
+                {(csDiag.pending_mirrors ?? []).length > 0 && (
+                  <div>
+                    <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "8px",
+                      color: "#111827" }}>
+                      Trade pending ({csDiag.pending_mirrors.length})
+                    </div>
+                    <div style={{ borderRadius: "8px", border: "1px solid #e5e7eb",
+                      overflow: "hidden", maxHeight: "240px", overflowY: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse",
+                        fontSize: "12px" }}>
+                        <thead style={{ background: "#f9fafb" }}>
+                          <tr>
+                            <th style={{ textAlign: "left", padding: "6px 10px",
+                              color: "#6b7280", fontWeight: 500 }}>Ticker</th>
+                            <th style={{ textAlign: "left", padding: "6px 10px",
+                              color: "#6b7280", fontWeight: 500 }}>Action</th>
+                            <th style={{ textAlign: "right", padding: "6px 10px",
+                              color: "#6b7280", fontWeight: 500 }}>Qty</th>
+                            <th style={{ textAlign: "left", padding: "6px 10px",
+                              color: "#6b7280", fontWeight: 500 }}>Status</th>
+                            <th style={{ textAlign: "left", padding: "6px 10px",
+                              color: "#6b7280", fontWeight: 500 }}>Reason</th>
+                            <th style={{ textAlign: "right", padding: "6px 10px",
+                              color: "#6b7280", fontWeight: 500 }}>Tries</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {csDiag.pending_mirrors.map((p) => (
+                            <tr key={p.trade_id} style={{ borderTop: "1px solid #f3f4f6" }}>
+                              <td style={{ padding: "6px 10px", fontFamily: "monospace" }}>{p.ticker}</td>
+                              <td style={{ padding: "6px 10px" }}>{p.action}</td>
+                              <td style={{ padding: "6px 10px", textAlign: "right" }}>{p.quantity}</td>
+                              <td style={{ padding: "6px 10px",
+                                color: p.status === "failed" ? "#dc2626" : "#92400e" }}>
+                                {p.status}
+                              </td>
+                              <td style={{ padding: "6px 10px", color: "#6b7280",
+                                maxWidth: "200px", overflow: "hidden",
+                                textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {p.reason || "—"}
+                              </td>
+                              <td style={{ padding: "6px 10px", textAlign: "right",
+                                color: "#6b7280" }}>{p.attempts || 0}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {csDiag.cs_error && (
+                  <div style={{ marginTop: "12px", padding: "10px 14px",
+                    borderRadius: "8px", background: "#fef2f2", color: "#991b1b",
+                    fontSize: "12px" }}>
+                    Errore comunicazione ClawStreet: {csDiag.cs_error}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

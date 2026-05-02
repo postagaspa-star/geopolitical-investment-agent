@@ -471,18 +471,18 @@ async def _handle_manager_tool(tool_name: str, tool_input: dict, run_id: str) ->
             database.insert_agent_log(run_id, "MANAGER_DECISION",
                 f"{action} {quantity} {ticker} @ {current_price:.2f} (conf: {confidence})")
 
-            # ClawStreet mirror
+            # ClawStreet mirror via wrapper centralizzato (aggiorna cs_mirror_status)
             try:
-                cs_bot_id = database.get_setting("clawstreet_bot_id", "")
-                cs_api_key = database.get_setting("clawstreet_api_key", "")
-                if cs_bot_id and cs_api_key:
-                    await data_fetchers.mirror_trade_to_clawstreet(
-                        bot_id=cs_bot_id, api_key=cs_api_key,
-                        symbol=ticker, action=action, qty=quantity,
-                        reasoning=f"{geo_reasoning} | {tech_reasoning}"
-                    )
-            except Exception:
-                pass
+                from clawstreet_mirror import mirror_trade as _mirror
+                trade_id = result.get("trade_id") if isinstance(result, dict) else None
+                await _mirror(
+                    trade_id=trade_id,
+                    ticker=ticker, action=action, quantity=quantity,
+                    reasoning=f"{geo_reasoning} | {tech_reasoning}",
+                    run_id=run_id,
+                )
+            except Exception as exc:
+                logger.warning("[%s] Mirror failed (legacy multi_agent): %s", run_id, exc)
 
             return json.dumps({
                 "trade_executed": True, "ticker": ticker, "action": action,

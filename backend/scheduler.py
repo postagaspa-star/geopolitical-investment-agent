@@ -329,34 +329,62 @@ async def _scout_4d_report_job():
         logger.error("Errore Scout 4D: %s", e, exc_info=True)
 
 
+async def _clawstreet_mirror_retry_job():
+    """
+    Retry trade falliti — ogni 15 min, 24/7.
+
+    Cerca tutti i trade con cs_mirror_status in (pending, failed) nelle ultime
+    24h e li riprova. Marca come 'ok'/'failed'/'skipped' a seconda dell'esito.
+    Limita a 5 tentativi per trade per evitare loop infiniti su trade
+    permanentemente non specchiabili (simbolo non supportato, ecc.).
+
+    Funziona 24/7 (non solo market hours): le crypto possono essere mirrored
+    a qualunque ora; i trade equity falliti restano in coda fino al prossimo
+    market open.
+    """
+    try:
+        cs_bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
+        cs_api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
+        if not cs_bot_id or not cs_api_key or cs_bot_id == "GEO":
+            return  # credenziali non configurate
+
+        from clawstreet_mirror import retry_pending_mirrors
+        result = await retry_pending_mirrors(window_hours=24, limit=20)
+        if result.get("retried", 0) > 0:
+            logger.info("ClawStreet mirror retry: %s", result)
+    except Exception as e:
+        logger.warning("Errore retry mirror ClawStreet: %s", e)
+
+
 async def _clawstreet_reconcile_job():
     """
-    Riconciliazione automatica ClawStreet ogni ora durante orari di mercato.
-    Confronta i trade locali con quelli su ClawStreet e invia quelli mancanti.
-    Aiuta a mantenere allineata la vetrina pubblica con il portafoglio interno.
-    """
-    if not is_market_open():
-        return  # Eseguiamo solo durante orari di mercato per non spammare CS
+    Riconciliazione completa ClawStreet — ogni 6 ore, 24/7.
 
+    Variante più "pesante" del retry job: confronta TUTTI i trade locali
+    delle ultime 48h con quelli effettivamente presenti su ClawStreet via
+    GET /bots/{id}/trades. Recupera trade locali che, per qualche motivo,
+    non hanno la riga cs_mirror_status correttamente popolata (es. legacy
+    trade pre-migration, o se la tabella ha avuto problemi).
+    """
     try:
         cs_bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
         cs_api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
         if not cs_bot_id or not cs_api_key or cs_bot_id == "GEO":
             return
 
-        # Riusa la stessa logica dell'endpoint /api/clawstreet/reconcile
-        # importandolo direttamente
+        # Self-call all'endpoint /api/clawstreet/reconcile (già implementato)
         import aiohttp
-        url = f"https://geopolitical-investment-agent.onrender.com/api/clawstreet/reconcile?since_hours=24"
+        url = f"https://geopolitical-investment-agent.onrender.com/api/clawstreet/reconcile?since_hours=48"
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            async with session.post(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     sent = data.get("sent", 0)
-                    if sent > 0:
-                        logger.info("ClawStreet reconcile: %d trade specchiati automaticamente", sent)
+                    failed = data.get("failed", 0)
+                    if sent > 0 or failed > 0:
+                        logger.info("ClawStreet 6h reconcile: sent=%d failed=%d", sent, failed)
     except Exception as e:
-        logger.warning("Errore reconcile ClawStreet automatico: %s", e)
+        logger.warning("Errore reconcile ClawStreet 6h: %s", e)
 
 
 
@@ -481,13 +509,30 @@ def start_scheduler() -> AsyncIOScheduler:
     )
 
 
-    # ClawStreet auto-reconcile: ogni ora durante orari di mercato
+    # ── ClawStreet mirror retry: ogni 15 min, 24/7 ──
+    # Riprova i trade con cs_mirror_status='failed' o 'pending'. Velocissimo
+    # (~1s) se non ci sono pending. Garantisce che le mirror failures
+    # transitorie (network, 500, timeout) vengano sistemate entro 15 min.
+    _scheduler.add_job(
+        _clawstreet_mirror_retry_job,
+        trigger="interval",
+        minutes=15,
+        id="clawstreet_mirror_retry",
+        name="ClawStreet mirror retry (15 min, 24/7)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(pytz.utc) + timedelta(minutes=2),
+    )
+
+    # ── ClawStreet reconcile: ogni 6 ore (deep check via GET /trades) ──
+    # Questo è il "safety net" — confronta lo storico effettivo CS vs locale.
     _scheduler.add_job(
         _clawstreet_reconcile_job,
         trigger="interval",
-        minutes=60,
+        hours=6,
         id="clawstreet_reconcile",
-        name="ClawStreet auto-reconcile (60 min, market-only)",
+        name="ClawStreet deep reconcile (6h, fetch CS trades)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

@@ -401,33 +401,21 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
             database.insert_agent_log(run_id=run_id, phase="DECISION",
                 content=f"{action} {quantity} {ticker} @ {current_price:.2f} (conf: {confidence_score})")
 
-            # --- ClawStreet trade mirror (fire-and-forget, non blocca) ---
+            # --- ClawStreet mirror via wrapper centralizzato ---
+            # Aggiorna cs_mirror_status sulla riga trades; il retry job
+            # di scheduler.py rilancia eventuali fallimenti.
             try:
-                cs_bot_id = database.get_setting("clawstreet_bot_id", "")
-                cs_api_key = database.get_setting("clawstreet_api_key", "")
-                if cs_bot_id and cs_api_key:
-                    reasoning_text = f"{geopolitical_reasoning} | {technical_reasoning}"
-                    mirror_result = await data_fetchers.mirror_trade_to_clawstreet(
-                        bot_id=cs_bot_id,
-                        api_key=cs_api_key,
-                        symbol=ticker,
-                        action=action,
-                        qty=quantity,
-                        reasoning=reasoning_text,
-                    )
-                    database.insert_agent_log(
-                        run_id=run_id,
-                        phase="CLAWSTREET_MIRROR",
-                        content=json.dumps({"ticker": ticker, "action": action, "mirror": mirror_result}, default=str),
-                    )
-                    logger.info("[%s] ClawStreet mirror: %s", run_id, mirror_result)
-            except Exception as cs_err:
-                logger.warning("[%s] ClawStreet mirror failed (non-blocking): %s", run_id, cs_err)
-                database.insert_agent_log(
+                from clawstreet_mirror import mirror_trade as _mirror
+                tid = trade_result.get("trade_id") if isinstance(trade_result, dict) else None
+                reasoning_text = f"{geopolitical_reasoning} | {technical_reasoning}"
+                await _mirror(
+                    trade_id=tid,
+                    ticker=ticker, action=action, quantity=quantity,
+                    reasoning=reasoning_text,
                     run_id=run_id,
-                    phase="CLAWSTREET_MIRROR",
-                    content=json.dumps({"error": str(cs_err), "ticker": ticker}, default=str),
                 )
+            except Exception as cs_err:
+                logger.warning("[%s] ClawStreet mirror exception (legacy tools.py): %s", run_id, cs_err)
 
             result = {
                 "trade_executed": True,

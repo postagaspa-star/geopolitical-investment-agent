@@ -180,8 +180,12 @@ def count_positions():
 # ============================================================
 
 def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning, final_decision, confidence):
+    """
+    Inserisce un trade e ritorna l'ID della riga creata (necessario per
+    linkare il trade allo stato del mirror ClawStreet).
+    """
     client = _get_client()
-    client.table("trades").insert({
+    payload = {
         "ticker": ticker,
         "action": action,
         "quantity": quantity,
@@ -191,13 +195,83 @@ def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
         "technical_reasoning": tech_reasoning,
         "final_decision": final_decision,
         "confidence_score": confidence,
-    }).execute()
+    }
+    # Aggiungi i campi mirror solo se la migration è stata applicata
+    # (gestione degrade graceful: se le colonne non esistono, ritenta senza)
+    payload_with_mirror = {**payload, "cs_mirror_status": "pending", "cs_mirror_attempts": 0}
+    try:
+        result = client.table("trades").insert(payload_with_mirror).execute()
+    except Exception:
+        result = client.table("trades").insert(payload).execute()
+    if result.data and len(result.data) > 0:
+        return result.data[0].get("id")
+    return None
 
 
 def get_trades(limit=50):
     client = _get_client()
     result = client.table("trades").select("*").order("timestamp", desc=True).limit(limit).execute()
     return result.data or []
+
+
+def update_trade_mirror_status(trade_id, status, reason=None, increment_attempts=True):
+    """Aggiorna stato del mirror ClawStreet per un trade (Supabase)."""
+    if not trade_id:
+        return
+    from datetime import datetime as _dt, timezone as _tz
+    client = _get_client()
+    update_fields = {
+        "cs_mirror_status": status,
+        "cs_mirror_reason": (reason or "")[:500],
+        "cs_mirror_last_attempt_at": _dt.now(_tz.utc).isoformat(),
+    }
+    try:
+        if increment_attempts:
+            current = client.table("trades").select("cs_mirror_attempts").eq("id", trade_id).execute()
+            cur_n = (current.data[0].get("cs_mirror_attempts") if current.data else 0) or 0
+            update_fields["cs_mirror_attempts"] = cur_n + 1
+        client.table("trades").update(update_fields).eq("id", trade_id).execute()
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning("update_trade_mirror_status fallita: %s", exc)
+
+
+def get_pending_mirror_trades(window_hours=24, max_attempts=5, limit=50):
+    """Trade non ancora specchiati su ClawStreet (Supabase)."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    cutoff = (_dt.now(_tz.utc) - _td(hours=window_hours)).isoformat()
+    client = _get_client()
+    try:
+        result = (client.table("trades")
+                  .select("*")
+                  .gte("timestamp", cutoff)
+                  .lt("cs_mirror_attempts", max_attempts)
+                  .in_("cs_mirror_status", ["pending", "failed"])
+                  .order("timestamp", desc=False)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning("get_pending_mirror_trades fallita: %s", exc)
+        return []
+
+
+def get_mirror_status_summary():
+    """Conteggio trade per stato mirror (ultimi 7 giorni)."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    cutoff = (_dt.now(_tz.utc) - _td(days=7)).isoformat()
+    client = _get_client()
+    try:
+        result = client.table("trades").select("cs_mirror_status").gte("timestamp", cutoff).execute()
+        rows = result.data or []
+        summary = {}
+        for r in rows:
+            key = r.get("cs_mirror_status") or "pending"
+            summary[key] = summary.get(key, 0) + 1
+        return summary
+    except Exception:
+        return {}
 
 
 # ============================================================
