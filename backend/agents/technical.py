@@ -301,30 +301,31 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
         "instruction": "Analyze these technical indicators and produce the JSON report.",
     }, default=str, ensure_ascii=False)
 
-    # 3. Chiama DeepSeek con fallback
+    # 3. Chiama DeepSeek-V3 (engine FISSO, no fallback Claude per controllo costi)
+    # Il Technical Agent gira sempre 24/7 a costo predicibile (~$0.0006/run).
+    # Se DeepSeek fallisce, andiamo direttamente in Pure Macro mode (solo
+    # indicatori grezzi) invece di pagare Sonnet 4 che costerebbe ~50× tanto.
     engine = "none"
     try:
         deepseek_key = _get_deepseek_key()
-        if deepseek_key:
-            response_text, engine = await _call_deepseek(context[:20000])
-        else:
-            raise ValueError("No DeepSeek key")
+        if not deepseek_key:
+            raise ValueError("DEEPSEEK_API_KEY non configurata")
+        response_text, engine = await _call_deepseek(context[:20000])
     except Exception as ds_err:
-        logger.warning("[%s][TECH] DeepSeek non disponibile (%s), fallback Claude", run_id, ds_err)
-        try:
-            response_text, engine = await _call_claude_fallback(context[:20000])
-        except Exception as claude_err:
-            logger.error("[%s][TECH] Anche Claude fallito: %s", run_id, claude_err)
-            # Pure Macro mode: restituisci solo dati grezzi
-            database.insert_agent_log(run_id, "TECH_WORKER",
-                f"ERRORE: DeepSeek e Claude falliti. Pure Macro Mode attivo. Errori: DS={ds_err}, CL={claude_err}")
-            return {
-                "analyses": [],
-                "raw_indicators": ticker_data,
-                "engine": "pure_macro_fallback",
-                "error": f"Both engines failed: {ds_err}",
-                "summary": "Technical analysis unavailable. Decision Agent will use Pure Macro mode.",
-            }
+        logger.warning("[%s][TECH] DeepSeek-V3 fallito (%s) — Pure Macro mode (no Claude fallback)",
+                       run_id, ds_err)
+        database.insert_agent_log(run_id, "TECH_WORKER", json.dumps({
+            "event": "technical_pure_macro_fallback",
+            "error": str(ds_err)[:200],
+            "tickers": list(ticker_data.keys()),
+        }))
+        return {
+            "analyses": [],
+            "raw_indicators": ticker_data,
+            "engine": "pure_macro_fallback",
+            "error": f"DeepSeek failed: {ds_err}",
+            "summary": "Technical DeepSeek-V3 non disponibile — Decision opera in Pure Macro mode con indicatori grezzi.",
+        }
 
     # 4. Parse risultato
     try:

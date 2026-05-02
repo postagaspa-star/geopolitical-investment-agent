@@ -588,7 +588,18 @@ def get_scheduler_info() -> dict:
     scout_8h_last = _last_log_for_phases(["SCOUT_8H"])
     scout_4d_last = _last_log_for_phases(["SCOUT_4D"])
     technical_last = _last_log_for_phases(["TECH_", "TECHNICAL_"])
-    decision_last = _last_log_for_phases(["DECISION_"])
+
+    # --- Decision split: Sonnet (orari mercato) vs R1 (overnight crypto) ---
+    # Letto dai setting key aggiornati da decision.py dopo ogni run completato.
+    # Sicurezza: se i setting non esistono ancora (DB pulito), fall back ai
+    # log generici.
+    try:
+        decision_sonnet_last = (database.get_setting("last_decision_sonnet_run_at", "")
+                                or _last_log_for_phases(["DECISION_"]))
+        decision_r1_last = database.get_setting("last_decision_r1_run_at", "") or None
+    except Exception:
+        decision_sonnet_last = _last_log_for_phases(["DECISION_"])
+        decision_r1_last = None
 
     agents = {
         "watchdog": {
@@ -616,16 +627,24 @@ def get_scheduler_info() -> dict:
             "active": running,
         },
         "technical": {
-            "schedule": "on-demand (trigger Watchdog)",
+            "schedule": "on-demand 24/7 (DeepSeek-V3, sempre attivo)",
             "next_run": None,
             "last_run": technical_last,
             "active": running,
         },
         "decision": {
-            "schedule": "on-demand (trigger Watchdog, max 1/ora)",
+            "schedule": "on-demand orari mercato (Sonnet 4.5, max 1/ora)",
             "next_run": None,
-            "last_run": decision_last,
-            "active": running,
+            "last_run": decision_sonnet_last,
+            "active": running and market_open,
+            "model": "claude-sonnet-4-5",
+        },
+        "decision_24h": {
+            "schedule": "on-demand overnight (DeepSeek-R1, max 1 ogni 2h30)",
+            "next_run": None,
+            "last_run": decision_r1_last,
+            "active": running and not market_open,
+            "model": "deepseek-r1",
         },
     }
 

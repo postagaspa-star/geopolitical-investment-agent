@@ -25,6 +25,7 @@ const AGENT_LABELS = {
   scout: { name: 'Scout', tone: '#a78bfa' },
   technical: { name: 'Technical', tone: '#06b6d4' },
   decision: { name: 'Decision', tone: '#10b981' },
+  decision_24h: { name: 'Decision 24h', tone: '#f472b6' },
 };
 
 // Portafoglio denominato in USD (yfinance/Massive ritornano sempre USD;
@@ -235,7 +236,7 @@ export default function Sidebar({
   const pnlPct = initialCapital > 0 ? ((totalValue - initialCapital) / initialCapital) * 100 : 0;
   const pnlPositive = pnlPct >= 0;
 
-  const agentOrder = ['watchdog', 'scout', 'technical', 'decision'];
+  const agentOrder = ['watchdog', 'scout', 'technical', 'decision', 'decision_24h'];
 
   return (
     <>

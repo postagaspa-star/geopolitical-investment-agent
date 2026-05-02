@@ -71,8 +71,13 @@ def _resolve_engine_for_run() -> str:
         return "claude"  # fail-open: Sonnet è il default più "safe"
 
 
-# Cooldown timestamp per R1 overnight (settings key)
+# Setting keys per i timestamp degli ultimi run del Decision Agent.
+# Vengono usati per:
+#  - cooldown 2h30 R1 overnight (R1_LAST_RUN_KEY)
+#  - mostrare "ultimo run" separato Decision (Sonnet) e Decision 24h (R1)
+#    nella sidebar del frontend
 R1_LAST_RUN_KEY = "last_decision_r1_run_at"
+SONNET_LAST_RUN_KEY = "last_decision_sonnet_run_at"
 R1_COOLDOWN_SECONDS = 9000   # 2h30
 
 
@@ -84,6 +89,16 @@ def record_r1_run_timestamp() -> None:
         _db.set_setting(R1_LAST_RUN_KEY, ts)
     except Exception as exc:
         logger.warning("Impossibile salvare timestamp R1 last-run: %s", exc)
+
+
+def record_sonnet_run_timestamp() -> None:
+    """Aggiorna il timestamp dell'ultimo run Sonnet 4.5 (Decision orari mercato)."""
+    try:
+        import database as _db
+        ts = datetime.now(timezone.utc).isoformat()
+        _db.set_setting(SONNET_LAST_RUN_KEY, ts)
+    except Exception as exc:
+        logger.warning("Impossibile salvare timestamp Sonnet last-run: %s", exc)
 
 
 def is_r1_cooldown_active() -> tuple[bool, int]:
@@ -793,6 +808,9 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
             "duration_seconds": round(duration, 1),
             "final_text": final_text[:500],
         }, default=str))
+
+    # Registra timestamp Sonnet per la sidebar (Decision row)
+    record_sonnet_run_timestamp()
 
     _save_checkpoint(run_id, "decision", "COMPLETED", {
         "trades": len(trades_executed),
