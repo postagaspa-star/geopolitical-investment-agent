@@ -32,25 +32,48 @@ URGENCY_THRESHOLD = 5  # 1-10
 WATCHDOG_PROMPT = """You are a financial market watchdog. Your ONLY job is to decide in seconds
 whether current market conditions justify waking up the Decision Agent (expensive model).
 
+The user message will tell you the MARKET STATE (OPEN or CLOSED). Adjust accordingly:
+
+═══════════════════════════════════════════════════════════════════════════
+WHEN MARKET STATE = OPEN (NYSE/LSE/XETRA hours, no holiday):
+═══════════════════════════════════════════════════════════════════════════
 TRIGGER if you detect ANY of:
-- Price move > 1.5% in last 5 minutes on any major index/ETF
+- Price move > 1.5% in last 5 minutes on any major index/ETF or watched stock
 - Breaking geopolitical news (conflict, sanctions, elections, central bank)
 - Earnings surprise or M&A announcement for watched tickers
 - VIX spike or bond yield jump > 5 basis points
 - Congressional trade on a ticker in the watchlist
 - Unusual volume (>2x average)
+- Significant crypto move (BTC/ETH > 3% in last hour)
 
 DO NOT TRIGGER for:
 - Normal market noise (< 0.5% moves)
 - Already-known news (nothing new in last 20 min)
 - Pre-market/after-hours with no catalyst
 
+═══════════════════════════════════════════════════════════════════════════
+WHEN MARKET STATE = CLOSED (overnight, weekend, US/UK/DE holiday):
+═══════════════════════════════════════════════════════════════════════════
+The equity market is CLOSED. Stock prices in the snapshot are STALE
+(last close, not real-time). IGNORE any apparent "moves" on equity tickers
+(MSFT, AAPL, XOM, etc.) — they are NOISE, not real movements.
+
+TRIGGER ONLY if:
+- Crypto move > 3% in last hour (BTC-USD, ETH-USD, SOL-USD…) — crypto IS 24/7
+- Breaking geopolitical/macro news with implications for crypto or Monday open
+- Major hack/regulation/exchange news affecting crypto
+- focus_tickers MUST be crypto in yfinance format (BTC-USD, ETH-USD, ...) —
+  never equity (MSFT, AAPL) since equity markets are closed
+
+DO NOT TRIGGER if focus would be equity tickers — wait for market to reopen.
+
+═══════════════════════════════════════════════════════════════════════════
 Respond ONLY with valid JSON, no other text:
 {
   "trigger": true/false,
   "urgency": 1-10,
   "reason": "one-line explanation",
-  "focus_tickers": ["XOM", "LMT"]
+  "focus_tickers": ["BTC-USD", "ETH-USD"]
 }"""
 
 
@@ -249,6 +272,23 @@ async def run_watchdog(run_id: str) -> dict:
 
     # 3. Costruisci contesto compatto
     context_parts = []
+
+    # Header con MARKET STATE — il prompt usa questo per scegliere il
+    # comportamento (open: trigger su qualunque cosa rilevante; closed: solo
+    # crypto, ignora equity moves che sono sicuramente stale).
+    try:
+        from scheduler import is_market_open, is_market_holiday
+        market_open = is_market_open()
+        is_holiday = is_market_holiday()
+        if market_open:
+            state_line = "MARKET STATE: OPEN (equity + crypto tradabili)"
+        else:
+            why = "weekend" if datetime.now(timezone.utc).weekday() >= 5 else (
+                "holiday" if is_holiday else "after-hours")
+            state_line = f"MARKET STATE: CLOSED ({why}) — only crypto is tradable"
+    except Exception:
+        state_line = "MARKET STATE: UNKNOWN"
+    context_parts.append(state_line)
 
     if price_snap:
         movers = sorted(price_snap.items(), key=lambda x: abs(x[1].get("chg_pct", 0)), reverse=True)

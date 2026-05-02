@@ -25,6 +25,27 @@ import database
 logger = logging.getLogger(__name__)
 
 
+# Crypto di fallback quando il Watchdog focalizza su equity ma i mercati
+# equity sono chiusi: invece di bloccare, sostituiamo con queste 3 e lasciamo
+# che R1 valuti se vale la pena operare. Top liquidity + volatilità garantita.
+_DEFAULT_OVERNIGHT_CRYPTO = ["BTC-USD", "ETH-USD", "SOL-USD"]
+
+# Log throttling: gli stessi eventi "blocked" vengono loggati al massimo
+# ogni N secondi per non riempire la dashboard con righe identiche.
+_BLOCK_LOG_THROTTLE_SECONDS = 600   # 10 minuti
+_last_block_logs: dict[str, float] = {}
+
+
+def _should_emit_block_log(reason_key: str) -> bool:
+    """True se è passato abbastanza tempo dall'ultimo log con questa reason_key."""
+    now = time.time()
+    last = _last_block_logs.get(reason_key, 0.0)
+    if now - last >= _BLOCK_LOG_THROTTLE_SECONDS:
+        _last_block_logs[reason_key] = now
+        return True
+    return False
+
+
 # ============================================================
 # Pipeline principale: Watchdog (ogni 5 min, market hours)
 # ============================================================
@@ -68,14 +89,19 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
     # ──────────────────────────────────────────────────────────────
     # GATE IBRIDO: market-open vs overnight crypto
     #
-    # Mercati equity APERTI (NYSE/LSE/XETRA):
+    # Mercati equity APERTI (NYSE/LSE/XETRA, festività considerate):
     #     → Decision Agent gira con engine Sonnet 4.5 (default GEO).
     #
-    # Mercati equity CHIUSI (notti, weekend):
-    #     → Decision Agent gira con engine DeepSeek-R1 SOLO se:
-    #       1) almeno un focus_ticker è una crypto (BTC-USD, ETH-USD, ...)
-    #       2) il cooldown 2h30 dall'ultimo run R1 è scaduto
-    #     → Altrimenti blocca: niente da fare overnight.
+    # Mercati equity CHIUSI (notti, weekend, festività):
+    #     → Cooldown 2h30 attivo? Skip silenzioso.
+    #     → Altrimenti: forziamo focus su crypto (default BTC/ETH/SOL se il
+    #       Watchdog ha indicato solo equity, che overnight è inutile) e
+    #       avviamo Decision con engine DeepSeek-R1.
+    #
+    # Il vecchio "blocked_no_crypto_overnight" è stato rimosso: bloccare il
+    # pipeline ogni minuto perché il Watchdog (LLM) genera reason su equity
+    # stale era solo rumore. Ora sostituiamo con default crypto e lasciamo
+    # decidere R1 — se non vede opportunità, usa do_nothing (~$0.001/run).
     # ──────────────────────────────────────────────────────────────
     try:
         from scheduler import is_market_open
@@ -84,29 +110,7 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         market_open = False
 
     if not market_open:
-        # Filtra crypto dai focus tickers (overnight: solo crypto è tradabile)
-        crypto_in_focus = [t for t in focus_tickers if _is_crypto_ticker(t)]
-
-        if not crypto_in_focus:
-            logger.info("[%s][ORCHESTRATOR] Mercati equity chiusi e nessuna crypto nei "
-                        "focus_tickers (focus=%s) — Decision NON avviato.",
-                        run_id, focus_tickers)
-            database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
-                "event": "decision_blocked_no_crypto_overnight",
-                "urgency": urgency,
-                "reason": reason,
-                "focus_tickers": focus_tickers,
-            }))
-            return {
-                "run_id": run_id,
-                "triggered": False,
-                "urgency": urgency,
-                "reason": reason,
-                "blocked": "no_crypto_overnight",
-                "duration_seconds": round(time.time() - start, 2),
-            }
-
-        # Cooldown 2h30 R1
+        # Cooldown 2h30 R1: se attivo, skip SILENZIOSO (no log spam ogni minuto)
         try:
             from agents.decision import is_r1_cooldown_active
             cooldown_active, seconds_left = is_r1_cooldown_active()
@@ -114,15 +118,17 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
             cooldown_active, seconds_left = False, 0
 
         if cooldown_active:
-            logger.info("[%s][ORCHESTRATOR] Cooldown R1 attivo: ancora %ds (~%.1fh) — "
-                        "Decision NON avviato.",
-                        run_id, seconds_left, seconds_left / 3600.0)
-            database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
-                "event": "decision_blocked_r1_cooldown",
-                "urgency": urgency,
-                "reason": reason,
-                "seconds_left": seconds_left,
-            }))
+            # Loggiamo solo ogni 10 min, e a livello debug il watchdog detail
+            if _should_emit_block_log("r1_cooldown"):
+                logger.info("[%s][ORCHESTRATOR] Cooldown R1 attivo: %ds (~%.1fh) "
+                            "— skip silenzioso fino al prossimo log fra 10 min.",
+                            run_id, seconds_left, seconds_left / 3600.0)
+                database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+                    "event": "decision_blocked_r1_cooldown",
+                    "urgency": urgency,
+                    "reason": reason,
+                    "seconds_left": seconds_left,
+                }))
             return {
                 "run_id": run_id,
                 "triggered": False,
@@ -133,12 +139,31 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
                 "duration_seconds": round(time.time() - start, 2),
             }
 
-        # Restringi focus_tickers SOLO alle crypto (overnight): non ha senso
-        # passare AAPL/TSLA al Decision quando le borse sono chiuse.
+        # Filtra crypto: tieni solo quelle nei focus, scarta equity (chiusi)
+        crypto_in_focus = [t for t in focus_tickers if _is_crypto_ticker(t)]
+
+        if not crypto_in_focus:
+            # FALLBACK: il Watchdog ha indicato solo equity (es. "MSFT move >1.5%")
+            # ma siamo overnight. Invece di bloccare, sostituiamo con BTC/ETH/SOL
+            # (default crypto). R1 valuterà se opera o usa do_nothing.
+            crypto_in_focus = list(_DEFAULT_OVERNIGHT_CRYPTO)
+            if _should_emit_block_log("overnight_crypto_fallback"):
+                logger.info("[%s][ORCHESTRATOR] Overnight: Watchdog ha indicato equity "
+                            "(%s) ma mercati chiusi → fallback a crypto default %s. "
+                            "Log throttled 10 min.",
+                            run_id, focus_tickers, crypto_in_focus)
+                database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+                    "event": "overnight_crypto_fallback",
+                    "watchdog_focus": focus_tickers,
+                    "fallback_focus": crypto_in_focus,
+                    "urgency": urgency,
+                }))
+
+        # Restringi focus_tickers alle crypto e procedi
         focus_tickers = crypto_in_focus
-        logger.info("[%s][ORCHESTRATOR] OVERNIGHT MODE: market closed, %d crypto in focus "
-                    "(%s), cooldown R1 OK — avvio R1 Decision.",
-                    run_id, len(crypto_in_focus), crypto_in_focus)
+        logger.info("[%s][ORCHESTRATOR] OVERNIGHT MODE: market closed, focus %s, "
+                    "cooldown OK — avvio R1 Decision.",
+                    run_id, focus_tickers)
 
     # Trigger! Avvia pipeline completa
     logger.info("[%s][WATCHDOG] TRIGGER urgency=%d: %s — avvio Technical+Decision",

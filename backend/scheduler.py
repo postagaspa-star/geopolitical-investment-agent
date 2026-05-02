@@ -33,14 +33,60 @@ current_mode: str = "idle"  # idle | weekend | pre_market | full
 # Funzioni di rilevamento stato mercato
 # ============================================================
 
+# ── Festività NYSE/NASDAQ (USA) — 2025-2027 ───────────────────────────────
+# In questi giorni la borsa USA è CHIUSA anche se è un giorno feriale.
+# Aggiornare ogni anno (NYSE pubblica il calendario ufficiale ~12 mesi prima).
+# Senza questo controllo, is_market_open() restituiva True nei festivi USA,
+# il bot apriva trade su S&P 500 con ClawStreet che li rifiutava → divergenza.
+NYSE_HOLIDAYS = {
+    # 2025
+    "2025-01-01", "2025-01-09",  # New Year, Day of mourning Carter
+    "2025-01-20", "2025-02-17", "2025-04-18", "2025-05-26",
+    "2025-06-19", "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25",
+    # 2026
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03",  # 4 luglio cade di sabato → osservato il 3
+    "2026-09-07", "2026-11-26", "2026-12-25",
+    # 2027
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18",  # 19 giugno cade di sabato → osservato il 18
+    "2027-07-05",  # 4 luglio cade di domenica → osservato il 5
+    "2027-09-06", "2027-11-25", "2027-12-24",  # 25 dic cade di sabato → 24
+}
+
+# ── Festività LSE (UK Bank Holidays) — 2025-2027 ──────────────────────────
+LSE_HOLIDAYS = {
+    "2025-01-01", "2025-04-18", "2025-04-21", "2025-05-05", "2025-05-26",
+    "2025-08-25", "2025-12-25", "2025-12-26",
+    "2026-01-01", "2026-04-03", "2026-04-06", "2026-05-04", "2026-05-25",
+    "2026-08-31", "2026-12-25", "2026-12-28",  # 26 dic cade di sabato → 28
+    "2027-01-01", "2027-03-26", "2027-03-29", "2027-05-03", "2027-05-31",
+    "2027-08-30", "2027-12-27", "2027-12-28",
+}
+
+# ── Festività XETRA (Germania) — 2025-2027 ────────────────────────────────
+XETRA_HOLIDAYS = {
+    "2025-01-01", "2025-04-18", "2025-04-21", "2025-05-01", "2025-12-24",
+    "2025-12-25", "2025-12-26", "2025-12-31",
+    "2026-01-01", "2026-04-03", "2026-04-06", "2026-05-01", "2026-12-24",
+    "2026-12-25", "2026-12-31",
+    "2027-01-01", "2027-03-26", "2027-03-29", "2027-12-24", "2027-12-27",
+    "2027-12-31",
+}
+
+
 def is_market_open():
     """
     Controlla se almeno una delle borse OBIETTIVO e' aperta.
     Borse considerate (definite dall'utente): USA (NYSE/NASDAQ), UK (LSE),
     Germania (XETRA/Francoforte). Restituisce True se almeno una e' aperta.
 
-    Watchdog e Decision Agent operano SOLO quando questa funzione restituisce True.
-    Lo Scout invece gira sempre (24/7).
+    Tiene conto di festività ufficiali (NYSE_HOLIDAYS, LSE_HOLIDAYS, XETRA_HOLIDAYS):
+    se è un giorno feriale ma è festivo per la borsa, quel mercato è chiuso.
+
+    Watchdog e Decision Agent operano SOLO quando questa funzione restituisce True
+    (in modalità Sonnet 4.5). Quando ritorna False, l'agent passa in modalità
+    overnight crypto con DeepSeek-R1.
     """
     now_utc = datetime.now(pytz.utc)
 
@@ -50,26 +96,46 @@ def is_market_open():
 
     # USA — NYSE/NASDAQ: 9:30-16:00 ET (Eastern Time, gestisce DST automaticamente)
     now_et = now_utc.astimezone(pytz.timezone('America/New_York'))
-    nyse_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-    nyse_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-    if nyse_open <= now_et <= nyse_close:
-        return True
+    if now_et.strftime("%Y-%m-%d") not in NYSE_HOLIDAYS:
+        nyse_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        nyse_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        if nyse_open <= now_et <= nyse_close:
+            return True
 
     # UK — LSE: 8:00-16:30 ora di Londra (GMT/BST)
     now_uk = now_utc.astimezone(pytz.timezone('Europe/London'))
-    lse_open = now_uk.replace(hour=8, minute=0, second=0, microsecond=0)
-    lse_close = now_uk.replace(hour=16, minute=30, second=0, microsecond=0)
-    if lse_open <= now_uk <= lse_close:
-        return True
+    if now_uk.strftime("%Y-%m-%d") not in LSE_HOLIDAYS:
+        lse_open = now_uk.replace(hour=8, minute=0, second=0, microsecond=0)
+        lse_close = now_uk.replace(hour=16, minute=30, second=0, microsecond=0)
+        if lse_open <= now_uk <= lse_close:
+            return True
 
     # Germania — XETRA Francoforte: 9:00-17:30 ora di Berlino (CET/CEST)
     now_de = now_utc.astimezone(pytz.timezone('Europe/Berlin'))
-    xetra_open = now_de.replace(hour=9, minute=0, second=0, microsecond=0)
-    xetra_close = now_de.replace(hour=17, minute=30, second=0, microsecond=0)
-    if xetra_open <= now_de <= xetra_close:
-        return True
+    if now_de.strftime("%Y-%m-%d") not in XETRA_HOLIDAYS:
+        xetra_open = now_de.replace(hour=9, minute=0, second=0, microsecond=0)
+        xetra_close = now_de.replace(hour=17, minute=30, second=0, microsecond=0)
+        if xetra_open <= now_de <= xetra_close:
+            return True
 
     return False
+
+
+def is_market_holiday() -> bool:
+    """
+    True se OGGI è un festivo per ALMENO una delle 3 borse target.
+    Usato per logging e per disabilitare trade equity nei giorni festivi
+    anche se l'orario formalmente combacia con l'apertura.
+    """
+    now_utc = datetime.now(pytz.utc)
+    if now_utc.weekday() >= 5:
+        return False  # weekend, non "holiday"
+    today_et = now_utc.astimezone(pytz.timezone('America/New_York')).strftime("%Y-%m-%d")
+    today_uk = now_utc.astimezone(pytz.timezone('Europe/London')).strftime("%Y-%m-%d")
+    today_de = now_utc.astimezone(pytz.timezone('Europe/Berlin')).strftime("%Y-%m-%d")
+    return (today_et in NYSE_HOLIDAYS
+            or today_uk in LSE_HOLIDAYS
+            or today_de in XETRA_HOLIDAYS)
 
 
 def is_weekend():
