@@ -1043,6 +1043,23 @@ async def clawstreet_diagnostics():
     }
 
 
+@app.post("/api/admin/apply-cs-mirror-migration")
+async def apply_cs_mirror_migration():
+    """
+    Trigger manuale della migrazione cs_mirror_* su Supabase.
+    Idempotente. Utile se DATABASE_URL/SUPABASE_DB_PASSWORD vengono aggiunti
+    DOPO il primo deploy → senza riavviare l'app, hit questo endpoint.
+    """
+    try:
+        # Forza il reload del modulo db_supabase per ri-eseguire la migration
+        import db_supabase
+        db_supabase._ensure_cs_mirror_columns()
+        return {"status": "ok", "message": "Migrazione applicata (vedi log Render per esito)"}
+    except Exception as e:
+        logger.error("Errore migration: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @app.post("/api/clawstreet/retry-mirrors")
 async def retry_failed_mirrors(window_hours: int = Query(default=24, ge=1, le=168)):
     """

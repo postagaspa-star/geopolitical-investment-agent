@@ -63,9 +63,81 @@ def init_db():
         # Auto-migrate v4 tables (safe: checks existence first)
         _ensure_v4_tables(client)
 
+        # Auto-migrate v6: colonne ClawStreet mirror tracking
+        # (idempotente, gira ad ogni avvio: ALTER TABLE IF NOT EXISTS)
+        _ensure_cs_mirror_columns()
+
     except Exception as e:
         logger.error("Errore connessione Supabase: %s", e, exc_info=True)
         raise
+
+
+def _ensure_cs_mirror_columns():
+    """
+    Auto-migrazione v6: aggiunge colonne cs_mirror_* alla tabella trades su
+    Supabase Postgres. Idempotente — usa IF NOT EXISTS, gira ad ogni avvio.
+
+    Richiede uno tra:
+      - DATABASE_URL: postgres://...:...@.../postgres (raccomandato)
+      - SUPABASE_DB_PASSWORD: la password del DB (postgres user)
+        + SUPABASE_URL per derivare l'host
+    Se nessuno è configurato, logga warning e continua (degrade graceful:
+    il sistema usa try/except su insert_trade e simili, quindi funziona
+    senza tracking ma il retry job non recupera i pending).
+    """
+    db_url = os.environ.get("DATABASE_URL", "").strip()
+    if not db_url:
+        # Prova a derivarla da SUPABASE_URL + SUPABASE_DB_PASSWORD
+        db_pass = os.environ.get("SUPABASE_DB_PASSWORD", "").strip()
+        if db_pass and SUPABASE_URL:
+            # SUPABASE_URL = https://<ref>.supabase.co
+            try:
+                ref = SUPABASE_URL.split("//")[1].split(".")[0]
+                # Pooler region-agnostic: prova prima il pooler standard
+                db_url = f"postgresql://postgres.{ref}:{db_pass}@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
+            except Exception:
+                pass
+
+    if not db_url:
+        logger.warning(
+            "Auto-migrazione cs_mirror_* SKIPPED: configurare DATABASE_URL "
+            "(consigliato) oppure SUPABASE_DB_PASSWORD su Render. "
+            "In alternativa eseguire manualmente backend/migrations/init_v6_cs_mirror.sql "
+            "su Supabase Dashboard → SQL Editor."
+        )
+        return
+
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning("psycopg2 non installato — auto-migrazione cs_mirror_* skipped.")
+        return
+
+    migration_sql = """
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS cs_mirror_status TEXT DEFAULT 'pending';
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS cs_mirror_reason TEXT;
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS cs_mirror_attempts INTEGER DEFAULT 0;
+        ALTER TABLE trades ADD COLUMN IF NOT EXISTS cs_mirror_last_attempt_at TIMESTAMPTZ;
+        CREATE INDEX IF NOT EXISTS idx_trades_cs_mirror_status
+            ON trades (cs_mirror_status, timestamp)
+            WHERE cs_mirror_status IN ('pending', 'failed');
+        UPDATE trades SET cs_mirror_status = 'legacy_unknown'
+            WHERE cs_mirror_status IS NULL;
+    """
+
+    try:
+        with psycopg2.connect(db_url, connect_timeout=15) as conn:
+            with conn.cursor() as cur:
+                cur.execute(migration_sql)
+            conn.commit()
+        logger.info("Auto-migrazione cs_mirror_* applicata su Supabase con successo.")
+    except Exception as exc:
+        # Non bloccare l'avvio del bot — degrade graceful
+        logger.warning(
+            "Auto-migrazione cs_mirror_* fallita (%s). Esegui manualmente "
+            "backend/migrations/init_v6_cs_mirror.sql su Supabase Dashboard.",
+            exc,
+        )
 
 
 def _ensure_v4_tables(client: Client):
