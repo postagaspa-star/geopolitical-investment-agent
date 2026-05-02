@@ -423,21 +423,38 @@ async def run_scout_20min(run_id: str) -> list[dict]:
         except Exception:
             pass
 
-    # 4. Scrivi nel buffer su Supabase
+    # 4. Deduplicazione: scarta micro-cards quasi-identiche a quelle già nel
+    #    buffer recente (ultime 4 ore). Lo Scout girando ogni 20 min su input
+    #    mostly-statici tendeva a produrre summary ripetuti → spreco di
+    #    storage + rumore per il Decision Agent. Soglia 4h: oltre questa
+    #    finestra anche un summary uguale è informativo (= "il tema persiste").
+    recent_fingerprints = _load_recent_fingerprints(database, hours=4)
     written = 0
+    skipped_duplicate = 0
     for card in micro_cards:
         try:
+            source_type = card.get("source_type", "UNKNOWN")
+            summary = card.get("micro_summary", "")
+            fp = _fingerprint_card(source_type, summary)
+            if fp in recent_fingerprints:
+                skipped_duplicate += 1
+                continue
             _write_intelligence_buffer(
                 database=database,
                 run_id=run_id,
-                source_type=card.get("source_type", "UNKNOWN"),
+                source_type=source_type,
                 raw_content=json.dumps(card, default=str),
-                micro_summary=card.get("micro_summary", ""),
+                micro_summary=summary,
                 sentiment_score=float(card.get("sentiment_score", 0)),
             )
+            recent_fingerprints.add(fp)  # evita duplicati anche dentro lo stesso run
             written += 1
         except Exception as e:
             logger.warning("[%s][SCOUT] Errore scrittura buffer: %s", run_id, e)
+
+    if skipped_duplicate > 0:
+        logger.info("[%s][SCOUT] Dedup: skippate %d card duplicate (già nel buffer 4h)",
+                    run_id, skipped_duplicate)
 
     # 5. Log finale — SEMPRE scritto (anche se 0 schede), cosi' il frontend
     # mostra ogni esecuzione dello Scout con count fonti e numero schede.
@@ -448,6 +465,7 @@ async def run_scout_20min(run_id: str) -> list[dict]:
             "event": "scout_20min_complete",
             "micro_cards": len(micro_cards),
             "written_to_buffer": written,
+            "skipped_duplicates": skipped_duplicate,
             "sources_queried": len(tasks),
             "sources_summary": sources_summary,
             "model_used": used_model,
@@ -703,6 +721,60 @@ def _save_checkpoint(run_id: str, agent_name: str, status: str, data: dict):
             }).execute()
     except Exception:
         pass  # Non-blocking
+
+
+def _fingerprint_card(source_type: str, summary: str) -> str:
+    """
+    Genera un fingerprint normalizzato di una micro-scheda per deduplicazione.
+
+    Strategia:
+      - lowercase, rimuovi punteggiatura e spazi multipli
+      - prendi le prime 12 parole "significative" (>2 char, no stopwords basic)
+      - hash SHA1 dei primi 60 caratteri canonici
+    Due card con lo STESSO source_type e summary quasi-identico (anche con
+    differenze cosmetiche di punteggiatura/case) ricevono lo stesso fingerprint.
+    """
+    import hashlib as _h
+    import re as _re
+    if not summary:
+        return ""
+    text = summary.lower()
+    text = _re.sub(r"[^\w\s]", " ", text)        # rimuovi punteggiatura
+    text = _re.sub(r"\s+", " ", text).strip()    # collassa spazi
+    # Estrai parole >2 caratteri (filtra "il", "di", "a", "the", ecc.)
+    words = [w for w in text.split() if len(w) > 2][:12]
+    canonical = f"{source_type.upper()}|{' '.join(words)}"[:60]
+    return _h.sha1(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_recent_fingerprints(database, hours: int = 4) -> set[str]:
+    """
+    Carica i fingerprint delle micro-schede scritte nel buffer nelle ultime
+    `hours` ore. Usato dallo Scout 20-min per scartare duplicati.
+
+    Limita a 200 card per non saturare la memoria — sufficiente perché lo
+    Scout produce ~9 card/run × 12 run/4h = ~108 card/finestra.
+    """
+    fingerprints: set[str] = set()
+    try:
+        client = database.get_client()
+        if not client:
+            return fingerprints
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        result = client.table("intelligence_buffer") \
+            .select("source_type,micro_summary") \
+            .in_("source_type", MICRO_CARD_TYPES) \
+            .gte("timestamp", cutoff) \
+            .order("timestamp", desc=True) \
+            .limit(200) \
+            .execute()
+        for row in (result.data or []):
+            fp = _fingerprint_card(row.get("source_type", ""), row.get("micro_summary", ""))
+            if fp:
+                fingerprints.add(fp)
+    except Exception as exc:
+        logger.warning("Impossibile caricare fingerprint recenti per dedup: %s", exc)
+    return fingerprints
 
 
 def _write_intelligence_buffer(database, run_id: str, source_type: str,
