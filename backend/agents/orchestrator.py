@@ -262,21 +262,31 @@ async def run_scheduled_24h_pipeline(run_id: str | None = None) -> dict:
     except Exception:
         pass  # se non riesco a verificare, procedo (fail-open)
 
-    # 2) Skip se cooldown R1 ancora attivo
+    # 2) Soft anti-double-run: skip SOLO se R1 ha girato negli ultimi 60 min.
+    # Il job stesso gira a 2h30 quindi non c'è bisogno del cooldown completo
+    # — usiamo solo una finestra breve per evitare doppio run quando il
+    # watchdog ha triggerato R1 pochi minuti prima del nostro scheduled fire.
+    # PRIMA c'era un check del cooldown completo 2h30: race condition con la
+    # schedule a 2h30 → il job fire 22 secondi PRIMA della scadenza, skippa,
+    # e poi attende altri 2h30 = blackout di ~5h tra un R1 e l'altro.
     try:
-        from agents.decision import is_r1_cooldown_active
-        cooldown_active, seconds_left = is_r1_cooldown_active()
+        from agents.decision import R1_LAST_RUN_KEY
+        last_iso = database.get_setting(R1_LAST_RUN_KEY, "") or ""
+        if last_iso:
+            last_dt = datetime.fromisoformat(last_iso)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            elapsed_min = (datetime.now(timezone.utc) - last_dt).total_seconds() / 60.0
+            if elapsed_min < 60:
+                logger.info("[%s][ORCHESTRATOR] R1 ha girato %.1f min fa — skip scheduled (soft 60min)",
+                            run_id, elapsed_min)
+                return {
+                    "run_id": run_id, "skipped": "recent_r1_run",
+                    "elapsed_minutes": round(elapsed_min, 1),
+                    "duration_seconds": round(time.time() - start, 2),
+                }
     except Exception:
-        cooldown_active, seconds_left = False, 0
-
-    if cooldown_active:
-        logger.info("[%s][ORCHESTRATOR] Cooldown R1 attivo (%ds, %.1fh) — skip scheduled run",
-                    run_id, seconds_left, seconds_left / 3600.0)
-        return {
-            "run_id": run_id, "skipped": "cooldown_active",
-            "cooldown_seconds_left": seconds_left,
-            "duration_seconds": round(time.time() - start, 2),
-        }
+        pass  # fail-open: meglio runnare due volte che mai
 
     # 3) Tickers di default per il run scheduled crypto-only
     hot_tickers = list(_DEFAULT_OVERNIGHT_CRYPTO)
