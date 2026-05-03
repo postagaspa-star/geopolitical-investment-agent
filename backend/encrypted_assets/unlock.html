@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
+<title>Unlock</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0a0a0a; color: #e5e5e5;
+               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; }
+  form { width: 320px; padding: 28px; border-radius: 12px;
+         background: #141414; border: 1px solid #262626; }
+  h1 { margin: 0 0 6px 0; font-size: 18px; font-weight: 600; }
+  p  { margin: 0 0 18px 0; font-size: 13px; color: #999; }
+  input[type=password] { width: 100%; padding: 10px 12px; box-sizing: border-box;
+        background: #0a0a0a; color: #e5e5e5; border: 1px solid #333;
+        border-radius: 6px; font-size: 14px; outline: none; }
+  input[type=password]:focus { border-color: #4f8cff; }
+  button { margin-top: 12px; width: 100%; padding: 10px; box-sizing: border-box;
+        background: #4f8cff; color: #fff; border: 0; border-radius: 6px;
+        font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .err { margin-top: 10px; font-size: 12px; color: #ff6b6b; min-height: 1em; }
+</style>
+</head>
+<body>
+<form id="f" autocomplete="off">
+  <h1>Accesso protetto</h1>
+  <p>Inserisci il token per decifrare l'app. La chiave non lascia mai questo browser.</p>
+  <input id="t" type="password" placeholder="Token" autofocus required />
+  <button id="b" type="submit">Sblocca</button>
+  <div class="err" id="e"></div>
+</form>
+
+<script>
+"use strict";
+
+// Costanti del formato bundle (devono matchare scripts/encrypt_build.py)
+const PBKDF2_ITERATIONS = 200000;
+const SALT_LEN = 16;
+const NONCE_LEN = 12;
+const KEY_LEN_BYTES = 32;     // AES-256
+
+const f  = document.getElementById("f");
+const tI = document.getElementById("t");
+const bI = document.getElementById("b");
+const eI = document.getElementById("e");
+
+// La chiave decifrata vive SOLO in questo scope di funzione → garbage collected
+// quando la pagina viene sostituita via document.write. Mai in storage.
+async function deriveKey(token, salt) {
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey(
+    "raw", enc.encode(token), { name: "PBKDF2" }, false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256",
+    },
+    baseKey,
+    { name: "AES-GCM", length: KEY_LEN_BYTES * 8 },
+    false,                     // non extractable: la chiave AES non è esportabile
+    ["decrypt"],
+  );
+}
+
+async function fetchBundle() {
+  const res = await fetch("/encrypted-bundle", { cache: "no-store" });
+  if (!res.ok) throw new Error("Bundle non disponibile (HTTP " + res.status + ")");
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+async function decryptAndRender(token) {
+  const blob = await fetchBundle();
+  if (blob.length < SALT_LEN + NONCE_LEN + 16) {
+    throw new Error("Bundle malformato");
+  }
+
+  const salt       = blob.slice(0, SALT_LEN);
+  const nonce      = blob.slice(SALT_LEN, SALT_LEN + NONCE_LEN);
+  const ciphertext = blob.slice(SALT_LEN + NONCE_LEN);
+
+  const key = await deriveKey(token, salt);
+  // AES-GCM verifica il tag automaticamente: token sbagliato → throw
+  const plaintextBuf = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: nonce, tagLength: 128 },
+    key,
+    ciphertext,
+  );
+
+  const html = new TextDecoder().decode(plaintextBuf);
+
+  // Sostituisce la pagina corrente con l'app decifrata.
+  // document.open/write/close mantengono lo stesso URL (/) → fetch /api/...
+  // continua a funzionare. La chiave AES è ora fuori scope → GC la libera.
+  document.open();
+  document.write(html);
+  document.close();
+}
+
+f.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const token = tI.value;
+  if (!token) return;
+
+  bI.disabled = true;
+  eI.textContent = "Decifratura in corso...";
+  try {
+    await decryptAndRender(token);
+    // Da qui in poi la pagina è stata sostituita; nessun cleanup necessario.
+  } catch (err) {
+    bI.disabled = false;
+    tI.value = "";
+    tI.focus();
+    eI.textContent = "Token non valido o bundle corrotto.";
+    console.error(err);
+  }
+});
+
+// Hardening: blocca trascinamento di file sulla pagina (no exfil) +
+// disabilita autocompletion del browser + warning se non c'è Web Crypto.
+if (!window.crypto || !window.crypto.subtle) {
+  eI.textContent = "Browser non supporta Web Crypto (serve HTTPS).";
+  bI.disabled = true;
+}
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
+</script>
+</body>
+</html>

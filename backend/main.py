@@ -1487,41 +1487,86 @@ async def run_v4_migration():
 
 
 # --- Montaggio dei file statici del frontend React ---
-# Cerca la build del frontend in due posizioni:
-# 1. backend/static (usata su Render dopo il build command che copia la build qui)
-# 2. ../frontend/build (sviluppo locale)
-_static_dir = os.path.join(os.path.dirname(__file__), "static")
-_frontend_build_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "build")
+# Modalità ENCRYPTION_ENABLED=true: il server espone SOLO unlock.html e
+# /encrypted-bundle. Il browser (Web Crypto API) decifra in locale dopo aver
+# ricevuto il token. La build React in chiaro NON viene mai trasmessa.
+# Modalità default: serve la build React normalmente (sviluppo).
+_ENCRYPTION_ENABLED = os.environ.get("ENCRYPTION_ENABLED", "").lower() in ("1", "true", "yes")
 
-_spa_dir: str | None = None
-if os.path.isdir(_static_dir):
-    _spa_dir = _static_dir
-    logger.info(f"Directory static trovata (Render): {_static_dir}")
-elif os.path.isdir(_frontend_build_dir):
-    _spa_dir = _frontend_build_dir
-    logger.info(f"Directory di build del frontend trovata: {_frontend_build_dir}")
-else:
-    logger.warning(
-        "Nessuna directory di build del frontend trovata. "
-        "Il montaggio dei file statici e' stato saltato."
-    )
+_encrypted_dir = os.path.join(os.path.dirname(__file__), "encrypted_assets")
+_encrypted_bundle = os.path.join(_encrypted_dir, "bundle.enc")
+_unlock_html = os.path.join(_encrypted_dir, "unlock.html")
 
-if _spa_dir:
-    # Monta gli asset statici (JS, CSS, immagini) sotto /static
-    _assets_dir = os.path.join(_spa_dir, "static")
-    if os.path.isdir(_assets_dir):
-        app.mount("/static", StaticFiles(directory=_assets_dir), name="static-assets")
+if _ENCRYPTION_ENABLED:
+    if not os.path.isfile(_encrypted_bundle):
+        logger.error(
+            "ENCRYPTION_ENABLED=true ma %s mancante. "
+            "Esegui `python scripts/encrypt_build.py` prima del deploy.",
+            _encrypted_bundle,
+        )
 
-    # Catch-all: per qualsiasi rotta non-API, restituisce index.html (SPA routing)
+    @app.get("/encrypted-bundle")
+    async def serve_encrypted_bundle():
+        """Serve il blob cifrato (salt + nonce + AES-GCM ciphertext+tag)."""
+        if not os.path.isfile(_encrypted_bundle):
+            return JSONResponse(status_code=404, content={"detail": "Bundle non disponibile"})
+        return FileResponse(
+            _encrypted_bundle,
+            media_type="application/octet-stream",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
     @app.get("/{full_path:path}")
-    async def serve_spa(request: Request, full_path: str):
-        """Serve index.html per tutte le rotte non-API (SPA catch-all)."""
-        # Se il file richiesto esiste nella directory statica, servilo direttamente
-        file_path = os.path.join(_spa_dir, full_path)
-        if full_path and os.path.isfile(file_path):
-            return FileResponse(file_path)
-        # Altrimenti restituisci index.html per il client-side routing
-        index_path = os.path.join(_spa_dir, "index.html")
-        if os.path.isfile(index_path):
-            return FileResponse(index_path)
-        return JSONResponse(status_code=404, content={"detail": "Frontend non trovato"})
+    async def serve_unlock(request: Request, full_path: str):
+        """Catch-all: tutte le rotte non-API restituiscono unlock.html.
+        Il server NON serve mai la build React in chiaro."""
+        if not os.path.isfile(_unlock_html):
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "unlock.html mancante; build incompleto"},
+            )
+        return FileResponse(
+            _unlock_html,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "X-Frame-Options": "DENY",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
+    logger.info("Frontend protetto da client-side encryption (ENCRYPTION_ENABLED=true).")
+
+else:
+    # Modalità classica: serve la build React in chiaro
+    _static_dir = os.path.join(os.path.dirname(__file__), "static")
+    _frontend_build_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "build")
+
+    _spa_dir: str | None = None
+    if os.path.isdir(_static_dir):
+        _spa_dir = _static_dir
+        logger.info(f"Directory static trovata (Render): {_static_dir}")
+    elif os.path.isdir(_frontend_build_dir):
+        _spa_dir = _frontend_build_dir
+        logger.info(f"Directory di build del frontend trovata: {_frontend_build_dir}")
+    else:
+        logger.warning(
+            "Nessuna directory di build del frontend trovata. "
+            "Il montaggio dei file statici e' stato saltato."
+        )
+
+    if _spa_dir:
+        _assets_dir = os.path.join(_spa_dir, "static")
+        if os.path.isdir(_assets_dir):
+            app.mount("/static", StaticFiles(directory=_assets_dir), name="static-assets")
+
+        @app.get("/{full_path:path}")
+        async def serve_spa(request: Request, full_path: str):
+            """Serve index.html per tutte le rotte non-API (SPA catch-all)."""
+            file_path = os.path.join(_spa_dir, full_path)
+            if full_path and os.path.isfile(file_path):
+                return FileResponse(file_path)
+            index_path = os.path.join(_spa_dir, "index.html")
+            if os.path.isfile(index_path):
+                return FileResponse(index_path)
+            return JSONResponse(status_code=404, content={"detail": "Frontend non trovato"})
