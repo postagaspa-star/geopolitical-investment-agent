@@ -335,25 +335,39 @@ async def get_geopolitical():
 @app.post("/api/agent/run")
 async def trigger_agent_run(background_tasks: BackgroundTasks):
     """
-    Avvia manualmente un'esecuzione singola dell'agente in background.
-    Determina automaticamente la modalita' in base all'orario.
+    Avvia manualmente un'esecuzione singola del pipeline multi-agente.
+    PRIMA: chiamava il vecchio agent.run_agent() (single-agent legacy → log
+    confondenti tipo "mode: weekend, architecture: single-agent" anche con
+    la nuova architettura).
+    ORA: chiama run_full_pipeline (Watchdog → Technical → Decision) o
+    direttamente run_scheduled_24h_pipeline (R1) se mercati chiusi.
     """
     run_id = str(uuid.uuid4())
     mode = scheduler.get_current_mode()
+    market_open = scheduler.is_market_open()
 
     async def _run():
         try:
-            logger.info(f"Esecuzione manuale dell'agente avviata (run_id: {run_id}, mode: {mode}).")
-            await agent.run_agent(mode=mode)
-            logger.info(f"Esecuzione manuale dell'agente completata (run_id: {run_id}).")
+            logger.info(f"Esecuzione manuale pipeline avviata (run_id: {run_id}, mode: {mode}).")
+            from agents.orchestrator import (
+                run_full_pipeline,
+                run_scheduled_24h_pipeline,
+            )
+            if market_open:
+                # Orari di mercato → pipeline completa con Sonnet 4.5
+                result = await run_full_pipeline(run_id=run_id)
+            else:
+                # Mercati chiusi → R1 scheduled (crypto only)
+                result = await run_scheduled_24h_pipeline(run_id=run_id)
+            logger.info(f"Esecuzione manuale completata (run_id: {run_id}, result: {result.get('decision', '?')}).")
         except Exception as e:
             logger.error(
-                f"Errore durante l'esecuzione manuale dell'agente (run_id: {run_id}): {e}",
+                f"Errore durante l'esecuzione manuale (run_id: {run_id}): {e}",
                 exc_info=True,
             )
 
     background_tasks.add_task(_run)
-    return {"status": "started", "run_id": run_id, "mode": mode}
+    return {"status": "started", "run_id": run_id, "mode": mode, "market_open": market_open}
 
 
 @app.post("/api/agent/start")
