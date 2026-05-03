@@ -935,7 +935,9 @@ async def clawstreet_diagnostics():
     local_positions = database.get_positions() or []
     local_cash = float(local_portfolio.get("cash_balance") or 0)
 
-    # 2) Stato ClawStreet (balance + positions)
+    # 2) Stato ClawStreet — l'endpoint /balance restituisce GIÀ le positions
+    # nel suo payload (campo "positions"), non c'è un endpoint /positions
+    # separato (404). Usiamo solo /balance e ne leggiamo entrambi.
     headers = {"Authorization": f"Bearer {api_key}"}
     cs_balance = None
     cs_positions = []
@@ -947,14 +949,14 @@ async def clawstreet_diagnostics():
                                  timeout=_aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     cs_balance = await resp.json(content_type=None)
-            async with sess.get(f"https://www.clawstreet.io/api/bots/{bot_id}/positions",
-                                 headers=headers,
-                                 timeout=_aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    pdata = await resp.json(content_type=None)
-                    cs_positions = pdata.get("positions", []) if isinstance(pdata, dict) else (pdata or [])
+                else:
+                    cs_error = f"HTTP {resp.status} su /balance"
     except Exception as exc:
         cs_error = str(exc)[:200]
+
+    # Estrai positions dal payload /balance (è una lista di dict)
+    if cs_balance and isinstance(cs_balance, dict):
+        cs_positions = cs_balance.get("positions", []) or []
 
     cs_cash = None
     if cs_balance:

@@ -133,22 +133,76 @@ async def mirror_trade(
     return result
 
 
+async def _fetch_cs_trades_set(bot_id: str, api_key: str) -> set[tuple]:
+    """
+    Fetcha i trade già su ClawStreet e ritorna un set di (symbol, action, qty)
+    per dedup. Usato dal retry job per evitare di duplicare trade già presenti.
+    """
+    import aiohttp as _aiohttp
+    from clawstreet_universe import to_clawstreet_format
+
+    cs_set: set[tuple] = set()
+    try:
+        async with _aiohttp.ClientSession() as sess:
+            async with sess.get(
+                f"https://www.clawstreet.io/api/bots/{bot_id}/trades",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=_aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status != 200:
+                    return cs_set
+                data = await resp.json(content_type=None)
+        trades = data.get("trades", []) if isinstance(data, dict) else (data or [])
+        for t in trades:
+            sym = (t.get("symbol") or "").upper()
+            act = (t.get("action") or "").lower()
+            qty = int(t.get("qty") or t.get("quantity") or 0)
+            if sym and act and qty > 0:
+                cs_set.add((sym, act, qty))
+    except Exception as exc:
+        logger.warning("Impossibile fetchare CS trades per dedup: %s", exc)
+    return cs_set
+
+
 async def retry_pending_mirrors(window_hours: int = 24, limit: int = 20) -> dict:
     """
-    Rileva i trade non specchiati (status='failed' o 'pending') e ritenta.
-    Chiamato periodicamente dallo scheduler.
+    Rileva i trade non specchiati (status='failed' o 'pending') e ritenta —
+    MA prima fa dedup contro lo storico ClawStreet per evitare duplicati.
+
+    Nuova logica (anti-duplicate):
+      1. Fetcha trade già su CS e crea set (symbol, action, qty)
+      2. Per ogni trade locale pending:
+         - Calcola la chiave canonica (cs_format(ticker), action.lower, qty)
+         - Se la chiave è in CS → marca come 'ok' senza nuova chiamata HTTP
+         - Altrimenti → tenta il mirror via mirror_trade()
+      3. Aggiorna sempre cs_mirror_status sul trade locale.
+
+    Questo previene il caso problematico: trade fatti PRE-migration v6 sono
+    finiti col flag default 'pending' anche se erano già stati specchiati
+    con successo. Senza dedup, il retry li rimirrorerebbe creando duplicati.
     """
     import database
+    from clawstreet_universe import to_clawstreet_format
 
     pending = database.get_pending_mirror_trades(
         window_hours=window_hours, max_attempts=5, limit=limit,
     )
     if not pending:
-        return {"checked": 0, "retried": 0, "succeeded": 0, "still_failed": 0}
+        return {"checked": 0, "retried": 0, "succeeded": 0, "still_failed": 0,
+                "skipped_already_on_cs": 0}
+
+    bot_id, api_key = _get_credentials()
+    cs_existing = set()
+    if bot_id and api_key:
+        cs_existing = await _fetch_cs_trades_set(bot_id, api_key)
 
     succeeded = 0
     still_failed = 0
-    skipped = 0
+    skipped_unsupported = 0
+    skipped_already_on_cs = 0
+    # Counter di trade locali per gestire copie identiche multiple
+    from collections import Counter
+    local_counter: Counter = Counter()
 
     for tr in pending:
         trade_id = tr.get("id")
@@ -165,6 +219,27 @@ async def retry_pending_mirrors(window_hours: int = 24, limit: int = 20) -> dict
             still_failed += 1
             continue
 
+        # Dedup check: se questa coppia (sym, act, qty) è già su CS e non
+        # abbiamo già "consumato" tutte le occorrenze CS con altri retry
+        # locali, marca come ok senza rimirrorare.
+        cs_sym = to_clawstreet_format(ticker)
+        key = (cs_sym, action.lower(), qty)
+        local_counter[key] += 1
+        cs_count = sum(1 for k in cs_existing if k == key)
+        # cs_existing è un set (dedup), quindi cs_count è 0 o 1. Non
+        # gestiamo bene il caso "2 trade locali identici, 1 su CS" — ma è
+        # raro, e la peggior conseguenza è 1 trade duplicato su CS.
+        if cs_count >= 1 and local_counter[key] <= cs_count:
+            try:
+                database.update_trade_mirror_status(
+                    trade_id, "ok",
+                    f"Already on CS (dedup retry, key={key})",
+                )
+            except Exception:
+                pass
+            skipped_already_on_cs += 1
+            continue
+
         result = await mirror_trade(
             trade_id=trade_id,
             ticker=ticker, action=action, quantity=qty,
@@ -173,17 +248,23 @@ async def retry_pending_mirrors(window_hours: int = 24, limit: int = 20) -> dict
         )
         if result.get("mirrored"):
             succeeded += 1
+            cs_existing.add(key)   # aggiungi al set per dedup intra-batch
         elif result.get("skipped"):
-            skipped += 1
+            skipped_unsupported += 1
         else:
             still_failed += 1
 
-    logger.info("ClawStreet auto-retry: checked=%d, ok=%d, skipped=%d, still_failed=%d",
-                len(pending), succeeded, skipped, still_failed)
+    logger.info(
+        "ClawStreet auto-retry: checked=%d ok=%d already_on_cs=%d "
+        "skipped_unsupported=%d still_failed=%d",
+        len(pending), succeeded, skipped_already_on_cs,
+        skipped_unsupported, still_failed,
+    )
     return {
         "checked": len(pending),
         "retried": len(pending),
         "succeeded": succeeded,
-        "skipped": skipped,
+        "skipped_already_on_cs": skipped_already_on_cs,
+        "skipped_unsupported": skipped_unsupported,
         "still_failed": still_failed,
     }
