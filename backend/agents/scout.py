@@ -650,8 +650,44 @@ async def _cascade_aggregate(
     return report_obj
 
 
+def _last_aggregated_age_hours(database, source_type: str) -> float | None:
+    """
+    Età in ore dell'ultimo record aggregato di un dato tier.
+    Ritorna None se non esiste ancora.
+    Usato per anti-double-run check (evita di rigenerare un AGG_8H/AGG_4D
+    poco dopo un deploy se l'ultimo è ancora "fresco").
+    """
+    try:
+        client = database.get_client()
+        if not client:
+            return None
+        result = client.table("intelligence_buffer") \
+            .select("timestamp") \
+            .eq("source_type", source_type) \
+            .order("timestamp", desc=True) \
+            .limit(1) \
+            .execute()
+        if not result.data:
+            return None
+        ts_str = result.data[0].get("timestamp", "")
+        if not ts_str:
+            return None
+        last_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - last_ts).total_seconds() / 3600.0
+    except Exception:
+        return None
+
+
 async def run_8h_report(run_id: str) -> dict:
     """L1 — Sintetizza le micro-cards delle ultime 8 ore in un singolo report."""
+    import database
+    # Anti-double-run: se l'ultimo AGG_8H è < 6h fa, skip (evita spreco
+    # token quando Render fa restart frequenti).
+    age = _last_aggregated_age_hours(database, TIER_8H)
+    if age is not None and age < 6.0:
+        logger.info("[%s][SCOUT] 8H skip: ultimo report di %.1fh fa (< 6h)",
+                    run_id, age)
+        return {"skipped": True, "reason": "too_recent", "last_age_hours": age}
     return await _cascade_aggregate(
         run_id,
         tier_label="8H",
@@ -666,6 +702,13 @@ async def run_8h_report(run_id: str) -> dict:
 
 async def run_4d_report(run_id: str) -> dict:
     """L2 — Sintetizza i report 8h degli ultimi 4 giorni in un report 4d."""
+    import database
+    # Anti-double-run: se l'ultimo AGG_4D è < 72h (3gg) fa, skip.
+    age = _last_aggregated_age_hours(database, TIER_4D)
+    if age is not None and age < 72.0:
+        logger.info("[%s][SCOUT] 4D skip: ultimo report di %.1fh fa (< 72h)",
+                    run_id, age)
+        return {"skipped": True, "reason": "too_recent", "last_age_hours": age}
     return await _cascade_aggregate(
         run_id,
         tier_label="4D",

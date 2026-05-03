@@ -511,7 +511,9 @@ def start_scheduler() -> AsyncIOScheduler:
     # AGG_8H / AGG_4D / AGG_3W (vedi backend/agents/scout.py).
     now_utc = datetime.now(pytz.utc)
 
-    # 8H — ogni 8 ore. Primo run dopo 1h (per accumulare almeno 3 cicli Scout).
+    # 8H — ogni 8 ore. Primo run dopo 10 min dal restart.
+    # Il job stesso fa un check anti-double-run leggendo l'ultimo AGG_8H
+    # dal buffer (skip se < 6h fa, evita spreco token su deploy frequenti).
     _scheduler.add_job(
         _scout_8h_report_job,
         trigger="interval",
@@ -521,10 +523,14 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        next_run_time=now_utc + timedelta(hours=1),
+        next_run_time=now_utc + timedelta(minutes=10),
     )
 
-    # 4D — ogni 4 giorni. Primo run dopo 24h (per avere almeno 3 report 8H).
+    # 4D — ogni 4 giorni. Primo run dopo 15 min dal restart.
+    # PRIMA: next_run = now + 24h → ogni deploy resettava il timer e il
+    # job non girava mai. Dopo 5 giorni di running con deploy frequenti
+    # avevamo 17 AGG_8H ma 0 AGG_4D. Fix: schedula presto, e il job stesso
+    # fa skip se l'ultimo AGG_4D è < 3 giorni fa.
     _scheduler.add_job(
         _scout_4d_report_job,
         trigger="interval",
@@ -534,7 +540,7 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        next_run_time=now_utc + timedelta(hours=24),
+        next_run_time=now_utc + timedelta(minutes=15),
     )
 
 
