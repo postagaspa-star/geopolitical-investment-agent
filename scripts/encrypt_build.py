@@ -100,21 +100,46 @@ def _inline_html(index_html: Path) -> str:
         replace_link, html,
     )
 
-    # 2) <script src="..."></script> → <script>...</script>
-    def replace_script(m: re.Match) -> str:
+    # 2) <script src="..."></script> → estrai TUTTI i contenuti e accumula
+    # per appenderli a fine body. Importante: il React build usa <script defer>
+    # → l'esecuzione avviene DOPO il parsing del DOM. Quando inliniamo come
+    # <script>...</script> perdiamo l'attributo defer (non valido su inline) e
+    # se lo script si trova in <head> tenta di accedere a #root prima che
+    # esista → React error #299 ("target container is not a DOM element").
+    # Soluzione: rimuoviamo i tag <script src> ovunque siano e li riattacciamo
+    # come <script>...</script> subito prima di </body>, preservando l'ordine
+    # originale (importante se ci sono multiple deps che dipendono fra loro).
+    inline_scripts: list[str] = []
+
+    def collect_script(m: re.Match) -> str:
         src = m.group(1)
         f = _resolve(src)
         if not f:
             return m.group(0)
         js = f.read_text(encoding="utf-8")
-        # Escape `</script>` dentro il codice JS (safety)
+        # Escape `</script>` dentro il codice JS (safety per il parser HTML)
         js = js.replace("</script>", "<\\/script>")
-        return f"<script>{js}</script>"
+        inline_scripts.append(js)
+        return ""  # rimuove il tag dalla posizione originale
 
     html = re.sub(
         r'<script[^>]+src=["\']([^"\']+)["\'][^>]*>\s*</script>',
-        replace_script, html,
+        collect_script, html,
     )
+
+    if inline_scripts:
+        # Concatena con un newline come separatore — preserva l'ordine
+        scripts_block = "\n".join(f"<script>{js}</script>" for js in inline_scripts)
+        # Inserisci subito prima di </body> (case-insensitive)
+        if re.search(r"</body>", html, re.IGNORECASE):
+            html = re.sub(
+                r"</body>",
+                scripts_block + "\n</body>",
+                html, count=1, flags=re.IGNORECASE,
+            )
+        else:
+            # Fallback: append a fine HTML
+            html = html + scripts_block
 
     # 3) Immagini, font, favicon: converti in data URI
     def replace_asset(m: re.Match) -> str:
