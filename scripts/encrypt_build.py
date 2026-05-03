@@ -130,13 +130,13 @@ def _inline_html(index_html: Path) -> str:
     if inline_scripts:
         # Concatena con un newline come separatore — preserva l'ordine
         scripts_block = "\n".join(f"<script>{js}</script>" for js in inline_scripts)
-        # Inserisci subito prima di </body> (case-insensitive)
-        if re.search(r"</body>", html, re.IGNORECASE):
-            html = re.sub(
-                r"</body>",
-                scripts_block + "\n</body>",
-                html, count=1, flags=re.IGNORECASE,
-            )
+        # Inserisci subito prima di </body>. Uso str.replace (non re.sub)
+        # perché il JS minificato contiene \d, \w, ecc. che re.sub
+        # interpreterebbe come backreferences nella replacement string,
+        # generando re.PatternError: bad escape \d.
+        idx = html.lower().rfind("</body>")
+        if idx >= 0:
+            html = html[:idx] + scripts_block + "\n" + html[idx:]
         else:
             # Fallback: append a fine HTML
             html = html + scripts_block
