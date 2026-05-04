@@ -711,6 +711,23 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
         response = await asyncio.to_thread(_create_message, model, 16000)
         used_model = model
     except Exception as model_err:
+        # Circuit breaker: se è un errore di auth/quota, NON tentare il
+        # fallback (sprecherebbe altri token). Errori tipici:
+        #   - 401 Unauthorized: chiave invalida
+        #   - 402 Payment Required / "credit balance is too low"
+        #   - 529 Overloaded: anthropic congestionato
+        err_str = str(model_err).lower()
+        is_auth_quota = any(s in err_str for s in [
+            "401", "402", "429", "quota", "credit balance",
+            "insufficient", "billing", "rate_limit",
+        ])
+        if is_auth_quota:
+            logger.error("[%s][DECISION] Anthropic auth/quota error (%s) — "
+                         "salto fallback model per non sprecare token",
+                         run_id, model_err)
+            # Re-raise → orchestrator catcha → DECISION_ERROR log → throttle
+            raise
+
         if model == DECISION_MODEL:
             logger.warning("[%s][DECISION] %s non disponibile (%s), fallback a %s",
                            run_id, DECISION_MODEL, model_err, DECISION_MODEL_FALLBACK)

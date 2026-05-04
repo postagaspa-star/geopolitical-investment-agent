@@ -106,13 +106,22 @@ def _get_last_decision_time(database) -> datetime | None:
     except Exception:
         pass
 
-    # Fallback: controlla agent_logs
+    # Fallback: controlla agent_logs — qualunque tentativo (success o crash)
+    # IMPORTANTE: il throttle DEVE attivarsi anche se il Decision è crashato.
+    # Prima guardavamo solo DECISION_COMPLETE: se Sonnet falliva (es. quota
+    # API esaurita), il flag non si scriveva → throttle non scattava → loop
+    # infinito di retry ogni 1 min × 8h = $$$. Ora throttiamo su QUALSIASI
+    # log che indichi un tentativo recente:
+    #   - DECISION_COMPLETE (run riuscito)
+    #   - DECISION_ERROR (run crashato — già abbastanza per non riprovare subito)
+    #   - DECISION_CONTEXT (context loaded → tentativo iniziato)
+    #   - watchdog_triggered nell'ORCHESTRATOR (Watchdog ha già triggerato)
     try:
         client = database.get_client()
         if client:
             result = client.table("agent_logs") \
-                .select("timestamp") \
-                .eq("phase", "DECISION_COMPLETE") \
+                .select("timestamp,phase") \
+                .in_("phase", ["DECISION_COMPLETE", "DECISION_ERROR", "DECISION_CONTEXT"]) \
                 .order("timestamp", desc=True) \
                 .limit(1) \
                 .execute()
@@ -124,15 +133,52 @@ def _get_last_decision_time(database) -> datetime | None:
     return None
 
 
+def _count_recent_decision_errors(database, minutes: int = 60) -> int:
+    """
+    Conta i DECISION_ERROR negli ultimi N minuti. Usato per backoff
+    esponenziale: se troppi errori consecutivi, throttle aggressivo.
+    """
+    try:
+        client = database.get_client()
+        if not client:
+            return 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        result = client.table("agent_logs") \
+            .select("id") \
+            .eq("phase", "DECISION_ERROR") \
+            .gte("timestamp", cutoff) \
+            .limit(20) \
+            .execute()
+        return len(result.data or [])
+    except Exception:
+        return 0
+
+
 def _is_throttled(database, throttle_minutes: int = 60) -> bool:
-    """Ritorna True se il Decision Agent ha girato negli ultimi N minuti."""
+    """
+    Ritorna True se il Decision Agent ha tentato di girare negli ultimi N min.
+
+    BACKOFF SU ERRORI: se gli ultimi N minuti contengono 2+ DECISION_ERROR,
+    estende il throttle a 4h (240 min) per evitare di bruciare token su
+    chiamate API che falliscono sistematicamente (es. quota esaurita,
+    chiave invalida, modello deprecato).
+    """
     last = _get_last_decision_time(database)
     if last is None:
         return False
-    elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 60
-    if elapsed < throttle_minutes:
-        logger.debug("Watchdog throttled: Decision ran %.0f min ago (limit %d min)",
-                     elapsed, throttle_minutes)
+    elapsed_min = (datetime.now(timezone.utc) - last).total_seconds() / 60
+
+    # Backoff esponenziale: se 2+ errori recenti, allunga il throttle
+    error_count = _count_recent_decision_errors(database, minutes=60)
+    effective_throttle = throttle_minutes
+    if error_count >= 2:
+        effective_throttle = max(throttle_minutes, 240)  # min 4h
+        logger.info("Watchdog: %d errori Decision in 60min → backoff a %d min",
+                    error_count, effective_throttle)
+
+    if elapsed_min < effective_throttle:
+        logger.debug("Watchdog throttled: ultimo Decision %.0f min fa (limit %d min)",
+                     elapsed_min, effective_throttle)
         return True
     return False
 
