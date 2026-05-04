@@ -86,19 +86,30 @@ def _inline_html(index_html: Path) -> str:
         # Prova senza il prefisso (relative path)
         return None
 
-    # 1) <link rel="stylesheet" href="..."> → <style>...</style>
+    # 1) <link ... rel="stylesheet" ... href="..."> → <style>...</style>
+    # IMPORTANTE: gli attributi possono essere in QUALSIASI ordine. Il React
+    # build di CRA scrive `<link href="X" rel="stylesheet">` (href prima di
+    # rel) → il regex precedente che cercava `rel.*href` non matchava → CSS
+    # non inlinato → app caricava senza stili (visibile come testo nero su
+    # bianco senza layout). Fix: matchamo OGNI <link> e poi controlliamo
+    # entrambi gli attributi indipendentemente dall'ordine.
     def replace_link(m: re.Match) -> str:
-        href = m.group(1)
+        tag = m.group(0)
+        # Verifica che sia un <link rel="stylesheet">
+        if not re.search(r'\brel\s*=\s*["\']stylesheet["\']', tag, re.IGNORECASE):
+            return tag
+        # Estrai href
+        href_m = re.search(r'\bhref\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        if not href_m:
+            return tag
+        href = href_m.group(1)
         f = _resolve(href)
         if not f:
-            return m.group(0)
+            return tag  # esterno (es. fonts.googleapis.com) o non trovato
         css = f.read_text(encoding="utf-8")
         return f"<style>{css}</style>"
 
-    html = re.sub(
-        r'<link[^>]+rel=["\']stylesheet["\'][^>]+href=["\']([^"\']+)["\'][^>]*/?>',
-        replace_link, html,
-    )
+    html = re.sub(r'<link\b[^>]*/?>', replace_link, html)
 
     # 2) <script src="..."></script> → estrai TUTTI i contenuti e accumula
     # per appenderli a fine body. Importante: il React build usa <script defer>
