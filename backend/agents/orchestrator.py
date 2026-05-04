@@ -193,7 +193,20 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         from agents.decision import run_decision_agent
         decision_result = await run_decision_agent(run_id, tech_report)
     except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Decision fallito: %s", run_id, e)
+        # Logga eccezione COMPLETA nel DB (visibile dal frontend) — finora
+        # vedevamo solo "decision: ERROR" senza traceback nel pannello logs.
+        import traceback as _tb
+        tb_str = _tb.format_exc()
+        logger.error("[%s][ORCHESTRATOR] Decision fallito: %s\n%s", run_id, e, tb_str)
+        try:
+            database.insert_agent_log(run_id, "DECISION_ERROR", json.dumps({
+                "event": "decision_exception",
+                "error_type": type(e).__name__,
+                "error_message": str(e)[:500],
+                "traceback": tb_str[:2000],
+            }, default=str))
+        except Exception:
+            pass
         decision_result = {"decision": "ERROR", "trades": [], "error": str(e)}
 
     duration = round(time.time() - start, 1)

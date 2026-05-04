@@ -162,10 +162,14 @@ def _get_recent_headlines(database, minutes: int = 10) -> list[str]:
     return headlines
 
 
-async def _get_price_snapshot() -> dict:
+async def _get_price_snapshot(extra_tickers: list[str] | None = None) -> dict:
     """
     Snapshot rapido prezzi dalla cache price_quotes (aggiornata ogni 10 min
     da price_polling). Molto più veloce che chiamare yfinance ogni minuto.
+
+    Args:
+        extra_tickers: ticker addizionali da includere (tipicamente le
+                       posizioni del portafoglio nel deep-check ogni 3 giri).
     """
     snapshot = {}
     try:
@@ -173,6 +177,13 @@ async def _get_price_snapshot() -> dict:
         tickers = ["SPY", "QQQ", "XOM", "LMT", "GLD", "VIX",
                    "AAPL", "MSFT", "NVDA", "TLT",
                    "BTC-USD", "ETH-USD"]  # crypto incluse — si muovono 24/7
+        if extra_tickers:
+            # dedupa preservando ordine
+            seen = set(tickers)
+            for t in extra_tickers:
+                if t and t not in seen:
+                    tickers.append(t)
+                    seen.add(t)
         # Cache age max 15 min (polling è ogni 10 min, lascio 5 min di margine
         # per evitare buchi se un ciclo di polling tarda).
         cached = await asyncio.to_thread(get_cached_prices_bulk, tickers, 900)
@@ -185,6 +196,70 @@ async def _get_price_snapshot() -> dict:
     except Exception as e:
         logger.debug("Watchdog cache snapshot error: %s", e)
     return snapshot
+
+
+def _get_portfolio_tickers(database) -> list[str]:
+    """Ritorna i ticker delle posizioni aperte attualmente."""
+    try:
+        positions = database.get_positions() or []
+        return [p.get("ticker", "") for p in positions if p.get("ticker")]
+    except Exception:
+        return []
+
+
+def _get_headlines_for_tickers(database, tickers: list[str], minutes: int = 60) -> list[str]:
+    """
+    Cerca nel buffer headlines che menzionano almeno uno dei ticker forniti.
+    Usato ogni 3 giri per il deep-check del portafoglio.
+    """
+    if not tickers:
+        return []
+    headlines = []
+    try:
+        client = database.get_client()
+        if not client:
+            return headlines
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        result = client.table("intelligence_buffer") \
+            .select("micro_summary,raw_content,sentiment_score") \
+            .gte("timestamp", cutoff) \
+            .order("timestamp", desc=True) \
+            .limit(50) \
+            .execute()
+        # Filtra in Python per ticker mention (case-insensitive)
+        ticker_re_parts = [t.upper().split("-")[0] for t in tickers]
+        for rec in (result.data or []):
+            summary = (rec.get("micro_summary") or "")[:200]
+            raw = (rec.get("raw_content") or "")[:400]
+            haystack = (summary + " " + raw).upper()
+            for tk in ticker_re_parts:
+                if tk and tk in haystack:
+                    score = rec.get("sentiment_score", 0)
+                    sign = "+" if (score or 0) >= 0 else ""
+                    headlines.append(f"[{tk} {sign}{score:.2f}] {summary[:140]}")
+                    break  # un match basta per questa card
+            if len(headlines) >= 8:
+                break
+    except Exception as e:
+        logger.debug("Headlines per portfolio fallita: %s", e)
+    return headlines
+
+
+def _increment_watchdog_counter(database) -> int:
+    """
+    Incrementa contatore globale dei run watchdog. Ritorna il nuovo valore.
+    Usato per attivare il portfolio deep-check ogni 3 giri.
+    """
+    try:
+        cur = int(database.get_setting("watchdog_run_counter", "0") or 0)
+    except Exception:
+        cur = 0
+    new = cur + 1
+    try:
+        database.set_setting("watchdog_run_counter", str(new))
+    except Exception:
+        pass
+    return new
 
 
 async def _call_deepseek(context: str) -> dict:
@@ -264,11 +339,33 @@ async def run_watchdog(run_id: str) -> dict:
         }))
         return {"should_trigger": False, "reason": "throttled", "urgency": 0}
 
-    # 2. Raccogli dati in parallelo
-    price_snap, headlines = await asyncio.gather(
-        _get_price_snapshot(),
-        asyncio.to_thread(_get_recent_headlines, database, 10),
-    )
+    # 1b. Counter globale: ogni 3 giri attiviamo il deep-check sul portafoglio
+    #     (prezzi specifici delle posizioni + headlines che le menzionano).
+    #     Tra un deep-check e l'altro, il watchdog usa solo i ticker base
+    #     (SPY/QQQ/MSFT...) per restare ultra-rapido.
+    counter = await asyncio.to_thread(_increment_watchdog_counter, database)
+    deep_check = (counter % 3 == 0)
+    portfolio_tickers: list[str] = []
+    if deep_check:
+        portfolio_tickers = await asyncio.to_thread(_get_portfolio_tickers, database)
+        logger.info("[%s][WATCHDOG] DEEP-CHECK turno (run #%d): %d ticker portfolio %s",
+                    run_id, counter, len(portfolio_tickers), portfolio_tickers)
+
+    # 2. Raccogli dati in parallelo. Nel deep-check passiamo anche i ticker
+    #    del portafoglio per arricchire lo snapshot prezzi e cerchiamo
+    #    headlines specifiche.
+    if deep_check and portfolio_tickers:
+        price_snap, headlines, port_news = await asyncio.gather(
+            _get_price_snapshot(extra_tickers=portfolio_tickers),
+            asyncio.to_thread(_get_recent_headlines, database, 10),
+            asyncio.to_thread(_get_headlines_for_tickers, database, portfolio_tickers, 60),
+        )
+    else:
+        price_snap, headlines = await asyncio.gather(
+            _get_price_snapshot(),
+            asyncio.to_thread(_get_recent_headlines, database, 10),
+        )
+        port_news = []
 
     # 3. Costruisci contesto compatto
     context_parts = []
@@ -300,6 +397,30 @@ async def run_watchdog(run_id: str) -> dict:
     else:
         context_parts.append("RECENT INTELLIGENCE: none in last 10 minutes")
 
+    # DEEP-CHECK ogni 3 giri: focus speciale sulle posizioni del portafoglio
+    if deep_check and portfolio_tickers:
+        port_lines = ["PORTFOLIO STOCKS DEEP-CHECK (every 3 runs):",
+                      f"  Holdings: {', '.join(portfolio_tickers)}"]
+        # prezzi specifici delle posizioni
+        port_prices = []
+        for tk in portfolio_tickers:
+            if tk in price_snap:
+                p = price_snap[tk]
+                port_prices.append(f"    {tk}: ${p['price']} ({p['chg_pct']:+.2f}%)")
+        if port_prices:
+            port_lines.append("  Prices:")
+            port_lines.extend(port_prices)
+        # headlines specifiche per i ticker del portafoglio
+        if port_news:
+            port_lines.append("  News mentioning holdings (last 60min):")
+            port_lines.extend(f"    {h}" for h in port_news[:6])
+        else:
+            port_lines.append("  News: none mentioning holdings in last 60min")
+        port_lines.append("  → If any holding shows >2% adverse move OR negative")
+        port_lines.append("    breaking news: TRIGGER (urgency >= 7) so Decision")
+        port_lines.append("    can decide whether to take profit / stop-loss / re-balance.")
+        context_parts.append("\n".join(port_lines))
+
     context_parts.append(f"Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
     context = "\n\n".join(context_parts)
 
@@ -321,6 +442,9 @@ async def run_watchdog(run_id: str) -> dict:
         "reason": reason,
         "focus_tickers": focus_tickers,
         "elapsed_seconds": elapsed,
+        "deep_check": deep_check,
+        "portfolio_tickers": portfolio_tickers if deep_check else [],
+        "run_counter": counter,
     }))
 
     logger.info("[%s][WATCHDOG] trigger=%s urgency=%d reason='%s' (%.2fs)",
