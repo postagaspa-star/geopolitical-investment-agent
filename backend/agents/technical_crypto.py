@@ -254,12 +254,37 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
                 "summary": f"Dati non disponibili per {tickers}",
                 "per_ticker_errors": per_ticker_errors}
 
-    # 2. Costruisci contesto e chiama DeepSeek-V3
-    context = json.dumps({
+    # 2. Carica documenti crypto (preset + upload utente) — il Technical
+    #    Crypto può sfruttarli come framework di riferimento per pattern,
+    #    on-chain, ecc. Tronchiamo a 12K char totali per non saturare il
+    #    context (V3 ha window ridotta vs R1).
+    crypto_docs_blob = ""
+    try:
+        docs = database.get_document_contents(category="crypto") or []
+        if docs:
+            doc_lines = ["DOCUMENTI CRYPTO DI RIFERIMENTO (estratti):"]
+            chars_so_far = 0
+            for d in docs:
+                fname = d.get("filename", "?")
+                content = (d.get("content") or "")[:1400]
+                snippet = f"--- {fname} ---\n{content}"
+                if chars_so_far + len(snippet) > 12000:
+                    doc_lines.append("[...restanti documenti omessi per limite context]")
+                    break
+                doc_lines.append(snippet)
+                chars_so_far += len(snippet)
+            crypto_docs_blob = "\n\n".join(doc_lines)
+    except Exception as e:
+        logger.debug("[%s][TECH-CRYPTO] Doc loading failed: %s", run_id, e)
+
+    context_payload = {
         "tickers_data": ticker_data,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "instruction": "Analyze these crypto technical indicators. Output JSON only.",
-    }, default=str, ensure_ascii=False)
+        "instruction": "Analyze these crypto technical indicators using the reference docs. Output JSON only.",
+    }
+    context = json.dumps(context_payload, default=str, ensure_ascii=False)
+    if crypto_docs_blob:
+        context = crypto_docs_blob + "\n\n" + "=" * 60 + "\n\n" + context
 
     try:
         response_text, engine = await _call_deepseek(context[:18000])

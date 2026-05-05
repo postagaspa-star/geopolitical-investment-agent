@@ -129,6 +129,9 @@ def _ensure_cs_mirror_columns():
         -- Senza questo UPDATE il filtro WHERE category='generic' li escluderebbe
         -- → Decision normale perderebbe tutti i documenti già caricati.
         UPDATE technical_documents SET category = 'generic' WHERE category IS NULL;
+        -- v8: flag is_preset per i documenti precaricati (PDF crypto forniti
+        -- nei preset_documents/). Non eliminabili dall'UI.
+        ALTER TABLE technical_documents ADD COLUMN IF NOT EXISTS is_preset BOOLEAN DEFAULT FALSE;
     """
 
     try:
@@ -426,20 +429,37 @@ def get_all_settings():
 # Technical Documents
 # ============================================================
 
-def insert_document(filename, content, file_size=0, category="generic"):
+def insert_document(filename, content, file_size=0, category="generic", is_preset=False):
     client = _get_client()
-    payload = {
-        "filename": filename,
-        "content": content,
-        "file_size": file_size,
-    }
-    # Aggiungi category solo se la migration è stata applicata. Tentiamo
-    # con category, fallback senza in caso di colonna mancante.
-    payload_cat = {**payload, "category": category}
+    payload = {"filename": filename, "content": content, "file_size": file_size}
+    payload_full = {**payload, "category": category, "is_preset": is_preset}
     try:
-        client.table("technical_documents").insert(payload_cat).execute()
+        client.table("technical_documents").insert(payload_full).execute()
     except Exception:
-        client.table("technical_documents").insert(payload).execute()
+        try:
+            client.table("technical_documents").insert({**payload, "category": category}).execute()
+        except Exception:
+            client.table("technical_documents").insert(payload).execute()
+
+
+def upsert_preset_document(filename, content, file_size=0, category="crypto"):
+    """Inserisce o aggiorna un preset crypto (idempotente)."""
+    client = _get_client()
+    try:
+        existing = (client.table("technical_documents").select("id")
+                    .eq("filename", filename).eq("is_preset", True).limit(1).execute())
+        if existing.data:
+            client.table("technical_documents").update({
+                "content": content, "file_size": file_size, "category": category,
+            }).eq("id", existing.data[0]["id"]).execute()
+        else:
+            client.table("technical_documents").insert({
+                "filename": filename, "content": content, "file_size": file_size,
+                "category": category, "is_preset": True,
+            }).execute()
+    except Exception as e:
+        import logging as _log
+        _log.getLogger(__name__).warning("upsert_preset_document fallita: %s", e)
 
 
 def get_documents(category=None):
@@ -447,18 +467,25 @@ def get_documents(category=None):
     client = _get_client()
     try:
         q = client.table("technical_documents").select(
-            "id, filename, file_size, uploaded_at, category"
+            "id, filename, file_size, uploaded_at, category, is_preset"
         ).order("uploaded_at", desc=True)
         if category is not None:
             q = q.eq("category", category)
         result = q.execute()
         return result.data or []
     except Exception:
-        # Fallback se colonna category non esiste
-        result = client.table("technical_documents").select(
-            "id, filename, file_size, uploaded_at"
-        ).order("uploaded_at", desc=True).execute()
-        return result.data or []
+        try:
+            q2 = client.table("technical_documents").select(
+                "id, filename, file_size, uploaded_at, category"
+            ).order("uploaded_at", desc=True)
+            if category is not None:
+                q2 = q2.eq("category", category)
+            return q2.execute().data or []
+        except Exception:
+            result = client.table("technical_documents").select(
+                "id, filename, file_size, uploaded_at"
+            ).order("uploaded_at", desc=True).execute()
+            return result.data or []
 
 
 def get_document_contents(category=None):

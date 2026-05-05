@@ -664,19 +664,34 @@ function Settings({ onBack, onDataRefresh }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {documents.filter(d => (d.category || "generic") === "crypto").map((doc, i, arr) => (
+                  {documents.filter(d => (d.category || "generic") === "crypto").map((doc, i, arr) => {
+                    const isPreset = doc.is_preset === true || doc.is_preset === 1;
+                    return (
                     <tr key={doc.id} style={{
                       borderBottom: i < arr.length - 1 ? "1px solid #fce7f3" : "none" }}>
-                      <td style={{ padding: "10px 14px", color: "#111827", fontWeight: 500 }}>{doc.filename}</td>
+                      <td style={{ padding: "10px 14px", color: "#111827", fontWeight: 500 }}>
+                        {doc.filename}
+                        {isPreset && (
+                          <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700,
+                                         padding: "2px 6px", borderRadius: 3,
+                                         background: "#fbcfe8", color: "#9d174d" }}>
+                            PRESET
+                          </span>
+                        )}
+                      </td>
                       <td style={{ padding: "10px 14px", color: "#6b7280" }}>{formatDate(doc.uploaded_at)}</td>
                       <td style={{ padding: "10px 14px", color: "#6b7280" }}>{formatFileSize(doc.file_size)}</td>
                       <td style={{ padding: "10px 14px", textAlign: "center" }}>
-                        <button onClick={() => handleDeleteDoc(doc.id)}
-                          style={{ ...removeBtn, color: "#ef4444", fontSize: "14px", fontWeight: 600 }}
-                          title="Elimina documento crypto">&#10005;</button>
+                        {isPreset ? (
+                          <span title="I preset non sono eliminabili" style={{ color: "#9ca3af", fontSize: 14 }}>🔒</span>
+                        ) : (
+                          <button onClick={() => handleDeleteDoc(doc.id)}
+                            style={{ ...removeBtn, color: "#ef4444", fontSize: "14px", fontWeight: 600 }}
+                            title="Elimina documento crypto">&#10005;</button>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                  );})}
                 </tbody>
               </table>
             </div>

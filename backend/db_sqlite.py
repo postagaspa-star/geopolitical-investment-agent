@@ -177,6 +177,13 @@ def init_db():
             )
         except Exception:
             pass
+        # Colonna is_preset per distinguere documenti precaricati (PDF crypto
+        # forniti dall'utente) da quelli upload manuali. I preset non sono
+        # eliminabili dall'UI per evitare cancellazioni accidentali.
+        try:
+            conn.execute("ALTER TABLE technical_documents ADD COLUMN is_preset INTEGER DEFAULT 0")
+        except Exception:
+            pass
 
 def get_portfolio():
     with get_db() as conn:
@@ -340,13 +347,35 @@ def get_all_settings():
 
 # --- Funzioni per i documenti tecnici ---
 
-def insert_document(filename, content, file_size=0, category="generic"):
+def insert_document(filename, content, file_size=0, category="generic", is_preset=False):
     """Inserisce un nuovo documento tecnico. category: 'generic' o 'crypto'."""
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO technical_documents (filename, content, file_size, category) VALUES (?,?,?,?)",
-            (filename, content, file_size, category),
+            "INSERT INTO technical_documents (filename, content, file_size, category, is_preset) VALUES (?,?,?,?,?)",
+            (filename, content, file_size, category, 1 if is_preset else 0),
         )
+
+def upsert_preset_document(filename, content, file_size=0, category="crypto"):
+    """
+    Inserisce o aggiorna un preset (filename = key univoca).
+    Idempotente — chiamato all'avvio per i documenti in preset_documents/.
+    """
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM technical_documents WHERE filename=? AND COALESCE(is_preset,0)=1",
+            (filename,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE technical_documents SET content=?, file_size=?, category=? WHERE id=?",
+                (content, file_size, category, existing["id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO technical_documents (filename, content, file_size, category, is_preset) "
+                "VALUES (?,?,?,?,1)",
+                (filename, content, file_size, category),
+            )
 
 def get_documents(category=None):
     """
@@ -354,17 +383,18 @@ def get_documents(category=None):
     Se category è specificato, filtra (es. 'generic' o 'crypto').
     """
     with get_db() as conn:
+        cols = ("id, filename, file_size, uploaded_at, "
+                "COALESCE(category,'generic') as category, "
+                "COALESCE(is_preset,0) as is_preset")
         if category is not None:
             rows = conn.execute(
-                "SELECT id, filename, file_size, uploaded_at, COALESCE(category,'generic') as category "
-                "FROM technical_documents WHERE COALESCE(category,'generic')=? "
-                "ORDER BY uploaded_at DESC",
+                f"SELECT {cols} FROM technical_documents "
+                f"WHERE COALESCE(category,'generic')=? ORDER BY uploaded_at DESC",
                 (category,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, filename, file_size, uploaded_at, COALESCE(category,'generic') as category "
-                "FROM technical_documents ORDER BY uploaded_at DESC"
+                f"SELECT {cols} FROM technical_documents ORDER BY uploaded_at DESC"
             ).fetchall()
         return [dict(r) for r in rows]
 

@@ -48,6 +48,31 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Simulator schema init fallita (non bloccante): %s", e)
 
+    # Preset documents crypto: scansiona backend/preset_documents/crypto/
+    # e fa upsert nel DB con is_preset=true. Idempotente: re-run sicuro.
+    try:
+        preset_dir = os.path.join(os.path.dirname(__file__), "preset_documents", "crypto")
+        if os.path.isdir(preset_dir):
+            n_loaded = 0
+            for filename in sorted(os.listdir(preset_dir)):
+                if not filename.lower().endswith((".txt", ".md")):
+                    continue
+                fpath = os.path.join(preset_dir, filename)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    database.upsert_preset_document(
+                        filename=filename, content=content,
+                        file_size=len(content.encode("utf-8")),
+                        category="crypto",
+                    )
+                    n_loaded += 1
+                except Exception as ex:
+                    logger.warning("Errore loading preset %s: %s", filename, ex)
+            logger.info("Preset crypto documenti caricati: %d", n_loaded)
+    except Exception as e:
+        logger.warning("Auto-load preset documents fallito: %s", e)
+
     # Avvia SEMPRE lo scheduler al deploy — il monitoraggio è sempre attivo
     try:
         logger.info("Avvio automatico dello scheduler (sempre attivo al deploy)...")
@@ -855,8 +880,18 @@ async def upload_document(file: UploadFile = File(...), category: str = Query(de
 
 @app.delete("/api/documents/{doc_id}")
 async def remove_document(doc_id: int):
-    """Elimina un documento tecnico per ID."""
+    """Elimina un documento tecnico per ID. Protegge i preset."""
     try:
+        # Blocca delete su documenti preset (precaricati dall'utente come PDF)
+        try:
+            docs = database.get_documents()
+            target = next((d for d in docs if d.get("id") == doc_id), None)
+            if target and (target.get("is_preset") or target.get("is_preset") == 1):
+                return JSONResponse(status_code=403, content={
+                    "error": "Documento preset, non eliminabile dall'UI"
+                })
+        except Exception:
+            pass
         database.delete_document(doc_id)
         return {"status": "deleted", "id": doc_id}
     except Exception as e:
