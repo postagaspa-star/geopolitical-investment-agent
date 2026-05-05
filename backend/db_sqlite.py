@@ -169,6 +169,14 @@ def init_db():
             conn.execute("ALTER TABLE technical_documents ADD COLUMN category TEXT DEFAULT 'generic'")
         except Exception:
             pass
+        # Backfill: documenti pre-existenti possono avere category=NULL anche
+        # se è stata aggiunta la colonna con default — mettiamo 'generic'.
+        try:
+            conn.execute(
+                "UPDATE technical_documents SET category='generic' WHERE category IS NULL"
+            )
+        except Exception:
+            pass
 
 def get_portfolio():
     with get_db() as conn:

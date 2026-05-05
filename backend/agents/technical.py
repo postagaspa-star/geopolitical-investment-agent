@@ -346,11 +346,13 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
         }
 
     # 4. Parse risultato
+    parse_ok = False
     try:
         json_start = response_text.find("{")
         json_end = response_text.rfind("}") + 1
         if json_start >= 0 and json_end > json_start:
             report = json.loads(response_text[json_start:json_end])
+            parse_ok = True
         else:
             report = {"analyses": [], "raw_analysis": response_text}
     except json.JSONDecodeError:
@@ -359,14 +361,27 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     report["engine"] = engine
     report["raw_indicators"] = ticker_data
 
-    # 5. Log
+    # 5. Log con visibilità del contenuto effettivo
+    analyses_summary = []
+    for a in (report.get("analyses") or [])[:6]:
+        analyses_summary.append({
+            "ticker": a.get("ticker"),
+            "signal": a.get("signal"),
+            "trend": a.get("trend"),
+            "confidence": a.get("confidence"),
+        })
     database.insert_agent_log(run_id, "TECH_WORKER",
         json.dumps({
             "event": "technical_analysis_complete",
             "engine": engine,
             "tickers_analyzed": len(report.get("analyses", [])),
             "tickers_requested": len(tickers),
-        }))
+            "json_parsed": parse_ok,
+            "analyses_summary": analyses_summary,
+            "summary_text": (report.get("summary") or "")[:300],
+            # Se parse failed, mostra raw response per debug
+            "raw_preview": "" if parse_ok else (response_text[:400] if response_text else ""),
+        }, default=str))
 
     logger.info("[%s][TECH] Analisi completata via %s: %d ticker",
                 run_id, engine, len(report.get("analyses", [])))

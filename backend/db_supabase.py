@@ -125,6 +125,10 @@ def _ensure_cs_mirror_columns():
             WHERE cs_mirror_status IS NULL;
         -- v7: documenti separati per Decision normale vs Decision Crypto
         ALTER TABLE technical_documents ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'generic';
+        -- backfill: i documenti caricati prima della migration hanno category=NULL.
+        -- Senza questo UPDATE il filtro WHERE category='generic' li escluderebbe
+        -- → Decision normale perderebbe tutti i documenti già caricati.
+        UPDATE technical_documents SET category = 'generic' WHERE category IS NULL;
     """
 
     try:

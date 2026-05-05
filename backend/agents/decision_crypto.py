@@ -228,7 +228,29 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str) -> str:
             except ImportError:
                 pass  # degrade graceful se modulo manca
 
-            current_price = await data_fetchers.fetch_current_price(ticker)
+            # Ottieni current_price: prima la cache price_quotes (60-120s
+            # fresh) per evitare hit yfinance ogni volta. Fallback a
+            # fetch_market_data via thread-pool se cache miss.
+            current_price = None
+            try:
+                from price_polling import get_cached_prices_bulk
+                cached = get_cached_prices_bulk([ticker], max_age_seconds=180)
+                if cached.get(ticker):
+                    current_price = float(cached[ticker]["price"])
+            except Exception:
+                pass
+            if not current_price:
+                try:
+                    loop = asyncio.get_running_loop()
+                    price_data = await loop.run_in_executor(
+                        None, data_fetchers.fetch_market_data, ticker, 5
+                    )
+                    if price_data.get("data"):
+                        current_price = float(price_data["data"][-1]["close"])
+                except Exception as exc:
+                    logger.warning("[%s][DEC-CRYPTO] price fetch failed for %s: %s",
+                                   run_id, ticker, exc)
+
             if not current_price or current_price <= 0:
                 return json.dumps({"error": f"Prezzo non disponibile per {ticker}"})
 

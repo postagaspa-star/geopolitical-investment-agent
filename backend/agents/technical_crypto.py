@@ -95,17 +95,27 @@ def _get_crypto_technical_prompt() -> str:
 
 async def _fetch_crypto_indicators(ticker: str) -> dict:
     """
-    Recupera indicatori tecnici crypto da yfinance.
-    Usa periodo 30 giorni per avere abbastanza dati per RSI/MACD.
+    Recupera indicatori tecnici crypto. Riusa la stessa logica di technical.py
+    (_fetch_ticker_indicators) che è già testata e include yfinance + fallback
+    ClawStreet + cache price_quotes.
+
+    Periodo 90 giorni (default del technical normale) per consistency.
     """
-    import data_fetchers
     try:
-        # Riusa il fetcher generico — yfinance funziona bene con BTC-USD ecc.
-        data = await data_fetchers.fetch_yfinance_indicators(ticker, period_days=30)
-        if data and not data.get("error"):
-            return data
-        return {"ticker": ticker, "error": data.get("error", "no data") if data else "fetch failed"}
+        from agents.technical import _fetch_ticker_indicators
+        data = await _fetch_ticker_indicators(ticker, period_days=90)
+        if data and isinstance(data, dict):
+            # Considera success solo se c'è un current_price valido
+            if data.get("current_price"):
+                return data
+            err = data.get("error", "no current_price")
+            logger.warning("[TECH-CRYPTO] %s no data: %s (source=%s)",
+                           ticker, err, data.get("source", "?"))
+            return {"ticker": ticker, "error": err, "source": data.get("source", "?")}
+        logger.warning("[TECH-CRYPTO] %s _fetch_ticker_indicators returned None/invalid", ticker)
+        return {"ticker": ticker, "error": "fetch returned None"}
     except Exception as exc:
+        logger.error("[TECH-CRYPTO] %s exception: %s", ticker, exc, exc_info=True)
         return {"ticker": ticker, "error": str(exc)[:200]}
 
 
@@ -218,17 +228,31 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
                    if ind and not ind.get("error")}
 
     if not ticker_data:
-        logger.warning("[%s][TECH-CRYPTO] Nessun dato disponibile per i %d ticker",
-                       run_id, len(tickers))
+        # Log dettagliato del PRIMO fail per ogni ticker così capiamo il
+        # root cause (rate limit yfinance / ticker non riconosciuto / ecc.)
+        per_ticker_errors = []
+        for t, ind in zip(tickers, indicators):
+            if isinstance(ind, dict):
+                per_ticker_errors.append({
+                    "ticker": t,
+                    "error": (ind.get("error") or "unknown")[:200],
+                    "source": ind.get("source", "?"),
+                })
+            else:
+                per_ticker_errors.append({"ticker": t, "error": f"non-dict: {type(ind).__name__}"})
+        logger.warning("[%s][TECH-CRYPTO] Nessun dato disponibile per i %d ticker. Errori: %s",
+                       run_id, len(tickers), per_ticker_errors)
         try:
             database.insert_agent_log(run_id, "TECH_CRYPTO", json.dumps({
                 "event": "tech_crypto_no_data",
                 "tickers_requested": tickers,
-            }))
+                "per_ticker_errors": per_ticker_errors,
+            }, default=str))
         except Exception:
             pass
         return {"analyses": [], "engine": "no_data",
-                "summary": f"Dati non disponibili per {tickers}"}
+                "summary": f"Dati non disponibili per {tickers}",
+                "per_ticker_errors": per_ticker_errors}
 
     # 2. Costruisci contesto e chiama DeepSeek-V3
     context = json.dumps({
@@ -254,11 +278,13 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
                 "filtered_count": filtered_count}
 
     # 3. Parse JSON
+    parse_ok = False
     try:
         json_start = response_text.find("{")
         json_end = response_text.rfind("}") + 1
         if json_start >= 0 and json_end > json_start:
             report = json.loads(response_text[json_start:json_end])
+            parse_ok = True
         else:
             report = {"analyses": [], "raw_analysis": response_text}
     except json.JSONDecodeError:
@@ -268,14 +294,28 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
     report["filtered_count"] = filtered_count
     report["tickers_analyzed"] = list(ticker_data.keys())
 
+    # Log con visibilità degli output del modello (signal/trend/confidence)
+    analyses_summary = []
+    for a in (report.get("analyses") or [])[:6]:
+        analyses_summary.append({
+            "ticker": a.get("ticker"),
+            "signal": a.get("signal"),
+            "trend": a.get("trend"),
+            "confidence": a.get("confidence"),
+        })
     try:
         database.insert_agent_log(run_id, "TECH_CRYPTO", json.dumps({
             "event": "tech_crypto_complete",
             "engine": engine,
             "tickers_analyzed": len(ticker_data),
+            "tickers_with_data": list(ticker_data.keys()),
             "tickers_requested": original_count,
             "filtered_out": filtered_count,
-        }))
+            "json_parsed": parse_ok,
+            "analyses_summary": analyses_summary,
+            "summary_text": (report.get("summary") or "")[:300],
+            "raw_preview": "" if parse_ok else (response_text[:400] if response_text else ""),
+        }, default=str))
     except Exception:
         pass
 
