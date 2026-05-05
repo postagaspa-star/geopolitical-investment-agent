@@ -431,16 +431,33 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
             # eventualmente aperte prima di questo controllo).
             try:
                 from clawstreet_universe import is_supported, to_clawstreet_format
+                # VETO CRYPTO: il Decision normale opera SOLO su mercati
+                # tradizionali (equity + ETF commodity). Le crypto sono
+                # dominio esclusivo del Decision Crypto agent (DeepSeek-R1
+                # ogni 1h, 24/7). Reject hard sia BUY sia SELL crypto qui.
+                t_up = (ticker or "").upper()
+                is_crypto = t_up.endswith("-USD") or t_up.startswith("X:")
+                if is_crypto:
+                    error_msg = (
+                        f"REJECTED: '{ticker}' è crypto. Il Decision normale opera "
+                        f"SOLO su equity/ETF tradizionali. Le crypto sono dominio "
+                        f"del Decision Crypto agent (gira ogni 1h con DeepSeek-R1)."
+                    )
+                    database.insert_agent_log(run_id, "DECISION_REJECTED", json.dumps({
+                        "ticker": ticker, "action": action,
+                        "reason": "crypto_outside_decision_domain",
+                    }))
+                    return json.dumps({"error": error_msg, "rejected": True})
+
                 if action == "BUY" and not is_supported(ticker):
                     cs_format = to_clawstreet_format(ticker)
                     error_msg = (
                         f"REJECTED: '{ticker}' (formato ClawStreet: '{cs_format}') "
-                        f"non è nell'universo tradabile ClawStreet (498 simboli: "
-                        f"~484 azioni S&P 500 + 14 crypto + GLD/SLV/USO). "
-                        f"Eseguire questo BUY desincronizzerebbe il portfolio interno "
-                        f"dal portfolio ClawStreet pubblico → leaderboard sballata. "
-                        f"Sostituisci con un ticker supportato dello stesso settore/tema, "
-                        f"oppure usa do_nothing con motivazione."
+                        f"non è nell'universo tradabile ClawStreet (~484 azioni "
+                        f"S&P 500 + GLD/SLV/USO). Eseguire questo BUY desincronizzerebbe "
+                        f"il portfolio interno dal portfolio ClawStreet pubblico → "
+                        f"leaderboard sballata. Sostituisci con un ticker supportato "
+                        f"dello stesso settore/tema, oppure usa do_nothing."
                     )
                     logger.warning(
                         "[%s][DECISION] BUY rejected: %s non supportato su ClawStreet",
@@ -620,10 +637,17 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     # Technical report
     context_loaded["technical"] = bool(tech_report and tech_report.get("analyses"))
 
-    # Documenti tecnici caricati
+    # Documenti tecnici caricati — SOLO categoria 'generic'.
+    # I documenti 'crypto' sono dominio del Decision Crypto agent.
     docs = []
     try:
-        docs = database.get_document_contents()
+        docs = database.get_document_contents(category="generic")
+    except TypeError:
+        # Fallback se vecchia firma senza parametro
+        try:
+            docs = database.get_document_contents()
+        except Exception:
+            pass
     except Exception:
         pass
     context_loaded["documents"] = len(docs) > 0

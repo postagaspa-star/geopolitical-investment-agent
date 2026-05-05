@@ -233,7 +233,96 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
 
 
 # ============================================================
-# Pipeline Decision 24h (scheduled, market closed)
+# Pipeline Crypto (scheduled ogni 1h, 24/7)
+# ============================================================
+
+async def run_crypto_pipeline(run_id: str | None = None) -> dict:
+    """
+    Pipeline crypto-only ogni 1h, 24/7. Bypassa Watchdog.
+
+    Sequenza:
+      1. Technical Crypto (DeepSeek-V3) sul universo crypto top-6
+      2. Decision Crypto (DeepSeek-R1) con tech_report + buffer + doc crypto
+      3. Cooldown 50min per evitare doppi run da test manuali
+
+    Costo per run: ~$0.0006 (Tech V3) + ~$0.006 (Decision R1) ≈ $0.007
+    24 run/giorno × $0.007 = $0.17/giorno ≈ $5/mese
+    """
+    if not run_id:
+        run_id = str(uuid4())
+
+    start = time.time()
+    logger.info("[%s][ORCHESTRATOR] Crypto pipeline avviata", run_id)
+
+    # 1. Cooldown check
+    try:
+        from agents.decision_crypto import is_cooldown_active
+        active, seconds_left = is_cooldown_active()
+        if active:
+            logger.info("[%s][ORCHESTRATOR] Cooldown crypto attivo (%ds) — skip",
+                        run_id, seconds_left)
+            return {"run_id": run_id, "skipped": "cooldown",
+                    "cooldown_seconds_left": seconds_left,
+                    "duration_seconds": round(time.time() - start, 2)}
+    except Exception:
+        pass
+
+    # 2. Tickers default — top 6 crypto liquidità
+    crypto_tickers = ["BTC-USD", "ETH-USD", "SOL-USD",
+                      "DOGE-USD", "AVAX-USD", "LINK-USD"]
+
+    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+        "event": "crypto_pipeline_start",
+        "tickers": crypto_tickers,
+        "trigger_source": "scheduler_1h",
+    }))
+
+    # 3. Technical Crypto
+    try:
+        from agents.technical_crypto import run_crypto_technical
+        tech_report = await run_crypto_technical(run_id, crypto_tickers)
+    except Exception as e:
+        logger.error("[%s][ORCHESTRATOR] Technical Crypto fallito: %s", run_id, e)
+        tech_report = {"analyses": [], "engine": "error", "summary": str(e)}
+
+    # 4. Decision Crypto
+    try:
+        from agents.decision_crypto import run_crypto_decision
+        decision_result = await run_crypto_decision(run_id, tech_report)
+    except Exception as e:
+        import traceback as _tb
+        logger.error("[%s][ORCHESTRATOR] Decision Crypto fallito: %s\n%s",
+                     run_id, e, _tb.format_exc())
+        try:
+            database.insert_agent_log(run_id, "DECISION_CRYPTO_ERROR", json.dumps({
+                "error_type": type(e).__name__,
+                "error_message": str(e)[:500],
+                "traceback": _tb.format_exc()[:2000],
+            }, default=str))
+        except Exception:
+            pass
+        decision_result = {"decision": "ERROR", "trades": [], "error": str(e)}
+
+    duration = round(time.time() - start, 1)
+    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+        "event": "crypto_pipeline_complete",
+        "tech_engine": tech_report.get("engine", "?"),
+        "decision": decision_result.get("decision", "UNKNOWN"),
+        "trades": len(decision_result.get("trades", [])),
+        "duration_seconds": duration,
+    }))
+
+    return {
+        "run_id": run_id,
+        "tech_engine": tech_report.get("engine", "?"),
+        "decision": decision_result.get("decision", "UNKNOWN"),
+        "trades": decision_result.get("trades", []),
+        "duration_seconds": duration,
+    }
+
+
+# ============================================================
+# Pipeline Decision 24h (DEPRECATED - sostituita da run_crypto_pipeline)
 # ============================================================
 
 async def run_scheduled_24h_pipeline(run_id: str | None = None) -> dict:

@@ -123,6 +123,8 @@ def _ensure_cs_mirror_columns():
             WHERE cs_mirror_status IN ('pending', 'failed');
         UPDATE trades SET cs_mirror_status = 'legacy_unknown'
             WHERE cs_mirror_status IS NULL;
+        -- v7: documenti separati per Decision normale vs Decision Crypto
+        ALTER TABLE technical_documents ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'generic';
     """
 
     try:
@@ -420,25 +422,57 @@ def get_all_settings():
 # Technical Documents
 # ============================================================
 
-def insert_document(filename, content, file_size=0):
+def insert_document(filename, content, file_size=0, category="generic"):
     client = _get_client()
-    client.table("technical_documents").insert({
+    payload = {
         "filename": filename,
         "content": content,
         "file_size": file_size,
-    }).execute()
+    }
+    # Aggiungi category solo se la migration è stata applicata. Tentiamo
+    # con category, fallback senza in caso di colonna mancante.
+    payload_cat = {**payload, "category": category}
+    try:
+        client.table("technical_documents").insert(payload_cat).execute()
+    except Exception:
+        client.table("technical_documents").insert(payload).execute()
 
 
-def get_documents():
+def get_documents(category=None):
+    """Lista documenti. Se category specificata ('generic' o 'crypto'), filtra."""
     client = _get_client()
-    result = client.table("technical_documents").select("id, filename, file_size, uploaded_at").order("uploaded_at", desc=True).execute()
-    return result.data or []
+    try:
+        q = client.table("technical_documents").select(
+            "id, filename, file_size, uploaded_at, category"
+        ).order("uploaded_at", desc=True)
+        if category is not None:
+            q = q.eq("category", category)
+        result = q.execute()
+        return result.data or []
+    except Exception:
+        # Fallback se colonna category non esiste
+        result = client.table("technical_documents").select(
+            "id, filename, file_size, uploaded_at"
+        ).order("uploaded_at", desc=True).execute()
+        return result.data or []
 
 
-def get_document_contents():
+def get_document_contents(category=None):
+    """Contenuti documenti per iniezione nel prompt. Filtra per category se specificata."""
     client = _get_client()
-    result = client.table("technical_documents").select("id, filename, content").order("uploaded_at").execute()
-    return result.data or []
+    try:
+        q = client.table("technical_documents").select(
+            "id, filename, content, category"
+        ).order("uploaded_at")
+        if category is not None:
+            q = q.eq("category", category)
+        result = q.execute()
+        return result.data or []
+    except Exception:
+        result = client.table("technical_documents").select(
+            "id, filename, content"
+        ).order("uploaded_at").execute()
+        return result.data or []
 
 
 def delete_document(doc_id):

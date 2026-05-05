@@ -24,18 +24,23 @@ const PROMPT_AGENTS = [
   },
   {
     key: "prompt_technical",
-    label: "Technical (DeepSeek-V3)",
-    description: "Esegue analisi tecnica quantitativa quando il Watchdog triggera la pipeline.",
+    label: "Technical (DeepSeek-V3) — equity/ETF",
+    description: "Analisi tecnica sui mercati tradizionali (azioni S&P 500 + GLD/SLV/USO). Triggerato dal Watchdog. NON opera su crypto.",
   },
   {
     key: "prompt_decision",
-    label: "Decision (Sonnet 4.5) — orari di mercato",
-    description: "Decide buy/sell/hold incrociando geopolitica + tecnico durante le ore di apertura di NYSE/LSE/XETRA. Max 1 esecuzione/ora.",
+    label: "Decision (Sonnet 4.5) — equity/ETF",
+    description: "Decide buy/sell/hold sui mercati tradizionali durante orari NYSE/LSE/XETRA. Max 1 esecuzione/ora. NON opera su crypto.",
   },
   {
-    key: "prompt_decision_r1",
-    label: "Decision R1 (DeepSeek-R1) — overnight crypto",
-    description: "Subentra a Sonnet 4.5 quando i mercati equity sono chiusi (notti, weekend). Focus crypto 24/7. Max 1 esecuzione ogni 2h30.",
+    key: "prompt_technical_crypto",
+    label: "Technical Crypto (DeepSeek-V3) — 24/7",
+    description: "Analisi tecnica focalizzata SOLO sui 14 ticker crypto ClawStreet (BTC, ETH, SOL, ecc.). Gira ogni ora 24/7 indipendentemente dal Watchdog.",
+  },
+  {
+    key: "prompt_decision_crypto",
+    label: "Decision Crypto (DeepSeek-R1 reasoning) — 24/7",
+    description: "Decisional autonomo focalizzato SOLO sulle crypto ClawStreet-supported. Riceve il Technical Crypto + buffer + documenti crypto-specifici. Gira ogni ora 24/7.",
   },
 ];
 
@@ -43,18 +48,20 @@ function Settings({ onBack, onDataRefresh }) {
   // === Diagnostica ===
   const [diagnostics, setDiagnostics] = useState(INITIAL_DIAGNOSTICS);
 
-  // === Prompt per i 4 agenti ===
+  // === Prompt per i 5 agenti ===
   const [prompts, setPrompts] = useState({
     prompt_scout: "",
     prompt_technical: "",
     prompt_decision: "",
-    prompt_decision_r1: "",
+    prompt_technical_crypto: "",
+    prompt_decision_crypto: "",
   });
   const [promptDefaults, setPromptDefaults] = useState({
     prompt_scout: "",
     prompt_technical: "",
     prompt_decision: "",
-    prompt_decision_r1: "",
+    prompt_technical_crypto: "",
+    prompt_decision_crypto: "",
   });
 
   // === Documenti ===
@@ -122,7 +129,10 @@ function Settings({ onBack, onDataRefresh }) {
   useEffect(() => {
     const loadAll = async () => {
       // Prima carico i default — servono come fallback se il custom e' vuoto
-      let defaults = { prompt_scout: "", prompt_technical: "", prompt_decision: "", prompt_decision_r1: "" };
+      let defaults = {
+        prompt_scout: "", prompt_technical: "", prompt_decision: "",
+        prompt_technical_crypto: "", prompt_decision_crypto: "",
+      };
       try {
         const res = await fetch(`${API}/api/settings/prompt-defaults`);
         if (res.ok) {
@@ -131,7 +141,8 @@ function Settings({ onBack, onDataRefresh }) {
             prompt_scout: data.prompt_scout || "",
             prompt_technical: data.prompt_technical || "",
             prompt_decision: data.prompt_decision || "",
-            prompt_decision_r1: data.prompt_decision_r1 || "",
+            prompt_technical_crypto: data.prompt_technical_crypto || "",
+            prompt_decision_crypto: data.prompt_decision_crypto || "",
           };
           setPromptDefaults(defaults);
         }
@@ -150,7 +161,8 @@ function Settings({ onBack, onDataRefresh }) {
             prompt_scout: (data.prompt_scout && data.prompt_scout.trim()) || defaults.prompt_scout || "",
             prompt_technical: (data.prompt_technical && data.prompt_technical.trim()) || defaults.prompt_technical || "",
             prompt_decision: (data.prompt_decision && data.prompt_decision.trim()) || defaults.prompt_decision || "",
-            prompt_decision_r1: (data.prompt_decision_r1 && data.prompt_decision_r1.trim()) || defaults.prompt_decision_r1 || "",
+            prompt_technical_crypto: (data.prompt_technical_crypto && data.prompt_technical_crypto.trim()) || defaults.prompt_technical_crypto || "",
+            prompt_decision_crypto: (data.prompt_decision_crypto && data.prompt_decision_crypto.trim()) || defaults.prompt_decision_crypto || "",
           });
         }
       } catch (err) {
@@ -247,18 +259,19 @@ function Settings({ onBack, onDataRefresh }) {
   };
 
   // === Documenti ===
-  const handleFileUpload = async (e) => {
+  // category: 'generic' (default, mercati tradizionali) | 'crypto' (Decision Crypto)
+  const handleFileUpload = async (e, category = "generic") => {
     const file = e.target.files[0];
     if (!file) return;
     const formData = new FormData();
     formData.append("file", file);
     try {
-      const res = await fetch(`${API}/api/documents/upload`, {
+      const res = await fetch(`${API}/api/documents/upload?category=${encodeURIComponent(category)}`, {
         method: "POST",
         body: formData,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      showMessage("Documento caricato con successo");
+      showMessage(`Documento ${category === "crypto" ? "CRYPTO" : "generico"} caricato con successo`);
       const docs = await loadDocumentsRaw();
       setDiagItem("documents", "ok",
         `${docs.length} ${docs.length !== 1 ? "documenti caricati" : "documento caricato"}`);
@@ -566,18 +579,22 @@ function Settings({ onBack, onDataRefresh }) {
           ))}
         </div>
 
-        {/* === DOCUMENTI === */}
+        {/* === DOCUMENTI GENERICI (Equity / ETF) === */}
         <div style={cardStyle}>
-          <div style={sectionTitle}>Documenti di Analisi Tecnica</div>
+          <div style={sectionTitle}>Documenti — Mercati Tradizionali (Equity/ETF)</div>
+          <p style={{ color: "#6b7280", fontSize: "0.85rem", margin: "0 0 14px 0" }}>
+            Caricati nel context del Decision normale (Sonnet 4.5) e del Technical normale.
+            NON visibili al Decision Crypto.
+          </p>
 
           <input type="file" accept=".pdf,.txt" ref={fileInputRef}
-            onChange={handleFileUpload} style={{ display: "none" }} />
+            onChange={(e) => handleFileUpload(e, "generic")} style={{ display: "none" }} />
           <button style={{ ...btnPrimary, marginBottom: "16px" }}
             onClick={() => fileInputRef.current?.click()}>
-            Carica Documento
+            Carica Documento Generico
           </button>
 
-          {documents.length > 0 ? (
+          {documents.filter(d => (d.category || "generic") === "generic").length > 0 ? (
             <div style={{ borderRadius: "8px", overflow: "hidden", border: "1px solid #e5e7eb" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
                 <thead>
@@ -592,9 +609,9 @@ function Settings({ onBack, onDataRefresh }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {documents.map((doc, i) => (
+                  {documents.filter(d => (d.category || "generic") === "generic").map((doc, i, arr) => (
                     <tr key={doc.id} style={{
-                      borderBottom: i < documents.length - 1 ? "1px solid #f3f4f6" : "none" }}>
+                      borderBottom: i < arr.length - 1 ? "1px solid #f3f4f6" : "none" }}>
                       <td style={{ padding: "10px 14px", color: "#111827", fontWeight: 500 }}>{doc.filename}</td>
                       <td style={{ padding: "10px 14px", color: "#6b7280" }}>{formatDate(doc.uploaded_at)}</td>
                       <td style={{ padding: "10px 14px", color: "#6b7280" }}>{formatFileSize(doc.file_size)}</td>
@@ -611,7 +628,62 @@ function Settings({ onBack, onDataRefresh }) {
           ) : (
             <div style={{ padding: "24px", textAlign: "center", color: "#9ca3af",
               fontSize: "14px", background: "#f9fafb", borderRadius: "8px",
-              border: "1px dashed #e5e7eb" }}>Nessun documento caricato</div>
+              border: "1px dashed #e5e7eb" }}>Nessun documento generico caricato</div>
+          )}
+        </div>
+
+        {/* === DOCUMENTI CRYPTO === */}
+        <div style={cardStyle}>
+          <div style={sectionTitle}>Documenti — Crypto-only (per Decision Crypto)</div>
+          <p style={{ color: "#6b7280", fontSize: "0.85rem", margin: "0 0 14px 0" }}>
+            Caricati ESCLUSIVAMENTE nel context del Decision Crypto (DeepSeek-R1).
+            Ideali per: framework on-chain, strategie altcoin, piani di entry/exit
+            su BTC/ETH, regole di stop-loss crypto-specifiche, tabelle di liquidazione.
+          </p>
+
+          <input type="file" accept=".pdf,.txt" id="cryptoFileInput"
+            onChange={(e) => handleFileUpload(e, "crypto")} style={{ display: "none" }} />
+          <button style={{ ...btnPrimary, marginBottom: "16px",
+                           background: "#f472b6", borderColor: "#f472b6" }}
+            onClick={() => document.getElementById("cryptoFileInput")?.click()}>
+            Carica Documento Crypto
+          </button>
+
+          {documents.filter(d => (d.category || "generic") === "crypto").length > 0 ? (
+            <div style={{ borderRadius: "8px", overflow: "hidden", border: "1px solid #fbcfe8" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
+                <thead>
+                  <tr style={{ background: "#fdf2f8" }}>
+                    <th style={{ textAlign: "left", padding: "10px 14px", fontWeight: 500,
+                      color: "#9d174d", fontSize: "13px", borderBottom: "1px solid #fbcfe8" }}>Nome File</th>
+                    <th style={{ textAlign: "left", padding: "10px 14px", fontWeight: 500,
+                      color: "#9d174d", fontSize: "13px", borderBottom: "1px solid #fbcfe8" }}>Data Upload</th>
+                    <th style={{ textAlign: "left", padding: "10px 14px", fontWeight: 500,
+                      color: "#9d174d", fontSize: "13px", borderBottom: "1px solid #fbcfe8" }}>Dimensione</th>
+                    <th style={{ width: "40px", borderBottom: "1px solid #fbcfe8" }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {documents.filter(d => (d.category || "generic") === "crypto").map((doc, i, arr) => (
+                    <tr key={doc.id} style={{
+                      borderBottom: i < arr.length - 1 ? "1px solid #fce7f3" : "none" }}>
+                      <td style={{ padding: "10px 14px", color: "#111827", fontWeight: 500 }}>{doc.filename}</td>
+                      <td style={{ padding: "10px 14px", color: "#6b7280" }}>{formatDate(doc.uploaded_at)}</td>
+                      <td style={{ padding: "10px 14px", color: "#6b7280" }}>{formatFileSize(doc.file_size)}</td>
+                      <td style={{ padding: "10px 14px", textAlign: "center" }}>
+                        <button onClick={() => handleDeleteDoc(doc.id)}
+                          style={{ ...removeBtn, color: "#ef4444", fontSize: "14px", fontWeight: 600 }}
+                          title="Elimina documento crypto">&#10005;</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div style={{ padding: "24px", textAlign: "center", color: "#9ca3af",
+              fontSize: "14px", background: "#fdf2f8", borderRadius: "8px",
+              border: "1px dashed #fbcfe8" }}>Nessun documento crypto caricato</div>
           )}
         </div>
 

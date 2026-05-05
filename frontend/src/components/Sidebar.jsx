@@ -25,7 +25,8 @@ const AGENT_LABELS = {
   scout: { name: 'Scout', tone: '#a78bfa' },
   technical: { name: 'Technical', tone: '#06b6d4' },
   decision: { name: 'Decision', tone: '#10b981' },
-  decision_24h: { name: 'Decision 24h', tone: '#f472b6' },
+  technical_crypto: { name: 'Technical Crypto', tone: '#0891b2' },
+  decision_crypto: { name: 'Decision Crypto', tone: '#f472b6' },
 };
 
 // Portafoglio denominato in USD (yfinance/Massive ritornano sempre USD;
@@ -66,7 +67,18 @@ function AgentRow({ agentKey, info, tick }) {
   const meta = AGENT_LABELS[agentKey] || { name: agentKey, tone: '#9ca3af' };
   const nextRun = info?.next_run;
   const lastRun = info?.last_run;
+  const lastAttempt = info?.last_attempt;
   const active = !!info?.active;
+
+  // Warning: c'è un tentativo PIÙ RECENTE dell'ultimo successo → fallimenti
+  // recenti. Esempio: last_run = 11h fa ma last_attempt = 2m fa → l'agent
+  // sta crashando da 11h.
+  let attemptWarn = false;
+  if (lastAttempt && lastRun) {
+    attemptWarn = new Date(lastAttempt) > new Date(lastRun);
+  } else if (lastAttempt && !lastRun) {
+    attemptWarn = true;
+  }
 
   // Mostra il countdown se c'e' un next_run; altrimenti "ultimo: 5m fa"; altrimenti "in attesa"
   let statusText;
@@ -75,8 +87,8 @@ function AgentRow({ agentKey, info, tick }) {
     statusText = `tra ${formatCountdown(nextRun)}`;
     statusColor = '#94a3b8';
   } else if (lastRun) {
-    statusText = `ultimo: ${formatTimeAgo(lastRun)}`;
-    statusColor = '#64748b';
+    statusText = `ok: ${formatTimeAgo(lastRun)}`;
+    statusColor = attemptWarn ? '#ef4444' : '#64748b';
   } else {
     statusText = active ? 'in attesa di trigger' : 'inattivo';
     statusColor = '#64748b';
@@ -100,7 +112,7 @@ function AgentRow({ agentKey, info, tick }) {
       <span style={{
         color: active ? '#e2e8f0' : '#94a3b8',
         fontWeight: 500,
-        minWidth: '70px',
+        minWidth: '90px',
       }}>
         {meta.name}
       </span>
@@ -113,6 +125,18 @@ function AgentRow({ agentKey, info, tick }) {
       }}>
         {statusText}
       </span>
+      {attemptWarn && (
+        <span title={`Tentativo fallito: ${formatTimeAgo(lastAttempt)} fa`}
+              style={{
+                fontSize: '0.65rem',
+                color: '#ef4444',
+                fontWeight: 700,
+                marginLeft: 'auto',
+                whiteSpace: 'nowrap',
+              }}>
+          ⚠ FAIL {formatTimeAgo(lastAttempt)}
+        </span>
+      )}
     </div>
   );
 }
@@ -236,7 +260,8 @@ export default function Sidebar({
   const pnlPct = initialCapital > 0 ? ((totalValue - initialCapital) / initialCapital) * 100 : 0;
   const pnlPositive = pnlPct >= 0;
 
-  const agentOrder = ['watchdog', 'scout', 'technical', 'decision', 'decision_24h'];
+  const agentOrder = ['watchdog', 'scout', 'technical', 'decision',
+                       'technical_crypto', 'decision_crypto'];
 
   return (
     <>

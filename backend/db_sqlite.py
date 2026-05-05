@@ -162,6 +162,14 @@ def init_db():
             except Exception:
                 pass  # colonna già esistente
 
+        # ── Migrazione documenti: aggiunta colonna category ──
+        # Permette di separare documenti generici (per Decision normale)
+        # da documenti crypto-specific (per Decision Crypto).
+        try:
+            conn.execute("ALTER TABLE technical_documents ADD COLUMN category TEXT DEFAULT 'generic'")
+        except Exception:
+            pass
+
 def get_portfolio():
     with get_db() as conn:
         row = conn.execute("SELECT * FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
@@ -324,23 +332,53 @@ def get_all_settings():
 
 # --- Funzioni per i documenti tecnici ---
 
-def insert_document(filename, content, file_size=0):
-    """Inserisce un nuovo documento tecnico."""
+def insert_document(filename, content, file_size=0, category="generic"):
+    """Inserisce un nuovo documento tecnico. category: 'generic' o 'crypto'."""
     with get_db() as conn:
-        conn.execute("INSERT INTO technical_documents (filename, content, file_size) VALUES (?,?,?)",
-                     (filename, content, file_size))
+        conn.execute(
+            "INSERT INTO technical_documents (filename, content, file_size, category) VALUES (?,?,?,?)",
+            (filename, content, file_size, category),
+        )
 
-def get_documents():
-    """Restituisce tutti i documenti tecnici (senza contenuto completo per la lista)."""
+def get_documents(category=None):
+    """
+    Restituisce tutti i documenti tecnici (lista, senza contenuto completo).
+    Se category è specificato, filtra (es. 'generic' o 'crypto').
+    """
     with get_db() as conn:
-        return [dict(r) for r in conn.execute(
-            "SELECT id, filename, file_size, uploaded_at FROM technical_documents ORDER BY uploaded_at DESC").fetchall()]
+        if category is not None:
+            rows = conn.execute(
+                "SELECT id, filename, file_size, uploaded_at, COALESCE(category,'generic') as category "
+                "FROM technical_documents WHERE COALESCE(category,'generic')=? "
+                "ORDER BY uploaded_at DESC",
+                (category,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, filename, file_size, uploaded_at, COALESCE(category,'generic') as category "
+                "FROM technical_documents ORDER BY uploaded_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
-def get_document_contents():
-    """Restituisce il contenuto di tutti i documenti tecnici (per iniezione nel prompt)."""
+def get_document_contents(category=None):
+    """
+    Restituisce il contenuto dei documenti per iniezione nel prompt.
+    Se category è specificato, filtra (es. 'crypto' per Decision Crypto).
+    """
     with get_db() as conn:
-        return [dict(r) for r in conn.execute(
-            "SELECT id, filename, content FROM technical_documents ORDER BY uploaded_at ASC").fetchall()]
+        if category is not None:
+            rows = conn.execute(
+                "SELECT id, filename, content, COALESCE(category,'generic') as category "
+                "FROM technical_documents WHERE COALESCE(category,'generic')=? "
+                "ORDER BY uploaded_at ASC",
+                (category,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, filename, content, COALESCE(category,'generic') as category "
+                "FROM technical_documents ORDER BY uploaded_at ASC"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
 def delete_document(doc_id):
     """Elimina un documento tecnico per ID."""

@@ -329,33 +329,32 @@ async def _scout_4d_report_job():
         logger.error("Errore Scout 4D: %s", e, exc_info=True)
 
 
-async def _decision_24h_scheduled_job():
+async def _crypto_pipeline_job():
     """
-    Decision 24h scheduled — ogni 2h30, market-closed only.
+    Crypto pipeline — ogni 1h, 24/7.
 
-    Bypassa il Watchdog: gira a tempo fisso, non a evento. Esegue Technical
-    (DeepSeek-V3) + Decision (DeepSeek-R1) con focus default crypto top-3.
+    Pipeline indipendente focalizzata SOLO su crypto ClawStreet-supported:
+      1. Technical Crypto (DeepSeek-V3) su top-6 crypto liquidità
+      2. Decision Crypto (DeepSeek-R1 reasoning) con context crypto-only
 
-    Skip automatico se:
-      - Mercati equity aperti (Sonnet attivo, no necessità di R1)
-      - Cooldown R1 ancora non scaduto
+    NON dipende da Watchdog. NON usa Anthropic. Cooldown 50min interno.
 
-    Costo: ~$0.007/run × ~10 run/giorno overnight = ~$0.07/giorno.
+    Costo: ~$0.007/run × 24 run/giorno = ~$0.17/giorno (~$5/mese).
     """
     try:
-        from agents.orchestrator import run_scheduled_24h_pipeline
+        from agents.orchestrator import run_crypto_pipeline
         from uuid import uuid4
         run_id = str(uuid4())
-        result = await run_scheduled_24h_pipeline(run_id=run_id)
+        result = await run_crypto_pipeline(run_id=run_id)
         if result.get("skipped"):
-            logger.debug("[%s] Decision 24h scheduled: skipped (%s)",
+            logger.debug("[%s] Crypto pipeline skipped: %s",
                          run_id, result["skipped"])
         else:
-            logger.info("[%s] Decision 24h scheduled completed: %s, trades=%d",
+            logger.info("[%s] Crypto pipeline OK: %s, trades=%d",
                         run_id, result.get("decision", "?"),
                         len(result.get("trades", [])))
     except Exception as e:
-        logger.error("Errore Decision 24h scheduled: %s", e, exc_info=True)
+        logger.error("Errore crypto pipeline: %s", e, exc_info=True)
 
 
 async def _clawstreet_mirror_retry_job():
@@ -544,17 +543,16 @@ def start_scheduler() -> AsyncIOScheduler:
     )
 
 
-    # ── Decision 24h scheduled: ogni 2h30, market-closed only ──
-    # Garantisce che il Decision R1 giri a tempo fisso quando i mercati sono
-    # chiusi, anche se il Watchdog non triggera (evento più frequente nelle
-    # festività e nei weekend, dove il Watchdog ha meno news rilevanti).
-    # Skip automatico se mercato aperto (Sonnet attivo) o cooldown attivo.
+    # ── Crypto pipeline: ogni 1h, 24/7 ──
+    # Pipeline crypto-only indipendente dal Watchdog. Tech V3 + Decision R1.
+    # Sostituisce il vecchio decision_24h_scheduled (eliminato perché
+    # market-closed only e troppo intrecciato col Decision normale).
     _scheduler.add_job(
-        _decision_24h_scheduled_job,
+        _crypto_pipeline_job,
         trigger="interval",
-        minutes=150,   # 2h30
-        id="decision_24h_scheduled",
-        name="Decision 24h scheduled (2h30, market-closed only, R1)",
+        minutes=60,
+        id="crypto_pipeline_job",
+        name="Crypto pipeline (1h, 24/7, V3+R1)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
@@ -665,7 +663,7 @@ def get_scheduler_info() -> dict:
     scout_next = None
     scout_8h_next = None
     scout_4d_next = None
-    decision_24h_next = None
+    crypto_pipeline_next = None
     if _scheduler and running:
         wj = _scheduler.get_job("watchdog_job")
         if wj and wj.next_run_time:
@@ -679,9 +677,9 @@ def get_scheduler_info() -> dict:
         s4 = _scheduler.get_job("scout_4d_report")
         if s4 and s4.next_run_time:
             scout_4d_next = s4.next_run_time.isoformat()
-        d24 = _scheduler.get_job("decision_24h_scheduled")
-        if d24 and d24.next_run_time:
-            decision_24h_next = d24.next_run_time.isoformat()
+        cj = _scheduler.get_job("crypto_pipeline_job")
+        if cj and cj.next_run_time:
+            crypto_pipeline_next = cj.next_run_time.isoformat()
 
     # --- Per i job on-demand cerchiamo l'ultimo log corrispondente ---
     watchdog_last = _last_log_for_phases(["WATCHDOG_"])
@@ -691,16 +689,20 @@ def get_scheduler_info() -> dict:
     technical_last = _last_log_for_phases(["TECH_", "TECHNICAL_"])
 
     # --- Decision split: Sonnet (orari mercato) vs R1 (overnight crypto) ---
-    # Letto dai setting key aggiornati da decision.py dopo ogni run completato.
-    # Sicurezza: se i setting non esistono ancora (DB pulito), fall back ai
-    # log generici.
+    # last_run = ultimo run COMPLETATO con successo (DECISION_COMPLETE)
+    # last_attempt = ultimo TENTATIVO (anche fallito) — per warning UI
     try:
         decision_sonnet_last = (database.get_setting("last_decision_sonnet_run_at", "")
-                                or _last_log_for_phases(["DECISION_"]))
+                                or _last_log_for_phases(["DECISION_COMPLETE"]))
         decision_r1_last = database.get_setting("last_decision_r1_run_at", "") or None
+        # Ultimo tentativo (success o fail). Se diverso da last_run → warning UI.
+        decision_last_attempt = _last_log_for_phases([
+            "DECISION_COMPLETE", "DECISION_ERROR", "DECISION_CONTEXT",
+        ])
     except Exception:
-        decision_sonnet_last = _last_log_for_phases(["DECISION_"])
+        decision_sonnet_last = _last_log_for_phases(["DECISION_COMPLETE"])
         decision_r1_last = None
+        decision_last_attempt = None
 
     agents = {
         "watchdog": {
@@ -728,25 +730,34 @@ def get_scheduler_info() -> dict:
             "active": running,
         },
         "technical": {
-            "schedule": "ogni 2h30 + on-demand watchdog (DeepSeek-V3, sempre attivo)",
-            # next_run = il prossimo trigger scheduled certo (ogni 2h30 con Decision 24h);
-            # il Watchdog può comunque triggerarlo prima durante orari di mercato.
-            "next_run": decision_24h_next,
+            "schedule": "on-demand watchdog (DeepSeek-V3, mercati equity)",
+            "next_run": None,
             "last_run": technical_last,
-            "active": running,
+            "active": running and market_open,
         },
         "decision": {
             "schedule": "on-demand orari mercato (Sonnet 4.5, max 1/ora)",
             "next_run": None,
             "last_run": decision_sonnet_last,
+            "last_attempt": decision_last_attempt,   # warning UI se diverso da last_run
             "active": running and market_open,
             "model": "claude-sonnet-4-5",
         },
-        "decision_24h": {
-            "schedule": "ogni 2h30 quando mercati chiusi (DeepSeek-R1, scheduled)",
-            "next_run": decision_24h_next,
-            "last_run": decision_r1_last,
-            "active": running and not market_open,
+        "technical_crypto": {
+            "schedule": "ogni 1h, 24/7 (DeepSeek-V3, solo crypto ClawStreet)",
+            "next_run": crypto_pipeline_next,
+            "last_run": _last_log_for_phases(["TECH_CRYPTO"]),
+            "active": running,
+            "model": "deepseek-v3",
+        },
+        "decision_crypto": {
+            "schedule": "ogni 1h, 24/7 (DeepSeek-R1 reasoning, solo crypto)",
+            "next_run": crypto_pipeline_next,
+            "last_run": _last_log_for_phases(["DECISION_CRYPTO_COMPLETE"]),
+            "last_attempt": _last_log_for_phases([
+                "DECISION_CRYPTO_COMPLETE", "DECISION_CRYPTO_ERROR", "DECISION_CRYPTO_CONTEXT",
+            ]),
+            "active": running,
             "model": "deepseek-r1",
         },
     }
