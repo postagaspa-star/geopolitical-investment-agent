@@ -282,21 +282,28 @@ export default function Sidebar({
         {/* Navigation */}
         <nav className="sidebar-nav">
           <NavLink to="/" end
+            className="nav-link"
+            onClick={onCloseSidebar}
+            style={{ fontSize: "0.78rem", color: "#94a3b8" }}
+            title="Torna alla scelta Live/Simulator">
+            ← Indietro
+          </NavLink>
+          <NavLink to="/live" end
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             onClick={onCloseSidebar}>
             <LayoutDashboard /> Dashboard
           </NavLink>
-          <NavLink to="/intelligence"
+          <NavLink to="/live/intelligence"
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             onClick={onCloseSidebar}>
             <Brain /> Intelligence
           </NavLink>
-          <NavLink to="/analytics"
+          <NavLink to="/live/analytics"
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             onClick={onCloseSidebar}>
             <BarChart3 /> Analytics
           </NavLink>
-          <NavLink to="/settings"
+          <NavLink to="/live/settings"
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             onClick={onCloseSidebar}>
             <Settings /> Impostazioni

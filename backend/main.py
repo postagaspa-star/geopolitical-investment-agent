@@ -41,6 +41,13 @@ async def lifespan(app: FastAPI):
     database.init_db()
     logger.info("Database inizializzato con successo.")
 
+    # Schema Simulator (idempotente, fail-safe)
+    try:
+        from simulator import db as sim_db
+        sim_db.ensure_schema()
+    except Exception as e:
+        logger.warning("Simulator schema init fallita (non bloccante): %s", e)
+
     # Avvia SEMPRE lo scheduler al deploy — il monitoraggio è sempre attivo
     try:
         logger.info("Avvio automatico dello scheduler (sempre attivo al deploy)...")
@@ -520,6 +527,224 @@ async def save_settings(payload: SettingsPayload):
     except Exception as e:
         logger.error(f"Errore nel salvataggio delle impostazioni: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SIMULATOR — endpoint
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/simulator/scenarios")
+async def sim_scenarios(category: str = Query(...)):
+    """Lista scenari disponibili per categoria (senza reveal)."""
+    from simulator import scenarios as _scn
+    return _scn.get_scenarios_by_category(category)
+
+
+@app.get("/api/simulator/scenarios/counts")
+async def sim_scenario_counts():
+    """{category: count} per la UI."""
+    from simulator import scenarios as _scn
+    return _scn.get_scenario_counts()
+
+
+@app.get("/api/simulator/kpi")
+async def sim_kpi():
+    """KPI aggregati per la dashboard simulator."""
+    from simulator import db as sim_db
+    runs = sim_db.list_runs(limit=500)
+    total = len(runs)
+    if total == 0:
+        return {"score": None, "score_label": "Nessun run", "win_rate": 0,
+                "wins": 0, "total": 0, "single_step": 0, "multi_step": 0,
+                "avg_delta_sp": 0, "win_by_category": {}}
+    wins = sum(1 for r in runs if r.get("outcome") == "green")
+    single = sum(1 for r in runs if r.get("scenario_type") == "single")
+    multi = total - single
+    avg_delta = sum((r.get("delta_sp") or 0) for r in runs) / total
+    win_by_cat = {}
+    for cat in ["normale", "geopolitico", "macro", "crash_rally"]:
+        cr = [r for r in runs if r.get("category") == cat]
+        n = len(cr)
+        win_by_cat[cat] = (sum(1 for r in cr if r.get("outcome") == "green") / n) if n else 0
+        win_by_cat[cat + "_total"] = n
+    return {
+        "score": round(wins / total * 100, 1),
+        "score_label": f"{wins} verdi su {total} run",
+        "win_rate": wins / total,
+        "wins": wins, "total": total, "single_step": single, "multi_step": multi,
+        "avg_delta_sp": avg_delta,
+        "win_by_category": win_by_cat,
+    }
+
+
+@app.get("/api/simulator/runs")
+async def sim_list_runs(category: str = Query(default=None),
+                         scenario_type: str = Query(default=None),
+                         outcome: str = Query(default=None),
+                         limit: int = Query(default=20, ge=1, le=500)):
+    from simulator import db as sim_db
+    return sim_db.list_runs(category=category, scenario_type=scenario_type,
+                             outcome=outcome, limit=limit)
+
+
+@app.get("/api/simulator/result/{run_id}")
+async def sim_get_result(run_id: str):
+    from simulator import db as sim_db
+    run = sim_db.get_run(run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": "Run non trovato"})
+    # Espandi full_data per UI
+    full = run.get("full_data") or {}
+    if isinstance(full, dict):
+        run["price_chart"] = full.get("price_chart", [])
+        run["steps_data"] = full.get("steps_data", [])
+    return run
+
+
+class SimRunStartReq(BaseModel):
+    category: str
+    scenario_type: str  # 'single' | 'multi'
+    num_steps: int = 1
+    scenario_id: str | None = None
+    mode: str = "manual"
+
+
+@app.post("/api/simulator/run/start")
+async def sim_run_start(req: SimRunStartReq):
+    from simulator import runner as _runner
+    try:
+        result = await _runner.start_run(
+            category=req.category, scenario_type=req.scenario_type,
+            num_steps=req.num_steps, scenario_id=req.scenario_id, mode=req.mode,
+        )
+        return result
+    except Exception as e:
+        logger.error("Errore sim run start: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class SimStepReq(BaseModel):
+    step_index: int
+
+
+@app.post("/api/simulator/run/{run_id}/step")
+async def sim_run_step(run_id: str, req: SimStepReq):
+    from simulator import runner as _runner
+    try:
+        return await _runner.execute_step(run_id, req.step_index)
+    except Exception as e:
+        logger.error("Errore sim step: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/simulator/auto-mode")
+async def sim_get_auto_mode():
+    from simulator import db as sim_db
+    enabled = sim_db.get_setting("auto_mode_enabled", "false") == "true"
+    cap = int(sim_db.get_setting("auto_mode_daily_cap", "5") or 5)
+    today = sim_db.runs_today(mode="auto")
+    return {"enabled": enabled, "daily_cap": cap, "runs_today": today}
+
+
+@app.post("/api/simulator/auto-mode")
+async def sim_set_auto_mode(payload: dict):
+    from simulator import db as sim_db
+    enabled = bool(payload.get("enabled"))
+    cap = int(payload.get("daily_cap", 5))
+    sim_db.set_setting("auto_mode_enabled", "true" if enabled else "false")
+    sim_db.set_setting("auto_mode_daily_cap", str(cap))
+    return {"enabled": enabled, "daily_cap": cap}
+
+
+@app.get("/api/simulator/analytics")
+async def sim_analytics():
+    """Aggregati per la pagina History/Analytics."""
+    from simulator import db as sim_db
+    runs = sim_db.list_runs(limit=500)
+    win_by_cat = {}
+    for cat in ["normale", "geopolitico", "macro", "crash_rally"]:
+        cr = [r for r in runs if r.get("category") == cat]
+        if cr:
+            win_by_cat[cat] = sum(1 for r in cr if r.get("outcome") == "green") / len(cr)
+        else:
+            win_by_cat[cat] = 0
+    perf_by_horizon = {
+        "h_1w": sum((r.get("perf_1w") or 0) for r in runs) / max(1, len(runs)),
+        "h_1m": sum((r.get("perf_1m") or 0) for r in runs) / max(1, len(runs)),
+        "h_3m": sum((r.get("perf_3m") or 0) for r in runs) / max(1, len(runs)),
+    }
+    outcomes = {"green": 0, "yellow": 0, "red": 0}
+    for r in runs:
+        o = r.get("outcome", "yellow")
+        outcomes[o] = outcomes.get(o, 0) + 1
+    # Curva apprendimento: perf_1m progressivo
+    sorted_runs = sorted(runs, key=lambda r: r.get("completed_at") or "")
+    learning = [{"i": i, "value": r.get("perf_1m") or 0}
+                for i, r in enumerate(sorted_runs)]
+    return {
+        "win_by_category": win_by_cat,
+        "perf_by_horizon": perf_by_horizon,
+        "outcome_distribution": outcomes,
+        "learning_curve": learning,
+        "patterns_text": sim_db.get_setting("patterns_analysis", ""),
+    }
+
+
+@app.post("/api/simulator/patterns")
+async def sim_generate_patterns():
+    """
+    Genera analisi testuale dei pattern via DeepSeek-R1.
+    Legge l'intero storico e produce 'pattern ricorrenti'.
+    """
+    from simulator import db as sim_db
+    runs = sim_db.list_runs(limit=200)
+    if len(runs) < 5:
+        return {"analysis": "Servono almeno 5 run per generare un'analisi affidabile."}
+
+    summary_lines = ["Run recenti (cronologico):"]
+    for r in runs[-50:]:
+        summary_lines.append(
+            f"  [{r.get('category')}] {r.get('action_chosen')} {r.get('asset_chosen','-')} "
+            f"conv={r.get('conviction')} horizon={r.get('horizon')} "
+            f"perf_1m={r.get('perf_1m')} delta_sp={r.get('delta_sp')} outcome={r.get('outcome')}"
+        )
+    prompt = (
+        "Analizza il pattern del seguente Investment Analyst AI sui run del Simulator. "
+        "Identifica: (1) categorie dove va bene/male, (2) bias sistematici (es. troppo conservativo, "
+        "overconfident con conviction ALTA, ecc.), (3) consigli di calibrazione. "
+        "Rispondi in 4-6 paragrafi, italiano, tono analitico-neutro."
+    )
+    try:
+        import aiohttp, os
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            return {"analysis": "DEEPSEEK_API_KEY non configurata"}
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                json={
+                    "model": "deepseek-reasoner",
+                    "messages": [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": "\n".join(summary_lines)},
+                    ],
+                    "max_tokens": 2500,
+                },
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    return {"analysis": f"Errore DeepSeek: HTTP {resp.status} {body[:200]}"}
+                data = await resp.json()
+        text = data["choices"][0]["message"]["content"] or ""
+        # Strip <think>
+        import re as _re
+        text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
+        sim_db.set_setting("patterns_analysis", text)
+        return {"analysis": text}
+    except Exception as e:
+        return {"analysis": f"Errore generazione: {e}"}
 
 
 @app.get("/api/settings/prompt-defaults")

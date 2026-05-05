@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Menu } from "lucide-react";
 
 import Sidebar from "./components/Sidebar";
@@ -8,9 +8,19 @@ import IntelligencePage from "./pages/IntelligencePage";
 import AnalyticsPage from "./pages/AnalyticsPage";
 import Settings from "./components/Settings";
 
+import EntryPage from "./pages/EntryPage";
+import SimulatorLayout from "./pages/simulator/SimulatorLayout";
+import SimDashboard from "./pages/simulator/SimDashboard";
+import SimRunner from "./pages/simulator/SimRunner";
+import SimResult from "./pages/simulator/SimResult";
+import SimHistory from "./pages/simulator/SimHistory";
+
 const API = window.location.origin;
 
-function AppContent() {
+/**
+ * LiveApp — la dashboard "Live" (bot operativo). Router interno con prefix /live.
+ */
+function LiveApp() {
   const [portfolio, setPortfolio] = useState(null);
   const [positions, setPositions] = useState([]);
   const [trades, setTrades] = useState([]);
@@ -65,7 +75,6 @@ function AppContent() {
     return () => clearInterval(interval);
   }, [fetchAll]);
 
-  // Countdown timers
   useEffect(() => {
     if (countdownRef.current) clearInterval(countdownRef.current);
     countdownRef.current = setInterval(() => {
@@ -124,12 +133,11 @@ function AppContent() {
 
   return (
     <div className="app-layout">
-      {/* Mobile header */}
       <div className="mobile-header">
         <button className="hamburger" onClick={() => setSidebarOpen(true)}>
           <Menu />
         </button>
-        <span style={{fontWeight:700, fontSize:"1rem"}}>GeoInvest AI</span>
+        <span style={{fontWeight:700, fontSize:"1rem"}}>GeoInvest AI Live</span>
         <div style={{width:24}} />
       </div>
 
@@ -152,12 +160,12 @@ function AppContent() {
 
       <main className="main-content">
         <Routes>
-          <Route path="/" element={
+          <Route index element={
             <DashboardPage portfolio={portfolio} positions={positions} trades={trades} logs={logs} />
           } />
-          <Route path="/intelligence" element={<IntelligencePage />} />
-          <Route path="/analytics" element={<AnalyticsPage />} />
-          <Route path="/settings" element={<Settings onDataRefresh={fetchAll} />} />
+          <Route path="intelligence" element={<IntelligencePage />} />
+          <Route path="analytics" element={<AnalyticsPage />} />
+          <Route path="settings" element={<Settings onDataRefresh={fetchAll} />} />
         </Routes>
       </main>
     </div>
@@ -167,7 +175,24 @@ function AppContent() {
 function App() {
   return (
     <BrowserRouter>
-      <AppContent />
+      <Routes>
+        {/* Entry page con scelta Live/Simulator */}
+        <Route path="/" element={<EntryPage />} />
+
+        {/* Live: dashboard bot operativo (route esistente "/" interna) */}
+        <Route path="/live/*" element={<LiveApp />} />
+
+        {/* Simulator: ambiente test scenari storici */}
+        <Route path="/simulator" element={<SimulatorLayout />}>
+          <Route index element={<SimDashboard />} />
+          <Route path="runner" element={<SimRunner />} />
+          <Route path="result/:runId" element={<SimResult />} />
+          <Route path="history" element={<SimHistory />} />
+        </Route>
+
+        {/* Fallback: redirect a entry page */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </BrowserRouter>
   );
 }
