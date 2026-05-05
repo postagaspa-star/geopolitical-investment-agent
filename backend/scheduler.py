@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 import database
 
@@ -331,15 +332,14 @@ async def _scout_4d_report_job():
 
 async def _crypto_pipeline_job():
     """
-    Crypto pipeline — ogni 1h, 24/7.
+    Crypto pipeline — cron ogni ora a :00, 24/7.
 
-    Pipeline indipendente focalizzata SOLO su crypto ClawStreet-supported:
+    Pipeline focalizzata SOLO su crypto ClawStreet-supported:
       1. Technical Crypto (DeepSeek-V3) su top-6 crypto liquidità
       2. Decision Crypto (DeepSeek-R1 reasoning) con context crypto-only
 
-    NON dipende da Watchdog. NON usa Anthropic. Cooldown 50min interno.
-
-    Costo: ~$0.007/run × 24 run/giorno = ~$0.17/giorno (~$5/mese).
+    Schedule cron-fisso (non interval): se il watchdog/run extra triggera
+    una crypto run alle 14:35, il prossimo cron run è comunque alle 15:00.
     """
     try:
         from agents.orchestrator import run_crypto_pipeline
@@ -355,6 +355,51 @@ async def _crypto_pipeline_job():
                         len(result.get("trades", [])))
     except Exception as e:
         logger.error("Errore crypto pipeline: %s", e, exc_info=True)
+
+
+async def _standard_pipeline_job():
+    """
+    Standard pipeline (Technical + Decision Sonnet) — cron a ore precise.
+
+    Triggera SEMPRE alle ore programmate (non interval da avvio scheduler):
+    13:00, 15:00, 17:00, 19:00, 21:00 UTC = 9:00, 11:00, 13:00, 15:00, 17:00 ET
+    Lunedì-Venerdì, solo se mercati aperti.
+
+    Bypassa il watchdog: gira a tempo fisso. Le esecuzioni extra del watchdog
+    su eventi urgenti restano possibili (con throttle 60min) ma NON spostano
+    la cadenza dei run programmati.
+
+    Skip se mercato chiuso (festività non US-only) o se l'ultimo Decision
+    Sonnet è girato negli ultimi 30 min (evita doppio run subito dopo un
+    watchdog-trigger).
+    """
+    try:
+        if not is_market_open():
+            logger.debug("Standard pipeline: mercato chiuso, skip")
+            return
+        # Soft anti-double-run: se Decision Sonnet ha girato nei 30 min, skip
+        try:
+            last_iso = database.get_setting("last_decision_sonnet_run_at", "") or ""
+            if last_iso:
+                last_dt = datetime.fromisoformat(last_iso)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=pytz.utc)
+                elapsed_min = (datetime.now(pytz.utc) - last_dt).total_seconds() / 60.0
+                if elapsed_min < 30:
+                    logger.info("Standard pipeline: Sonnet girato %.0f min fa, skip", elapsed_min)
+                    return
+        except Exception:
+            pass
+
+        from agents.orchestrator import run_full_pipeline
+        from uuid import uuid4
+        run_id = str(uuid4())
+        result = await run_full_pipeline(run_id=run_id)
+        logger.info("[%s] Standard pipeline (cron) OK: %s, trades=%d",
+                    run_id, result.get("decision", "?"),
+                    len(result.get("trades", [])))
+    except Exception as e:
+        logger.error("Errore standard pipeline: %s", e, exc_info=True)
 
 
 async def _clawstreet_mirror_retry_job():
@@ -543,20 +588,32 @@ def start_scheduler() -> AsyncIOScheduler:
     )
 
 
-    # ── Crypto pipeline: ogni 1h, 24/7 ──
-    # Pipeline crypto-only indipendente dal Watchdog. Tech V3 + Decision R1.
-    # Sostituisce il vecchio decision_24h_scheduled (eliminato perché
-    # market-closed only e troppo intrecciato col Decision normale).
+    # ── Crypto pipeline: CRON ogni ora a :00, 24/7 ──
+    # Schedule cron-fisso (non interval). Se watchdog triggera crypto a 14:35,
+    # il prossimo cron resta alle 15:00 — la cadenza non viene sballata.
     _scheduler.add_job(
         _crypto_pipeline_job,
-        trigger="interval",
-        minutes=60,
+        trigger=CronTrigger(minute=0),   # ogni ora a :00
         id="crypto_pipeline_job",
-        name="Crypto pipeline (1h, 24/7, V3+R1)",
+        name="Crypto pipeline (cron :00, 24/7, V3+R1)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        next_run_time=datetime.now(pytz.utc) + timedelta(minutes=5),
+    )
+
+    # ── Standard pipeline (Tech + Decision Sonnet): CRON a ore precise ──
+    # 13:00, 15:00, 17:00, 19:00, 21:00 UTC (Lun-Ven). Skip auto se mercato
+    # chiuso (festività). Le esecuzioni extra del watchdog NON spostano la
+    # cadenza — questi sono i "main run" pianificati.
+    _scheduler.add_job(
+        _standard_pipeline_job,
+        trigger=CronTrigger(hour="13,15,17,19,21", minute=0,
+                            day_of_week="mon-fri"),
+        id="standard_pipeline_job",
+        name="Standard pipeline (cron 13/15/17/19/21 UTC L-V, V3+Sonnet)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     # ── ClawStreet mirror retry: ogni 15 min, 24/7 ──
@@ -664,6 +721,7 @@ def get_scheduler_info() -> dict:
     scout_8h_next = None
     scout_4d_next = None
     crypto_pipeline_next = None
+    standard_pipeline_next = None
     if _scheduler and running:
         wj = _scheduler.get_job("watchdog_job")
         if wj and wj.next_run_time:
@@ -680,6 +738,9 @@ def get_scheduler_info() -> dict:
         cj = _scheduler.get_job("crypto_pipeline_job")
         if cj and cj.next_run_time:
             crypto_pipeline_next = cj.next_run_time.isoformat()
+        spj = _scheduler.get_job("standard_pipeline_job")
+        if spj and spj.next_run_time:
+            standard_pipeline_next = spj.next_run_time.isoformat()
 
     # --- Per i job on-demand cerchiamo l'ultimo log corrispondente ---
     watchdog_last = _last_log_for_phases(["WATCHDOG_"])
@@ -730,14 +791,14 @@ def get_scheduler_info() -> dict:
             "active": running,
         },
         "technical": {
-            "schedule": "on-demand watchdog (DeepSeek-V3, mercati equity)",
-            "next_run": None,
+            "schedule": "cron L-V 13/15/17/19/21 UTC + on-demand watchdog (DeepSeek-V3)",
+            "next_run": standard_pipeline_next,
             "last_run": technical_last,
             "active": running and market_open,
         },
         "decision": {
-            "schedule": "on-demand orari mercato (Sonnet 4.5, max 1/ora)",
-            "next_run": None,
+            "schedule": "cron L-V 13/15/17/19/21 UTC + on-demand watchdog (Sonnet 4.5)",
+            "next_run": standard_pipeline_next,
             "last_run": decision_sonnet_last,
             "last_attempt": decision_last_attempt,   # warning UI se diverso da last_run
             "active": running and market_open,
