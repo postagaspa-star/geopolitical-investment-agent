@@ -68,6 +68,152 @@ def _get_from_local_cache(run_id: str) -> dict | None:
     return cache.get(run_id)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# DUAL-MODE FALLBACK: storage dei run su `sim_settings` quando la tabella
+# `sim_runs` non e' accessibile (DDL fallita, DATABASE_URL non configurato).
+# Stesso pattern di db_supabase._chat_fallback_*.
+#
+# La tabella `sim_settings` esiste sempre (e' creata dal pattern key-value
+# generico) ed e' accessibile via REST API senza DDL.
+#
+# Schema chiavi:
+#   _sim_run_fallback::list           JSON list di run_id ordinati per recency
+#   _sim_run_fallback::run::{id}      JSON dell'intero run_data
+# ═══════════════════════════════════════════════════════════════════════
+
+_SIM_RUN_FALLBACK_MODE = False  # True dopo il primo errore di tabella mancante
+_RUN_FALLBACK_LIST_KEY = "_sim_run_fallback::list"
+_RUN_FALLBACK_RUN_KEY = "_sim_run_fallback::run::{id}"
+_RUN_FALLBACK_MAX_LIST = 300   # cap totale run preservati nel fallback
+
+
+def _is_table_missing_error(exc: Exception) -> bool:
+    """Riconosce errori "tabella non trovata" su Supabase / Postgres."""
+    s = str(exc).lower()
+    return ("pgrst205" in s
+            or "does not exist" in s
+            or "no such table" in s
+            or "could not find the table" in s
+            or "schema cache" in s
+            or "relation" in s and "does not exist" in s)
+
+
+def _settings_get(key: str, default: str = "") -> str:
+    """Wrapper su sim_settings get_setting."""
+    try:
+        return get_setting(key, default) or default
+    except Exception:
+        return default
+
+
+def _settings_set(key: str, value: str) -> None:
+    try:
+        set_setting(key, value)
+    except Exception as exc:
+        logger.warning("[SIM] settings set fallita per %s: %s", key, exc)
+
+
+def _run_fallback_load_list() -> list:
+    raw = _settings_get(_RUN_FALLBACK_LIST_KEY, "[]") or "[]"
+    try:
+        v = json.loads(raw) if isinstance(raw, str) else raw
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
+def _run_fallback_save_list(lst: list) -> None:
+    _settings_set(_RUN_FALLBACK_LIST_KEY, json.dumps(lst, default=str))
+
+
+def _run_fallback_load_run(run_id: str) -> dict | None:
+    raw = _settings_get(_RUN_FALLBACK_RUN_KEY.format(id=run_id), "")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
+
+
+def _run_fallback_save_run(run_data: dict) -> bool:
+    """Salva un run nel fallback settings + aggiorna l'indice."""
+    rid = run_data.get("id")
+    if not rid:
+        return False
+    try:
+        _settings_set(_RUN_FALLBACK_RUN_KEY.format(id=rid),
+                      json.dumps(run_data, default=str))
+        lst = _run_fallback_load_list()
+        # Sposta in cima (= piu' recente)
+        if rid in lst:
+            lst.remove(rid)
+        lst.insert(0, rid)
+        # Cap totale: rimuove vecchi run anche dalle key dedicate
+        if len(lst) > _RUN_FALLBACK_MAX_LIST:
+            to_drop = lst[_RUN_FALLBACK_MAX_LIST:]
+            lst = lst[:_RUN_FALLBACK_MAX_LIST]
+            for old_id in to_drop:
+                try:
+                    _settings_set(_RUN_FALLBACK_RUN_KEY.format(id=old_id), "")
+                except Exception:
+                    pass
+        _run_fallback_save_list(lst)
+        return True
+    except Exception as exc:
+        logger.warning("[SIM] fallback save run %s fallita: %s", rid, exc)
+        return False
+
+
+def _run_fallback_list_runs(limit: int = 50, category: str | None = None,
+                             scenario_type: str | None = None,
+                             outcome: str | None = None) -> list[dict]:
+    """Lista run dal fallback applicando filtri. Caricamento on-demand."""
+    out: list[dict] = []
+    ids = _run_fallback_load_list()
+    for rid in ids[:limit * 4]:  # buffer per filtri
+        run = _run_fallback_load_run(rid)
+        if not run:
+            continue
+        if category and run.get("category") != category:
+            continue
+        if scenario_type and run.get("scenario_type") != scenario_type:
+            continue
+        if outcome and run.get("outcome") != outcome:
+            continue
+        out.append(run)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def get_storage_mode() -> dict:
+    """
+    Ritorna lo stato corrente del backend di storage per i sim_runs.
+    Usato dall'endpoint /api/simulator/health per diagnostica visibile.
+    """
+    info = {"fallback_mode": _SIM_RUN_FALLBACK_MODE}
+    client = _get_client()
+    if client is None:
+        info["primary_backend"] = "sqlite"
+    else:
+        # Probe sim_runs accessibilita'
+        try:
+            client.table("sim_runs").select("id").limit(1).execute()
+            info["primary_backend"] = "supabase_sim_runs"
+            info["sim_runs_accessible"] = True
+        except Exception as exc:
+            info["primary_backend"] = "supabase_settings_fallback"
+            info["sim_runs_accessible"] = False
+            info["sim_runs_error"] = str(exc)[:200]
+    # Conta nel fallback (anche se primary funziona, mostra count)
+    try:
+        info["fallback_count"] = len(_run_fallback_load_list())
+    except Exception:
+        info["fallback_count"] = -1
+    return info
+
+
 # ─── Migration auto su startup (chiamata da database.init_db) ───────────────
 
 SIM_MIGRATION_SQL = """
@@ -230,93 +376,122 @@ def insert_run(run_data: dict) -> str:
     """
     Inserisce un run completo. Ritorna l'id.
 
-    Strategia di persistenza ridondante (best-effort):
-      1. Salva SEMPRE nella cache file locale (anche se Supabase funziona —
-         backup di emergenza per restart del pod prima del prossimo deploy)
-      2. Tenta Supabase. Se la tabella sim_runs non esiste, applica la
-         migration al volo e ritenta.
-      3. Tenta SQLite come fallback dev.
+    Strategia di persistenza a 4 tier (in ordine di tentativo):
+      1. Supabase tabella `sim_runs` (primario, migration via psycopg2)
+      2. Supabase tabella `sim_settings` come key-value JSON (DUAL-MODE
+         FALLBACK: stesso pattern della chat — non richiede DDL, sempre
+         accessibile via REST API). Garantisce persistenza CROSS-DEPLOY.
+      3. SQLite locale (dev / containers con disk persistente)
+      4. Cache file locale (`/tmp` ephemeral, solo intra-pod)
 
-    Anche se i tier 2 e 3 falliscono, la cache file (tier 1) garantisce che
-    get_run possa servire il risultato all'utente almeno per il run corrente.
+    La novita' chiave e' il Tier 2: prima si perdevano i run quando
+    sim_runs non era accessibile (DATABASE_URL mancante → migration
+    saltata). Ora cadiamo automaticamente su sim_settings che e' SEMPRE
+    accessibile e persiste tra deploy.
     """
-    # Tier 1: cache file locale — SEMPRE, indipendentemente dal resto
+    global _SIM_RUN_FALLBACK_MODE
+    rid = run_data["id"]
+
+    # Tier "background": cache file locale — SEMPRE (no-op se non scrivibile)
     try:
-        _put_in_local_cache(run_data["id"], run_data)
-        logger.info("[SIM] insert_run: salvato in local cache: %s", run_data["id"])
+        _put_in_local_cache(rid, run_data)
     except Exception as exc:
         logger.warning("[SIM] insert_run: local cache fallita: %s", exc)
 
     client = _get_client()
-    if client:
+
+    # Tier 1: Supabase sim_runs (se non gia' in fallback mode)
+    if client and not _SIM_RUN_FALLBACK_MODE:
         payload = dict(run_data)
         if isinstance(payload.get("full_data"), dict):
             payload["full_data"] = json.dumps(payload["full_data"], default=str)
         try:
             client.table("sim_runs").insert(payload).execute()
-            logger.info("[SIM] insert_run Supabase ok: id=%s", payload["id"])
-            return payload["id"]
+            logger.info("[SIM] insert_run Supabase sim_runs ok: id=%s", rid)
+            # SCRIVI ANCHE in fallback come backup di sicurezza, cosi' se la
+            # tabella poi diventa inaccessibile per qualunque motivo, il run
+            # resta consultabile via fallback.
+            try:
+                _run_fallback_save_run(run_data)
+            except Exception:
+                pass
+            return rid
         except Exception as exc:
-            err_str = str(exc).lower()
-            logger.warning(
-                "[SIM] insert_run Supabase failed: %s | tabella esiste? %s",
-                exc, "no" if "does not exist" in err_str or "relation" in err_str else "boh",
-            )
-            # Tentativo recovery: applica la migration al volo e ritenta
-            if "does not exist" in err_str or "relation" in err_str or "schema" in err_str:
+            if _is_table_missing_error(exc):
+                logger.warning("[SIM] insert_run: sim_runs MANCANTE, switch a "
+                               "fallback sim_settings (persistente). Errore: %s",
+                               str(exc)[:150])
+                _SIM_RUN_FALLBACK_MODE = True
+                # Tentativo recovery one-shot: applica migration e ritenta
                 try:
-                    logger.info("[SIM] tentativo applicazione migration al volo...")
                     ensure_schema()
                     client.table("sim_runs").insert(payload).execute()
-                    logger.info("[SIM] insert_run Supabase ok dopo recovery: id=%s", payload["id"])
-                    return payload["id"]
+                    logger.info("[SIM] insert_run sim_runs ok DOPO recovery: id=%s", rid)
+                    _SIM_RUN_FALLBACK_MODE = False
+                    return rid
                 except Exception as exc2:
-                    logger.error("[SIM] recovery migration fallito: %s", exc2)
+                    logger.warning("[SIM] recovery migration fallita: %s", str(exc2)[:120])
+            else:
+                logger.warning("[SIM] insert_run sim_runs error (non-DDL): %s",
+                               str(exc)[:200])
 
-    # SQLite fallback (solo se Supabase non e' disponibile)
-    try:
-        import db_sqlite
-        # Assicura che la tabella esista anche in SQLite
+    # Tier 2: Supabase sim_settings fallback (DUAL-MODE)
+    if client:
+        if _run_fallback_save_run(run_data):
+            logger.info("[SIM] insert_run salvato in fallback sim_settings: id=%s", rid)
+            return rid
+        logger.warning("[SIM] fallback sim_settings save fallita per id=%s", rid)
+
+    # Tier 3: SQLite (solo se Supabase non e' configurato)
+    if not client:
         try:
+            import db_sqlite
+            try:
+                with db_sqlite.get_db() as conn:
+                    for stmt in SIM_MIGRATION_SQLITE.split(";"):
+                        if stmt.strip():
+                            try:
+                                conn.execute(stmt)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
             with db_sqlite.get_db() as conn:
-                for stmt in SIM_MIGRATION_SQLITE.split(";"):
-                    if stmt.strip():
-                        try:
-                            conn.execute(stmt)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        with db_sqlite.get_db() as conn:
-            keys = list(run_data.keys())
-            placeholders = ",".join("?" for _ in keys)
-            cols = ",".join(keys)
-            vals = []
-            for k in keys:
-                v = run_data[k]
-                if isinstance(v, (dict, list)):
-                    v = json.dumps(v, default=str)
-                vals.append(v)
-            conn.execute(f"INSERT INTO sim_runs ({cols}) VALUES ({placeholders})", vals)
-        logger.info("[SIM] insert_run SQLite ok: id=%s", run_data["id"])
-        return run_data["id"]
-    except Exception as exc:
-        logger.error("[SIM] insert_run SQLite failed: %s", exc, exc_info=True)
-        raise
+                keys = list(run_data.keys())
+                placeholders = ",".join("?" for _ in keys)
+                cols = ",".join(keys)
+                vals = []
+                for k in keys:
+                    v = run_data[k]
+                    if isinstance(v, (dict, list)):
+                        v = json.dumps(v, default=str)
+                    vals.append(v)
+                conn.execute(f"INSERT INTO sim_runs ({cols}) VALUES ({placeholders})", vals)
+            logger.info("[SIM] insert_run SQLite ok: id=%s", rid)
+            return rid
+        except Exception as exc:
+            logger.error("[SIM] insert_run SQLite failed: %s", exc, exc_info=True)
+
+    # Se siamo qui, abbiamo Supabase ma nemmeno il fallback ha funzionato.
+    # Non solleviamo: la cache file ha salvato comunque (best-effort).
+    logger.error("[SIM] insert_run: TUTTI i tier falliti per id=%s, solo cache file", rid)
+    return rid
 
 
 def get_run(run_id: str) -> dict | None:
     """
-    Cerca un run in 4 sorgenti in ordine:
-      1. Supabase (sim_runs)
-      2. SQLite locale (fallback dev)
-      3. Local file cache (super-fallback, sopravvive ai pod restart)
-      4. In-memory _active_runs del runner (ultimo: se _finalize_run e' fallito
-         su tutti i layer ma il run e' stato eseguito in memoria)
+    Cerca un run in 5 sorgenti in ordine:
+      1. Supabase tabella sim_runs (primario)
+      2. Supabase tabella sim_settings (DUAL-MODE FALLBACK persistente)
+      3. SQLite locale (fallback dev)
+      4. Local file cache (ephemeral, intra-pod restart only)
+      5. In-memory _active_runs del runner (last resort)
     """
-    # Tier 1: Supabase
+    global _SIM_RUN_FALLBACK_MODE
     client = _get_client()
-    if client:
+
+    # Tier 1: Supabase sim_runs
+    if client and not _SIM_RUN_FALLBACK_MODE:
         try:
             r = client.table("sim_runs").select("*").eq("id", run_id).limit(1).execute()
             if r.data:
@@ -329,9 +504,20 @@ def get_run(run_id: str) -> dict | None:
                 row["_source"] = "supabase"
                 return row
         except Exception as exc:
-            logger.warning("[SIM] get_run Supabase failed: %s", exc)
+            if _is_table_missing_error(exc):
+                _SIM_RUN_FALLBACK_MODE = True
+                logger.warning("[SIM] get_run: sim_runs mancante, switch a fallback")
+            else:
+                logger.warning("[SIM] get_run Supabase failed: %s", exc)
 
-    # Tier 2: SQLite
+    # Tier 2: Supabase sim_settings DUAL-MODE FALLBACK
+    if client:
+        run = _run_fallback_load_run(run_id)
+        if run:
+            run["_source"] = "supabase_settings_fallback"
+            return run
+
+    # Tier 3: SQLite
     try:
         import db_sqlite
         with db_sqlite.get_db() as conn:
@@ -383,8 +569,23 @@ def get_run(run_id: str) -> dict | None:
 
 def list_runs(category: str | None = None, scenario_type: str | None = None,
               outcome: str | None = None, limit: int = 50) -> list[dict]:
+    """
+    Lista i run con merge di tutte le sorgenti disponibili:
+      1. Supabase sim_runs (primario)
+      2. Supabase sim_settings (fallback DUAL-MODE)
+      3. SQLite locale (dev)
+
+    Quando il fallback e' attivo, ritorniamo dal fallback. Altrimenti
+    proviamo sim_runs come prima — ma se va a vuoto e c'e' un fallback
+    popolato, mergiamo entrambi (dedup per id, ordine per recency).
+    """
+    global _SIM_RUN_FALLBACK_MODE
     client = _get_client()
-    if client:
+    primary: list[dict] = []
+    used_fallback = False
+
+    # Tier 1: Supabase sim_runs
+    if client and not _SIM_RUN_FALLBACK_MODE:
         try:
             q = client.table("sim_runs").select("*")\
                 .order("completed_at", desc=True).limit(limit)
@@ -395,9 +596,48 @@ def list_runs(category: str | None = None, scenario_type: str | None = None,
             if outcome:
                 q = q.eq("outcome", outcome)
             r = q.execute()
-            return r.data or []
-        except Exception:
-            pass
+            primary = r.data or []
+        except Exception as exc:
+            if _is_table_missing_error(exc):
+                _SIM_RUN_FALLBACK_MODE = True
+                logger.warning("[SIM] list_runs: sim_runs mancante, switch a fallback")
+            else:
+                logger.warning("[SIM] list_runs sim_runs error: %s", str(exc)[:200])
+
+    # Tier 2: Supabase sim_settings (sempre interrogato come merge,
+    # cosi' non perdiamo run salvati nel fallback prima della migration)
+    fb_runs: list[dict] = []
+    if client:
+        try:
+            fb_runs = _run_fallback_list_runs(
+                limit=limit, category=category,
+                scenario_type=scenario_type, outcome=outcome,
+            )
+            used_fallback = bool(fb_runs)
+        except Exception as exc:
+            logger.debug("[SIM] list_runs fallback fail: %s", exc)
+
+    # Merge primary + fallback con dedup per id, ordina per completed_at desc
+    merged: dict = {}
+    for r in primary:
+        if r.get("id"):
+            merged[r["id"]] = r
+    for r in fb_runs:
+        if r.get("id") and r["id"] not in merged:
+            merged[r["id"]] = r
+
+    if merged:
+        out = sorted(
+            merged.values(),
+            key=lambda r: str(r.get("completed_at") or ""),
+            reverse=True,
+        )[:limit]
+        if used_fallback and not primary:
+            logger.info("[SIM] list_runs: %d run serviti da fallback sim_settings",
+                        len(out))
+        return out
+
+    # Tier 3: SQLite (no Supabase configurato)
     try:
         import db_sqlite
         clauses, vals = [], []

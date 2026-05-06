@@ -1148,6 +1148,15 @@ async def sim_health():
     except Exception as e:
         info["persisted_runs_count_error"] = str(e)
 
+    # 4. Storage mode: rivela in tempo reale quale tier sta servendo i run
+    # (sim_runs primario vs sim_settings fallback dual-mode vs SQLite vs cache).
+    # Utile per diagnosticare se i run di oggi sopravviveranno al prossimo deploy.
+    try:
+        if hasattr(sim_db, "get_storage_mode"):
+            info["storage_mode"] = sim_db.get_storage_mode()
+    except Exception as e:
+        info["storage_mode_error"] = str(e)
+
     return info
 
 
