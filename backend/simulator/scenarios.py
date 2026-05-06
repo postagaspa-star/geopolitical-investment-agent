@@ -478,23 +478,90 @@ SCENARIOS = [
 ]
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# DYNAMIC SCENARIOS — caricati da sim_settings, prodotti dal generator
+# giornaliero (GitHub Actions). Si combinano con gli static SCENARIOS via
+# merge automatico. Gli scenari scaduti (expires_at < now) vengono filtrati.
+# ═══════════════════════════════════════════════════════════════════════
+
+import json as _json
+import logging as _logging
+from datetime import datetime as _dt, timezone as _tz
+
+_logger = _logging.getLogger(__name__)
+
+
+def load_dynamic_scenarios(strip_reveal: bool = False) -> list[dict]:
+    """
+    Carica gli scenari dinamici da sim_settings, scartando quelli scaduti.
+    Strip_reveal=True rimuove description_reveal/period_* per UI di selezione.
+    """
+    try:
+        from simulator import db as sim_db
+    except Exception:
+        return []
+
+    try:
+        idx_raw = sim_db.get_setting("_sim_scenario::dynamic_index", "[]")
+        idx = _json.loads(idx_raw) if isinstance(idx_raw, str) else (idx_raw or [])
+        if not isinstance(idx, list):
+            return []
+    except Exception as e:
+        _logger.warning("[scenarios] Errore lettura dynamic_index: %s", e)
+        return []
+
+    now = _dt.now(_tz.utc)
+    out: list[dict] = []
+    for sid in idx:
+        try:
+            raw = sim_db.get_setting(f"_sim_scenario::{sid}", "")
+            if not raw:
+                continue
+            sc = _json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(sc, dict):
+                continue
+            # Filtra gli scaduti
+            exp = sc.get("expires_at")
+            if exp:
+                try:
+                    exp_dt = _dt.fromisoformat(exp.replace("Z", "+00:00"))
+                    if exp_dt < now:
+                        continue
+                except Exception:
+                    pass
+            out.append(_strip_reveal(sc) if strip_reveal else sc)
+        except Exception as e:
+            _logger.debug("[scenarios] Errore parse scenario %s: %s", sid, e)
+            continue
+    return out
+
+
+def _all_scenarios() -> list[dict]:
+    """Static + dynamic mergiati con dedup per id (static ha precedenza)."""
+    static_ids = {s["id"] for s in SCENARIOS}
+    dynamic = load_dynamic_scenarios(strip_reveal=False)
+    dynamic_clean = [s for s in dynamic if s.get("id") not in static_ids]
+    return list(SCENARIOS) + dynamic_clean
+
+
 def get_scenarios_by_category(category: str) -> list[dict]:
     """Ritorna gli scenari di una categoria (lista di dict, senza il reveal)."""
-    return [_strip_reveal(s) for s in SCENARIOS if s["category"] == category]
+    return [_strip_reveal(s) for s in _all_scenarios() if s.get("category") == category]
 
 
 def get_scenario_counts() -> dict:
     """{category: count} per la UI di selezione."""
-    counts = {}
-    for s in SCENARIOS:
-        counts[s["category"]] = counts.get(s["category"], 0) + 1
+    counts: dict = {}
+    for s in _all_scenarios():
+        cat = s.get("category", "unknown")
+        counts[cat] = counts.get(cat, 0) + 1
     return counts
 
 
 def get_scenario_by_id(scenario_id: str) -> dict | None:
     """Ritorna lo scenario completo (con reveal) — usato dal runner backend."""
-    for s in SCENARIOS:
-        if s["id"] == scenario_id:
+    for s in _all_scenarios():
+        if s.get("id") == scenario_id:
             return s
     return None
 
@@ -502,7 +569,7 @@ def get_scenario_by_id(scenario_id: str) -> dict | None:
 def get_random_scenario(category: str) -> dict | None:
     """Sceglie uno scenario random nella categoria."""
     import random
-    candidates = [s for s in SCENARIOS if s["category"] == category]
+    candidates = [s for s in _all_scenarios() if s.get("category") == category]
     return random.choice(candidates) if candidates else None
 
 
@@ -512,5 +579,6 @@ def _strip_reveal(s: dict) -> dict:
         "id": s["id"],
         "category": s["category"],
         "title": s["title"],
-        "brief": s["brief"],
+        "brief": s.get("brief", ""),
+        "is_dynamic": bool(s.get("source", "").startswith("dynamic")),
     }

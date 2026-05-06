@@ -8,7 +8,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import BackgroundTasks, FastAPI, File, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -1304,6 +1304,150 @@ async def sim_generate_patterns():
         return {"analysis": text}
     except Exception as e:
         return {"analysis": f"Errore generazione: {e}"}
+
+
+# ─── Daily scenario generator: ingestione scenari da GitHub Actions ────────
+
+class DynamicScenarioPayload(BaseModel):
+    """Payload di un singolo scenario inviato dal generator quotidiano."""
+    id: str
+    category: str        # 'normale' | 'geopolitico' | 'macro' | 'crash_rally'
+    title: str
+    brief: str
+    period_start: str | None = None
+    period_end: str | None = None
+    asset_universe: list[str]
+    headlines: list[str]
+    market_data: list[dict]   # [{ticker, price_t0, change_24h, change_7d}]
+    description_reveal: str
+    source: str = "dynamic"   # tag origin (es. "dynamic_2026-05-06")
+    expires_at: str | None = None  # ISO datetime, default +30 giorni
+
+
+class DynamicScenarioBatch(BaseModel):
+    scenarios: list[DynamicScenarioPayload]
+
+
+def _validate_scenario(s: DynamicScenarioPayload) -> tuple[bool, str]:
+    """Validazione qualitativa: rifiuta scenari malformati."""
+    if not s.id or not s.category or not s.title:
+        return False, "id/category/title obbligatori"
+    if s.category not in ("normale", "geopolitico", "macro", "crash_rally"):
+        return False, f"category '{s.category}' non valida"
+    if len(s.asset_universe) < 5:
+        return False, f"asset_universe troppo corto ({len(s.asset_universe)} < 5)"
+    if len(s.headlines) < 3:
+        return False, f"headlines insufficienti ({len(s.headlines)} < 3)"
+    if len(s.market_data) < 5:
+        return False, f"market_data insufficiente ({len(s.market_data)} < 5)"
+    # Ogni market_data deve avere price_t0 valido
+    for md in s.market_data:
+        if not md.get("ticker") or not isinstance(md.get("price_t0"), (int, float)):
+            return False, f"market_data malformato: {md}"
+        if md["price_t0"] <= 0:
+            return False, f"price_t0 non positivo per {md.get('ticker')}"
+    if not s.description_reveal or len(s.description_reveal) < 30:
+        return False, "description_reveal troppo breve (< 30 char)"
+    return True, ""
+
+
+@app.post("/api/simulator/scenarios/dynamic")
+async def upload_dynamic_scenarios(
+    batch: DynamicScenarioBatch,
+    request: Request,
+):
+    """
+    Ingestione di scenari dinamici prodotti dal generator giornaliero
+    (GitHub Actions). Auth: header X-Scenario-Token confrontato con
+    env SCENARIO_UPLOAD_TOKEN.
+
+    Salva su sim_settings come `_sim_scenario::{id}` + indice dei dynamic
+    in `_sim_scenario::dynamic_index`. La libreria scenarios.py legge
+    automaticamente static + dynamic via merge.
+    """
+    # Auth
+    expected_token = os.environ.get("SCENARIO_UPLOAD_TOKEN", "").strip()
+    if not expected_token:
+        return JSONResponse(status_code=503, content={
+            "error": "SCENARIO_UPLOAD_TOKEN non configurato sul server",
+        })
+    provided = request.headers.get("X-Scenario-Token", "").strip()
+    if not provided or provided != expected_token:
+        return JSONResponse(status_code=401, content={
+            "error": "Token mancante o non valido",
+        })
+
+    if not batch.scenarios:
+        return {"accepted": 0, "rejected": 0, "rejected_reasons": []}
+
+    # Default expires_at: +30 giorni
+    default_expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+
+    accepted: list[str] = []
+    rejected: list[dict] = []
+
+    try:
+        from simulator import db as sim_db
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"sim_db import: {e}"})
+
+    for sc in batch.scenarios:
+        ok, err = _validate_scenario(sc)
+        if not ok:
+            rejected.append({"id": sc.id, "reason": err})
+            continue
+        scenario_dict = sc.model_dump()
+        if not scenario_dict.get("expires_at"):
+            scenario_dict["expires_at"] = default_expiry
+        scenario_dict["uploaded_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            sim_db.set_setting(
+                f"_sim_scenario::{sc.id}",
+                json.dumps(scenario_dict, default=str, ensure_ascii=False),
+            )
+            accepted.append(sc.id)
+        except Exception as e:
+            rejected.append({"id": sc.id, "reason": f"persistence error: {e}"})
+
+    # Aggiorna l'indice dei dynamic scenarios
+    try:
+        idx_raw = sim_db.get_setting("_sim_scenario::dynamic_index", "[]")
+        idx = json.loads(idx_raw) if isinstance(idx_raw, str) else (idx_raw or [])
+        if not isinstance(idx, list):
+            idx = []
+        for aid in accepted:
+            if aid not in idx:
+                idx.append(aid)
+        # Cap a 200 dynamic scenarios totali — cleanup degli scaduti gestito dal merger
+        sim_db.set_setting("_sim_scenario::dynamic_index",
+                            json.dumps(idx[-200:], default=str))
+    except Exception as e:
+        logger.warning("Errore aggiornamento indice scenari dinamici: %s", e)
+
+    logger.info("Dynamic scenarios upload: %d accepted, %d rejected",
+                len(accepted), len(rejected))
+
+    return {
+        "accepted": len(accepted),
+        "rejected": len(rejected),
+        "accepted_ids": accepted,
+        "rejected_reasons": rejected,
+    }
+
+
+@app.get("/api/simulator/scenarios/dynamic")
+async def list_dynamic_scenarios():
+    """Lista gli scenari dinamici attualmente attivi (non scaduti)."""
+    try:
+        from simulator import db as sim_db
+        from simulator import scenarios as _sc
+        items = _sc.load_dynamic_scenarios(strip_reveal=False)
+        return {
+            "count": len(items),
+            "scenarios": items,
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ─── Sim Advisor: chat AI per consigli post-run + memoria categorizzata ─────
