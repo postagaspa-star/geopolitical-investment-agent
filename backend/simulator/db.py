@@ -126,7 +126,9 @@ def ensure_schema():
         if db_pass and sup_url:
             try:
                 ref = sup_url.split("//")[1].split(".")[0]
-                db_url = f"postgresql://postgres.{ref}:{db_pass}@aws-0-eu-west-3.pooler.supabase.com:6543/postgres"
+                # NOTA: usiamo eu-central-1 per coerenza con db_supabase.py
+                # (era eu-west-3 → mismatch silenzioso che non creava le tabelle)
+                db_url = f"postgresql://postgres.{ref}:{db_pass}@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
             except Exception:
                 pass
     if not db_url:
@@ -155,22 +157,54 @@ def _get_client():
 
 
 def insert_run(run_data: dict) -> str:
-    """Inserisce un run completo. Ritorna l'id."""
+    """
+    Inserisce un run completo. Ritorna l'id.
+
+    Cerca di salvare prima su Supabase. Se fallisce (es. tabella sim_runs
+    non esiste perche' la migration psycopg2 non e' passata) tenta di
+    crearla al volo via psycopg2 e poi riprova l'INSERT. Solo se anche
+    quello fallisce, prova SQLite come fallback (locale).
+    """
     client = _get_client()
     if client:
-        # Supabase: stringify il full_data se è dict
         payload = dict(run_data)
         if isinstance(payload.get("full_data"), dict):
             payload["full_data"] = json.dumps(payload["full_data"], default=str)
         try:
             client.table("sim_runs").insert(payload).execute()
+            logger.info("[SIM] insert_run Supabase ok: id=%s", payload["id"])
             return payload["id"]
         except Exception as exc:
-            logger.warning("[SIM] insert_run Supabase failed: %s — try SQLite", exc)
+            err_str = str(exc).lower()
+            logger.warning(
+                "[SIM] insert_run Supabase failed: %s | tabella esiste? %s",
+                exc, "no" if "does not exist" in err_str or "relation" in err_str else "boh",
+            )
+            # Tentativo recovery: applica la migration al volo e ritenta
+            if "does not exist" in err_str or "relation" in err_str or "schema" in err_str:
+                try:
+                    logger.info("[SIM] tentativo applicazione migration al volo...")
+                    ensure_schema()
+                    client.table("sim_runs").insert(payload).execute()
+                    logger.info("[SIM] insert_run Supabase ok dopo recovery: id=%s", payload["id"])
+                    return payload["id"]
+                except Exception as exc2:
+                    logger.error("[SIM] recovery migration fallito: %s", exc2)
 
-    # SQLite fallback
+    # SQLite fallback (solo se Supabase non e' disponibile)
     try:
         import db_sqlite
+        # Assicura che la tabella esista anche in SQLite
+        try:
+            with db_sqlite.get_db() as conn:
+                for stmt in SIM_MIGRATION_SQLITE.split(";"):
+                    if stmt.strip():
+                        try:
+                            conn.execute(stmt)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         with db_sqlite.get_db() as conn:
             keys = list(run_data.keys())
             placeholders = ",".join("?" for _ in keys)
@@ -182,13 +216,23 @@ def insert_run(run_data: dict) -> str:
                     v = json.dumps(v, default=str)
                 vals.append(v)
             conn.execute(f"INSERT INTO sim_runs ({cols}) VALUES ({placeholders})", vals)
+        logger.info("[SIM] insert_run SQLite ok: id=%s", run_data["id"])
         return run_data["id"]
     except Exception as exc:
-        logger.error("[SIM] insert_run SQLite failed: %s", exc)
+        logger.error("[SIM] insert_run SQLite failed: %s", exc, exc_info=True)
         raise
 
 
 def get_run(run_id: str) -> dict | None:
+    """
+    Cerca un run in 3 sorgenti in ordine:
+      1. Supabase (sim_runs)
+      2. SQLite locale (fallback dev)
+      3. In-memory _active_runs del runner (fallback ultimo: se l'INSERT
+         su Supabase e' fallito ma il run e' stato comunque eseguito in
+         memoria, lo ricostruiamo on-the-fly cosi' l'utente vede il
+         risultato invece di un 404)
+    """
     client = _get_client()
     if client:
         try:
@@ -201,8 +245,9 @@ def get_run(run_id: str) -> dict | None:
                     except Exception:
                         pass
                 return row
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[SIM] get_run Supabase failed: %s", exc)
+
     try:
         import db_sqlite
         with db_sqlite.get_db() as conn:
@@ -217,6 +262,21 @@ def get_run(run_id: str) -> dict | None:
                 return d
     except Exception:
         pass
+
+    # Fallback in-memory: il run e' stato eseguito ma _finalize_run ha fallito
+    # il salvataggio su DB. Ricostruiamo i dati dallo state attivo del runner.
+    try:
+        from simulator import runner as _runner
+        rebuilt = _runner.rebuild_run_from_memory(run_id)
+        if rebuilt:
+            logger.warning(
+                "[SIM] get_run %s servito da _active_runs (DB non disponibile)",
+                run_id,
+            )
+            return rebuilt
+    except Exception as exc:
+        logger.warning("[SIM] in-memory rebuild failed: %s", exc)
+
     return None
 
 

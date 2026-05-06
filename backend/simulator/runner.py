@@ -311,6 +311,110 @@ async def start_run(category: str, scenario_type: str, num_steps: int,
     return {"run_id": run_id, "scenario_id": scenario["id"], "total_steps": total}
 
 
+def rebuild_run_from_memory(run_id: str) -> dict | None:
+    """
+    Ricostruisce i dati di un run gia' eseguito ma non ancora salvato nel DB
+    (es. l'INSERT su Supabase e' fallito ma _active_runs ce l'ha).
+
+    Ritorna un dict con la stessa struttura usata da sim_db.get_run():
+    cosi' il frontend puo' visualizzare il risultato senza accorgersi
+    che il salvataggio persistente e' fallito.
+    """
+    state = _active_runs.get(run_id)
+    if not state:
+        return None
+    if not state.get("steps"):
+        return None
+    # Re-esegui la logica di _finalize_run() ma senza scrivere nel DB,
+    # restituendo direttamente il payload run_data.
+    try:
+        scenario = state["scenario"]
+        last_step = state["steps"][-1]
+        decision = last_step["decision"]
+        asset = decision.get("asset")
+
+        perf_1w, perf_1m, perf_3m = _simulate_outcome(
+            scenario, asset, decision.get("action")
+        )
+        perf_sp_1m = 0.02
+        perf_sector_1m = 0.015
+        perf_monkey_1m = 0.005
+        delta_sp = perf_1m - perf_sp_1m if perf_1m is not None else None
+        delta_sector = perf_1m - perf_sector_1m if perf_1m is not None else None
+        delta_monkey = perf_1m - perf_monkey_1m if perf_1m is not None else None
+
+        if perf_1m is None:
+            outcome = "yellow"
+        elif delta_sp and delta_sp > 0.005 and delta_sector and delta_sector > 0:
+            outcome = "green"
+        elif delta_sp and delta_sp < -0.01:
+            outcome = "red"
+        else:
+            outcome = "yellow"
+
+        historical_period = f"{scenario['period_start']} → {scenario['period_end']}"
+
+        if asset:
+            anchor = next((m for m in scenario["market_data"] if m["ticker"] == asset), None)
+            anchor_price = anchor["price_t0"] if anchor else 100.0
+            import random
+            random.seed(hash(scenario["id"] + (asset or "")))
+            target = anchor_price * (1 + (perf_3m or 0))
+            price_chart = []
+            for i in range(90):
+                t = i / 89
+                base = anchor_price + (target - anchor_price) * t
+                noise = random.uniform(-0.02, 0.02) * anchor_price
+                price_chart.append({"day": i, "price": round(base + noise, 2)})
+        else:
+            price_chart = []
+
+        steps_data = [{
+            "action": s["decision"].get("action"),
+            "asset": s["decision"].get("asset"),
+            "price": next((m["price_t0"] for m in scenario["market_data"]
+                            if m["ticker"] == s["decision"].get("asset")), None),
+            "perf_from_here": None,
+        } for s in state["steps"]]
+
+        return {
+            "id": run_id,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "mode": state["mode"],
+            "category": scenario["category"],
+            "scenario_type": state["scenario_type"],
+            "steps": state["total_steps"],
+            "scenario_id": scenario["id"],
+            "historical_period": historical_period,
+            "asset_chosen": asset,
+            "action_chosen": decision.get("action"),
+            "conviction": decision.get("conviction"),
+            "horizon": decision.get("horizon"),
+            "perf_1w": perf_1w,
+            "perf_1m": perf_1m,
+            "perf_3m": perf_3m,
+            "perf_sp_1m": perf_sp_1m,
+            "perf_sector_1m": perf_sector_1m,
+            "perf_monkey_1m": perf_monkey_1m,
+            "delta_sp": delta_sp,
+            "delta_sector": delta_sector,
+            "delta_monkey": delta_monkey,
+            "outcome": outcome,
+            "original_thesis": (last_step.get("reasoning") or "")[:1500],
+            "what_happened": scenario.get("description_reveal", ""),
+            "thesis_evaluation": _evaluate_thesis(decision, scenario, perf_1m),
+            "full_data": {
+                "steps": state["steps"],
+                "price_chart": price_chart,
+                "steps_data": steps_data,
+            },
+            "_source": "in_memory_fallback",
+        }
+    except Exception as exc:
+        logger.error("[SIM] rebuild_run_from_memory %s failed: %s", run_id, exc, exc_info=True)
+        return None
+
+
 async def execute_step(run_id: str, step_index: int) -> dict:
     """Esegue uno step del run. Ritorna context + output del modello."""
     if run_id not in _active_runs:

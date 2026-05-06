@@ -919,16 +919,101 @@ async def sim_list_runs(category: str = Query(default=None),
 
 @app.get("/api/simulator/result/{run_id}")
 async def sim_get_result(run_id: str):
-    from simulator import db as sim_db
-    run = sim_db.get_run(run_id)
-    if not run:
-        return JSONResponse(status_code=404, content={"error": "Run non trovato"})
-    # Espandi full_data per UI
-    full = run.get("full_data") or {}
-    if isinstance(full, dict):
-        run["price_chart"] = full.get("price_chart", [])
-        run["steps_data"] = full.get("steps_data", [])
-    return run
+    """
+    Ritorna il risultato di un run completato. Fallback chain:
+      1. Supabase sim_runs
+      2. SQLite locale
+      3. In-memory _active_runs (se l'INSERT su DB e' fallito)
+    """
+    try:
+        from simulator import db as sim_db
+        run = sim_db.get_run(run_id)
+        if not run:
+            # Diagnostica: verifica se il run e' stato avviato ma non finalizzato
+            try:
+                from simulator import runner as _runner
+                in_memory = run_id in getattr(_runner, "_active_runs", {})
+            except Exception:
+                in_memory = False
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "Run non trovato",
+                    "run_id": run_id,
+                    "in_active_memory": in_memory,
+                    "hint": (
+                        "Il run e' stato avviato ma il salvataggio su DB non e' riuscito. "
+                        "Verifica /api/simulator/health per diagnostica completa."
+                        if in_memory else
+                        "Run inesistente o scaduto. Avvia un nuovo scenario."
+                    ),
+                },
+            )
+        # Espandi full_data per UI
+        full = run.get("full_data") or {}
+        if isinstance(full, dict):
+            run["price_chart"] = full.get("price_chart", [])
+            run["steps_data"] = full.get("steps_data", [])
+        return run
+    except Exception as e:
+        logger.error("sim_get_result error: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__},
+        )
+
+
+@app.get("/api/simulator/health")
+async def sim_health():
+    """
+    Diagnostica del Simulator: verifica tabelle, runs in memoria e DB.
+    Utile per debugging del 404 sul Visualizza Risultato.
+    """
+    info: dict = {}
+    try:
+        from simulator import db as sim_db
+        from simulator import runner as _runner
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    # 1. Test tabella sim_runs
+    table_ok = False
+    table_err = None
+    try:
+        client = sim_db._get_client()
+        if client:
+            r = client.table("sim_runs").select("id").limit(1).execute()
+            table_ok = True
+            info["supabase_table_count_sample"] = len(r.data or [])
+        else:
+            info["supabase_client"] = "not available — using SQLite"
+            try:
+                import db_sqlite
+                with db_sqlite.get_db() as conn:
+                    n = conn.execute("SELECT COUNT(*) as c FROM sim_runs").fetchone()
+                    info["sqlite_runs_count"] = n["c"] if n else 0
+                table_ok = True
+            except Exception as e:
+                table_err = f"sqlite: {e}"
+    except Exception as e:
+        table_err = str(e)
+    info["table_ok"] = table_ok
+    if table_err:
+        info["table_error"] = table_err
+
+    # 2. Active runs in memoria
+    active = getattr(_runner, "_active_runs", {})
+    info["active_runs_in_memory"] = len(active)
+    info["active_run_ids"] = list(active.keys())[:10]
+
+    # 3. Conteggio runs persistiti (se accessibile)
+    try:
+        runs = sim_db.list_runs(limit=1000) if hasattr(sim_db, "list_runs") else []
+        info["persisted_runs_count"] = len(runs)
+    except Exception as e:
+        info["persisted_runs_count_error"] = str(e)
+
+    return info
 
 
 class SimRunStartReq(BaseModel):

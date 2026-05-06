@@ -15,14 +15,54 @@ export default function SimResult() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    fetch(`${API}/api/simulator/result/${runId}`)
-      .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
-      .then(setRun).catch(e => setError(String(e)))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API}/api/simulator/result/${runId}`);
+        let data;
+        try { data = await res.json(); } catch { data = { error: `HTTP ${res.status}` }; }
+        if (cancelled) return;
+        if (!res.ok) {
+          const parts = [];
+          if (data.error) parts.push(data.error);
+          if (data.hint) parts.push(`Suggerimento: ${data.hint}`);
+          if (data.in_active_memory != null) {
+            parts.push(`Run in memoria: ${data.in_active_memory ? "sì" : "no"}`);
+          }
+          setError(parts.join("\n") || `HTTP ${res.status}`);
+        } else {
+          setRun(data);
+        }
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [runId]);
 
   if (loading) return <div style={S.empty}>Caricamento risultato...</div>;
-  if (error) return <div style={S.empty}>Errore: {error}</div>;
+  if (error) {
+    return (
+      <div style={S.empty}>
+        <div style={{ color: "#ef4444", fontSize: 16, marginBottom: 12 }}>
+          ⚠ Errore caricamento risultato
+        </div>
+        <div style={{ whiteSpace: "pre-line", fontSize: 13, color: "#cbd5e1", lineHeight: 1.6 }}>
+          {error}
+        </div>
+        <div style={{ marginTop: 20, display: "flex", gap: 8, justifyContent: "center" }}>
+          <button style={S.backBtn} onClick={() => nav("/simulator")}>
+            <ArrowLeft size={16} /> Dashboard
+          </button>
+          <button style={S.btnPrimary} onClick={() => nav("/simulator/runner")}>
+            Avvia nuovo scenario <ArrowRight size={16} />
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (!run) return <div style={S.empty}>Risultato non trovato</div>;
 
   const outcomeColor = run.outcome === "green" ? "#10b981"
