@@ -7,6 +7,7 @@ import DashboardPage from "./pages/DashboardPage";
 import IntelligencePage from "./pages/IntelligencePage";
 import AnalyticsPage from "./pages/AnalyticsPage";
 import Settings from "./components/Settings";
+import ChatWidget from "./components/ChatWidget";
 
 import EntryPage from "./pages/EntryPage";
 import SimulatorLayout from "./pages/simulator/SimulatorLayout";
@@ -168,6 +169,9 @@ function LiveApp() {
           <Route path="settings" element={<Settings onDataRefresh={fetchAll} />} />
         </Routes>
       </main>
+
+      {/* Chat widget flottante: solo nella Live (analizza decisioni reali) */}
+      <ChatWidget />
     </div>
   );
 }

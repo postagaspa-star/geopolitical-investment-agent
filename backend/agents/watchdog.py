@@ -26,7 +26,7 @@ DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_TIMEOUT = 20
 
-# Soglia urgenza per triggerare la pipeline completa
+# Soglia urgenza per triggerare la pipeline completa.
 URGENCY_THRESHOLD = 5  # 1-10
 
 WATCHDOG_PROMPT = """You are a financial market watchdog. Your ONLY job is to decide in seconds

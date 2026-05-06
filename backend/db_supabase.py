@@ -132,6 +132,26 @@ def _ensure_cs_mirror_columns():
         -- v8: flag is_preset per i documenti precaricati (PDF crypto forniti
         -- nei preset_documents/). Non eliminabili dall'UI.
         ALTER TABLE technical_documents ADD COLUMN IF NOT EXISTS is_preset BOOLEAN DEFAULT FALSE;
+        -- v9: chat assistant (conversazioni con AI DeepSeek-R1).
+        -- Mini-memoria delle ultime 10 conversazioni dell'utente.
+        CREATE TABLE IF NOT EXISTS chat_conversations (
+            id BIGSERIAL PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT 'Nuova conversazione',
+            selected_decisions TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id BIGSERIAL PRIMARY KEY,
+            conversation_id BIGINT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_conv
+            ON chat_messages (conversation_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_chat_conversations_updated
+            ON chat_conversations (updated_at DESC);
     """
 
     try:
@@ -632,3 +652,124 @@ def get_portfolio_history(days=30):
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     result = client.table("portfolio_snapshots").select("total_value, cash_balance, timestamp").gte("timestamp", since).order("timestamp").execute()
     return result.data or []
+
+
+# ============================================================
+# Chat Assistant (conversazioni con l'analista AI DeepSeek-R1)
+# ============================================================
+
+def create_chat_conversation(title: str = "Nuova conversazione",
+                             selected_decisions: str | None = None) -> int | None:
+    """Crea una nuova conversazione e ritorna l'id."""
+    client = _get_client()
+    try:
+        payload = {"title": title[:120], "selected_decisions": selected_decisions}
+        result = client.table("chat_conversations").insert(payload).execute()
+        if result.data and len(result.data) > 0:
+            return result.data[0].get("id")
+    except Exception as e:
+        logger.warning("create_chat_conversation fallita: %s", e)
+    return None
+
+
+def get_chat_conversations(limit: int = 10) -> list:
+    """Lista le ultime N conversazioni (default 10)."""
+    client = _get_client()
+    try:
+        result = (client.table("chat_conversations")
+                  .select("id, title, selected_decisions, created_at, updated_at")
+                  .order("updated_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        logger.warning("get_chat_conversations fallita: %s", e)
+        return []
+
+
+def get_chat_messages(conversation_id: int) -> list:
+    """Tutti i messaggi di una conversazione, in ordine cronologico."""
+    client = _get_client()
+    try:
+        result = (client.table("chat_messages")
+                  .select("id, role, content, created_at")
+                  .eq("conversation_id", conversation_id)
+                  .order("created_at")
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        logger.warning("get_chat_messages fallita: %s", e)
+        return []
+
+
+def insert_chat_message(conversation_id: int, role: str, content: str) -> int | None:
+    """Aggiunge un messaggio e aggiorna updated_at della conversazione."""
+    client = _get_client()
+    try:
+        result = client.table("chat_messages").insert({
+            "conversation_id": conversation_id,
+            "role": role,
+            "content": content,
+        }).execute()
+        client.table("chat_conversations").update({
+            "updated_at": _now_iso(),
+        }).eq("id", conversation_id).execute()
+        if result.data and len(result.data) > 0:
+            return result.data[0].get("id")
+    except Exception as e:
+        logger.warning("insert_chat_message fallita: %s", e)
+    return None
+
+
+def update_chat_conversation_title(conversation_id: int, title: str):
+    client = _get_client()
+    try:
+        client.table("chat_conversations").update({
+            "title": title[:120], "updated_at": _now_iso(),
+        }).eq("id", conversation_id).execute()
+    except Exception as e:
+        logger.warning("update_chat_conversation_title fallita: %s", e)
+
+
+def update_chat_conversation_decisions(conversation_id: int, selected_decisions: str):
+    client = _get_client()
+    try:
+        client.table("chat_conversations").update({
+            "selected_decisions": selected_decisions,
+            "updated_at": _now_iso(),
+        }).eq("id", conversation_id).execute()
+    except Exception as e:
+        logger.warning("update_chat_conversation_decisions fallita: %s", e)
+
+
+def delete_chat_conversation(conversation_id: int):
+    """Elimina una conversazione (cascade sui messaggi via FK)."""
+    client = _get_client()
+    try:
+        # Cancellazione esplicita per sicurezza (FK ON DELETE CASCADE è in SQL)
+        client.table("chat_messages").delete().eq("conversation_id", conversation_id).execute()
+        client.table("chat_conversations").delete().eq("id", conversation_id).execute()
+    except Exception as e:
+        logger.warning("delete_chat_conversation fallita: %s", e)
+
+
+def trim_chat_conversations(keep_last: int = 10):
+    """Mantiene solo le ultime N conversazioni; elimina le altre."""
+    client = _get_client()
+    try:
+        # Prendi tutte le conversazioni ordinate per updated_at desc
+        result = (client.table("chat_conversations")
+                  .select("id")
+                  .order("updated_at", desc=True)
+                  .execute())
+        rows = result.data or []
+        if len(rows) <= keep_last:
+            return
+        to_delete = [r["id"] for r in rows[keep_last:]]
+        for cid in to_delete:
+            client.table("chat_messages").delete().eq("conversation_id", cid).execute()
+            client.table("chat_conversations").delete().eq("id", cid).execute()
+    except Exception as e:
+        logger.warning("trim_chat_conversations fallita: %s", e)
+
+

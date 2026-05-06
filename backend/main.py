@@ -555,6 +555,166 @@ async def save_settings(payload: SettingsPayload):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# CHAT ASSISTANT — analista AI delle decisioni del Decision Agent
+# ═══════════════════════════════════════════════════════════════════════
+# Mini-memoria: solo le ultime 10 conversazioni vengono conservate.
+# Engine: DeepSeek-R1 (reasoning) per analisi profonda dei pattern.
+# Sicurezza: read-only, l'AI NON puo' eseguire trade.
+
+class ChatSendPayload(BaseModel):
+    conversation_id: int | None = None  # se None, crea nuova conversazione
+    message: str
+    selected_trade_ids: list[int] | None = None  # trade scelti dall'utente
+
+
+@app.get("/api/chat/conversations")
+async def chat_list_conversations(limit: int = Query(default=10, ge=1, le=50)):
+    """Lista delle ultime conversazioni con l'analista AI."""
+    try:
+        return database.get_chat_conversations(limit=limit)
+    except Exception as e:
+        logger.error(f"Errore lista conversazioni chat: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/chat/conversations/{conv_id}/messages")
+async def chat_get_messages(conv_id: int):
+    """Tutti i messaggi di una conversazione."""
+    try:
+        msgs = database.get_chat_messages(conv_id)
+        return {"conversation_id": conv_id, "messages": msgs}
+    except Exception as e:
+        logger.error(f"Errore lettura messaggi chat: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/api/chat/conversations/{conv_id}")
+async def chat_delete_conversation(conv_id: int):
+    """Elimina una conversazione (cascade sui messaggi)."""
+    try:
+        database.delete_chat_conversation(conv_id)
+        return {"status": "deleted", "id": conv_id}
+    except Exception as e:
+        logger.error(f"Errore cancellazione conversazione chat: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/chat/decisions")
+async def chat_list_decisions(limit: int = Query(default=30, ge=1, le=100)):
+    """
+    Lista degli ultimi trade (BUY/SELL eseguiti dal Decision Agent standard
+    o crypto) che l'utente puo' selezionare come contesto per la chat.
+    Restituisce solo i campi essenziali per la UI di selezione.
+    """
+    try:
+        trades = database.get_trades(limit=limit) or []
+        compact = [{
+            "id": t.get("id"),
+            "timestamp": t.get("timestamp"),
+            "ticker": t.get("ticker"),
+            "action": t.get("action"),
+            "quantity": t.get("quantity"),
+            "price": t.get("price"),
+            "confidence": t.get("confidence_score"),
+            "is_crypto": "-USD" in (t.get("ticker") or ""),
+        } for t in trades]
+        return compact
+    except Exception as e:
+        logger.error(f"Errore lista decisioni chat: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/chat/send")
+async def chat_send(payload: ChatSendPayload):
+    """
+    Invia un messaggio all'analista AI. Crea automaticamente una nuova
+    conversazione se conversation_id e' None. Ritorna la risposta completa
+    (non-streaming per semplicita').
+
+    Se selected_trade_ids e' fornito, i trade corrispondenti vengono
+    iniettati come contesto nel prompt user.
+    """
+    try:
+        from agents import chat_assistant
+
+        message = (payload.message or "").strip()
+        if not message:
+            return JSONResponse(status_code=400, content={"error": "Messaggio vuoto"})
+
+        # 1. Determina/crea la conversazione
+        conv_id = payload.conversation_id
+        is_new_conversation = False
+        if conv_id is None:
+            title = chat_assistant.auto_title_from_first_message(message)
+            sel_json = json.dumps(payload.selected_trade_ids) if payload.selected_trade_ids else None
+            conv_id = database.create_chat_conversation(title=title, selected_decisions=sel_json)
+            is_new_conversation = True
+            if conv_id is None:
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "Impossibile creare la conversazione"},
+                )
+
+        # 2. Carica history esistente (esclude il nuovo messaggio)
+        history = database.get_chat_messages(conv_id) or []
+
+        # 3. Costruisci contesto decisioni (solo dai trade_ids forniti ora;
+        #    se non passati, usa quelli salvati sulla conversazione)
+        trade_ids = payload.selected_trade_ids
+        if not trade_ids and not is_new_conversation:
+            convs = database.get_chat_conversations(limit=50) or []
+            for c in convs:
+                if c.get("id") == conv_id and c.get("selected_decisions"):
+                    try:
+                        trade_ids = json.loads(c["selected_decisions"])
+                    except Exception:
+                        trade_ids = None
+                    break
+
+        decisions_context = ""
+        if trade_ids:
+            all_trades = database.get_trades(limit=200) or []
+            trade_id_set = set(trade_ids)
+            selected = [t for t in all_trades if t.get("id") in trade_id_set]
+            decisions_context = chat_assistant.build_decisions_context(selected)
+            # Aggiorna la conversazione con i trade_ids piu' recenti
+            try:
+                database.update_chat_conversation_decisions(conv_id, json.dumps(trade_ids))
+            except Exception:
+                pass
+
+        # 4. Salva il messaggio user PRIMA di chiamare l'AI
+        database.insert_chat_message(conv_id, "user", message)
+
+        # 5. Chiama R1
+        reply, reasoning = await chat_assistant.chat_completion(
+            system_prompt=chat_assistant.SYSTEM_PROMPT,
+            history=history,
+            user_message=message,
+            decisions_context=decisions_context,
+        )
+
+        # 6. Salva la risposta dell'assistant
+        database.insert_chat_message(conv_id, "assistant", reply)
+
+        # 7. Mini-memoria: trim a 10 conversazioni totali
+        try:
+            database.trim_chat_conversations(keep_last=10)
+        except Exception:
+            pass
+
+        return {
+            "conversation_id": conv_id,
+            "is_new": is_new_conversation,
+            "reply": reply,
+            "trades_used": len(trade_ids) if trade_ids else 0,
+        }
+    except Exception as e:
+        logger.error(f"Errore chat send: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # SIMULATOR — endpoint
 # ═══════════════════════════════════════════════════════════════════════
 

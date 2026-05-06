@@ -110,6 +110,28 @@ def init_db():
                 cash_balance REAL NOT NULL,
                 timestamp TEXT NOT NULL DEFAULT (datetime('now'))
             );
+            -- Chat assistant: conversazioni con l'analista AI (DeepSeek-R1).
+            -- Ogni conversazione ha un titolo (auto-generato dal primo
+            -- messaggio) e una lista di messaggi con ruolo user/assistant.
+            -- selected_decisions e' un JSON array di trade_id usati come
+            -- contesto per quella specifica conversazione.
+            CREATE TABLE IF NOT EXISTS chat_conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT 'Nuova conversazione',
+                selected_decisions TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_conv
+                ON chat_messages (conversation_id, created_at);
         """)
         # Migrazione: ricreare agent_logs se ha il vecchio constraint
         # (SQLite non supporta ALTER TABLE per modificare CHECK constraint)
@@ -532,3 +554,94 @@ def get_portfolio_history(days=30):
 def get_client():
     """SQLite stub — v4 tables not supported locally. Returns None."""
     return None
+
+
+# ============================================================
+# Chat Assistant (conversazioni con l'analista AI DeepSeek-R1)
+# ============================================================
+
+def create_chat_conversation(title: str = "Nuova conversazione",
+                             selected_decisions: str | None = None) -> int:
+    """Crea una nuova conversazione e ritorna l'id."""
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO chat_conversations (title, selected_decisions) VALUES (?,?)",
+            (title[:120], selected_decisions),
+        )
+        return cur.lastrowid
+
+
+def get_chat_conversations(limit: int = 10) -> list:
+    """Lista le ultime N conversazioni (default 10) per la mini-memoria."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, selected_decisions, created_at, updated_at "
+            "FROM chat_conversations ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_chat_messages(conversation_id: int) -> list:
+    """Tutti i messaggi di una conversazione, in ordine cronologico."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, role, content, created_at FROM chat_messages "
+            "WHERE conversation_id=? ORDER BY created_at ASC, id ASC",
+            (conversation_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def insert_chat_message(conversation_id: int, role: str, content: str) -> int:
+    """Aggiunge un messaggio e aggiorna updated_at della conversazione."""
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?,?,?)",
+            (conversation_id, role, content),
+        )
+        conn.execute(
+            "UPDATE chat_conversations SET updated_at=datetime('now') WHERE id=?",
+            (conversation_id,),
+        )
+        return cur.lastrowid
+
+
+def update_chat_conversation_title(conversation_id: int, title: str):
+    """Aggiorna il titolo di una conversazione."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE chat_conversations SET title=?, updated_at=datetime('now') WHERE id=?",
+            (title[:120], conversation_id),
+        )
+
+
+def update_chat_conversation_decisions(conversation_id: int, selected_decisions: str):
+    """Aggiorna l'elenco dei trade_id selezionati per questa conversazione."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE chat_conversations SET selected_decisions=?, updated_at=datetime('now') WHERE id=?",
+            (selected_decisions, conversation_id),
+        )
+
+
+def delete_chat_conversation(conversation_id: int):
+    """Elimina una conversazione (cascade sui messaggi via FK)."""
+    with get_db() as conn:
+        conn.execute("DELETE FROM chat_messages WHERE conversation_id=?", (conversation_id,))
+        conn.execute("DELETE FROM chat_conversations WHERE id=?", (conversation_id,))
+
+
+def trim_chat_conversations(keep_last: int = 10):
+    """
+    Mantiene solo le ultime N conversazioni (per ordine updated_at) ed elimina
+    le altre. Chiamato dopo ogni nuova conversazione per la mini-memoria.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM chat_conversations ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
+            (keep_last,),
+        ).fetchall()
+        for r in rows:
+            conn.execute("DELETE FROM chat_messages WHERE conversation_id=?", (r["id"],))
+            conn.execute("DELETE FROM chat_conversations WHERE id=?", (r["id"],))
