@@ -423,22 +423,37 @@ async def run_scout_20min(run_id: str) -> list[dict]:
         except Exception:
             pass
 
-    # 4. Deduplicazione: scarta micro-cards quasi-identiche a quelle già nel
-    #    buffer recente (ultime 4 ore). Lo Scout girando ogni 20 min su input
-    #    mostly-statici tendeva a produrre summary ripetuti → spreco di
-    #    storage + rumore per il Decision Agent. Soglia 4h: oltre questa
-    #    finestra anche un summary uguale è informativo (= "il tema persiste").
-    recent_fingerprints = _load_recent_fingerprints(database, hours=4)
+    # 4. Deduplicazione SEMANTICA (Jaccard sui token significativi).
+    #    Lo Scout girando ogni 20 min su input mostly-statici tendeva a
+    #    produrre summary ripetuti → spreco di storage + rumore per il
+    #    Decision Agent. Ora usiamo Jaccard >= 0.55 sullo stesso source_type:
+    #    riconosce paraphrase ovvi, non solo match esatti.
+    #    Soglia 4h: oltre questa finestra anche un summary simile è
+    #    informativo (= "il tema persiste nel ciclo successivo").
+    recent_signatures = _load_recent_card_signatures(database, hours=4)
     written = 0
     skipped_duplicate = 0
+    dedup_log_samples: list[dict] = []   # per diagnostica frontend (max 5)
     for card in micro_cards:
         try:
             source_type = card.get("source_type", "UNKNOWN")
             summary = card.get("micro_summary", "")
-            fp = _fingerprint_card(source_type, summary)
-            if fp in recent_fingerprints:
+
+            is_dup, matched = _is_card_duplicate(
+                source_type, summary, recent_signatures,
+                threshold=DEDUP_JACCARD_THRESHOLD,
+            )
+            if is_dup:
                 skipped_duplicate += 1
+                if len(dedup_log_samples) < 5 and matched:
+                    dedup_log_samples.append({
+                        "skipped_summary": summary[:120],
+                        "matched_summary": (matched.get("summary") or "")[:120],
+                        "similarity": round(matched.get("similarity", 1.0), 3),
+                        "source_type": source_type,
+                    })
                 continue
+
             _write_intelligence_buffer(
                 database=database,
                 run_id=run_id,
@@ -447,14 +462,32 @@ async def run_scout_20min(run_id: str) -> list[dict]:
                 micro_summary=summary,
                 sentiment_score=float(card.get("sentiment_score", 0)),
             )
-            recent_fingerprints.add(fp)  # evita duplicati anche dentro lo stesso run
+            # Aggiungi alla collezione per dedup intra-run
+            new_tokens = _tokenize_for_dedup(summary)
+            if new_tokens:
+                recent_signatures.append({
+                    "source_type": source_type,
+                    "summary": summary,
+                    "tokens": new_tokens,
+                    "fp": _fingerprint_card(source_type, summary),
+                })
             written += 1
         except Exception as e:
             logger.warning("[%s][SCOUT] Errore scrittura buffer: %s", run_id, e)
 
     if skipped_duplicate > 0:
-        logger.info("[%s][SCOUT] Dedup: skippate %d card duplicate (già nel buffer 4h)",
-                    run_id, skipped_duplicate)
+        logger.info("[%s][SCOUT] Dedup semantica: skippate %d card simili "
+                    "(Jaccard >= %.2f, finestra 4h)",
+                    run_id, skipped_duplicate, DEDUP_JACCARD_THRESHOLD)
+        try:
+            database.insert_agent_log(run_id, "SCOUT_DEDUP", json.dumps({
+                "event": "scout_dedup_summary",
+                "skipped_duplicates": skipped_duplicate,
+                "threshold": DEDUP_JACCARD_THRESHOLD,
+                "samples": dedup_log_samples,
+            }, default=str))
+        except Exception:
+            pass
 
     # 5. Log finale — SEMPRE scritto (anche se 0 schede), cosi' il frontend
     # mostra ogni esecuzione dello Scout con count fonti e numero schede.
@@ -766,43 +799,82 @@ def _save_checkpoint(run_id: str, agent_name: str, status: str, data: dict):
         pass  # Non-blocking
 
 
+# ─── Stopwords IT+EN per la dedup semantica ────────────────────────────────
+# Lista compatta di parole funzionali (preposizioni, articoli, congiunzioni)
+# da escludere dalla bag-of-words usata per il calcolo Jaccard.
+_DEDUP_STOPWORDS = frozenset({
+    # IT
+    "che", "con", "per", "una", "uno", "del", "della", "dello", "delle", "dei",
+    "alla", "allo", "alle", "agli", "nel", "nella", "nelle", "negli", "sul",
+    "sulla", "sulle", "sugli", "ed", "anche", "come", "non", "più", "molto",
+    "essere", "stato", "stata", "sono", "era", "erano", "sarà", "saranno",
+    "dopo", "prima", "questo", "questa", "questi", "queste", "loro",
+    # EN
+    "the", "and", "for", "with", "are", "was", "were", "this", "that", "these",
+    "those", "from", "have", "has", "had", "but", "not", "into", "about",
+    "would", "could", "should", "their", "there", "where", "which", "while",
+    "more", "most", "less", "than", "after", "before", "over", "under",
+    "between", "during", "such", "only", "very",
+})
+
+
+def _tokenize_for_dedup(text: str) -> set:
+    """Estrae set di token significativi (>3 char, no stopwords) da un summary."""
+    import re as _re
+    if not text:
+        return set()
+    s = text.lower()
+    s = _re.sub(r"[^\w\s]", " ", s)
+    s = _re.sub(r"\s+", " ", s).strip()
+    return {w for w in s.split()
+            if len(w) > 3 and w not in _DEDUP_STOPWORDS and not w.isdigit()}
+
+
+def _jaccard_similarity(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    union = a | b
+    if not union:
+        return 0.0
+    return len(a & b) / len(union)
+
+
 def _fingerprint_card(source_type: str, summary: str) -> str:
     """
-    Genera un fingerprint normalizzato di una micro-scheda per deduplicazione.
-
-    Strategia:
-      - lowercase, rimuovi punteggiatura e spazi multipli
-      - prendi le prime 12 parole "significative" (>2 char, no stopwords basic)
-      - hash SHA1 dei primi 60 caratteri canonici
-    Due card con lo STESSO source_type e summary quasi-identico (anche con
-    differenze cosmetiche di punteggiatura/case) ricevono lo stesso fingerprint.
+    Genera fingerprint stretto (mantenuto per back-compat con vecchio
+    fast-path exact-match: se il summary è IDENTICO, hash uguale).
+    Per la similarità semantica vera, usa _tokenize_for_dedup + _jaccard.
     """
     import hashlib as _h
     import re as _re
     if not summary:
         return ""
     text = summary.lower()
-    text = _re.sub(r"[^\w\s]", " ", text)        # rimuovi punteggiatura
-    text = _re.sub(r"\s+", " ", text).strip()    # collassa spazi
-    # Estrai parole >2 caratteri (filtra "il", "di", "a", "the", ecc.)
+    text = _re.sub(r"[^\w\s]", " ", text)
+    text = _re.sub(r"\s+", " ", text).strip()
     words = [w for w in text.split() if len(w) > 2][:12]
     canonical = f"{source_type.upper()}|{' '.join(words)}"[:60]
     return _h.sha1(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def _load_recent_fingerprints(database, hours: int = 4) -> set[str]:
-    """
-    Carica i fingerprint delle micro-schede scritte nel buffer nelle ultime
-    `hours` ore. Usato dallo Scout 20-min per scartare duplicati.
+# Soglia di similarità Jaccard sopra cui due card sono considerate duplicate.
+# 0.55 = 55% di token in comune (calibrato per IT+EN: con stopwords filtrate
+# e tokens >3 char, è abbastanza stringente da non scartare news distinte
+# sullo stesso ticker, ma riconosce paraphrase ovvi).
+DEDUP_JACCARD_THRESHOLD = 0.55
 
-    Limita a 200 card per non saturare la memoria — sufficiente perché lo
-    Scout produce ~9 card/run × 12 run/4h = ~108 card/finestra.
+
+def _load_recent_card_signatures(database, hours: int = 4) -> list[dict]:
     """
-    fingerprints: set[str] = set()
+    Carica (source_type, summary, tokens) delle micro-schede recenti.
+    Ritorna lista per permettere similarità Jaccard contro ogni record
+    invece del solo match esatto via fingerprint.
+    """
+    signatures: list[dict] = []
     try:
         client = database.get_client()
         if not client:
-            return fingerprints
+            return signatures
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         result = client.table("intelligence_buffer") \
             .select("source_type,micro_summary") \
@@ -812,12 +884,54 @@ def _load_recent_fingerprints(database, hours: int = 4) -> set[str]:
             .limit(200) \
             .execute()
         for row in (result.data or []):
-            fp = _fingerprint_card(row.get("source_type", ""), row.get("micro_summary", ""))
-            if fp:
-                fingerprints.add(fp)
+            st = row.get("source_type", "")
+            ms = row.get("micro_summary", "")
+            tokens = _tokenize_for_dedup(ms)
+            if tokens:
+                signatures.append({
+                    "source_type": st,
+                    "summary": ms,
+                    "tokens": tokens,
+                    "fp": _fingerprint_card(st, ms),
+                })
     except Exception as exc:
-        logger.warning("Impossibile caricare fingerprint recenti per dedup: %s", exc)
-    return fingerprints
+        logger.warning("Impossibile caricare signatures recenti per dedup: %s", exc)
+    return signatures
+
+
+def _is_card_duplicate(card_source: str, card_summary: str,
+                       recent_signatures: list[dict],
+                       threshold: float = DEDUP_JACCARD_THRESHOLD
+                       ) -> tuple[bool, dict | None]:
+    """
+    Verifica se una nuova card è duplicato semantico di una recente.
+
+    Ritorna (is_duplicate, matched_signature).
+    Confronta SOLO con card dello stesso source_type per evitare falsi
+    positivi (due fonti diverse che parlano dello stesso evento sono
+    informative entrambe).
+    """
+    new_tokens = _tokenize_for_dedup(card_summary)
+    if not new_tokens:
+        return False, None
+    new_fp = _fingerprint_card(card_source, card_summary)
+    for sig in recent_signatures:
+        # Fast path: hash exact match (stesso summary normalizzato)
+        if sig["fp"] == new_fp:
+            return True, sig
+        # Stesso source_type richiesto per Jaccard
+        if sig["source_type"] != card_source:
+            continue
+        sim = _jaccard_similarity(new_tokens, sig["tokens"])
+        if sim >= threshold:
+            return True, {**sig, "similarity": sim}
+    return False, None
+
+
+# Wrapper legacy mantenuto per chiamanti che si aspettavano set[str]
+def _load_recent_fingerprints(database, hours: int = 4) -> set[str]:
+    sigs = _load_recent_card_signatures(database, hours)
+    return {s["fp"] for s in sigs if s.get("fp")}
 
 
 def _write_intelligence_buffer(database, run_id: str, source_type: str,

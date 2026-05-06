@@ -724,34 +724,87 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
                 return json.dumps({"error": "tickers deve essere una lista non vuota"})
             tickers = [str(t).upper().strip() for t in tickers if t][:5]
 
-            logger.info("[%s][DECISION] request_technical_analysis: %s — focus: %s",
-                        run_id, tickers, focus[:80])
-            try:
-                from agents.technical import run_technical_analysis
-                report = await run_technical_analysis(run_id, tickers)
-            except Exception as exc:
-                logger.error("[%s][DECISION] technical realtime failed: %s",
-                             run_id, exc, exc_info=True)
-                return json.dumps({
-                    "error": f"Technical Agent fallito: {exc}",
-                    "tickers_requested": tickers,
-                })
+            # ── Routing automatico: crypto vs equity ────────────────────────
+            # Se l'agente ha una crypto in portfolio (es. BTC-USD aperto da
+            # un run precedente), DEVE poterne ricevere indicatori anche
+            # tramite il tool standard. Splittiamo la richiesta:
+            #   - Equity/ETF → run_technical_analysis (DeepSeek-V3 standard)
+            #   - Crypto → run_crypto_technical (DeepSeek-V3 crypto-specialized)
+            crypto_tickers = [t for t in tickers
+                              if t.endswith("-USD") or t.startswith("X:")]
+            equity_tickers = [t for t in tickers if t not in crypto_tickers]
 
-            # Costruisci risposta strutturata: chi e' stato analizzato, chi e' fallito
-            analyses = report.get("analyses") or []
+            logger.info("[%s][DECISION] request_technical_analysis: %s "
+                        "(equity=%d, crypto=%d) — focus: %s",
+                        run_id, tickers, len(equity_tickers),
+                        len(crypto_tickers), focus[:80])
+
+            analyses_combined: list[dict] = []
+            errors_per_ticker: dict[str, str] = {}
+            engines_used: list[str] = []
+            summaries: list[str] = []
+
+            # Equity branch
+            if equity_tickers:
+                try:
+                    from agents.technical import run_technical_analysis
+                    eq_report = await run_technical_analysis(run_id, equity_tickers)
+                    analyses_combined += (eq_report.get("analyses") or [])
+                    if eq_report.get("engine"):
+                        engines_used.append(f"equity={eq_report['engine']}")
+                    if eq_report.get("summary"):
+                        summaries.append(f"[EQUITY] {eq_report['summary']}")
+                    raw_eq = eq_report.get("raw_indicators") or []
+                    analyzed_eq = {a.get("ticker") for a in (eq_report.get("analyses") or [])}
+                    for t in equity_tickers:
+                        if t not in analyzed_eq:
+                            err = "non analizzato"
+                            if isinstance(raw_eq, list):
+                                for r in raw_eq:
+                                    if isinstance(r, dict) and r.get("ticker") == t and r.get("error"):
+                                        err = r.get("error", "no data")
+                                        break
+                            errors_per_ticker[t] = err
+                except Exception as exc:
+                    logger.error("[%s][DECISION] technical equity failed: %s",
+                                 run_id, exc, exc_info=True)
+                    for t in equity_tickers:
+                        errors_per_ticker[t] = f"technical equity error: {exc}"
+
+            # Crypto branch (auto-routing al Technical Crypto)
+            if crypto_tickers:
+                try:
+                    from agents.technical_crypto import run_crypto_technical
+                    cr_report = await run_crypto_technical(run_id, crypto_tickers)
+                    analyses_combined += (cr_report.get("analyses") or [])
+                    if cr_report.get("engine"):
+                        engines_used.append(f"crypto={cr_report['engine']}")
+                    if cr_report.get("summary"):
+                        summaries.append(f"[CRYPTO] {cr_report['summary']}")
+                    analyzed_cr = {a.get("ticker") for a in (cr_report.get("analyses") or [])}
+                    pte = cr_report.get("per_ticker_errors") or []
+                    for t in crypto_tickers:
+                        if t not in analyzed_cr:
+                            err = "non analizzato (crypto out of universe / no data)"
+                            for ent in pte:
+                                if isinstance(ent, dict) and ent.get("ticker") == t:
+                                    err = ent.get("error", err)
+                                    break
+                            errors_per_ticker[t] = err
+                except Exception as exc:
+                    logger.error("[%s][DECISION] technical crypto failed: %s",
+                                 run_id, exc, exc_info=True)
+                    for t in crypto_tickers:
+                        errors_per_ticker[t] = f"technical crypto error: {exc}"
+
+            report = {
+                "analyses": analyses_combined,
+                "engine": " + ".join(engines_used) or "none",
+                "summary": " | ".join(summaries),
+                "raw_indicators": [],
+            }
+            analyses = analyses_combined
             analyzed_tickers = {a.get("ticker") for a in analyses if a.get("ticker")}
-            errors_per_ticker = {}
-            for t in tickers:
-                if t not in analyzed_tickers:
-                    # Cerca motivo nel raw_indicators
-                    raw_list = report.get("raw_indicators") or []
-                    if isinstance(raw_list, list):
-                        for r in raw_list:
-                            if isinstance(r, dict) and r.get("ticker") == t and r.get("error"):
-                                errors_per_ticker[t] = r.get("error", "no data")
-                                break
-                    if t not in errors_per_ticker:
-                        errors_per_ticker[t] = "non analizzato (out of universe / no data)"
 
             database.insert_agent_log(run_id, "DECISION_REALTIME_TA", json.dumps({
                 "tickers_requested": tickers,

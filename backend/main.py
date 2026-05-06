@@ -2144,6 +2144,69 @@ async def retry_failed_mirrors(window_hours: int = Query(default=24, ge=1, le=16
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+@app.get("/api/scout/sources-health")
+async def scout_sources_health():
+    """
+    Diagnostica: testa ogni fonte Scout in parallelo e ritorna status,
+    count items, error e env vars necessarie. Usato dal frontend (Settings)
+    per mostrare quali fonti funzionano e quali sono down/non configurate.
+    """
+    import data_fetchers as _df
+
+    sources_spec = [
+        ("GDELT", _df.fetch_gdelt_data, []),
+        ("NEWSAPI", _df.fetch_newsapi_data, ["NEWS_API_KEY"]),
+        ("YFINANCE_NEWS", _df.fetch_yfinance_news, []),
+        ("REDDIT", _df.fetch_reddit_sentiment, ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"]),
+        ("X_TWITTER", _df.fetch_x_sentiment, ["X_BEARER_TOKEN"]),
+        ("CLAWSTREET_MARKET", _df.fetch_clawstreet_market_context, []),
+        ("CONGRESSIONAL", _df.fetch_congressional_trades, []),
+        ("CLAWSTREET_ECONOMY", _df.fetch_clawstreet_economy, []),
+        ("COINGECKO", _df.fetch_coingecko_data, []),
+    ]
+
+    async def _probe(name, fn, env_keys):
+        env_status = {k: ("set" if os.environ.get(k) else "missing") for k in env_keys}
+        try:
+            result = await fn()
+            count = 0
+            error = None
+            if isinstance(result, dict):
+                if result.get("error"):
+                    error = str(result.get("error"))[:200]
+                count = (len(result.get("items", []))
+                         or len(result.get("articles", []))
+                         or len(result.get("posts", []))
+                         or len(result.get("tweets", []))
+                         or len(result.get("trades", []))
+                         or len(result.get("data", [])))
+            elif hasattr(result, "__len__"):
+                count = len(result)
+            status = "ok" if (count > 0 and not error) else ("warn" if not error else "error")
+            return {
+                "name": name, "status": status, "items_count": count,
+                "error": error, "env": env_status,
+            }
+        except Exception as exc:
+            return {
+                "name": name, "status": "error",
+                "items_count": 0, "error": str(exc)[:200],
+                "env": env_status,
+            }
+
+    import asyncio as _asyncio
+    probes = await _asyncio.gather(*[_probe(n, f, e) for n, f, e in sources_spec])
+    ok = sum(1 for p in probes if p["status"] == "ok")
+    warn = sum(1 for p in probes if p["status"] == "warn")
+    err = sum(1 for p in probes if p["status"] == "error")
+
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "sources": probes,
+        "totals": {"ok": ok, "warn": warn, "error": err, "total": len(probes)},
+    }
+
+
 @app.post("/api/scout/run")
 async def trigger_scout_run(background_tasks: BackgroundTasks):
     """
