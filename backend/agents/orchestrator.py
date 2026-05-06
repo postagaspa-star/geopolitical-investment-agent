@@ -130,16 +130,14 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         "architecture": "multi-agent",
     }))
 
-    # ─── Technical Worker ───
-    hot_tickers = focus_tickers if focus_tickers else _get_default_tickers()
-    hot_tickers = hot_tickers[:6]  # Max 6 tickers per contenere i costi
-
-    try:
-        from agents.technical import run_technical_analysis
-        tech_report = await run_technical_analysis(run_id, hot_tickers)
-    except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Technical fallito: %s", run_id, e)
-        tech_report = {"analyses": [], "engine": "error", "summary": str(e)}
+    # ─── WORKFLOW A 4 FASI: Technical NON eseguito a priori ─────────────
+    # Il Decision Agent deve seguire il workflow obbligatorio:
+    #   FASE 1: commit_initial_assessment (analisi situazione corrente)
+    #   FASE 2: request_technical_analysis (richiesta dati tecnici)
+    #   FASE 3: commit_final_thesis (tesi integrata)
+    #   FASE 4: execute_trade / do_nothing
+    # Passiamo tech_report=None così il Decision si rende conto e chiede.
+    tech_report = None
 
     # ─── Decision Agent ───
     try:
@@ -178,7 +176,7 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         "triggered": True,
         "urgency": urgency,
         "reason": reason,
-        "tech_engine": tech_report.get("engine", "unknown"),
+        "tech_engine": (tech_report or {}).get("engine", "deferred_to_decision"),
         "decision": decision_result.get("decision", "UNKNOWN"),
         "trades": decision_result.get("trades", []),
         "duration_seconds": duration,
@@ -230,13 +228,9 @@ async def run_crypto_pipeline(run_id: str | None = None) -> dict:
         "trigger_source": "scheduler_1h",
     }))
 
-    # 3. Technical Crypto
-    try:
-        from agents.technical_crypto import run_crypto_technical
-        tech_report = await run_crypto_technical(run_id, crypto_tickers)
-    except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Technical Crypto fallito: %s", run_id, e)
-        tech_report = {"analyses": [], "engine": "error", "summary": str(e)}
+    # 3. WORKFLOW A 4 FASI: Technical Crypto NON eseguito a priori.
+    # Il Decision Crypto deve richiederlo via tool durante FASE 2.
+    tech_report = None
 
     # 4. Decision Crypto
     try:
@@ -259,7 +253,7 @@ async def run_crypto_pipeline(run_id: str | None = None) -> dict:
     duration = round(time.time() - start, 1)
     database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
         "event": "crypto_pipeline_complete",
-        "tech_engine": tech_report.get("engine", "?"),
+        "tech_engine": (tech_report or {}).get("engine", "deferred_to_decision"),
         "decision": decision_result.get("decision", "UNKNOWN"),
         "trades": len(decision_result.get("trades", [])),
         "duration_seconds": duration,
@@ -267,7 +261,7 @@ async def run_crypto_pipeline(run_id: str | None = None) -> dict:
 
     return {
         "run_id": run_id,
-        "tech_engine": tech_report.get("engine", "?"),
+        "tech_engine": (tech_report or {}).get("engine", "deferred_to_decision"),
         "decision": decision_result.get("decision", "UNKNOWN"),
         "trades": decision_result.get("trades", []),
         "duration_seconds": duration,
@@ -352,13 +346,9 @@ async def run_scheduled_24h_pipeline(run_id: str | None = None) -> dict:
         "trigger_source": "scheduler_2h30",
     }))
 
-    # ── Technical Worker (sempre DeepSeek-V3) ──
-    try:
-        from agents.technical import run_technical_analysis
-        tech_report = await run_technical_analysis(run_id, hot_tickers)
-    except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Technical fallito (scheduled 24h): %s", run_id, e)
-        tech_report = {"analyses": [], "engine": "error", "summary": str(e)}
+    # ── WORKFLOW A 4 FASI: Technical NON eseguito a priori (24h scheduled) ──
+    # Il Decision Agent (R1) chiede i dati tecnici durante FASE 2.
+    tech_report = None
 
     # ── Decision Agent — FORZA engine R1 via env override temporanea ──
     # Salva il valore corrente, lo setta su deepseek-r1 SOLO per questo run,
@@ -390,7 +380,7 @@ async def run_scheduled_24h_pipeline(run_id: str | None = None) -> dict:
     return {
         "run_id": run_id,
         "scheduled": True,
-        "tech_engine": tech_report.get("engine", "unknown"),
+        "tech_engine": (tech_report or {}).get("engine", "deferred_to_decision"),
         "decision": decision_result.get("decision", "UNKNOWN"),
         "trades": decision_result.get("trades", []),
         "duration_seconds": duration,
@@ -478,19 +468,10 @@ async def run_full_pipeline(run_id: str | None = None) -> dict:
         hot_tickers = _get_default_tickers()
     hot_tickers = hot_tickers[:6]
 
-    # 3. Technical
-    try:
-        from agents.technical import run_technical_analysis
-        tech_report = await run_technical_analysis(run_id, hot_tickers)
-        result["phases"]["technical"] = {
-            "status": "ok",
-            "engine": tech_report.get("engine", "unknown"),
-            "analyses": len(tech_report.get("analyses", [])),
-        }
-    except Exception as e:
-        logger.error("[%s] Technical fallito: %s", run_id, e)
-        tech_report = {"analyses": [], "engine": "none", "summary": str(e)}
-        result["phases"]["technical"] = {"status": "error", "error": str(e)}
+    # 3. WORKFLOW A 4 FASI: Technical NON pre-eseguito (manual full).
+    # Il Decision Agent fa request_technical_analysis durante FASE 2.
+    tech_report = None
+    result["phases"]["technical"] = {"status": "skipped_workflow_4fasi"}
 
     # 4. Decision
     try:

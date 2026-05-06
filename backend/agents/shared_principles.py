@@ -113,12 +113,91 @@ exit_strategy='discretionary' e setta i target a null.
 """
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# WORKFLOW DI DECISIONE A 4 FASI (Decision standard + crypto)
+# ═══════════════════════════════════════════════════════════════════════
+
+WORKFLOW_PHASES_PRINCIPLES = """\
+WORKFLOW OBBLIGATORIO A 4 FASI — questa sequenza non e' opzionale.
+
+Il sistema NON ti fornisce il report tecnico baseline all'inizio. Tu inizi
+con la sola situazione corrente (portfolio, briefing macro, sentiment buffer)
+e DEVI seguire questo percorso PRIMA di poter eseguire un trade:
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ FASE 1 — VALUTAZIONE INIZIALE (obbligatoria)                          ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║ Analizza la situazione corrente SENZA dati tecnici dettagliati:       ║
+║   - Cosa dice il portafoglio (cash, posizioni, P&L aperti)            ║
+║   - Cosa dicono le briefing geopolitiche / macro recenti              ║
+║   - Cosa dice il buffer scout (news ultimi 60 min)                    ║
+║   - Quale tema/regime stai vedendo                                    ║
+║                                                                       ║
+║ Identifica i ticker su cui vuoi indagare e le DOMANDE TECNICHE        ║
+║ specifiche da girare al Technical Agent.                              ║
+║                                                                       ║
+║ → CHIAMA: commit_initial_assessment(situation_overview, asset_candidates,
+║                                     technical_questions)               ║
+║   con un'analisi di almeno 200 caratteri.                              ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ FASE 2 — RICHIESTA DATI TECNICI (obbligatoria)                        ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║ Solo DOPO commit_initial_assessment puoi chiamare:                    ║
+║   - request_technical_analysis (equity)                               ║
+║   - request_crypto_technical_analysis (crypto)                        ║
+║                                                                       ║
+║ MAX 2 chiamate per run. Se i dati ricevuti sono parziali, decidi se   ║
+║ procedere con quanto hai o se chiedere un ticker mancante.            ║
+║                                                                       ║
+║ Se non ti servono dati tecnici (es. solo portfolio rebalancing),      ║
+║ commit_initial_assessment con technical_questions=[] e procedi        ║
+║ direttamente a FASE 3.                                                ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ FASE 3 — TESI FINALE (obbligatoria)                                   ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║ Integra l'analisi iniziale con i dati tecnici ricevuti. Formula:      ║
+║   - Tesi causale (se X allora Y perche'...)                           ║
+║   - Action plan (quale ticker, BUY o SELL, dimensione, livelli)       ║
+║   - Rischio principale e cosa la invalida                             ║
+║                                                                       ║
+║ → CHIAMA: commit_final_thesis(thesis, action_plan, primary_risk)      ║
+║   con thesis di almeno 200 caratteri.                                 ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║ FASE 4 — TRADING                                                      ║
+╠═══════════════════════════════════════════════════════════════════════╣
+║ Solo DOPO commit_final_thesis puoi chiamare:                          ║
+║   - execute_trade (BUY o SELL)                                        ║
+║   - do_nothing (con reasoning)                                        ║
+║   - set_stop_loss / set_take_profit per posizioni esistenti           ║
+║                                                                       ║
+║ Se chiami execute_trade prima di aver completato le 3 fasi precedenti,║
+║ il sistema TI RIFIUTA il tool con un errore e dovrai riprovare.       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+REGOLE GENERALI:
+- Le 4 fasi sono ENFORCED dal sistema. Non puoi saltarne nessuna.
+- Il logic_chain di execute_trade deve essere >= 200 caratteri e deve
+  citare esplicitamente la tesi commitata in FASE 3.
+- get_portfolio_state e' chiamabile in qualsiasi fase (read-only).
+"""
+
+
 def get_full_risk_block_for_live() -> str:
     """
     Ritorna il blocco completo di principi da iniettare nei prompt Live
-    (decision.py + decision_crypto.py).
+    (decision.py + decision_crypto.py): risk + technical dialog + workflow phases.
     """
-    return RISK_MANAGEMENT_PRINCIPLES + "\n\n" + TECHNICAL_DIALOG_PRINCIPLES
+    return (
+        WORKFLOW_PHASES_PRINCIPLES + "\n\n"
+        + RISK_MANAGEMENT_PRINCIPLES + "\n\n"
+        + TECHNICAL_DIALOG_PRINCIPLES
+    )
 
 
 def get_full_risk_block_for_simulator() -> str:

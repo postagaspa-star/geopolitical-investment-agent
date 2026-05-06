@@ -73,16 +73,34 @@ RISCHI CRYPTO-SPECIFIC da valutare prima di operare:
 - Sentiment regime: bull market → bias BUY su breakouts, bear → bias SELL su rallies
 - Funding rate squeezes: se rilevati nel buffer, attesa fino a stabilizzazione
 
-FASE DECISIONALE:
-A. Valuta: ci sono setup tecnici con confidence >= 60%?
-B. Cross-check con sentiment retail (FOMO/FUD/equilibrato)
-C. Se SI → execute_trade. Se NO → do_nothing con reasoning dettagliato.
+WORKFLOW OBBLIGATORIO A 4 FASI (state machine enforced):
+
+FASE 1 — Pre-analisi (commit_initial_assessment):
+  Analizza la SOLA situazione corrente: portfolio crypto, buffer sentiment
+  retail, news regulatorie/macro overnight, catalisti potenziali. Identifica
+  i ticker crypto da indagare e le domande tecniche specifiche.
+  → tool: commit_initial_assessment(situation_overview, asset_candidates,
+           technical_questions). situation_overview >= 200 caratteri.
+
+FASE 2 — Richiesta dati tecnici (request_crypto_technical_analysis):
+  Chiama il Technical Crypto Agent con i ticker e le domande di FASE 1.
+  MAX 2 chiamate per run. Se non servono dati tecnici (es. solo SL update),
+  passa technical_questions=[] in FASE 1 e salta a FASE 3.
+
+FASE 3 — Tesi finale (commit_final_thesis):
+  Integra pre-analisi + dati tecnici in tesi causale ('se X allora Y perché').
+  → tool: commit_final_thesis(thesis, action_plan, primary_risk).
+     thesis >= 200 caratteri.
+
+FASE 4 — Trading:
+  execute_trade (BUY/SELL, logic_chain >= 200 char che cita la tesi),
+  do_nothing (con reasoning), o set_stop_loss / set_take_profit.
 
 Per CHIUDERE una posizione: get_portfolio_state per leggere quantity,
 poi execute_trade(action='SELL', quantity=...) — parziale o totale.
 
-Output: usa SOLO i tool messi a disposizione (execute_trade, do_nothing,
-get_portfolio_state). MAI rispondere in plain text, sempre tool call."""
+Se chiami execute_trade prima di aver completato le 4 fasi, il sistema
+TI RIFIUTA il tool con un errore esplicito e dovrai riprovare."""
 
 
 def _get_deepseek_key() -> str:
@@ -144,7 +162,33 @@ def _record_run_timestamp():
 
 # ─── Tools ──────────────────────────────────────────────────────────────────
 
+# Importa workflow shared
+from agents.decision_workflow import (
+    COMMIT_INITIAL_ASSESSMENT_TOOL,
+    COMMIT_FINAL_THESIS_TOOL,
+    WorkflowState,
+    can_call_tool,
+    apply_tool_transition,
+    validate_commit_input,
+    make_rejection_result,
+)
+
+
+def _wrap_anthropic_tool_for_openai(t: dict) -> dict:
+    """Converte tool format Anthropic → OpenAI/DeepSeek (per i tool del workflow)."""
+    return {
+        "type": "function",
+        "function": {
+            "name": t["name"],
+            "description": t["description"],
+            "parameters": t["input_schema"],
+        },
+    }
+
+
 CRYPTO_DECISION_TOOLS = [
+    _wrap_anthropic_tool_for_openai(COMMIT_INITIAL_ASSESSMENT_TOOL),
+    _wrap_anthropic_tool_for_openai(COMMIT_FINAL_THESIS_TOOL),
     {
         "type": "function",
         "function": {
@@ -270,6 +314,33 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str) -> str:
     timestamp = datetime.now(timezone.utc).isoformat()
 
     try:
+        # ── Tool del workflow a 4 fasi ─────────────────────────────────────
+        if tool_name == "commit_initial_assessment":
+            payload = {
+                "situation_overview": (tool_input.get("situation_overview") or "")[:6000],
+                "asset_candidates": tool_input.get("asset_candidates") or [],
+                "technical_questions": tool_input.get("technical_questions") or [],
+            }
+            database.insert_agent_log(run_id, "DECISION_CRYPTO_PHASE1", json.dumps(payload, default=str))
+            return json.dumps({
+                "phase": "INITIAL_DONE",
+                "ack": "Pre-analisi crypto committata. Procedi con request_crypto_technical_analysis "
+                       "se hai domande tecniche, altrimenti vai a commit_final_thesis.",
+                "questions_count": len(payload["technical_questions"]),
+            })
+
+        if tool_name == "commit_final_thesis":
+            payload = {
+                "thesis": (tool_input.get("thesis") or "")[:6000],
+                "action_plan": (tool_input.get("action_plan") or "")[:2000],
+                "primary_risk": (tool_input.get("primary_risk") or "")[:2000],
+            }
+            database.insert_agent_log(run_id, "DECISION_CRYPTO_PHASE3", json.dumps(payload, default=str))
+            return json.dumps({
+                "phase": "FINAL_THESIS_DONE",
+                "ack": "Tesi finale crypto committata. Procedi con execute_trade o do_nothing.",
+            })
+
         if tool_name == "execute_trade":
             ticker = tool_input["ticker"]
             action = tool_input["action"]
@@ -501,8 +572,14 @@ def _build_context(tech_report: dict, recent_buffer: list, portfolio_state: dict
     parts = []
     parts.append(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
     parts.append("=" * 60)
-    parts.append("REPORT TECNICO CRYPTO (DeepSeek-V3):")
-    parts.append(json.dumps(tech_report, default=str, ensure_ascii=False)[:8000])
+    # Workflow a 4 fasi: il tech_report NON e' iniettato a priori. Il
+    # Decision Crypto Agent deve PRIMA fare commit_initial_assessment, poi
+    # request_crypto_technical_analysis (FASE 2), poi commit_final_thesis.
+    parts.append(
+        "REPORT TECNICO CRYPTO: NON fornito a priori. Devi richiederlo TU "
+        "tramite request_crypto_technical_analysis durante FASE 2 del workflow "
+        "obbligatorio (vedi WORKFLOW_PHASES nel system prompt)."
+    )
     parts.append("=" * 60)
     parts.append(f"PORTAFOGLIO CORRENTE:")
     parts.append(json.dumps(portfolio_state, default=str, ensure_ascii=False)[:3000])
@@ -542,6 +619,9 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
     max_iterations = 8
     final_text = ""
 
+    # ─── State machine workflow a 4 fasi ────────────────────────────────────
+    workflow_state = WorkflowState()
+
     async with aiohttp.ClientSession() as session:
         while iteration < max_iterations:
             payload = {
@@ -573,6 +653,10 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
                 break
 
             iteration += 1
+            logger.info("[%s][DEC-CRYPTO] Iter %d phase=%s tech_calls=%d tools=%d",
+                        run_id, iteration, workflow_state.phase,
+                        workflow_state.tech_request_count, len(msg["tool_calls"]))
+
             messages.append({
                 "role": "assistant",
                 "content": msg.get("content"),
@@ -581,8 +665,39 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
 
             for tc in msg["tool_calls"]:
                 tool_name = tc["function"]["name"]
-                tool_input = json.loads(tc["function"]["arguments"])
+                try:
+                    tool_input = json.loads(tc["function"]["arguments"])
+                except Exception:
+                    tool_input = {}
+
+                # Validazione workflow phase
+                allowed, err = can_call_tool(workflow_state, tool_name)
+                if not allowed:
+                    workflow_state.rejected_calls.append({
+                        "tool": tool_name, "reason": err[:200],
+                    })
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc["id"],
+                        "content": make_rejection_result(err, workflow_state),
+                    })
+                    continue
+
+                # Validazione contenuto (lunghezza minima testi commit + logic_chain)
+                content_ok, content_err = validate_commit_input(tool_name, tool_input)
+                if not content_ok:
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc["id"],
+                        "content": make_rejection_result(content_err, workflow_state),
+                    })
+                    continue
+
+                # Esegui tool
                 result = await _handle_tool(tool_name, tool_input, run_id)
+
+                # Aggiorna state machine
+                workflow_state = apply_tool_transition(
+                    workflow_state, tool_name, tool_input, result
+                )
 
                 if tool_name == "execute_trade":
                     try:
@@ -602,6 +717,14 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
                     "tool_call_id": tc["id"],
                     "content": result,
                 })
+
+    # Log finale workflow state per diagnostica
+    try:
+        import database
+        database.insert_agent_log(run_id, "DECISION_CRYPTO_WORKFLOW", json.dumps(
+            workflow_state.to_dict(), default=str))
+    except Exception:
+        pass
 
     return trades_executed, final_text, iteration
 

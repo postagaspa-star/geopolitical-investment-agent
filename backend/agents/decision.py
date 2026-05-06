@@ -146,43 +146,40 @@ HAI PIENA AUTONOMIA DECISIONALE. Non ci sono restrizioni conservative.
 Il tuo obiettivo è massimizzare i rendimenti accettando rischi calcolati.
 
 ═══════════════════════════════════════════════════════════════════════
-PROCEDURA OBBLIGATORIA (4 sezioni, in ordine, NESSUNA OMISSIONE):
+WORKFLOW OBBLIGATORIO A 4 FASI (enforced via tool state machine)
 ═══════════════════════════════════════════════════════════════════════
 
-PRIMA di qualsiasi tool call (execute_trade / do_nothing / get_portfolio_state),
-DEVI scrivere in plain text un'analisi strutturata in 4 sezioni nominate:
+⚠️ Il sistema NON ti fornisce il report tecnico baseline. Devi richiederlo
+TU durante FASE 2. Se chiami execute_trade prima di aver completato le
+4 fasi, il sistema TI RIFIUTA il tool con un errore esplicito.
 
-[1] LETTURA DEL CONTESTO
-    - Cosa dicono i Report 4D / 8H / Intelligence Buffer (cita 3-5 micro-cards
-      rilevanti, NON tutte) — sintesi del regime di mercato corrente.
-    - Cosa dice il Report Tecnico per i ticker focus (signal/trend/confidence)
-    - Stato del portafoglio: cash %%, posizioni aperte e loro P&L
+FASE 1 — Pre-analisi (commit_initial_assessment)
+  Analizza la SOLA situazione corrente: portfolio, briefing 4D/8H,
+  intelligence buffer recente, sentiment retail. Identifica i ticker
+  che vuoi indagare e formula domande tecniche specifiche da girare al
+  Technical Agent (es. "RSI 14 e livelli S/R su NVDA per posizionare SL").
+  → tool: commit_initial_assessment(situation_overview, asset_candidates,
+           technical_questions)
+     situation_overview deve essere >= 200 caratteri.
 
-[2] RAGIONAMENTO CAUSALE
-    - Tesi principale: incrocia geopolitica + tecnico in 1-2 paragrafi
-      ('se X allora Y perché...'). Identifica il driver dominante del periodo.
-    - Conferme: cosa nel buffer/tech supporta la tesi
-    - Contraddizioni: cosa potrebbe invalidarla (segnali contrari)
-    - Rischio principale: cosa potrebbe far andare male questa decisione
+FASE 2 — Richiesta dati tecnici (request_technical_analysis)
+  Chiama il Technical Agent con i ticker e la focus_question definiti
+  in FASE 1. MAX 2 chiamate per run. Se non ti servono dati tecnici
+  (es. solo rebalancing), passa technical_questions=[] in FASE 1 e
+  salta direttamente a FASE 3.
 
-[3] DECISIONE PROPOSTA (in plain text, prima del tool call)
-    - Azione: BUY / SELL / HOLD
-    - Asset (se BUY/SELL): ticker scelto con razionale del perché QUESTO ticker
-    - Quantity proposta (con calcolo: prezzo × qty = % portafoglio)
-    - Conviction: BASSA (50-65%) / MEDIA (65-80%) / ALTA (80-95%)
-    - Orizzonte atteso: 1g / 1 settimana / 1 mese
-    - Stop-loss e take-profit con motivazione tecnica
+FASE 3 — Tesi finale (commit_final_thesis)
+  Integra l'analisi iniziale con i dati tecnici ricevuti. Formula tesi
+  causale 'se X allora Y perché', action plan e rischio principale.
+  → tool: commit_final_thesis(thesis, action_plan, primary_risk)
+     thesis deve essere >= 200 caratteri.
 
-[4] ESECUZIONE
-    Solo ORA chiami il tool: execute_trade (se action) o do_nothing (se no-trade).
-    Il logic_chain del tool deve essere un riassunto in 2-3 righe della tesi.
-
-REGOLE:
-- Le sezioni [1]-[2]-[3] DEVONO essere scritte come testo prima del tool call
-- Niente sezioni vuote/abbozzate. Se non hai abbastanza dati, dillo nella [2]
-  e scegli do_nothing nella [3].
-- Non saltare direttamente al tool call: sarebbe un ragionamento monco e
-  rende impossibile il debug delle decisioni a posteriori.
+FASE 4 — Trading
+  Solo ora puoi chiamare:
+    - execute_trade (BUY/SELL): logic_chain >= 200 caratteri, deve
+      citare la tesi commitata in FASE 3.
+    - do_nothing(reasoning): se la tesi conclude no-trade.
+    - set_stop_loss / set_take_profit per posizioni esistenti.
 
 ═══════════════════════════════════════════════════════════════════════
 
@@ -288,11 +285,13 @@ Hai il tool execute_trade per BUY/SELL e do_nothing per non operare.
 SELL su posizioni equity esistenti è permesso (chiusura emergency overnight),
 ma generalmente meglio aspettare l'apertura del mercato.
 
-PROCEDURA OVERNIGHT:
-1. Leggi il portafoglio (get_portfolio_state) e identifica posizioni crypto aperte.
-2. Valuta sentiment retail (Reddit r/CryptoCurrency, r/Bitcoin) dal buffer Scout.
-3. Cerca pattern tecnici crypto dal Tech Report (RSI, MACD, support/resistance).
-4. Cerca catalisti macro overnight (annunci Fed, geopolitica, hack, regulation).
+PROCEDURA OVERNIGHT — workflow obbligatorio a 4 fasi:
+1. FASE 1 (commit_initial_assessment): leggi portfolio + buffer sentiment +
+   catalisti macro overnight, identifica i ticker crypto da indagare.
+2. FASE 2 (request_technical_analysis): chiedi al Technical Agent indicatori
+   freschi sui ticker crypto candidati (max 2 chiamate).
+3. FASE 3 (commit_final_thesis): integra sentiment + tecnico in tesi causale.
+4. FASE 4: execute_trade (BUY/SELL) o do_nothing.
 
 REGOLE OPERATIVE:
 - Allocazione max 30% del portafoglio per singola posizione crypto (vs 50% di giorno:
@@ -372,7 +371,22 @@ def _select_model() -> str:
 # Tool Definitions per il Decision Agent
 # ============================================================
 
+# Importa i tool del workflow a 4 fasi (commit_initial_assessment, commit_final_thesis)
+from agents.decision_workflow import (
+    COMMIT_INITIAL_ASSESSMENT_TOOL,
+    COMMIT_FINAL_THESIS_TOOL,
+    WorkflowState,
+    can_call_tool,
+    apply_tool_transition,
+    validate_commit_input,
+    make_rejection_result,
+    PHASE_FINAL_THESIS_DONE,
+)
+
+
 DECISION_TOOLS = [
+    COMMIT_INITIAL_ASSESSMENT_TOOL,
+    COMMIT_FINAL_THESIS_TOOL,
     {
         "name": "execute_trade",
         "description": (
@@ -515,6 +529,33 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
     timestamp = datetime.now(timezone.utc).isoformat()
 
     try:
+        # ── Tool del workflow a 4 fasi ─────────────────────────────────────
+        if tool_name == "commit_initial_assessment":
+            payload = {
+                "situation_overview": (tool_input.get("situation_overview") or "")[:6000],
+                "asset_candidates": tool_input.get("asset_candidates") or [],
+                "technical_questions": tool_input.get("technical_questions") or [],
+            }
+            database.insert_agent_log(run_id, "DECISION_PHASE1", json.dumps(payload, default=str))
+            return json.dumps({
+                "phase": "INITIAL_DONE",
+                "ack": "Pre-analisi committata. Procedi con request_technical_analysis "
+                       "se hai domande tecniche, altrimenti vai a commit_final_thesis.",
+                "questions_count": len(payload["technical_questions"]),
+            })
+
+        if tool_name == "commit_final_thesis":
+            payload = {
+                "thesis": (tool_input.get("thesis") or "")[:6000],
+                "action_plan": (tool_input.get("action_plan") or "")[:2000],
+                "primary_risk": (tool_input.get("primary_risk") or "")[:2000],
+            }
+            database.insert_agent_log(run_id, "DECISION_PHASE3", json.dumps(payload, default=str))
+            return json.dumps({
+                "phase": "FINAL_THESIS_DONE",
+                "ack": "Tesi finale committata. Procedi con execute_trade o do_nothing.",
+            })
+
         if tool_name == "execute_trade":
             ticker = tool_input["ticker"]
             action = tool_input["action"]
@@ -923,52 +964,18 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
             kwargs["tools"] = DECISION_TOOLS
         return client.messages.create(**kwargs)
 
-    # FASE 1 — REASONING-ONLY: chiamata SENZA tools per forzare il modello
-    # a produrre il ragionamento articolato (sezioni 1-2-3 in plain text).
-    # Senza questo step, Sonnet 4.5 saltava direttamente al tool_use al primo
-    # turn, lasciando final_text quasi vuoto e ragionamento muto.
-    try:
-        reasoning_response = await asyncio.to_thread(_create_message, model, 4000, False)
-        used_model = model
-    except Exception as model_err:
-        # Circuit breaker auth/quota — fail-fast (uguale al codice sotto)
-        err_str = str(model_err).lower()
-        if any(s in err_str for s in ["401", "402", "429", "quota", "credit balance",
-                                        "insufficient", "billing", "rate_limit"]):
-            logger.error("[%s][DECISION] Anthropic auth/quota: %s — abort",
-                         run_id, model_err)
-            raise
-        # Fallback model per altri errori
-        if model == DECISION_MODEL:
-            model = DECISION_MODEL_FALLBACK
-            reasoning_response = await asyncio.to_thread(_create_message, model, 4000, False)
-            used_model = model
-        else:
-            raise
-
-    # Estrai testo del ragionamento
-    reasoning_text = ""
-    for block in reasoning_response.content:
-        if hasattr(block, "text"):
-            reasoning_text += block.text
-
-    # Logga il ragionamento — SEMPRE visibile nella dashboard
-    database.insert_agent_log(run_id, "DECISION_REASONING", json.dumps({
-        "model": used_model,
-        "reasoning_text": reasoning_text[:5000],
-        "stop_reason": reasoning_response.stop_reason,
-    }, default=str))
-
-    # FASE 2 — TOOL-CALL: aggiungi il ragionamento alla history e poi
-    # chiama il modello CON tools per eseguire la decisione.
-    messages.append({"role": "assistant", "content": reasoning_text})
-    messages.append({"role": "user", "content":
-        "Ottimo. Ora esegui la decisione che hai motivato: chiama "
-        "execute_trade (se BUY/SELL) oppure do_nothing (se HOLD). "
-        "Il logic_chain del tool deve essere il riassunto in 2-3 righe della tua tesi."})
+    # ═══════════════════════════════════════════════════════════════════
+    # WORKFLOW A 4 FASI: il modello deve passare attraverso
+    # commit_initial_assessment → request_technical_analysis →
+    # commit_final_thesis → execute_trade/do_nothing.
+    # Lo state machine in decision_workflow.py rifiuta tool out-of-order
+    # con un tool_result error che il modello legge e usa per riprovare.
+    # ═══════════════════════════════════════════════════════════════════
+    workflow_state = WorkflowState()
 
     try:
         response = await asyncio.to_thread(_create_message, model, 8000)
+        used_model = model
     except Exception as model_err:
         # Circuit breaker: se è un errore di auth/quota, NON tentare il
         # fallback (sprecherebbe altri token). Errori tipici:
@@ -999,46 +1006,85 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     database.insert_agent_log(run_id, "DECISION_MODEL",
         json.dumps({"model": used_model, "initial_stop_reason": response.stop_reason}))
 
-    # --- Tool Loop ---
+    # --- Tool Loop con state machine ---
     iteration = 0
     max_iterations = 15
     trades_executed = []
 
     while response.stop_reason == "tool_use" and iteration < max_iterations:
         iteration += 1
-        logger.info("[%s][DECISION] Iterazione %d - tool calls...", run_id, iteration)
+        logger.info("[%s][DECISION] Iter %d phase=%s tech_calls=%d",
+                    run_id, iteration, workflow_state.phase,
+                    workflow_state.tech_request_count)
 
         messages.append({"role": "assistant", "content": response.content})
 
         tool_results = []
         for block in response.content:
-            if block.type == "tool_use":
-                result = await _handle_decision_tool(block.name, block.input, run_id)
+            if block.type != "tool_use":
+                continue
+
+            # Validazione workflow phase
+            allowed, err = can_call_tool(workflow_state, block.name)
+            if not allowed:
+                workflow_state.rejected_calls.append({
+                    "tool": block.name, "reason": err[:200],
+                })
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": result,
+                    "content": make_rejection_result(err, workflow_state),
+                    "is_error": True,
                 })
+                continue
 
-                # Track executed trades
-                if block.name == "execute_trade":
-                    try:
-                        parsed = json.loads(result)
-                        if parsed.get("executed"):
-                            trades_executed.append({
-                                "ticker": block.input.get("ticker"),
-                                "action": block.input.get("action"),
-                                "quantity": block.input.get("quantity"),
-                                "confidence": block.input.get("confidence_level"),
-                            })
-                    except Exception:
-                        pass
+            # Validazione contenuto (lunghezza minima testi commit + logic_chain)
+            content_ok, content_err = validate_commit_input(block.name, block.input)
+            if not content_ok:
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": make_rejection_result(content_err, workflow_state),
+                    "is_error": True,
+                })
+                continue
+
+            # Esegui il tool
+            result = await _handle_decision_tool(block.name, block.input, run_id)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result,
+            })
+
+            # Aggiorna state machine post-execution
+            workflow_state = apply_tool_transition(
+                workflow_state, block.name, block.input, result
+            )
+
+            # Track executed trades
+            if block.name == "execute_trade":
+                try:
+                    parsed = json.loads(result)
+                    if parsed.get("executed"):
+                        trades_executed.append({
+                            "ticker": block.input.get("ticker"),
+                            "action": block.input.get("action"),
+                            "quantity": block.input.get("quantity"),
+                            "confidence": block.input.get("confidence_level"),
+                        })
+                except Exception:
+                    pass
 
         messages.append({"role": "user", "content": tool_results})
 
         # Wrap in to_thread per non bloccare l'event loop durante il tool loop
         # (15 iterazioni × ~10s = 2-3 min di blocking se non wrappato)
         response = await asyncio.to_thread(_create_message, used_model, 16000)
+
+    # Log finale workflow state per diagnostica
+    database.insert_agent_log(run_id, "DECISION_WORKFLOW", json.dumps(
+        workflow_state.to_dict(), default=str))
 
     # --- Estrai risposta finale ---
     final_text = ""
@@ -1127,6 +1173,9 @@ async def _run_deepseek_decision_loop(
     max_iterations = 10   # R1 è più lento di Sonnet, riduco da 15 a 10
     final_text = ""
 
+    # ─── State machine workflow a 4 fasi ────────────────────────────────────
+    workflow_state = WorkflowState()
+
     async with aiohttp.ClientSession() as session:
         while iteration < max_iterations:
             payload = {
@@ -1158,8 +1207,9 @@ async def _run_deepseek_decision_loop(
                 break
 
             iteration += 1
-            logger.info("[%s][DECISION-R1] Iterazione %d — tool calls: %d",
-                        run_id, iteration, len(msg["tool_calls"]))
+            logger.info("[%s][DECISION-R1] Iter %d phase=%s tech_calls=%d tools=%d",
+                        run_id, iteration, workflow_state.phase,
+                        workflow_state.tech_request_count, len(msg["tool_calls"]))
 
             # Aggiungi risposta dell'assistente alla storia della conversazione
             messages.append({
@@ -1170,9 +1220,39 @@ async def _run_deepseek_decision_loop(
 
             for tc in msg["tool_calls"]:
                 tool_name = tc["function"]["name"]
-                # IMPORTANTE: arguments è una stringa JSON, non un dict
-                tool_input = json.loads(tc["function"]["arguments"])
+                try:
+                    tool_input = json.loads(tc["function"]["arguments"])
+                except Exception:
+                    tool_input = {}
+
+                # Validazione workflow phase
+                allowed, err = can_call_tool(workflow_state, tool_name)
+                if not allowed:
+                    workflow_state.rejected_calls.append({
+                        "tool": tool_name, "reason": err[:200],
+                    })
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc["id"],
+                        "content": make_rejection_result(err, workflow_state),
+                    })
+                    continue
+
+                # Validazione contenuto (lunghezza minima testi commit + logic_chain)
+                content_ok, content_err = validate_commit_input(tool_name, tool_input)
+                if not content_ok:
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc["id"],
+                        "content": make_rejection_result(content_err, workflow_state),
+                    })
+                    continue
+
+                # Esegui tool
                 result = await _handle_decision_tool(tool_name, tool_input, run_id)
+
+                # Aggiorna state machine
+                workflow_state = apply_tool_transition(
+                    workflow_state, tool_name, tool_input, result
+                )
 
                 # Track trade eseguiti
                 if tool_name == "execute_trade":
@@ -1194,6 +1274,14 @@ async def _run_deepseek_decision_loop(
                     "tool_call_id": tc["id"],
                     "content": result,
                 })
+
+    # Log finale workflow state per diagnostica
+    try:
+        import database
+        database.insert_agent_log(run_id, "DECISION_WORKFLOW", json.dumps(
+            workflow_state.to_dict(), default=str))
+    except Exception:
+        pass
 
     return trades_executed, final_text, iteration
 
@@ -1249,18 +1337,14 @@ def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state,
     else:
         parts.append("=== INTELLIGENCE BUFFER L0 === Vuoto (ultime micro-cards consumate dal report 8H)")
 
-    # Technical Report
-    if tech_report:
-        tech_summary = tech_report.get("summary", "")
-        analyses = tech_report.get("analyses", [])
-        tech_text = f"Engine: {tech_report.get('engine', '?')}\nSummary: {tech_summary}\n"
-        for a in analyses[:8]:
-            tech_text += f"\n{a.get('ticker', '?')}: {a.get('signal', '?')} (conf: {a.get('confidence', '?')}%) "
-            tech_text += f"RSI={a.get('rsi', {}).get('value', '?')} ATR={a.get('atr', '?')} "
-            tech_text += f"S/R={a.get('support', '?')}/{a.get('resistance', '?')}"
-        parts.append(f"=== TECHNICAL REPORT ==={tech_text}")
-    else:
-        parts.append("=== TECHNICAL REPORT === Non disponibile (Pure Macro Mode)")
+    # Technical Report — RIMOSSO dal contesto iniziale.
+    # Il workflow a 4 fasi richiede che sia il Decision Agent stesso a
+    # richiederlo via tool (request_technical_analysis) durante FASE 2.
+    parts.append(
+        "=== TECHNICAL REPORT === NON fornito a priori. Devi richiederlo "
+        "tu via tool request_technical_analysis durante FASE 2 del workflow "
+        "obbligatorio. Vedi WORKFLOW_PHASES nel system prompt."
+    )
 
     # Portfolio
     parts.append(f"""=== PORTAFOGLIO ===
