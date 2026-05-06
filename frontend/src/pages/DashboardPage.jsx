@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
+import AgentActivityCards from "../components/AgentActivityCards";
 
 const API = window.location.origin;
 
@@ -385,57 +386,10 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
         )}
       </div>
 
-      {/* Agent Logs (collapsible) */}
+      {/* Attività Agenti (cards strutturate) */}
       <div className="card">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem" }}>
-          <h2 className="card-title" style={{ margin: 0 }}>Agent Logs</h2>
-          {logs && logs.length > LOGS_PREVIEW_COUNT && (
-            <span style={{ fontSize: "0.8rem", color: "#9ca3af" }}>
-              {showAllLogs ? logs.length : LOGS_PREVIEW_COUNT} di {logs.length}
-            </span>
-          )}
-        </div>
-        {!logs || logs.length === 0 ? (
-          <div className="no-data">Nessun log disponibile</div>
-        ) : (
-          <>
-            <div className="logs-container">
-              {(showAllLogs ? logs : logs.slice(0, LOGS_PREVIEW_COUNT)).map((log, idx) => (
-                <div key={idx} className="log-entry">
-                  <span className={`log-badge phase-${(log.phase || "info").toLowerCase()}`}>
-                    {log.phase || "INFO"}
-                  </span>
-                  <span className="log-timestamp">
-                    {log.timestamp
-                      ? new Date(log.timestamp).toLocaleString("it-IT")
-                      : ""}
-                  </span>
-                  <span className="log-message">{log.content || log.message}</span>
-                </div>
-              ))}
-            </div>
-            {logs.length > LOGS_PREVIEW_COUNT && (
-              <div style={{ marginTop: "0.75rem", textAlign: "center" }}>
-                <button
-                  className="btn-secondary btn-sm"
-                  onClick={() => setShowAllLogs(!showAllLogs)}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid #374151",
-                    color: "#9ca3af",
-                    padding: "0.4rem 1rem",
-                    borderRadius: "6px",
-                    cursor: "pointer",
-                    fontSize: "0.85rem",
-                    transition: "all 0.15s",
-                  }}
-                >
-                  {showAllLogs ? "▲ Nascondi" : `▼ Mostra tutti (${logs.length - LOGS_PREVIEW_COUNT} altri)`}
-                </button>
-              </div>
-            )}
-          </>
-        )}
+        <h2 className="card-title">Attività Agenti</h2>
+        <AgentActivityCards />
       </div>
     </div>
   );

@@ -601,16 +601,17 @@ def start_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # ── Standard pipeline (Tech + Decision Sonnet): CRON a ore precise ──
-    # 13:00, 15:00, 17:00, 19:00, 21:00 UTC (Lun-Ven). Skip auto se mercato
-    # chiuso (festività). Le esecuzioni extra del watchdog NON spostano la
-    # cadenza — questi sono i "main run" pianificati.
+    # ── Standard pipeline (Tech + Decision Sonnet): CRON solo NYSE hours ──
+    # 14, 16, 18, 20 UTC (= 10:00, 12:00, 14:00, 16:00 ET) Lun-Ven.
+    # NYSE apre 13:30 UTC, chiude 20:00 UTC → primo run a 14:00, ultimo a 20:00.
+    # Skip auto se mercato chiuso (festività). Watchdog può comunque triggerare
+    # extra runs durante NYSE hours.
     _scheduler.add_job(
         _standard_pipeline_job,
-        trigger=CronTrigger(hour="13,15,17,19,21", minute=0,
+        trigger=CronTrigger(hour="14,16,18,20", minute=0,
                             day_of_week="mon-fri"),
         id="standard_pipeline_job",
-        name="Standard pipeline (cron 13/15/17/19/21 UTC L-V, V3+Sonnet)",
+        name="Standard pipeline (cron 14/16/18/20 UTC L-V, V3+Sonnet, NYSE-only)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

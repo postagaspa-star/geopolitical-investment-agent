@@ -44,31 +44,20 @@ DEEPSEEK_R1_MODEL = "deepseek-reasoner"   # DeepSeek-R1 (reasoning model)
 
 
 def _get_decision_engine() -> str:
-    """Legge DECISION_ENGINE da env var. Default 'hybrid' (production GEO).
+    """Legge DECISION_ENGINE da env var. Default 'claude' (Sonnet 4.5).
 
     Valori validi:
-      - 'claude'      → Sonnet 4.5 sempre
-      - 'deepseek-r1' → R1 sempre (GR1 tournament)
-      - 'hybrid'      → Sonnet 4.5 in market hours, R1 fuori orario (default GEO)
+      - 'claude'      → Sonnet 4.5 sempre (default Live)
+      - 'deepseek-r1' → R1 sempre (GR1 tournament bot via env override)
+    L'hybrid mode è stato RIMOSSO (creava confusione con la sidebar e con
+    Decision Crypto). Le crypto sono dominio esclusivo del Decision Crypto.
     """
-    return os.environ.get("DECISION_ENGINE", "hybrid").lower()
+    return os.environ.get("DECISION_ENGINE", "claude").lower()
 
 
 def _resolve_engine_for_run() -> str:
-    """
-    Risolve l'engine da usare per QUESTO run, considerando lo stato del mercato.
-    In hybrid: market open → claude, market closed → deepseek-r1.
-    """
-    engine = _get_decision_engine()
-    if engine != "hybrid":
-        return engine
-
-    # hybrid: scegli in base allo stato del mercato
-    try:
-        from scheduler import is_market_open
-        return "claude" if is_market_open() else "deepseek-r1"
-    except Exception:
-        return "claude"  # fail-open: Sonnet è il default più "safe"
+    """Ritorna l'engine configurato (no più switching per stato mercato)."""
+    return _get_decision_engine()
 
 
 # Setting keys per i timestamp degli ultimi run del Decision Agent.
@@ -750,23 +739,67 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     client = _get_client()
     system_prompt = _get_decision_prompt("claude")
 
-    # Prima prova Opus, se non disponibile usa Sonnet.
     # CRITICO: Anthropic SDK è sincrono → wrap in asyncio.to_thread per non
     # bloccare l'event loop (evita di fermare polling, watchdog, ecc.).
     messages = [{"role": "user", "content": user_message}]
 
-    def _create_message(model_id: str, max_tokens: int):
-        return client.messages.create(
+    def _create_message(model_id: str, max_tokens: int, with_tools: bool = True):
+        kwargs = dict(
             model=model_id,
             max_tokens=max_tokens,
             system=system_prompt,
-            tools=DECISION_TOOLS,
             messages=messages,
         )
+        if with_tools:
+            kwargs["tools"] = DECISION_TOOLS
+        return client.messages.create(**kwargs)
+
+    # FASE 1 — REASONING-ONLY: chiamata SENZA tools per forzare il modello
+    # a produrre il ragionamento articolato (sezioni 1-2-3 in plain text).
+    # Senza questo step, Sonnet 4.5 saltava direttamente al tool_use al primo
+    # turn, lasciando final_text quasi vuoto e ragionamento muto.
+    try:
+        reasoning_response = await asyncio.to_thread(_create_message, model, 4000, False)
+        used_model = model
+    except Exception as model_err:
+        # Circuit breaker auth/quota — fail-fast (uguale al codice sotto)
+        err_str = str(model_err).lower()
+        if any(s in err_str for s in ["401", "402", "429", "quota", "credit balance",
+                                        "insufficient", "billing", "rate_limit"]):
+            logger.error("[%s][DECISION] Anthropic auth/quota: %s — abort",
+                         run_id, model_err)
+            raise
+        # Fallback model per altri errori
+        if model == DECISION_MODEL:
+            model = DECISION_MODEL_FALLBACK
+            reasoning_response = await asyncio.to_thread(_create_message, model, 4000, False)
+            used_model = model
+        else:
+            raise
+
+    # Estrai testo del ragionamento
+    reasoning_text = ""
+    for block in reasoning_response.content:
+        if hasattr(block, "text"):
+            reasoning_text += block.text
+
+    # Logga il ragionamento — SEMPRE visibile nella dashboard
+    database.insert_agent_log(run_id, "DECISION_REASONING", json.dumps({
+        "model": used_model,
+        "reasoning_text": reasoning_text[:5000],
+        "stop_reason": reasoning_response.stop_reason,
+    }, default=str))
+
+    # FASE 2 — TOOL-CALL: aggiungi il ragionamento alla history e poi
+    # chiama il modello CON tools per eseguire la decisione.
+    messages.append({"role": "assistant", "content": reasoning_text})
+    messages.append({"role": "user", "content":
+        "Ottimo. Ora esegui la decisione che hai motivato: chiama "
+        "execute_trade (se BUY/SELL) oppure do_nothing (se HOLD). "
+        "Il logic_chain del tool deve essere il riassunto in 2-3 righe della tua tesi."})
 
     try:
-        response = await asyncio.to_thread(_create_message, model, 16000)
-        used_model = model
+        response = await asyncio.to_thread(_create_message, model, 8000)
     except Exception as model_err:
         # Circuit breaker: se è un errore di auth/quota, NON tentare il
         # fallback (sprecherebbe altri token). Errori tipici:
