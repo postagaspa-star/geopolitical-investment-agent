@@ -118,8 +118,28 @@ export default function ChatWidget() {
           selected_trade_ids: selectedIds.length > 0 ? selectedIds : null,
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+
+      // Leggi sempre il body, anche su errore: il backend ritorna detail strutturato
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        data = { error: `HTTP ${res.status} (response non JSON)` };
+      }
+
+      if (!res.ok) {
+        // Costruisci messaggio di errore leggibile dal detail backend
+        const parts = [];
+        if (data.error) parts.push(data.error);
+        if (data.detail) parts.push(`Dettaglio: ${data.detail}`);
+        if (data.hint) parts.push(`Suggerimento: ${data.hint}`);
+        if (data.type) parts.push(`Tipo: ${data.type}`);
+        const fullErr = parts.length > 0
+          ? parts.join("\n")
+          : `HTTP ${res.status}`;
+        throw new Error(fullErr);
+      }
+
       if (data.is_new && data.conversation_id) {
         setActiveConvId(data.conversation_id);
         loadConversations();
@@ -132,7 +152,7 @@ export default function ChatWidget() {
     } catch (e) {
       setMessages(prev => [...prev, {
         role: "assistant",
-        content: `Errore: ${e.message}. Riprova.`,
+        content: `⚠ Errore chat:\n${e.message}`,
         created_at: new Date().toISOString(),
       }]);
     } finally {

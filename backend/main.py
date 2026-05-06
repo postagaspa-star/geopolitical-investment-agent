@@ -602,11 +602,62 @@ async def chat_health():
             "tables_ok": ok,
             "tables_error": err if not ok else None,
             "deepseek_api_key_set": bool(api_key),
+            "deepseek_api_key_len": len(api_key) if api_key else 0,
             "live_context_chars": live_ctx_len,
             "live_context_error": live_ctx_err,
         }
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e), "type": type(e).__name__})
+        import traceback
+        return JSONResponse(status_code=500, content={
+            "error": str(e),
+            "type": type(e).__name__,
+            "traceback": traceback.format_exc()[-2000:],
+        })
+
+
+@app.post("/api/chat/test-deepseek")
+async def chat_test_deepseek():
+    """
+    Diagnostica DIRETTA su DeepSeek: invia una richiesta minima ('Ciao')
+    e ritorna esito + dettagli. Bypassa tabelle e contesto live, per
+    isolare problemi di API key / rete / quota.
+    """
+    try:
+        from agents import chat_assistant
+        api_key = chat_assistant._get_api_key()
+        if not api_key:
+            return {"ok": False, "stage": "api_key", "error": "DEEPSEEK_API_KEY non configurata"}
+
+        import aiohttp
+        payload = {
+            "model": chat_assistant.DEEPSEEK_R1_MODEL,
+            "messages": [
+                {"role": "system", "content": "Rispondi in 1 parola."},
+                {"role": "user", "content": "Ciao"},
+            ],
+            "max_tokens": 10,
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                chat_assistant.DEEPSEEK_API_URL, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                body = await resp.text()
+                return {
+                    "ok": resp.status == 200,
+                    "status_code": resp.status,
+                    "body_preview": body[:800],
+                    "stage": "http_response",
+                }
+    except Exception as e:
+        import traceback
+        return JSONResponse(status_code=500, content={
+            "ok": False, "stage": "exception",
+            "error": str(e), "type": type(e).__name__,
+            "traceback": traceback.format_exc()[-1500:],
+        })
 
 
 @app.get("/api/chat/conversations")

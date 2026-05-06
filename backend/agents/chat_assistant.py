@@ -124,17 +124,76 @@ def build_decisions_context(trades: list) -> str:
     )
 
 
+# Cap totale del live context per evitare di saturare i 64k token di R1.
+# Lasciamo ~30k char per evitare di sforare considerando system prompt +
+# history + decisions_context + risposta. R1 = ~256k char totali, ma
+# vogliamo lasciare margine per output_tokens (max 2500).
+LIVE_CONTEXT_HARD_CAP_CHARS = 35000
+TRADES_FULL_LIMIT = 200    # tutti i trade compressi
+LOGS_RECENT_LIMIT = 60     # ultimi log degli agenti
+HISTORY_SAMPLE_POINTS = 30 # equity curve sampling
+
+
+def _compact_trade(t: dict) -> dict:
+    """Versione ULTRA compressa di un trade per il bulk listing."""
+    return {
+        "id": t.get("id"),
+        "ts": str(t.get("timestamp", ""))[:19],  # solo "YYYY-MM-DD HH:MM:SS"
+        "tk": t.get("ticker"),
+        "a": t.get("action"),
+        "q": t.get("quantity"),
+        "p": t.get("price"),
+        "c": t.get("confidence_score"),
+        "cs": t.get("cs_mirror_status"),
+    }
+
+
+def _compact_log(l: dict) -> dict:
+    """Versione compressa di un agent_log."""
+    content_str = str(l.get("content", ""))
+    # Tronca contenuti molto lunghi mantenendo i primi 200 char
+    if len(content_str) > 200:
+        content_str = content_str[:200] + "..."
+    return {
+        "ts": str(l.get("timestamp", ""))[:19],
+        "phase": l.get("phase"),
+        "content": content_str,
+    }
+
+
+def _sample_evenly(items: list, n: int) -> list:
+    """Campiona n elementi distribuiti uniformemente su una lista."""
+    if not items or n >= len(items):
+        return items
+    step = len(items) / n
+    return [items[int(i * step)] for i in range(n)]
+
+
 def build_live_context() -> str:
     """
     Costruisce un blocco "fatti di base" sempre iniettato nel prompt:
-    portafoglio, posizioni con P&L attuale, stato mercato, ultime decisioni
-    e ultime briefing. Tutte le query sono best-effort: se una fallisce
-    (es. tabella mancante, errore di rete), il blocco viene comunque
-    generato senza quella sezione.
+    TUTTI i dati significativi della piattaforma, compressi per stare
+    sotto LIVE_CONTEXT_HARD_CAP_CHARS (~35k char).
+
+    Sezioni:
+      1. PORTFOLIO + POSITIONS (con P&L)
+      2. MARKET STATE (us_open, ora UTC)
+      3. ALL TRADES (fino a 200, compressi)
+      4. EQUITY CURVE (campionata a 30 punti su 90 giorni)
+      5. AGENT LOGS (ultimi 60, compressi)
+      6. PRE-MARKET BRIEFING (latest)
+      7. WEEKEND INTELLIGENCE (latest)
+      8. SETTINGS rilevanti (no API keys, solo flag operativi)
+      9. DOCUMENTS (metadata: filename, size, category)
+      10. SIM RUNS (count per categoria)
+
+    Tutte le query sono best-effort: se una fallisce, la sezione viene
+    omessa ma il blocco continua. Logging esteso per diagnostica.
     """
     sections: list[str] = []
+    counters: dict[str, str] = {}
 
-    # 1. Portfolio
+    # 1. Portfolio + Positions (sempre prioritario)
     try:
         import database
         portfolio = database.get_portfolio() or {}
@@ -142,7 +201,6 @@ def build_live_context() -> str:
         cash = float(portfolio.get("cash_balance") or 0)
         total = float(portfolio.get("total_value") or 0)
 
-        # Initial balance da settings; fallback 100k
         try:
             init_str = database.get_setting("initial_balance", "100000")
             initial = float(init_str) if init_str else 100000.0
@@ -169,16 +227,12 @@ def build_live_context() -> str:
             + json.dumps(port_obj, indent=2, ensure_ascii=False)
             + "\n```"
         )
-    except Exception as e:
-        logger.warning("build_live_context: portfolio fetch failed: %s", e)
+        counters["portfolio"] = "ok"
 
-    # 2. Posizioni aperte con P&L unrealized
-    try:
-        import database
-        positions = database.get_positions() or []
+        # Positions con P&L
         if positions:
             pos_list = []
-            for p in positions[:30]:  # cap a 30 per safety
+            for p in positions[:50]:
                 qty = p.get("quantity") or 0
                 avg = p.get("avg_buy_price") or 0
                 cur = p.get("current_price") or 0
@@ -191,17 +245,19 @@ def build_live_context() -> str:
                     "current_price": round(cur, 4),
                     "unrealized_pnl_usd": round(upnl, 2),
                     "unrealized_pnl_pct": round(upnl_pct, 2),
-                    "opened_at": str(p.get("opened_at", "")),
+                    "opened_at": str(p.get("opened_at", ""))[:19],
                 })
             sections.append(
                 f"POSITIONS aperte ({len(pos_list)}):\n```json\n"
                 + json.dumps(pos_list, indent=2, ensure_ascii=False, default=str)
                 + "\n```"
             )
+            counters["positions"] = str(len(pos_list))
     except Exception as e:
-        logger.warning("build_live_context: positions fetch failed: %s", e)
+        logger.warning("build_live_context[portfolio/positions]: %s", e)
+        counters["portfolio"] = f"error: {e}"
 
-    # 3. Market state
+    # 2. Market State
     try:
         from scheduler import is_market_open, get_next_market_open
         market_open = bool(is_market_open())
@@ -220,59 +276,212 @@ def build_live_context() -> str:
             + json.dumps(market_obj, indent=2, ensure_ascii=False)
             + "\n```"
         )
+        counters["market"] = "ok"
     except Exception as e:
-        logger.warning("build_live_context: market state failed: %s", e)
+        logger.warning("build_live_context[market]: %s", e)
 
-    # 4. Ultime 8 decisioni (sintesi)
+    # 3. ALL TRADES (compressi, fino a 200)
     try:
         import database
-        recent = database.get_trades(limit=8) or []
-        if recent:
-            mini = [{
-                "id": t.get("id"),
-                "ts": str(t.get("timestamp", "")),
-                "ticker": t.get("ticker"),
-                "action": t.get("action"),
-                "qty": t.get("quantity"),
-                "price": t.get("price"),
-                "confidence": t.get("confidence_score"),
-            } for t in recent]
+        all_trades = database.get_trades(limit=TRADES_FULL_LIMIT) or []
+        if all_trades:
+            compact_trades = [_compact_trade(t) for t in all_trades]
+            # Statistiche aggregate
+            n_buy = sum(1 for t in all_trades if t.get("action") == "BUY")
+            n_sell = sum(1 for t in all_trades if t.get("action") == "SELL")
+            unique_tickers = sorted({t.get("ticker") for t in all_trades if t.get("ticker")})
+            stats = {
+                "total_trades": len(all_trades),
+                "buys": n_buy,
+                "sells": n_sell,
+                "unique_tickers": len(unique_tickers),
+                "tickers_traded": unique_tickers,
+                "legend": "tk=ticker, a=action, q=qty, p=price, c=confidence%, cs=cs_mirror_status",
+            }
             sections.append(
-                "RECENT DECISIONS (ultime 8):\n```json\n"
-                + json.dumps(mini, indent=2, ensure_ascii=False, default=str)
+                f"ALL TRADES STATS:\n```json\n"
+                + json.dumps(stats, indent=2, ensure_ascii=False)
+                + f"\n```\n\nALL TRADES (fino a {TRADES_FULL_LIMIT}, compressi, ordine desc):\n```json\n"
+                + json.dumps(compact_trades, ensure_ascii=False, default=str)
                 + "\n```"
             )
+            counters["trades"] = str(len(compact_trades))
     except Exception as e:
-        logger.warning("build_live_context: recent trades fetch failed: %s", e)
+        logger.warning("build_live_context[trades]: %s", e)
 
-    # 5. Pre-market briefing (se presente, troncato)
+    # 4. Equity curve (campionata)
+    try:
+        import database
+        history = database.get_portfolio_history(days=90) or []
+        if history:
+            sampled = _sample_evenly(history, HISTORY_SAMPLE_POINTS)
+            curve = [{
+                "ts": str(h.get("timestamp", ""))[:10],
+                "v": round(float(h.get("total_value", 0)), 2),
+            } for h in sampled]
+            sections.append(
+                f"EQUITY CURVE (campionata a {len(curve)} punti su 90 giorni):\n```json\n"
+                + json.dumps(curve, ensure_ascii=False, default=str)
+                + "\n```"
+            )
+            counters["equity_curve"] = str(len(curve))
+    except Exception as e:
+        logger.warning("build_live_context[equity_curve]: %s", e)
+
+    # 5. AGENT LOGS recenti (compressi)
+    try:
+        import database
+        logs = database.get_agent_logs(limit=LOGS_RECENT_LIMIT) or []
+        if logs:
+            compact_logs = [_compact_log(l) for l in logs]
+            # Statistiche per phase
+            phase_counts: dict[str, int] = {}
+            for l in logs:
+                p = l.get("phase", "?")
+                phase_counts[p] = phase_counts.get(p, 0) + 1
+            sections.append(
+                f"AGENT LOGS (ultimi {len(compact_logs)}, compressi):\n"
+                f"Conteggi per phase: {json.dumps(phase_counts, ensure_ascii=False)}\n"
+                f"```json\n"
+                + json.dumps(compact_logs, ensure_ascii=False, default=str)
+                + "\n```"
+            )
+            counters["logs"] = str(len(compact_logs))
+    except Exception as e:
+        logger.warning("build_live_context[agent_logs]: %s", e)
+
+    # 6. Pre-market briefing
     try:
         import database
         briefing = database.get_latest_pre_market_briefing()
         if briefing and briefing.get("content"):
             content = str(briefing["content"])[:1500]
             sections.append(
-                f"PRE-MARKET BRIEFING (latest, troncato a 1500 char):\n{content}"
+                f"PRE-MARKET BRIEFING (latest, troncato 1500 char):\n{content}"
             )
+            counters["briefing"] = "yes"
     except Exception:
         pass
 
-    # 6. Weekend intelligence (se presente, troncato)
+    # 7. Weekend intelligence
     try:
         import database
         wknd = database.get_latest_weekend_intelligence()
         if wknd and wknd.get("content"):
             content = str(wknd["content"])[:1200]
             sections.append(
-                f"WEEKEND INTELLIGENCE (latest, troncato a 1200 char):\n{content}"
+                f"WEEKEND INTELLIGENCE (latest, troncato 1200 char):\n{content}"
             )
+            counters["weekend"] = "yes"
+    except Exception:
+        pass
+
+    # 8. Settings rilevanti (NO chiavi API)
+    try:
+        import database
+        all_settings = database.get_all_settings() or {}
+        # Filtra: rimuovi chiavi sensibili (API keys, password)
+        SENSITIVE = {"deepseek_api_key", "anthropic_api_key", "news_api_key",
+                     "fred_api_key", "openai_api_key", "clawstreet_api_key",
+                     "supabase_db_password", "polygon_api_key", "massive_api_key"}
+        filtered = {}
+        for k, v in all_settings.items():
+            if k.lower() in SENSITIVE or "api_key" in k.lower() or "password" in k.lower():
+                filtered[k] = "(redacted)"
+            else:
+                # Tronca valori molto lunghi (es. prompt)
+                vs = str(v)
+                if len(vs) > 200:
+                    vs = vs[:200] + f"...[{len(vs)} char totali]"
+                filtered[k] = vs
+        sections.append(
+            f"SETTINGS attivi ({len(filtered)} chiavi):\n```json\n"
+            + json.dumps(filtered, indent=2, ensure_ascii=False, default=str)
+            + "\n```"
+        )
+        counters["settings"] = str(len(filtered))
+    except Exception as e:
+        logger.warning("build_live_context[settings]: %s", e)
+
+    # 9. Documenti (solo metadata)
+    try:
+        import database
+        docs = database.get_documents() or []
+        if docs:
+            metas = [{
+                "id": d.get("id"),
+                "filename": d.get("filename"),
+                "size": d.get("file_size"),
+                "category": d.get("category", "generic"),
+                "is_preset": bool(d.get("is_preset")),
+            } for d in docs]
+            sections.append(
+                f"TECHNICAL DOCUMENTS ({len(metas)} file caricati, solo metadata):\n```json\n"
+                + json.dumps(metas, indent=2, ensure_ascii=False, default=str)
+                + "\n```"
+            )
+            counters["documents"] = str(len(metas))
+    except Exception as e:
+        logger.warning("build_live_context[documents]: %s", e)
+
+    # 10. Sim runs (counts)
+    try:
+        from simulator import db as sim_db
+        runs = sim_db.list_runs() if hasattr(sim_db, "list_runs") else []
+        if runs:
+            cat_counts: dict[str, int] = {}
+            for r in runs:
+                cat = r.get("category", "?")
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            sections.append(
+                f"SIMULATOR RUNS (totale {len(runs)}, per categoria):\n```json\n"
+                + json.dumps(cat_counts, indent=2, ensure_ascii=False)
+                + "\n```"
+            )
+            counters["sim_runs"] = str(len(runs))
+    except Exception as e:
+        logger.warning("build_live_context[sim_runs]: %s", e)
+
+    # 11. Geopolitical snapshots (counts)
+    try:
+        import database
+        snaps = database.get_geopolitical_snapshots(limit=20) or []
+        if snaps:
+            sources = {}
+            for s in snaps:
+                src = s.get("source", "?")
+                sources[src] = sources.get(src, 0) + 1
+            sections.append(
+                f"GEOPOLITICAL SNAPSHOTS (ultimi 20, conteggi per source):\n"
+                f"```json\n{json.dumps(sources, ensure_ascii=False)}\n```"
+            )
+            counters["geo_snapshots"] = str(len(snaps))
     except Exception:
         pass
 
     if not sections:
         return ""
-    header = "=" * 60 + "\nLIVE CONTEXT (snapshot al momento della richiesta):\n" + "=" * 60
-    return header + "\n\n" + "\n\n".join(sections)
+
+    logger.info("build_live_context: counters=%s", counters)
+
+    header = "=" * 60 + "\nLIVE PLATFORM CONTEXT (snapshot al momento della richiesta).\nL'analista AI ha accesso a TUTTI i dati seguenti.\n" + "=" * 60
+    full = header + "\n\n" + "\n\n".join(sections)
+
+    # Hard cap per evitare di saturare il context di R1
+    if len(full) > LIVE_CONTEXT_HARD_CAP_CHARS:
+        # Tronca preservando l'header e una nota di troncamento
+        truncated = full[:LIVE_CONTEXT_HARD_CAP_CHARS]
+        truncated += (
+            f"\n\n[NOTA: contesto troncato a {LIVE_CONTEXT_HARD_CAP_CHARS} caratteri "
+            f"(originale {len(full)}). Alcune sezioni finali potrebbero essere tagliate.]"
+        )
+        full = truncated
+        logger.warning(
+            "build_live_context: troncato da %d a %d char",
+            len(full), LIVE_CONTEXT_HARD_CAP_CHARS,
+        )
+
+    return full
 
 
 def _strip_think(text: str) -> str:
