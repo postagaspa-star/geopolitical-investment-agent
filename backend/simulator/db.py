@@ -6,14 +6,66 @@ Tabelle:
   - sim_runs: un record per ogni scenario completato (memoria principale)
   - sim_steps: dettaglio step-by-step (multi-step scenarios)
   - sim_settings: stato auto-mode + cap giornaliero
+
+Persistenza ridondante: oltre a Supabase (primaria) e SQLite (fallback dev),
+i run vengono salvati anche in un file JSON locale (`/tmp/sim_runs_cache.json`)
+come backup di emergenza. Cosi' se Supabase fallisce E SQLite non e' migrato,
+il fallback `get_run` puo' recuperare i dati anche dopo un restart del pod
+Render (almeno fino al prossimo cleanup del filesystem ephemeral).
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
+
+# Cache file locale per persistenza di emergenza (super-fallback dopo Supabase
+# e SQLite). Su Render /tmp e' ephemeral ma sopravvive ai restart del pod
+# senza redeploy. Se cambi codice e fai push, viene resettato.
+_LOCAL_CACHE_PATH = os.environ.get(
+    "SIM_LOCAL_CACHE_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "sim_runs_cache.json"),
+)
+
+
+def _load_local_cache() -> dict:
+    try:
+        with open(_LOCAL_CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _save_local_cache(cache: dict):
+    try:
+        os.makedirs(os.path.dirname(_LOCAL_CACHE_PATH), exist_ok=True)
+        with open(_LOCAL_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, default=str, ensure_ascii=False)
+    except Exception as exc:
+        logger.warning("[SIM] save local cache fallito: %s", exc)
+
+
+def _put_in_local_cache(run_id: str, run_data: dict):
+    """Aggiunge un run alla cache locale (cap 200 run per evitare crescita illimitata)."""
+    cache = _load_local_cache()
+    cache[run_id] = run_data
+    if len(cache) > 200:
+        # Mantieni solo gli ultimi 200 per data
+        sorted_items = sorted(
+            cache.items(),
+            key=lambda kv: str(kv[1].get("completed_at", "")),
+            reverse=True,
+        )
+        cache = dict(sorted_items[:200])
+    _save_local_cache(cache)
+
+
+def _get_from_local_cache(run_id: str) -> dict | None:
+    cache = _load_local_cache()
+    return cache.get(run_id)
 
 
 # ─── Migration auto su startup (chiamata da database.init_db) ───────────────
@@ -160,11 +212,23 @@ def insert_run(run_data: dict) -> str:
     """
     Inserisce un run completo. Ritorna l'id.
 
-    Cerca di salvare prima su Supabase. Se fallisce (es. tabella sim_runs
-    non esiste perche' la migration psycopg2 non e' passata) tenta di
-    crearla al volo via psycopg2 e poi riprova l'INSERT. Solo se anche
-    quello fallisce, prova SQLite come fallback (locale).
+    Strategia di persistenza ridondante (best-effort):
+      1. Salva SEMPRE nella cache file locale (anche se Supabase funziona —
+         backup di emergenza per restart del pod prima del prossimo deploy)
+      2. Tenta Supabase. Se la tabella sim_runs non esiste, applica la
+         migration al volo e ritenta.
+      3. Tenta SQLite come fallback dev.
+
+    Anche se i tier 2 e 3 falliscono, la cache file (tier 1) garantisce che
+    get_run possa servire il risultato all'utente almeno per il run corrente.
     """
+    # Tier 1: cache file locale — SEMPRE, indipendentemente dal resto
+    try:
+        _put_in_local_cache(run_data["id"], run_data)
+        logger.info("[SIM] insert_run: salvato in local cache: %s", run_data["id"])
+    except Exception as exc:
+        logger.warning("[SIM] insert_run: local cache fallita: %s", exc)
+
     client = _get_client()
     if client:
         payload = dict(run_data)
@@ -225,14 +289,14 @@ def insert_run(run_data: dict) -> str:
 
 def get_run(run_id: str) -> dict | None:
     """
-    Cerca un run in 3 sorgenti in ordine:
+    Cerca un run in 4 sorgenti in ordine:
       1. Supabase (sim_runs)
       2. SQLite locale (fallback dev)
-      3. In-memory _active_runs del runner (fallback ultimo: se l'INSERT
-         su Supabase e' fallito ma il run e' stato comunque eseguito in
-         memoria, lo ricostruiamo on-the-fly cosi' l'utente vede il
-         risultato invece di un 404)
+      3. Local file cache (super-fallback, sopravvive ai pod restart)
+      4. In-memory _active_runs del runner (ultimo: se _finalize_run e' fallito
+         su tutti i layer ma il run e' stato eseguito in memoria)
     """
+    # Tier 1: Supabase
     client = _get_client()
     if client:
         try:
@@ -244,10 +308,12 @@ def get_run(run_id: str) -> dict | None:
                         row["full_data"] = json.loads(row["full_data"])
                     except Exception:
                         pass
+                row["_source"] = "supabase"
                 return row
         except Exception as exc:
             logger.warning("[SIM] get_run Supabase failed: %s", exc)
 
+    # Tier 2: SQLite
     try:
         import db_sqlite
         with db_sqlite.get_db() as conn:
@@ -259,12 +325,23 @@ def get_run(run_id: str) -> dict | None:
                         d["full_data"] = json.loads(d["full_data"])
                     except Exception:
                         pass
+                d["_source"] = "sqlite"
                 return d
     except Exception:
         pass
 
-    # Fallback in-memory: il run e' stato eseguito ma _finalize_run ha fallito
-    # il salvataggio su DB. Ricostruiamo i dati dallo state attivo del runner.
+    # Tier 3: cache file locale (sopravvive ai pod restart su Render)
+    try:
+        cached = _get_from_local_cache(run_id)
+        if cached:
+            logger.warning("[SIM] get_run %s servito da local file cache", run_id)
+            cached["_source"] = "local_file_cache"
+            return cached
+    except Exception as exc:
+        logger.warning("[SIM] local cache lookup failed: %s", exc)
+
+    # Tier 4: in-memory rebuild (richiede che il pod NON si sia riavviato
+    # tra _finalize_run e il click "Visualizza Risultato")
     try:
         from simulator import runner as _runner
         rebuilt = _runner.rebuild_run_from_memory(run_id)
@@ -273,6 +350,12 @@ def get_run(run_id: str) -> dict | None:
                 "[SIM] get_run %s servito da _active_runs (DB non disponibile)",
                 run_id,
             )
+            # Salva ANCHE in local cache cosi' la prossima volta funziona
+            # senza dipendere da _active_runs (es. dopo un restart)
+            try:
+                _put_in_local_cache(run_id, rebuilt)
+            except Exception:
+                pass
             return rebuilt
     except Exception as exc:
         logger.warning("[SIM] in-memory rebuild failed: %s", exc)

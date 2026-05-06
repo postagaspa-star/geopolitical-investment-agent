@@ -1046,6 +1046,57 @@ async def sim_get_result(run_id: str):
         )
 
 
+@app.post("/api/simulator/init-tables")
+async def sim_init_tables():
+    """
+    Forza la creazione delle tabelle sim_* su Supabase via psycopg2.
+    Utile se la migration auto all'avvio non e' passata. Verifica con un
+    INSERT/DELETE di test che il client Supabase possa effettivamente leggere.
+    """
+    try:
+        from simulator import db as sim_db
+        sim_db.ensure_schema()
+
+        # Verifica con probe diretto
+        client = sim_db._get_client()
+        if client:
+            try:
+                r = client.table("sim_runs").select("id").limit(1).execute()
+                return {
+                    "ok": True, "tables_ready": True,
+                    "client": "supabase",
+                    "current_runs_count_sample": len(r.data or []),
+                }
+            except Exception as e:
+                return {
+                    "ok": False, "tables_ready": False,
+                    "client": "supabase",
+                    "probe_error": str(e),
+                    "hint": (
+                        "Migration psycopg2 ha girato ma la tabella non e' "
+                        "leggibile dal client Supabase. Verifica DATABASE_URL "
+                        "e SUPABASE_DB_PASSWORD su Render."
+                    ),
+                }
+        else:
+            # SQLite path
+            import db_sqlite
+            try:
+                with db_sqlite.get_db() as conn:
+                    n = conn.execute("SELECT COUNT(*) as c FROM sim_runs").fetchone()
+                    return {"ok": True, "tables_ready": True, "client": "sqlite",
+                            "current_runs_count": n["c"] if n else 0}
+            except Exception as e:
+                return {"ok": False, "tables_ready": False, "client": "sqlite",
+                        "probe_error": str(e)}
+    except Exception as e:
+        import traceback
+        return JSONResponse(status_code=500, content={
+            "ok": False, "error": str(e), "type": type(e).__name__,
+            "traceback": traceback.format_exc()[-1500:],
+        })
+
+
 @app.get("/api/simulator/health")
 async def sim_health():
     """

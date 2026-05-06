@@ -343,21 +343,21 @@ def rebuild_run_from_memory(run_id: str) -> dict | None:
     Ricostruisce i dati di un run gia' eseguito ma non ancora salvato nel DB
     (es. l'INSERT su Supabase e' fallito ma _active_runs ce l'ha).
 
-    Ritorna un dict con la stessa struttura usata da sim_db.get_run():
-    cosi' il frontend puo' visualizzare il risultato senza accorgersi
-    che il salvataggio persistente e' fallito.
+    Robusto: ogni accesso a campi dello scenario usa .get() con fallback,
+    cosi' anche se uno scenario ha schema parziale, il rebuild non crasha.
     """
     state = _active_runs.get(run_id)
     if not state:
+        logger.warning("[SIM] rebuild_run_from_memory: %s NON in _active_runs (keys: %s)",
+                       run_id, list(_active_runs.keys())[:5])
         return None
     if not state.get("steps"):
+        logger.warning("[SIM] rebuild_run_from_memory: %s ha steps vuoti", run_id)
         return None
-    # Re-esegui la logica di _finalize_run() ma senza scrivere nel DB,
-    # restituendo direttamente il payload run_data.
     try:
-        scenario = state["scenario"]
-        last_step = state["steps"][-1]
-        decision = last_step["decision"]
+        scenario = state.get("scenario") or {}
+        last_step = state["steps"][-1] if state.get("steps") else {}
+        decision = last_step.get("decision") or {}
         asset = decision.get("asset")
 
         perf_1w, perf_1m, perf_3m = _simulate_outcome(
@@ -379,13 +379,17 @@ def rebuild_run_from_memory(run_id: str) -> dict | None:
         else:
             outcome = "yellow"
 
-        historical_period = f"{scenario['period_start']} → {scenario['period_end']}"
+        # Robust: usa .get() con fallback su tutti i campi scenario
+        period_start = scenario.get("period_start", "?")
+        period_end = scenario.get("period_end", "?")
+        historical_period = f"{period_start} → {period_end}"
 
-        if asset:
-            anchor = next((m for m in scenario["market_data"] if m["ticker"] == asset), None)
-            anchor_price = anchor["price_t0"] if anchor else 100.0
+        market_data = scenario.get("market_data") or []
+        if asset and market_data:
+            anchor = next((m for m in market_data if m.get("ticker") == asset), None)
+            anchor_price = anchor.get("price_t0", 100.0) if anchor else 100.0
             import random
-            random.seed(hash(scenario["id"] + (asset or "")))
+            random.seed(hash(str(scenario.get("id", "")) + (asset or "")))
             target = anchor_price * (1 + (perf_3m or 0))
             price_chart = []
             for i in range(90):
@@ -396,22 +400,31 @@ def rebuild_run_from_memory(run_id: str) -> dict | None:
         else:
             price_chart = []
 
-        steps_data = [{
-            "action": s["decision"].get("action"),
-            "asset": s["decision"].get("asset"),
-            "price": next((m["price_t0"] for m in scenario["market_data"]
-                            if m["ticker"] == s["decision"].get("asset")), None),
-            "perf_from_here": None,
-        } for s in state["steps"]]
+        steps_data = []
+        for s in state.get("steps", []):
+            d = s.get("decision") or {}
+            asset_step = d.get("asset")
+            price = None
+            if asset_step and market_data:
+                price = next(
+                    (m.get("price_t0") for m in market_data if m.get("ticker") == asset_step),
+                    None,
+                )
+            steps_data.append({
+                "action": d.get("action"),
+                "asset": asset_step,
+                "price": price,
+                "perf_from_here": None,
+            })
 
-        return {
+        result = {
             "id": run_id,
             "completed_at": datetime.now(timezone.utc).isoformat(),
-            "mode": state["mode"],
-            "category": scenario["category"],
-            "scenario_type": state["scenario_type"],
-            "steps": state["total_steps"],
-            "scenario_id": scenario["id"],
+            "mode": state.get("mode", "manual"),
+            "category": scenario.get("category", "unknown"),
+            "scenario_type": state.get("scenario_type", "single"),
+            "steps": state.get("total_steps", 1),
+            "scenario_id": scenario.get("id", "unknown"),
             "historical_period": historical_period,
             "asset_chosen": asset,
             "action_chosen": decision.get("action"),
@@ -431,12 +444,14 @@ def rebuild_run_from_memory(run_id: str) -> dict | None:
             "what_happened": scenario.get("description_reveal", ""),
             "thesis_evaluation": _evaluate_thesis(decision, scenario, perf_1m),
             "full_data": {
-                "steps": state["steps"],
+                "steps": state.get("steps", []),
                 "price_chart": price_chart,
                 "steps_data": steps_data,
             },
             "_source": "in_memory_fallback",
         }
+        logger.info("[SIM] rebuild_run_from_memory ok: %s", run_id)
+        return result
     except Exception as exc:
         logger.error("[SIM] rebuild_run_from_memory %s failed: %s", run_id, exc, exc_info=True)
         return None
