@@ -213,12 +213,28 @@ export default function SimRunner() {
   const renderRunning = () => {
     const current = stepData[stepIdx];
     const totalSteps = scenarioType === "multi" ? numSteps : 1;
+    const updateDetails = current?.context?.update_details;
+    const isMulti = scenarioType === "multi" && stepIdx > 0;
+
     return (
       <div>
         <div style={S.runHeader}>
-          <h2 style={S.h2}>Step {stepIdx + 1} di {totalSteps}</h2>
+          <h2 style={S.h2}>
+            Step {stepIdx + 1} di {totalSteps}
+            {scenarioType === "single" && (
+              <span style={S.modeChip}>SINGLE-STEP · max 1 mese</span>
+            )}
+            {scenarioType === "multi" && (
+              <span style={S.modeChip}>MULTI-STEP</span>
+            )}
+          </h2>
           {running && <span style={S.runStatus}><Loader2 size={14} className="spin" /> Agente in elaborazione…</span>}
         </div>
+
+        {/* MULTI-STEP: banner cambiamenti dal turno precedente (sopra a tutto) */}
+        {isMulti && updateDetails && (
+          <UpdateBanner stepIdx={stepIdx} totalSteps={totalSteps} details={updateDetails} />
+        )}
 
         <div style={S.runColumns}>
           {/* SINISTRA: contesto */}
@@ -229,37 +245,56 @@ export default function SimRunner() {
                 <div style={S.contextBlock}>
                   <strong>📰 Headline:</strong>
                   <ul style={S.headlineList}>
-                    {(current.context.headlines || []).map((h, i) => (<li key={i}>{h}</li>))}
+                    {(current.context.headlines || []).map((h, i) => {
+                      const isNew = isMulti && updateDetails?.headline_changes?.includes(h);
+                      return (
+                        <li key={i} style={isNew ? { color: "#fbbf24", fontWeight: 600 } : null}>
+                          {isNew && <span style={S.newTag}>NUOVA</span>}
+                          {h}
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
                 <div style={S.contextBlock}>
                   <strong>📊 Mercato:</strong>
                   <table style={S.priceTable}>
-                    <thead><tr><th>Asset</th><th>Prezzo</th><th>24h</th><th>7g</th></tr></thead>
+                    <thead>
+                      <tr>
+                        <th>Asset</th><th>Prezzo</th>
+                        {isMulti && <th>Δ vs T-1</th>}
+                        <th>24h</th><th>7g</th>
+                      </tr>
+                    </thead>
                     <tbody>
-                      {(current.context.market_data || []).map((m, i) => (
-                        <tr key={i}>
-                          <td>{m.ticker}</td>
-                          <td>${m.price?.toFixed(2)}</td>
-                          <td style={{color: m.change_24h >= 0 ? "#10b981" : "#ef4444"}}>
-                            {m.change_24h >= 0 ? "+" : ""}{m.change_24h?.toFixed(2)}%
-                          </td>
-                          <td style={{color: m.change_7d >= 0 ? "#10b981" : "#ef4444"}}>
-                            {m.change_7d >= 0 ? "+" : ""}{m.change_7d?.toFixed(2)}%
-                          </td>
-                        </tr>
-                      ))}
+                      {(current.context.market_data || []).map((m, i) => {
+                        const change = updateDetails?.price_changes?.find(c => c.ticker === m.ticker);
+                        return (
+                          <tr key={i}>
+                            <td style={{ fontFamily: "monospace" }}>{m.ticker}</td>
+                            <td>${m.price_t0?.toFixed(2)}</td>
+                            {isMulti && (
+                              <td style={{
+                                color: change?.delta_pct >= 0 ? "#10b981" : "#ef4444",
+                                fontWeight: 600,
+                              }}>
+                                {change?.delta_pct != null
+                                  ? `${change.delta_pct >= 0 ? "+" : ""}${change.delta_pct.toFixed(2)}%`
+                                  : "—"}
+                              </td>
+                            )}
+                            <td style={{color: m.change_24h >= 0 ? "#10b981" : "#ef4444"}}>
+                              {m.change_24h >= 0 ? "+" : ""}{m.change_24h?.toFixed(2)}%
+                            </td>
+                            <td style={{color: m.change_7d >= 0 ? "#10b981" : "#ef4444"}}>
+                              {m.change_7d >= 0 ? "+" : ""}{m.change_7d?.toFixed(2)}%
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
-                {stepIdx > 0 && current.context.update && (
-                  <div style={{ ...S.contextBlock, background: "#1e293b" }}>
-                    <strong>🔄 Update T+{stepIdx}:</strong>
-                    <div style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6 }}>
-                      {current.context.update}
-                    </div>
-                  </div>
-                )}
               </>
             )}
           </div>
@@ -278,6 +313,18 @@ export default function SimRunner() {
             )}
           </div>
         </div>
+
+        {/* MULTI-STEP: storico decisioni precedenti collassabile */}
+        {isMulti && stepData.length > 1 && (
+          <PrevDecisionsHistory steps={stepData.slice(0, stepIdx)} />
+        )}
+
+        {/* Error from finalize (l'ultimo step puo' avere finalize_error) */}
+        {current?.finalize_error && (
+          <div style={S.warnBox}>
+            ⚠ {current.finalize_error}
+          </div>
+        )}
 
         {error && <div style={S.errorBox}>Errore: {error}</div>}
 
@@ -323,14 +370,153 @@ function Section({ label, body, decision }) {
       <div style={S.outputLabel}>{label}</div>
       {decision ? (
         <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 13 }}>
-          <strong>Azione:</strong><span>{decision.action || "—"}</span>
-          <strong>Asset:</strong><span>{decision.asset || "—"}</span>
+          <strong>Azione:</strong><span style={{
+            color: decision.action === "BUY" ? "#10b981"
+                 : decision.action === "SELL" ? "#ef4444" : "#94a3b8",
+            fontWeight: 700,
+          }}>{decision.action || "—"}</span>
+          <strong>Asset:</strong><span style={{ fontFamily: "monospace" }}>{decision.asset || "—"}</span>
           <strong>Conviction:</strong><span>{decision.conviction || "—"}</span>
           <strong>Orizzonte:</strong><span>{decision.horizon || "—"}</span>
           <strong>Rischio:</strong><span>{decision.risk || "—"}</span>
+          {decision.stop_loss_target != null && (
+            <>
+              <strong>Stop-loss:</strong>
+              <span style={{ color: "#fca5a5" }}>${decision.stop_loss_target}</span>
+            </>
+          )}
+          {decision.take_profit_target != null && (
+            <>
+              <strong>Take-profit:</strong>
+              <span style={{ color: "#86efac" }}>${decision.take_profit_target}</span>
+            </>
+          )}
         </div>
       ) : (
         <div style={S.outputBody}>{body || <em style={{color: "#64748b"}}>—</em>}</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Banner che mostra cosa è cambiato dal turno precedente nel multi-step.
+ * Usato sopra le 2 colonne per dare contesto chiaro all'utente.
+ */
+function UpdateBanner({ stepIdx, totalSteps, details }) {
+  const prev = details?.prev_decision || {};
+  const headlineChanges = details?.headline_changes || [];
+  const priceChanges = (details?.price_changes || []).filter(p => p.delta_pct != null);
+  const significantChanges = priceChanges.filter(p => Math.abs(p.delta_pct) >= 1);
+  return (
+    <div style={S.updateBanner}>
+      <div style={S.updateBannerHeader}>
+        🔄 Cambiamenti dal turno T+{stepIdx - 1} → T+{stepIdx}
+        <span style={S.updateBannerStep}>{stepIdx + 1}/{totalSteps}</span>
+      </div>
+
+      {/* Decisione precedente */}
+      <div style={S.updateSection}>
+        <div style={S.updateSectionLabel}>Tua decisione precedente</div>
+        <div style={S.prevDecisionRow}>
+          <span style={{
+            ...S.prevTag,
+            background: prev.action === "BUY" ? "#064e3b"
+                      : prev.action === "SELL" ? "#7f1d1d" : "#334155",
+            color: prev.action === "BUY" ? "#86efac"
+                 : prev.action === "SELL" ? "#fca5a5" : "#cbd5e1",
+          }}>
+            {prev.action || "—"}
+          </span>
+          <span style={{ fontFamily: "monospace", fontWeight: 700, color: "#e2e8f0" }}>
+            {prev.asset || "—"}
+          </span>
+          <span style={{ fontSize: 11, color: "#94a3b8" }}>
+            conv: <strong>{prev.conviction || "—"}</strong>
+            {" · "}orizzonte: <strong>{prev.horizon || "—"}</strong>
+          </span>
+        </div>
+        {details.prev_thesis && (
+          <div style={S.prevThesis}>"{details.prev_thesis}"</div>
+        )}
+      </div>
+
+      {/* Performance asset scelto */}
+      {details.asset_performance_text && (
+        <div style={S.updateSection}>
+          <div style={S.updateSectionLabel}>Performance del tuo asset</div>
+          <div style={S.perfText}>{details.asset_performance_text}</div>
+        </div>
+      )}
+
+      {/* Headline nuove */}
+      {headlineChanges.length > 0 && (
+        <div style={S.updateSection}>
+          <div style={S.updateSectionLabel}>Nuove headline ({headlineChanges.length})</div>
+          <ul style={{ ...S.headlineList, color: "#fbbf24" }}>
+            {headlineChanges.map((h, i) => <li key={i}>{h}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* Movimenti significativi */}
+      {significantChanges.length > 0 && (
+        <div style={S.updateSection}>
+          <div style={S.updateSectionLabel}>Movimenti prezzo significativi (≥1%)</div>
+          <div style={S.movementsRow}>
+            {significantChanges.map((p, i) => (
+              <span key={i} style={{
+                ...S.movementChip,
+                color: p.delta_pct >= 0 ? "#10b981" : "#ef4444",
+                background: p.delta_pct >= 0 ? "#064e3b30" : "#7f1d1d30",
+                borderColor: p.delta_pct >= 0 ? "#065f46" : "#991b1b",
+              }}>
+                {p.ticker} {p.delta_pct >= 0 ? "+" : ""}{p.delta_pct.toFixed(2)}%
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Storico decisioni precedenti per multi-step. Collassato di default.
+ */
+function PrevDecisionsHistory({ steps }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!steps || steps.length === 0) return null;
+  return (
+    <div style={S.histBox}>
+      <button onClick={() => setExpanded(!expanded)} style={S.histToggle}>
+        {expanded ? "▼" : "▶"} Storico decisioni precedenti ({steps.length})
+      </button>
+      {expanded && (
+        <div style={S.histContent}>
+          {steps.map((s, i) => {
+            const d = s.decision || {};
+            return (
+              <div key={i} style={S.histItem}>
+                <div style={S.histItemHeader}>
+                  <strong>T+{i}</strong>
+                  <span style={{
+                    color: d.action === "BUY" ? "#10b981"
+                         : d.action === "SELL" ? "#ef4444" : "#94a3b8",
+                    fontWeight: 700,
+                  }}>{d.action || "—"}</span>
+                  <span style={{ fontFamily: "monospace" }}>{d.asset || "—"}</span>
+                  <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                    conv {d.conviction || "—"} · {d.horizon || "—"}
+                  </span>
+                </div>
+                {s.reasoning && (
+                  <div style={S.histReasoning}>{s.reasoning.slice(0, 250)}{s.reasoning.length > 250 ? "..." : ""}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -377,4 +563,89 @@ const S = {
   outputBody: { fontSize: 13, color: "#cbd5e1", lineHeight: 1.5, whiteSpace: "pre-wrap" },
   errorBox: { background: "#7f1d1d", color: "#fef2f2", padding: 12, borderRadius: 6,
               marginTop: 12, fontSize: 13 },
+  warnBox: { background: "#3f1d0f", color: "#fed7aa", padding: 12, borderRadius: 6,
+             marginTop: 12, fontSize: 13, border: "1px solid #7c2d12" },
+
+  // Mode chip (single-step / multi-step)
+  modeChip: {
+    marginLeft: 12, padding: "3px 10px", borderRadius: 12,
+    background: "#1e1b4b", color: "#a78bfa",
+    fontSize: 10, fontWeight: 700, letterSpacing: "0.05em",
+    textTransform: "uppercase", verticalAlign: "middle",
+  },
+
+  // Update banner (multi-step transitions)
+  updateBanner: {
+    background: "linear-gradient(135deg, #0f1729 0%, #1e1b4b 100%)",
+    border: "1px solid #4c1d95", padding: 16, borderRadius: 10,
+    marginBottom: 16,
+  },
+  updateBannerHeader: {
+    fontSize: 14, fontWeight: 700, color: "#e9d5ff",
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    paddingBottom: 12, borderBottom: "1px solid #4c1d95", marginBottom: 12,
+  },
+  updateBannerStep: {
+    fontSize: 11, fontWeight: 600, color: "#a78bfa",
+    background: "#1e1b4b", padding: "3px 8px", borderRadius: 4,
+  },
+  updateSection: { marginBottom: 12 },
+  updateSectionLabel: {
+    fontSize: 10, fontWeight: 600, color: "#a78bfa",
+    textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6,
+  },
+  prevDecisionRow: {
+    display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
+    marginBottom: 4,
+  },
+  prevTag: {
+    padding: "3px 10px", borderRadius: 4,
+    fontSize: 11, fontWeight: 700, letterSpacing: "0.05em",
+  },
+  prevThesis: {
+    fontSize: 12, color: "#cbd5e1", lineHeight: 1.5,
+    background: "#0a0e1a", padding: "8px 10px", borderRadius: 4,
+    fontStyle: "italic", border: "1px solid #1f2937", marginTop: 6,
+  },
+  perfText: {
+    fontSize: 13, color: "#cbd5e1",
+    background: "#0a0e1a", padding: "8px 10px", borderRadius: 4,
+    border: "1px solid #1f2937",
+  },
+  movementsRow: { display: "flex", gap: 6, flexWrap: "wrap" },
+  movementChip: {
+    padding: "3px 9px", borderRadius: 4,
+    fontSize: 11, fontWeight: 600, fontFamily: "monospace",
+    border: "1px solid",
+  },
+  newTag: {
+    display: "inline-block", padding: "1px 5px",
+    background: "#7c2d12", color: "#fed7aa",
+    borderRadius: 3, fontSize: 9, fontWeight: 700,
+    marginRight: 6, verticalAlign: "middle",
+  },
+
+  // Storico decisioni precedenti (collassabile)
+  histBox: {
+    marginTop: 16, background: "#0f172a", border: "1px solid #1f2937",
+    borderRadius: 6,
+  },
+  histToggle: {
+    width: "100%", textAlign: "left", padding: "10px 14px",
+    background: "transparent", border: 0, color: "#cbd5e1",
+    cursor: "pointer", fontSize: 13, fontFamily: "inherit", fontWeight: 600,
+  },
+  histContent: { padding: "0 14px 14px 14px" },
+  histItem: {
+    background: "#111827", padding: 10, borderRadius: 6,
+    marginBottom: 8, border: "1px solid #1f2937",
+  },
+  histItemHeader: {
+    display: "flex", gap: 10, alignItems: "center",
+    marginBottom: 4, fontSize: 13,
+  },
+  histReasoning: {
+    fontSize: 12, color: "#94a3b8", lineHeight: 1.5,
+    fontStyle: "italic",
+  },
 };

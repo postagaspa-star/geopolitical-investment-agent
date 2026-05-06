@@ -35,6 +35,9 @@ Stai analizzando uno scenario di mercato realistico per testare il tuo ragioname
 prezzi correnti, headline e dati. Devi decidere come operare ORA, basandoti
 solo su quello che vedi.
 
+Il messaggio user ti dira' se sei in modalita' SINGLE-STEP (decisione una-tantum,
+orizzonte breve max 1 mese) o MULTI-STEP (turni successivi, decisioni adattive).
+
 ═══════════════════════════════════════════════════════════════════════
 PROCEDURA OBBLIGATORIA (3 sezioni nominate, in ordine, NESSUNA OMISSIONE):
 ═══════════════════════════════════════════════════════════════════════
@@ -78,22 +81,44 @@ REGOLE:
 """
 
 SIM_PROMPT_MULTI_UPDATE = """\
-[UPDATE T+{step}] Stai continuando lo scenario.
+═══════════════════════════════════════════════════════════════════════
+[UPDATE T+{step} di {total_steps}] Stai continuando uno scenario MULTI-STEP.
+═══════════════════════════════════════════════════════════════════════
 
-Vediamo come sono evolute le cose. Headline e prezzi sono cambiati.
-La tua decisione precedente è stata ricordata sotto.
+ECCO COSA È CAMBIATO DAL TURNO PRECEDENTE (T+{prev_step}):
 
-DECISIONE PRECEDENTE T+{prev_step}:
+📰 HEADLINE NUOVE / AGGIORNATE:
+{headline_changes}
+
+📊 MOVIMENTO PREZZI dal precedente snapshot:
+{price_changes}
+
+🎯 LA TUA DECISIONE A T+{prev_step} ERA:
   Action: {prev_action}
   Asset: {prev_asset}
   Conviction: {prev_conviction}
+  Orizzonte: {prev_horizon}
   Tesi: {prev_thesis}
 
-PERFORMANCE DA T+{prev_step} A T+{step}:
-{prev_perf}
+📈 PERFORMANCE DELL'ASSET CHE HAI SCELTO da T+{prev_step} a T+{step}:
+{asset_performance}
 
-Ora devi prendere una nuova decisione (può confermare, modificare o chiudere
-la posizione precedente). Stessa procedura: [1] Lettura, [2] Ragionamento, [3] Decisione JSON.
+═══════════════════════════════════════════════════════════════════════
+COSA DEVI FARE ORA:
+
+Decidi se la tua tesi precedente è CONFERMATA, MODIFICATA o INVALIDATA dai
+nuovi dati. La tua nuova decisione T+{step} può essere:
+  • CONFERMA: stessa action sullo stesso asset (mantieni la posizione)
+  • RAFFORZA: aumenta conviction o size se la tesi si sta realizzando bene
+  • RUOTA: cambia asset/action se i nuovi dati mostrano opportunità migliori
+  • CHIUDI: action=HOLD se la tesi è invalidata o profitto raggiunto
+
+Nel ragionamento [2], dichiara ESPLICITAMENTE:
+  "Tesi precedente: [conferma/modifica/invalida] perche' [motivo concreto
+   basato sui dati nuovi]."
+
+Stessa procedura: [1] Lettura, [2] Ragionamento, [3] Decisione JSON.
+═══════════════════════════════════════════════════════════════════════
 """
 
 
@@ -137,29 +162,157 @@ def _load_memory_summary(category: str, n_same: int = 5, n_recent: int = 3) -> s
     return "\n".join(lines)
 
 
+def _perturb_market_data(scenario: dict, step_index: int) -> list:
+    """
+    Genera la versione "T+step" dei market_data applicando perturbazioni
+    deterministiche (stessa seed → stessi prezzi sempre, riproducibile).
+    """
+    import random
+    base = list(scenario.get("market_data", []))
+    if step_index <= 0:
+        return base
+    random.seed(hash(scenario.get("id", "")) + step_index)
+    out = []
+    for m in base:
+        drift = random.uniform(-0.04, 0.06) * step_index
+        out.append({
+            **m,
+            "price_t0": round(m["price_t0"] * (1 + drift), 2),
+            "change_24h": round(random.uniform(-3, 3), 2),
+            "change_7d": round(random.uniform(-8, 8), 2),
+        })
+    return out
+
+
+def _perturb_headlines(scenario: dict, step_index: int) -> list:
+    """
+    Per multi-step: simula evoluzione delle headlines. Per il primo step
+    ritorna la lista originale. Per step successivi, ne ruota alcune e
+    aggiunge "follow-up" generici basati sulla categoria.
+    """
+    base = list(scenario.get("headlines", []))
+    if step_index <= 0:
+        return base
+
+    import random
+    random.seed(hash("hl::" + scenario.get("id", "")) + step_index)
+
+    # Headline "follow-up" per categoria — simula nuove news che escono
+    category = scenario.get("category", "")
+    followup_pool = {
+        "geopolitico": [
+            "Reazioni dei mercati alla situazione geopolitica continuano a impattare i settori risk-on",
+            "Analisti rivedono le proiezioni per le prossime settimane",
+            "Diplomazia attiva su piu' tavoli negoziali",
+        ],
+        "macro": [
+            "Dichiarazioni Fed/BCE muovono i tassi sui Treasury",
+            "Dati macro contrastanti: occupazione vs inflazione",
+            "Forward guidance delle banche centrali aggiornata",
+        ],
+        "crash_rally": [
+            "Volatilita' rimane elevata: VIX in espansione",
+            "Trader retail aumentano l'attivita' su small cap",
+            "Hedge funds modificano posizionamento netto",
+        ],
+        "normale": [
+            "Earnings stagionali confermano la traiettoria attesa",
+            "Volume sopra la media negli ETF settoriali",
+            "Sentiment retail stabile",
+        ],
+    }
+    pool = followup_pool.get(category, followup_pool["normale"])
+    new_headlines = list(base)
+    for _ in range(min(2, len(pool))):
+        h = random.choice(pool)
+        if h not in new_headlines:
+            new_headlines.append(h)
+    return new_headlines
+
+
+def _format_price_changes(prev_md: list, curr_md: list, max_lines: int = 8) -> str:
+    """Formatta le variazioni di prezzo tra due snapshot multi-step."""
+    if not prev_md or not curr_md:
+        return "  (snapshot iniziale, no comparativi)"
+    by_ticker_prev = {m["ticker"]: m for m in prev_md}
+    lines = []
+    for m in curr_md[:max_lines]:
+        t = m["ticker"]
+        prev = by_ticker_prev.get(t)
+        if not prev:
+            continue
+        delta_pct = ((m["price_t0"] - prev["price_t0"]) / prev["price_t0"] * 100) if prev["price_t0"] else 0
+        arrow = "↗" if delta_pct > 0.5 else "↘" if delta_pct < -0.5 else "→"
+        lines.append(
+            f"  {arrow} {t:8s} ${prev['price_t0']:>8.2f} → ${m['price_t0']:>8.2f} "
+            f"({delta_pct:+.2f}%)"
+        )
+    return "\n".join(lines) if lines else "  (nessun cambiamento significativo)"
+
+
+def _format_headline_changes(prev_hl: list, curr_hl: list, max_lines: int = 5) -> str:
+    """Formatta le headline nuove (presenti in curr ma non in prev)."""
+    prev_set = set(prev_hl or [])
+    new_only = [h for h in (curr_hl or []) if h not in prev_set][:max_lines]
+    if not new_only:
+        return "  (nessuna headline nuova: contesto stabile)"
+    return "\n".join(f"  • [NUOVA] {h}" for h in new_only)
+
+
+def _format_asset_performance(asset: str, prev_md: list, curr_md: list) -> str:
+    """Mostra come si e' mosso l'asset scelto al turno precedente."""
+    if not asset or not prev_md or not curr_md:
+        return "  (asset non determinato o snapshot mancante)"
+    prev = next((m for m in prev_md if m["ticker"] == asset), None)
+    curr = next((m for m in curr_md if m["ticker"] == asset), None)
+    if not prev or not curr:
+        return f"  (asset {asset} non in market_data)"
+    delta_pct = ((curr["price_t0"] - prev["price_t0"]) / prev["price_t0"] * 100) if prev["price_t0"] else 0
+    icon = "📈" if delta_pct >= 0 else "📉"
+    verdict = (
+        "tesi si sta realizzando" if delta_pct >= 1
+        else "tesi neutrale" if delta_pct >= -1
+        else "tesi sotto pressione"
+    )
+    return (
+        f"  {icon} {asset}: ${prev['price_t0']:.2f} → ${curr['price_t0']:.2f} "
+        f"({delta_pct:+.2f}%)  [{verdict}]"
+    )
+
+
 def _build_context_prompt(scenario: dict, step_index: int = 0,
-                           prev_steps: list[dict] | None = None) -> tuple[str, dict]:
+                           prev_steps: list[dict] | None = None,
+                           scenario_type: str = "single",
+                           total_steps: int = 1) -> tuple[str, dict]:
     """
     Costruisce il messaggio user per il modello + ritorna il context (per UI).
-    """
-    headlines = list(scenario.get("headlines", []))
-    market_data = list(scenario.get("market_data", []))
-    asset_universe = list(scenario.get("asset_universe", []))
 
-    # Per multi-step: ad ogni step variamo leggermente i dati per simulare il movimento
-    # (in production sostituibile con vere serie storiche del periodo). Per ora,
-    # applichiamo piccole perturbazioni casuali progressive.
-    if step_index > 0:
-        import random
-        random.seed(hash(scenario["id"]) + step_index)
-        market_data = [
-            {**m, "price_t0": round(m["price_t0"] * (1 + random.uniform(-0.04, 0.06) * step_index), 2),
-                  "change_24h": round(random.uniform(-3, 3), 2),
-                  "change_7d": round(random.uniform(-8, 8), 2)}
-            for m in market_data
-        ]
+    Aggiunge:
+    - Mode banner: SINGLE-STEP (max 1 mese) vs MULTI-STEP (T+X di Y)
+    - Multi-step: cambiamenti specifici di prezzi/headline + perf dell'asset
+    """
+    asset_universe = list(scenario.get("asset_universe", []))
+    headlines = _perturb_headlines(scenario, step_index)
+    market_data = _perturb_market_data(scenario, step_index)
 
     parts = []
+
+    # ── Mode banner (sempre in cima)
+    if scenario_type == "single":
+        parts.append("═" * 60)
+        parts.append("MODE: SINGLE-STEP — decisione una-tantum, orizzonte breve.")
+        parts.append("VINCOLO: il campo 'horizon' deve essere uno tra '1g' / '1settimana' / '1mese'.")
+        parts.append("NON usare '3mesi' (riservato al multi-step). Hai una sola finestra di azione.")
+        parts.append("═" * 60)
+        parts.append("")
+    else:
+        parts.append("═" * 60)
+        parts.append(f"MODE: MULTI-STEP — turno T+{step_index} di {total_steps}.")
+        parts.append("Hai turni successivi per adattare la decisione: usa orizzonti coerenti")
+        parts.append("col numero di step rimanenti.")
+        parts.append("═" * 60)
+        parts.append("")
+
     parts.append(f"Asset universe disponibile: {', '.join(asset_universe)}")
     parts.append("")
     parts.append("HEADLINE (ultime 24h):")
@@ -177,28 +330,73 @@ def _build_context_prompt(scenario: dict, step_index: int = 0,
         "headlines": headlines,
         "market_data": market_data,
         "asset_universe": asset_universe,
+        "scenario_type": scenario_type,
+        "total_steps": total_steps,
+        "step_index": step_index,
     }
 
-    # Multi-step: aggiungi update + decisione precedente
+    # ── Multi-step: blocco update con cambiamenti specifici
     if step_index > 0 and prev_steps:
         prev = prev_steps[-1]
+        prev_decision = prev.get("decision") or {}
+        # Calcola gli snapshot del turno precedente per fare il diff
+        prev_md = _perturb_market_data(scenario, step_index - 1)
+        prev_hl = _perturb_headlines(scenario, step_index - 1)
+
+        price_changes = _format_price_changes(prev_md, market_data)
+        headline_changes = _format_headline_changes(prev_hl, headlines)
+        asset_perf = _format_asset_performance(
+            prev_decision.get("asset"), prev_md, market_data
+        )
+
         update_text = SIM_PROMPT_MULTI_UPDATE.format(
             step=step_index,
             prev_step=step_index - 1,
-            prev_action=prev["decision"].get("action", "?"),
-            prev_asset=prev["decision"].get("asset", "—"),
-            prev_conviction=prev["decision"].get("conviction", "?"),
-            prev_thesis=(prev.get("reasoning", "") or "")[:300],
-            prev_perf="(simulazione: range -5/+5%)",
+            total_steps=total_steps,
+            prev_action=prev_decision.get("action", "?"),
+            prev_asset=prev_decision.get("asset", "—"),
+            prev_conviction=prev_decision.get("conviction", "?"),
+            prev_horizon=prev_decision.get("horizon", "?"),
+            prev_thesis=(prev.get("reasoning", "") or "")[:400],
+            headline_changes=headline_changes,
+            price_changes=price_changes,
+            asset_performance=asset_perf,
         )
         parts.insert(0, update_text)
+
+        # Estendi il context_for_ui con il diff per la UI
         context_for_ui["update"] = (
-            f"Headline e prezzi aggiornati al T+{step_index}. "
-            f"Tua precedente decisione: {prev['decision'].get('action')} {prev['decision'].get('asset','')}."
+            f"T+{step_index} di {total_steps}. Decisione precedente: "
+            f"{prev_decision.get('action')} {prev_decision.get('asset','')} "
+            f"({prev_decision.get('conviction','?')})"
         )
+        context_for_ui["update_details"] = {
+            "prev_decision": prev_decision,
+            "prev_thesis": (prev.get("reasoning", "") or "")[:400],
+            "headline_changes": [
+                h for h in headlines if h not in (prev_hl or [])
+            ],
+            "price_changes": [
+                {
+                    "ticker": m["ticker"],
+                    "prev_price": next(
+                        (p["price_t0"] for p in prev_md if p["ticker"] == m["ticker"]),
+                        None,
+                    ),
+                    "curr_price": m["price_t0"],
+                    "delta_pct": (
+                        ((m["price_t0"] - p["price_t0"]) / p["price_t0"] * 100)
+                        if (p := next((x for x in prev_md if x["ticker"] == m["ticker"]), None))
+                           and p["price_t0"] else None
+                    ),
+                }
+                for m in market_data
+            ],
+            "asset_performance_text": asset_perf.strip(),
+        }
 
     # Inietta memoria
-    memory = _load_memory_summary(scenario["category"])
+    memory = _load_memory_summary(scenario.get("category", ""))
     if memory:
         parts.insert(0, memory + "\n\n" + "=" * 60)
 
@@ -368,9 +566,12 @@ async def execute_step(run_id: str, step_index: int) -> dict:
         raise ValueError(f"Run {run_id} non trovato (forse scaduto)")
     state = _active_runs[run_id]
     scenario = state["scenario"]
+    scenario_type = state.get("scenario_type", "single")
+    total_steps = state.get("total_steps", 1)
 
     user_msg, context_for_ui = _build_context_prompt(
-        scenario, step_index=step_index, prev_steps=state["steps"]
+        scenario, step_index=step_index, prev_steps=state["steps"],
+        scenario_type=scenario_type, total_steps=total_steps,
     )
     raw = await _call_r1(SIM_PROMPT_DEFAULT, user_msg)
     parsed = _parse_response(raw)
@@ -386,9 +587,20 @@ async def execute_step(run_id: str, step_index: int) -> dict:
     }
     state["steps"].append(step_data)
 
-    # Se è l'ultimo step, persisti il run e calcola gli outcome
+    # Se è l'ultimo step, persisti il run e calcola gli outcome.
+    # IMPORTANTE: il finalize NON deve mai crashare l'execute_step, altrimenti
+    # il frontend riceve 500 e l'utente vede "errore di caricamento" all'ultimo
+    # step. Catturiamo tutto qui e flagghiamo lo step con eventuale errore.
     if step_data["is_last_step"]:
-        await _finalize_run(run_id)
+        try:
+            await _finalize_run(run_id)
+        except Exception as exc:
+            logger.error("[SIM] _finalize_run crash su run %s: %s",
+                         run_id, exc, exc_info=True)
+            step_data["finalize_error"] = (
+                f"Salvataggio risultato fallito: {type(exc).__name__}: {str(exc)[:200]}. "
+                f"Il run e' visibile via fallback in-memory."
+            )
 
     return step_data
 
@@ -632,11 +844,20 @@ def _build_run_data(run_id: str, state: dict) -> dict:
 
 
 async def _finalize_run(run_id: str):
-    """Salva il run completo nel DB con benchmark + outcome calcolati."""
+    """
+    Salva il run completo nel DB con benchmark + outcome calcolati.
+    Wrappato in try/except: NESSUN errore deve propagare a execute_step.
+    """
     state = _active_runs.get(run_id)
     if not state:
         return
-    run_data = _build_run_data(run_id, state)
+    try:
+        run_data = _build_run_data(run_id, state)
+    except Exception as exc:
+        logger.error("[SIM] _build_run_data crash su run %s: %s",
+                     run_id, exc, exc_info=True)
+        return
+
     try:
         sim_db.insert_run(run_data)
         logger.info("[SIM] Run %s salvato (outcome=%s)", run_id, run_data.get("outcome"))
