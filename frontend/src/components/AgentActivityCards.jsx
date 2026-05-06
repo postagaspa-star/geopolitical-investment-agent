@@ -11,6 +11,9 @@ const API = window.location.origin;
  *  - Scout: solo "creato N schede" + breve riassunto
  *  - Technical: tutte le analisi sui ticker
  *  - Decision: due card → ragionamento + decisione presa
+ *
+ * Design: niente scroll interno (le card mostrano tutto il contenuto),
+ * border-left colorato per identificare il tipo, hover lift soft.
  */
 export default function AgentActivityCards() {
   const [logs, setLogs] = useState([]);
@@ -36,9 +39,23 @@ export default function AgentActivityCards() {
   if (!cards.length) return <div style={S.empty}>Nessuna attività recente</div>;
 
   return (
-    <div style={S.list}>
-      {cards.slice(0, 30).map((c, i) => <CardRenderer key={c.key || i} card={c} />)}
-    </div>
+    <>
+      <style>{KEYFRAMES}</style>
+      <div style={S.list}>
+        {cards.slice(0, 30).map((c, i) => (
+          <div
+            key={c.key || i}
+            className="agent-card"
+            style={{
+              animation: "agentCardIn 0.35s ease-out both",
+              animationDelay: `${Math.min(i * 0.02, 0.3)}s`,
+            }}
+          >
+            <CardRenderer card={c} />
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -62,7 +79,6 @@ function buildCards(logs) {
       if (skipNoise.has(content.event) && !content.trigger) continue;
       if (content.event === "watchdog_complete" && !content.trigger) continue;
       if (content.event === "watchdog_throttled") continue;
-      // Solo eventi con trigger=true
       if (content.trigger) {
         cards.push({
           key: `wd_${log.id || ts}`,
@@ -78,7 +94,6 @@ function buildCards(logs) {
       continue;
     }
 
-    // ORCHESTRATOR: skip — duplicato del Watchdog/Pipeline complete
     if (phase === "ORCHESTRATOR") continue;
 
     // ─── SCOUT: solo scout_20min_complete con riassunto ───
@@ -99,7 +114,6 @@ function buildCards(logs) {
       });
       continue;
     }
-    // Skip altri scout events
     if (phase.startsWith("SCOUT")) continue;
 
     // ─── TECHNICAL ───
@@ -174,7 +188,6 @@ function buildCards(logs) {
       continue;
     }
 
-    // ─── DECISION CRYPTO (R1) ───
     if (phase === "DECISION_CRYPTO_COMPLETE") {
       cards.push({
         key: `dcc_${log.id || ts}`,
@@ -198,7 +211,6 @@ function buildCards(logs) {
     }
   }
 
-  // Ordina cronologicamente decrescente
   return cards.sort((a, b) => new Date(b.ts) - new Date(a.ts));
 }
 
@@ -231,21 +243,43 @@ function CardRenderer({ card }) {
   }
 }
 
-function WatchdogCard({ c }) {
+// ─── Header riutilizzabile ──────────────────────────────────────────────
+function CardHeader({ icon: Icon, iconColor, title, subtitle, ts, badges }) {
   return (
-    <div style={{ ...S.card, borderLeftColor: "#fbbf24" }}>
-      <div style={S.head}>
-        <Eye size={14} style={{ color: "#fbbf24" }} />
-        <strong>Watchdog → trigger</strong>
-        <span style={S.urgency}>urgency {c.urgency}/10</span>
-        <span style={S.timestamp}>{timeAgo(c.ts)}</span>
+    <div style={S.head}>
+      <div style={{ ...S.iconWrap, background: `${iconColor}20` }}>
+        <Icon size={15} style={{ color: iconColor }} />
       </div>
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <strong style={S.title}>{title}</strong>
+          {badges}
+        </div>
+        {subtitle && <div style={S.subtitle}>{subtitle}</div>}
+      </div>
+      <span style={S.timestamp}>{timeAgo(ts)}</span>
+    </div>
+  );
+}
+
+// ─── Cards ──────────────────────────────────────────────────────────────
+
+function WatchdogCard({ c }) {
+  const tone = "#fbbf24";
+  return (
+    <div style={S.card("#fbbf24")}>
+      <CardHeader
+        icon={Eye} iconColor={tone} title="Watchdog → trigger" ts={c.ts}
+        badges={<span style={S.urgencyBadge}>urgency {c.urgency}/10</span>}
+      />
       <div style={S.body}>
-        <strong>Motivazione:</strong> {c.reason}
+        <span style={S.label}>Motivazione</span>
+        <span style={S.value}>{c.reason}</span>
       </div>
       {c.focus_tickers?.length > 0 && (
-        <div style={S.tags}>
-          {c.focus_tickers.map(t => <span key={t} style={S.tag}>{t}</span>)}
+        <div style={S.tickerRow}>
+          <span style={S.labelInline}>Focus:</span>
+          {c.focus_tickers.map(t => <span key={t} style={S.tickerPill}>{t}</span>)}
         </div>
       )}
     </div>
@@ -253,21 +287,21 @@ function WatchdogCard({ c }) {
 }
 
 function ScoutCard({ c }) {
+  const tone = "#a78bfa";
   return (
-    <div style={{ ...S.card, borderLeftColor: "#a78bfa" }}>
-      <div style={S.head}>
-        <BookOpen size={14} style={{ color: "#a78bfa" }} />
-        <strong>Scout</strong>
-        <span style={S.timestamp}>{timeAgo(c.ts)}</span>
-      </div>
-      <div style={S.body}>
-        Create <strong>{c.cards_created}</strong> schede
-        {" "}({c.written_to_buffer} scritte, {c.skipped_duplicates} duplicate skippate)
-        — {c.sources_active.length}/{c.sources_total} fonti attive
+    <div style={S.card(tone)}>
+      <CardHeader
+        icon={BookOpen} iconColor={tone} title="Scout" ts={c.ts}
+        subtitle={`${c.sources_active.length}/${c.sources_total} fonti attive`}
+      />
+      <div style={S.statsRow}>
+        <Stat value={c.cards_created} label="schede" big />
+        <Stat value={c.written_to_buffer} label="scritte" />
+        <Stat value={c.skipped_duplicates} label="duplicate" muted />
       </div>
       {c.sources_active.length > 0 && (
-        <div style={S.tags}>
-          {c.sources_active.map(s => <span key={s} style={{...S.tag, fontSize: 10}}>{s}</span>)}
+        <div style={S.tickerRow}>
+          {c.sources_active.map(s => <span key={s} style={S.sourceTag}>{s}</span>)}
         </div>
       )}
     </div>
@@ -277,46 +311,63 @@ function ScoutCard({ c }) {
 function TechCard({ c, crypto }) {
   const tone = crypto ? "#0891b2" : "#06b6d4";
   return (
-    <div style={{ ...S.card, borderLeftColor: tone }}>
-      <div style={S.head}>
-        <BarChart3 size={14} style={{ color: tone }} />
-        <strong>Technical {crypto ? "Crypto" : ""}</strong>
-        <span style={{...S.tag, fontSize: 10}}>{c.engine}</span>
-        <span style={S.timestamp}>{timeAgo(c.ts)}</span>
-      </div>
-      {c.summary && <div style={S.body}>{c.summary}</div>}
+    <div style={S.card(tone)}>
+      <CardHeader
+        icon={BarChart3} iconColor={tone}
+        title={`Technical ${crypto ? "Crypto" : "Equity"}`}
+        ts={c.ts}
+        badges={<span style={S.engineBadge}>{c.engine}</span>}
+      />
+      {c.summary && <div style={S.summaryBox}>{c.summary}</div>}
       {c.analyses.length > 0 && (
-        <table style={S.table}>
-          <thead>
-            <tr><th>Ticker</th><th>Signal</th><th>Trend</th><th>Conf</th></tr>
-          </thead>
-          <tbody>
-            {c.analyses.map((a, i) => (
-              <tr key={i}>
-                <td style={{ fontFamily: "monospace" }}>{a.ticker}</td>
-                <td style={{ color: signalColor(a.signal) }}>{a.signal || "—"}</td>
-                <td>{a.trend || "—"}</td>
-                <td>{a.confidence != null ? `${a.confidence}%` : "—"}</td>
+        <div style={S.tableWrap}>
+          <table style={S.table}>
+            <thead>
+              <tr>
+                <th style={S.th}>Ticker</th>
+                <th style={S.th}>Signal</th>
+                <th style={S.th}>Trend</th>
+                <th style={{...S.th, textAlign: "right"}}>Conf</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {c.analyses.map((a, i) => (
+                <tr key={i} style={i % 2 === 0 ? S.trEven : S.trOdd}>
+                  <td style={{...S.td, fontFamily: "ui-monospace, SFMono-Regular, monospace", fontWeight: 600}}>{a.ticker}</td>
+                  <td style={S.td}>
+                    <span style={{
+                      ...S.signalChip,
+                      color: signalColor(a.signal),
+                      borderColor: `${signalColor(a.signal)}40`,
+                      background: `${signalColor(a.signal)}15`,
+                    }}>
+                      {a.signal || "—"}
+                    </span>
+                  </td>
+                  <td style={{...S.td, color: "#cbd5e1"}}>{a.trend || "—"}</td>
+                  <td style={{...S.td, textAlign: "right", color: "#cbd5e1"}}>
+                    {a.confidence != null ? `${a.confidence}%` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
 }
 
 function ReasoningCard({ c }) {
+  const tone = "#10b981";
   return (
-    <div style={{ ...S.card, borderLeftColor: "#10b981" }}>
-      <div style={S.head}>
-        <Brain size={14} style={{ color: "#10b981" }} />
-        <strong>Decision — Ragionamento</strong>
-        <span style={{...S.tag, fontSize: 10}}>{c.model}</span>
-        <span style={S.timestamp}>{timeAgo(c.ts)}</span>
-      </div>
-      <div style={{ ...S.body, whiteSpace: "pre-wrap", maxHeight: 240, overflowY: "auto" }}>
-        {c.reasoning_text || "(testo vuoto)"}
+    <div style={S.card(tone)}>
+      <CardHeader
+        icon={Brain} iconColor={tone} title="Decision — Ragionamento" ts={c.ts}
+        badges={<span style={S.engineBadge}>{c.model}</span>}
+      />
+      <div style={S.reasoningBox}>
+        {c.reasoning_text || <em style={{ color: "#64748b" }}>(testo vuoto)</em>}
       </div>
     </div>
   );
@@ -326,64 +377,101 @@ function DecisionCard({ c }) {
   const isTrade = c.decision_label !== "NO TRADE";
   const isBuy = c.action === "BUY";
   const tone = !isTrade ? "#64748b" : isBuy ? "#10b981" : "#ef4444";
+  const isCrypto = c.decision_label === "CRYPTO TRADE";
+
   return (
-    <div style={{ ...S.card, borderLeftColor: tone, background: "#0f172a" }}>
-      <div style={S.head}>
-        <Target size={14} style={{ color: tone }} />
-        <strong>Decision — {c.decision_label}</strong>
-        <span style={S.timestamp}>{timeAgo(c.ts)}</span>
-      </div>
+    <div style={{ ...S.card(tone), background: "#0d1424" }}>
+      <CardHeader
+        icon={Target} iconColor={tone}
+        title={`Decision — ${c.decision_label}`}
+        ts={c.ts}
+        badges={isCrypto ? <span style={S.cryptoBadge}>R1</span> : null}
+      />
       {isTrade ? (
-        <div style={S.body}>
-          <div style={S.tradeRow}>
-            <strong style={{ color: tone, fontSize: 16 }}>
-              {c.action} {c.qty} {c.ticker}
-            </strong>
-            <span>@ ${c.price?.toFixed(2)}</span>
-            <span style={{ color: "#94a3b8" }}>conf {c.confidence}%</span>
+        <div style={S.tradeBlock}>
+          <div style={S.tradeMain}>
+            <span style={{...S.actionTag, background: tone, color: "#fff"}}>
+              {c.action}
+            </span>
+            <span style={S.tradeQty}>{c.qty}</span>
+            <span style={S.tradeTicker}>{c.ticker}</span>
+            <span style={S.tradeAt}>@</span>
+            <span style={S.tradePrice}>${c.price?.toFixed(2)}</span>
           </div>
-          {(c.stop_loss || c.take_profit) && (
-            <div style={{ fontSize: 12, color: "#94a3b8" }}>
-              {c.stop_loss && <span>SL ${c.stop_loss} </span>}
-              {c.take_profit && <span>· TP ${c.take_profit}</span>}
-            </div>
-          )}
+          <div style={S.tradeMeta}>
+            <MetaItem label="Confidence" value={`${c.confidence}%`} />
+            {c.stop_loss && <MetaItem label="Stop Loss" value={`$${c.stop_loss}`} color="#ef4444" />}
+            {c.take_profit && <MetaItem label="Take Profit" value={`$${c.take_profit}`} color="#10b981" />}
+          </div>
         </div>
       ) : (
-        <div style={S.body}>{c.reasoning?.slice(0, 400)}</div>
+        <div style={S.body}>
+          <span style={S.label}>Motivazione</span>
+          <span style={S.value}>{c.reasoning || "(non specificato)"}</span>
+        </div>
       )}
     </div>
   );
 }
 
 function DecisionCryptoCard({ c }) {
+  const tone = "#f472b6";
   return (
-    <div style={{ ...S.card, borderLeftColor: "#f472b6", background: "#1a0e1a" }}>
-      <div style={S.head}>
-        <Target size={14} style={{ color: "#f472b6" }} />
-        <strong>Decision Crypto</strong>
-        <span style={{...S.tag, fontSize: 10, background: "#831843", color: "#fce7f3"}}>R1</span>
-        <span style={S.tag}>{c.trades_executed} trade</span>
-        <span style={S.timestamp}>{timeAgo(c.ts)}</span>
-      </div>
-      <div style={{ ...S.body, whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>
-        {c.final_text}
+    <div style={{ ...S.card(tone), background: "#15101a" }}>
+      <CardHeader
+        icon={Target} iconColor={tone} title="Decision Crypto" ts={c.ts}
+        badges={
+          <>
+            <span style={S.cryptoBadge}>R1</span>
+            <span style={S.tradesBadge}>{c.trades_executed} trade</span>
+          </>
+        }
+      />
+      <div style={S.reasoningBox}>
+        {c.final_text || <em style={{ color: "#64748b" }}>(testo vuoto)</em>}
       </div>
     </div>
   );
 }
 
 function ErrorCard({ c }) {
+  const tone = "#ef4444";
   return (
-    <div style={{ ...S.card, borderLeftColor: "#ef4444" }}>
-      <div style={S.head}>
-        <AlertCircle size={14} style={{ color: "#ef4444" }} />
-        <strong style={{ color: "#ef4444" }}>Decision ERROR</strong>
-        <span style={S.timestamp}>{timeAgo(c.ts)}</span>
-      </div>
+    <div style={{ ...S.card(tone), background: "#1f0e0e" }}>
+      <CardHeader
+        icon={AlertCircle} iconColor={tone}
+        title={<span style={{ color: tone }}>Decision ERROR</span>}
+        ts={c.ts}
+      />
       <div style={S.body}>
-        <strong>{c.error_type}</strong>: {c.error_message}
+        <span style={{...S.label, color: tone}}>{c.error_type}</span>
+        <span style={S.value}>{c.error_message}</span>
       </div>
+    </div>
+  );
+}
+
+// ─── Helper components ──────────────────────────────────────────────────
+
+function Stat({ value, label, big, muted }) {
+  return (
+    <div style={S.stat}>
+      <div style={{
+        fontSize: big ? 22 : 16,
+        fontWeight: 700,
+        color: muted ? "#64748b" : "#e2e8f0",
+        lineHeight: 1.1,
+      }}>{value}</div>
+      <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{label}</div>
+    </div>
+  );
+}
+
+function MetaItem({ label, value, color }) {
+  return (
+    <div style={S.metaItem}>
+      <div style={S.metaLabel}>{label}</div>
+      <div style={{ ...S.metaValue, color: color || "#e2e8f0" }}>{value}</div>
     </div>
   );
 }
@@ -391,24 +479,182 @@ function ErrorCard({ c }) {
 const signalColor = (s) => {
   if (s === "BUY") return "#10b981";
   if (s === "SELL") return "#ef4444";
-  if (s === "HOLD") return "#94a3b8";
-  return "#cbd5e1";
+  if (s === "HOLD") return "#f59e0b";
+  return "#94a3b8";
 };
 
+// ─── Animations ─────────────────────────────────────────────────────────
+// Wrapper .agent-card applica l'hover-lift al primo figlio (la card vera),
+// che e' il div con S.card(tone) e che possiede box-shadow + border.
+const KEYFRAMES = `
+@keyframes agentCardIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.agent-card { cursor: default; }
+.agent-card > div {
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.agent-card:hover > div {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  border-color: #2d3748;
+}
+`;
+
+// ─── Styles ─────────────────────────────────────────────────────────────
+
 const S = {
-  list: { display: "flex", flexDirection: "column", gap: 10 },
-  card: { background: "#111827", border: "1px solid #1f2937",
-          borderLeft: "4px solid", padding: "10px 14px", borderRadius: 6 },
-  head: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6,
-          fontSize: 13, color: "#cbd5e1" },
-  body: { fontSize: 13, color: "#e2e8f0", lineHeight: 1.5 },
-  urgency: { padding: "2px 6px", borderRadius: 3, background: "#7c2d12",
-             color: "#fed7aa", fontSize: 10, fontWeight: 600 },
-  timestamp: { marginLeft: "auto", color: "#64748b", fontSize: 11 },
-  tag: { padding: "2px 6px", borderRadius: 3, background: "#1e293b",
-         color: "#94a3b8", fontSize: 11, fontFamily: "monospace" },
-  tags: { display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 },
-  table: { width: "100%", borderCollapse: "collapse", fontSize: 12, marginTop: 8 },
-  tradeRow: { display: "flex", gap: 12, alignItems: "center", marginBottom: 4 },
-  empty: { color: "#64748b", padding: 24, textAlign: "center", fontSize: 13 },
+  list: { display: "flex", flexDirection: "column", gap: 12 },
+
+  // Card factory: prende il colore del tipo, lo applica al border-left
+  card: (toneColor) => ({
+    background: "#111827",
+    border: "1px solid #1f2937",
+    borderLeft: `3px solid ${toneColor}`,
+    padding: "14px 18px",
+    borderRadius: 10,
+    boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+    transition: "transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease",
+  }),
+
+  // Header
+  head: {
+    display: "flex", alignItems: "center", gap: 12, marginBottom: 10,
+  },
+  iconWrap: {
+    width: 28, height: 28, borderRadius: 7,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    flexShrink: 0,
+  },
+  title: { fontSize: 14, fontWeight: 600, color: "#f1f5f9", letterSpacing: "0.01em" },
+  subtitle: { fontSize: 11, color: "#64748b", marginTop: 2 },
+  timestamp: { color: "#64748b", fontSize: 11, fontFamily: "ui-monospace, SFMono-Regular, monospace", flexShrink: 0 },
+
+  // Body — label/value strutturate
+  body: { fontSize: 13, lineHeight: 1.6, display: "flex", flexDirection: "column", gap: 4 },
+  label: {
+    fontSize: 10, fontWeight: 600, textTransform: "uppercase",
+    letterSpacing: "0.06em", color: "#64748b",
+  },
+  labelInline: {
+    fontSize: 10, fontWeight: 600, textTransform: "uppercase",
+    letterSpacing: "0.06em", color: "#64748b", marginRight: 4,
+  },
+  value: { color: "#e2e8f0" },
+
+  // Badges
+  urgencyBadge: {
+    padding: "2px 8px", borderRadius: 4,
+    background: "linear-gradient(90deg, #92400e, #b45309)",
+    color: "#fed7aa", fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
+  },
+  engineBadge: {
+    padding: "2px 7px", borderRadius: 4,
+    background: "#1e293b", color: "#94a3b8",
+    fontSize: 10, fontFamily: "ui-monospace, SFMono-Regular, monospace",
+    border: "1px solid #334155",
+  },
+  cryptoBadge: {
+    padding: "2px 7px", borderRadius: 4,
+    background: "#831843", color: "#fce7f3",
+    fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
+  },
+  tradesBadge: {
+    padding: "2px 7px", borderRadius: 4,
+    background: "#1e293b", color: "#94a3b8",
+    fontSize: 10, fontWeight: 600,
+  },
+
+  // Scout stats
+  statsRow: {
+    display: "flex", gap: 18, marginTop: 4, marginBottom: 6,
+    paddingLeft: 4,
+  },
+  stat: { display: "flex", flexDirection: "column", alignItems: "flex-start" },
+
+  // Tickers / sources
+  tickerRow: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8, alignItems: "center" },
+  tickerPill: {
+    padding: "3px 9px", borderRadius: 999,
+    background: "#1e293b", color: "#cbd5e1",
+    fontSize: 11, fontFamily: "ui-monospace, SFMono-Regular, monospace",
+    fontWeight: 600,
+    border: "1px solid #334155",
+  },
+  sourceTag: {
+    padding: "2px 7px", borderRadius: 3,
+    background: "#0f172a", color: "#94a3b8",
+    fontSize: 10, fontFamily: "ui-monospace, SFMono-Regular, monospace",
+    border: "1px solid #1f2937",
+  },
+
+  // Tech table
+  summaryBox: {
+    fontSize: 13, color: "#e2e8f0", lineHeight: 1.55,
+    padding: "8px 12px", background: "#0f172a", borderRadius: 6,
+    marginBottom: 8,
+  },
+  tableWrap: { borderRadius: 6, overflow: "hidden", border: "1px solid #1f2937" },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: 12 },
+  th: {
+    padding: "6px 10px", textAlign: "left", fontSize: 10,
+    fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em",
+    color: "#64748b", background: "#0f172a",
+    borderBottom: "1px solid #1f2937",
+  },
+  td: { padding: "8px 10px", color: "#e2e8f0", borderBottom: "1px solid #1a2030" },
+  trEven: { background: "transparent" },
+  trOdd: { background: "rgba(15,23,42,0.4)" },
+  signalChip: {
+    display: "inline-block", padding: "2px 8px", borderRadius: 4,
+    fontSize: 11, fontWeight: 700, letterSpacing: "0.04em",
+    border: "1px solid",
+  },
+
+  // Reasoning text full
+  reasoningBox: {
+    fontSize: 13, lineHeight: 1.7, color: "#e2e8f0",
+    whiteSpace: "pre-wrap", wordBreak: "break-word",
+    padding: "12px 14px",
+    background: "#0a1018",
+    borderRadius: 6,
+    border: "1px solid #1a2030",
+  },
+
+  // Decision trade
+  tradeBlock: { display: "flex", flexDirection: "column", gap: 10 },
+  tradeMain: {
+    display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap",
+    padding: "10px 14px", background: "#0a1018", borderRadius: 8,
+    border: "1px solid #1a2030",
+  },
+  actionTag: {
+    padding: "3px 10px", borderRadius: 4,
+    fontSize: 11, fontWeight: 700, letterSpacing: "0.05em",
+    alignSelf: "center",
+  },
+  tradeQty: { fontSize: 18, fontWeight: 700, color: "#cbd5e1" },
+  tradeTicker: {
+    fontSize: 18, fontWeight: 700, color: "#f1f5f9",
+    fontFamily: "ui-monospace, SFMono-Regular, monospace",
+    letterSpacing: "0.02em",
+  },
+  tradeAt: { fontSize: 14, color: "#64748b" },
+  tradePrice: { fontSize: 18, fontWeight: 600, color: "#e2e8f0" },
+  tradeMeta: {
+    display: "flex", gap: 16, paddingLeft: 4,
+  },
+  metaItem: { display: "flex", flexDirection: "column" },
+  metaLabel: {
+    fontSize: 10, fontWeight: 600, textTransform: "uppercase",
+    letterSpacing: "0.06em", color: "#64748b", marginBottom: 2,
+  },
+  metaValue: { fontSize: 13, fontWeight: 600 },
+
+  // Empty
+  empty: {
+    color: "#64748b", padding: "32px 24px", textAlign: "center", fontSize: 13,
+    background: "#0f172a", borderRadius: 8, border: "1px dashed #1f2937",
+  },
 };
