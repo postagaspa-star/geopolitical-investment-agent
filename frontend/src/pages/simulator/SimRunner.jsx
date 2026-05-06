@@ -195,8 +195,14 @@ export default function SimRunner() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ step_index: idx }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      // Tenta sempre di parsare il body — in caso di 500 il backend
+      // restituisce {"error": "..."} con dettaglio utile.
+      let data = null;
+      try { data = await res.json(); } catch { /* body non-JSON */ }
+      if (!res.ok) {
+        const detail = (data && (data.error || data.detail)) || `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
       setStepData(prev => [...prev, data]);
       setStepIdx(idx);
       setRunning(false);

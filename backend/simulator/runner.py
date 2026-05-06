@@ -24,8 +24,79 @@ logger = logging.getLogger(__name__)
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_R1 = "deepseek-reasoner"
 
-# In-memory state dei run attivi (single-step + multi-step in corso)
+# In-memory state dei run attivi (single-step + multi-step in corso).
+# Su Render i pod si riavviano (deploy, scaling, idle), il dict si svuota
+# → multi-step si rompeva tra step 0 e step 1 con HTTP 500 "Run not found".
+# Soluzione: SHADOW PERSIST su sim_settings come JSON, key
+#   _sim_active_run::{run_id}
+# Caricato lazy in execute_step() se manca dal dict in-memory.
 _active_runs: dict[str, dict] = {}
+_ACTIVE_RUN_KEY_PREFIX = "_sim_active_run::"
+_ACTIVE_RUN_TTL_HOURS = 24   # cleanup degli abbandonati dopo 24h
+
+
+def _persist_active_run(run_id: str, state: dict) -> None:
+    """Shadow-persiste lo state corrente su sim_settings (cross-restart)."""
+    try:
+        from simulator import db as sim_db
+        # NOTA: lo scenario completo include market_data + headlines già
+        # serializzabili. Lo step list contiene oggetti string-only.
+        payload = json.dumps(state, default=str, ensure_ascii=False)
+        sim_db.set_setting(f"{_ACTIVE_RUN_KEY_PREFIX}{run_id}", payload)
+    except Exception as e:
+        logger.warning("[SIM] persist_active_run %s fallita: %s", run_id, e)
+
+
+def _load_active_run(run_id: str) -> dict | None:
+    """Carica lo state shadow-persistito. None se assente o corrotto."""
+    try:
+        from simulator import db as sim_db
+        raw = sim_db.get_setting(f"{_ACTIVE_RUN_KEY_PREFIX}{run_id}", "")
+        if not raw:
+            return None
+        state = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(state, dict):
+            return None
+        # Verifica TTL: se started_at > 24h fa, lo trattiamo come scaduto
+        started = state.get("started_at")
+        if started:
+            try:
+                started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                age_h = (datetime.now(timezone.utc) - started_dt).total_seconds() / 3600
+                if age_h > _ACTIVE_RUN_TTL_HOURS:
+                    logger.info("[SIM] active_run %s scaduto (%.1fh > %dh), skip",
+                                 run_id, age_h, _ACTIVE_RUN_TTL_HOURS)
+                    return None
+            except Exception:
+                pass
+        return state
+    except Exception as e:
+        logger.warning("[SIM] load_active_run %s fallita: %s", run_id, e)
+        return None
+
+
+def _clear_active_run(run_id: str) -> None:
+    """Rimuove lo state shadow-persistito (chiamato a fine run)."""
+    try:
+        from simulator import db as sim_db
+        sim_db.set_setting(f"{_ACTIVE_RUN_KEY_PREFIX}{run_id}", "")
+    except Exception:
+        pass
+
+
+def _get_or_load_active_run(run_id: str) -> dict | None:
+    """
+    Ritorna lo state da memoria o lo recupera dal shadow store.
+    Se ricarica, popola anche `_active_runs` per i call successivi nello stesso pod.
+    """
+    state = _active_runs.get(run_id)
+    if state is not None:
+        return state
+    state = _load_active_run(run_id)
+    if state is not None:
+        _active_runs[run_id] = state
+        logger.info("[SIM] state %s ricaricato da shadow persistence", run_id)
+    return state
 
 
 SIM_PROMPT_DEFAULT = """Sei un Investment Analyst AI in modalità SIMULATOR.
@@ -544,7 +615,7 @@ async def start_run(category: str, scenario_type: str, num_steps: int,
 
     run_id = str(uuid4())
     total = num_steps if scenario_type == "multi" else 1
-    _active_runs[run_id] = {
+    state = {
         "scenario": scenario,
         "scenario_type": scenario_type,
         "category": category,
@@ -553,6 +624,11 @@ async def start_run(category: str, scenario_type: str, num_steps: int,
         "mode": mode,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
+    _active_runs[run_id] = state
+    # Shadow persist subito: cosi' anche se il pod si riavvia tra start_run e
+    # il primo execute_step, lo state e' recuperabile.
+    _persist_active_run(run_id, state)
+
     logger.info("[SIM] Avviato run %s scenario=%s type=%s steps=%d",
                 run_id, scenario["id"], scenario_type, total)
     return {"run_id": run_id, "scenario_id": scenario["id"], "total_steps": total}
@@ -561,12 +637,12 @@ async def start_run(category: str, scenario_type: str, num_steps: int,
 def rebuild_run_from_memory(run_id: str) -> dict | None:
     """
     Ricostruisce i dati di un run gia' eseguito ma non ancora salvato nel DB
-    (es. l'INSERT su Supabase e' fallito ma _active_runs ce l'ha).
-    Usa la stessa _build_run_data di _finalize_run per consistency.
+    (es. l'INSERT su Supabase e' fallito ma lo state e' ancora disponibile).
+    Cerca prima in memory, poi nel shadow store (sim_settings).
     """
-    state = _active_runs.get(run_id)
+    state = _get_or_load_active_run(run_id)
     if not state:
-        logger.warning("[SIM] rebuild_run_from_memory: %s NON in _active_runs (keys: %s)",
+        logger.warning("[SIM] rebuild_run_from_memory: %s NON trovato (mem keys: %s)",
                        run_id, list(_active_runs.keys())[:5])
         return None
     if not state.get("steps"):
@@ -583,10 +659,18 @@ def rebuild_run_from_memory(run_id: str) -> dict | None:
 
 
 async def execute_step(run_id: str, step_index: int) -> dict:
-    """Esegue uno step del run. Ritorna context + output del modello."""
-    if run_id not in _active_runs:
-        raise ValueError(f"Run {run_id} non trovato (forse scaduto)")
-    state = _active_runs[run_id]
+    """Esegue uno step del run. Ritorna context + output del modello.
+
+    Recupera lo state da memoria O dal shadow store (sim_settings) — cosi'
+    se il pod Render si riavvia tra step 0 e step 1, il multi-step continua
+    a funzionare invece di crashare con HTTP 500 "Run not found".
+    """
+    state = _get_or_load_active_run(run_id)
+    if state is None:
+        raise ValueError(
+            f"Run {run_id} non trovato. Possibili cause: run scaduto (>24h "
+            f"da start_run), errore di persistenza, oppure id non mai esistito."
+        )
     scenario = state["scenario"]
     scenario_type = state.get("scenario_type", "single")
     total_steps = state.get("total_steps", 1)
@@ -608,6 +692,10 @@ async def execute_step(run_id: str, step_index: int) -> dict:
         "is_last_step": (step_index + 1) >= state["total_steps"],
     }
     state["steps"].append(step_data)
+
+    # Aggiorna shadow persistence DOPO ogni step (cosi' il prossimo step,
+    # anche su pod diverso, vede gli step precedenti).
+    _persist_active_run(run_id, state)
 
     # Se è l'ultimo step, persisti il run e calcola gli outcome.
     # IMPORTANTE: il finalize NON deve mai crashare l'execute_step, altrimenti
@@ -870,7 +958,7 @@ async def _finalize_run(run_id: str):
     Salva il run completo nel DB con benchmark + outcome calcolati.
     Wrappato in try/except: NESSUN errore deve propagare a execute_step.
     """
-    state = _active_runs.get(run_id)
+    state = _active_runs.get(run_id) or _load_active_run(run_id)
     if not state:
         return
     try:
@@ -883,6 +971,8 @@ async def _finalize_run(run_id: str):
     try:
         sim_db.insert_run(run_data)
         logger.info("[SIM] Run %s salvato (outcome=%s)", run_id, run_data.get("outcome"))
+        # Cleanup dello shadow state (run terminato, persistito in sim_runs)
+        _clear_active_run(run_id)
     except Exception as exc:
         logger.error("[SIM] Errore salvataggio run %s: %s", run_id, exc, exc_info=True)
 
