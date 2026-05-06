@@ -577,30 +577,31 @@ async def chat_with_advisor(
 
     messages = [{"role": "system", "content": ADVISOR_SYSTEM_PROMPT}]
 
-    # Inietta il run_context nel primo messaggio user (se è il primo turno),
-    # oppure prima del nuovo user_message altrimenti.
+    # Cap totale del run_context per non saturare il context window
+    run_context_capped = (run_context or "")[:12000]
+
     if not history:
         # Primo turno: il run_context fa da contesto principale
         first_user = (
-            f"{run_context}\n\n"
-            "═" * 60 + "\n"
+            f"{run_context_capped}\n\n"
+            + "═" * 60 + "\n"
             "PRIMA RICHIESTA: analizza questo run e proponi 1-3 consigli "
             "operativi per migliorare il Decision Agent in scenari simili. "
             "Rispondi nel formato richiesto (analisi discorsiva + JSON proposed_advices)."
         )
         messages.append({"role": "user", "content": first_user})
     else:
-        # Turni successivi: replay history + run_context come reminder + nuovo msg
-        for m in history:
+        # Turni successivi: replay history (cap a ultimi 6 msg per token saving)
+        for m in history[-6:]:
             role = m.get("role")
             if role not in ("user", "assistant"):
                 continue
-            messages.append({"role": role, "content": m.get("content", "")})
-        # Reminder leggero del context (compresso)
+            content = m.get("content", "") or ""
+            messages.append({"role": role, "content": content[:6000]})
         reminder = (
-            "[CONTEXT REMINDER — usa questo per rispondere accuratamente]\n"
-            f"{run_context[:8000]}\n\n"
-            f"[NUOVO MESSAGGIO]\n{user_message}"
+            "[CONTEXT REMINDER — riepilogo run per rispondere accuratamente]\n"
+            f"{run_context_capped[:6000]}\n\n"
+            f"[NUOVO MESSAGGIO UTENTE]\n{user_message}"
         )
         messages.append({"role": "user", "content": reminder})
 

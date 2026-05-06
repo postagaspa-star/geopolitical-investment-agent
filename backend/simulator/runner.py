@@ -126,29 +126,42 @@ PROCEDURA OBBLIGATORIA (3 sezioni nominate, in ordine, NESSUNA OMISSIONE):
     - Rischio principale di una decisione operativa
 
 [3] DECISIONE
-    Output STRUTTURATO sotto forma di JSON, formato esatto (NIENTE testo extra):
+    Output STRUTTURATO sotto forma di JSON. Puoi prendere UNA o PIÙ azioni
+    nello stesso step (max 5). Schema esatto (NIENTE testo extra):
     {
-      "action": "BUY" | "SELL" | "HOLD",
-      "asset": "TICKER",  // se action=HOLD, può essere null
-      "conviction": "BASSA" | "MEDIA" | "ALTA",
-      "horizon": "1g" | "1settimana" | "1mese" | "3mesi",
-      "risk": "frase breve sul rischio principale (1-2 righe)",
-      "stop_loss_target": null | <prezzo assoluto>,
-      "take_profit_target": null | <prezzo assoluto>,
-      "exit_strategy": "trailing_atr" | "level_target" | "time_based" | "discretionary"
+      "decisions": [
+        {
+          "action": "BUY" | "SELL" | "HOLD",
+          "asset": "TICKER",
+          "conviction": "BASSA" | "MEDIA" | "ALTA",
+          "horizon": "1g" | "1settimana" | "1mese" | "3mesi",
+          "risk": "frase breve sul rischio (1-2 righe)",
+          "stop_loss_target": null | <prezzo assoluto>,
+          "take_profit_target": null | <prezzo assoluto>,
+          "exit_strategy": "trailing_atr" | "level_target" | "time_based" | "discretionary"
+        }
+      ]
     }
+
+    Per back-compat, se hai una sola decisione puoi anche usare il formato
+    flat senza "decisions": [...] (campi al primo livello).
 
 REGOLE:
 - Le sezioni [1] e [2] DEVONO essere scritte in plain text
-- La sezione [3] DEVE essere un JSON valido nel formato specificato
-- Asset deve essere uno dei ticker dell'asset_universe fornito
+- La sezione [3] DEVE essere un JSON valido (lista decisions o flat singola)
+- Ogni asset deve essere uno dei ticker dell'asset_universe fornito
 - Niente testo dopo il JSON di [3]
-- I campi stop_loss_target e take_profit_target sono PREZZI ASSOLUTI (es. 150.50),
-  non percentuali. Se action='HOLD' o non riesci a fissarli, usa null.
+- I campi stop_loss_target e take_profit_target sono PREZZI ASSOLUTI (es. 150.50)
 - exit_strategy descrive il TUO approccio: 'level_target' se hai mirato livelli
   tecnici precisi, 'trailing_atr' se prevedi adattamento via ATR, 'time_based'
   se chiuderesti dopo X giorni indipendentemente dal prezzo, 'discretionary'
   se preferisci decidere step-by-step.
+
+QUANDO USARE PIÙ DECISIONI:
+- Pair trade: BUY un settore + SELL un correlato (es. BUY GLD + SELL TLT)
+- Diversificazione tematica: BUY 2-3 ticker dello stesso tema
+- Hedge: BUY del long + posizione difensiva
+- HOLD: usa una sola decision con action=HOLD; non ha senso fare HOLD multipli
 """
 
 SIM_PROMPT_MULTI_UPDATE = """\
@@ -576,6 +589,14 @@ def _parse_response(raw: str) -> dict:
                 pass
     # Fallback: cerca JSON nell'intero testo
     if not decision_json:
+        # Prova prima JSON con "decisions": [...]
+        m = re.search(r'\{[\s\S]*?"decisions"[\s\S]*?\]\s*\}', txt)
+        if m:
+            try:
+                decision_json = json.loads(m.group(0))
+            except Exception:
+                pass
+    if not decision_json:
         m = re.search(r'\{[^{}]*"action"[\s\S]*?\}', txt)
         if m:
             try:
@@ -583,21 +604,47 @@ def _parse_response(raw: str) -> dict:
             except Exception:
                 pass
 
+    # ─── Parse decisions: supporta sia "decisions": [...] sia formato flat ───
+    decisions_list: list[dict] = []
+    if isinstance(decision_json, dict):
+        if isinstance(decision_json.get("decisions"), list) and decision_json["decisions"]:
+            for d in decision_json["decisions"][:5]:   # cap a 5 azioni per step
+                if not isinstance(d, dict):
+                    continue
+                decisions_list.append(_normalize_decision(d))
+        elif decision_json.get("action"):
+            decisions_list.append(_normalize_decision(decision_json))
+
+    if not decisions_list:
+        decisions_list.append({
+            "action": "HOLD", "asset": None, "conviction": "BASSA",
+            "horizon": "1settimana", "risk": "", "stop_loss_target": None,
+            "take_profit_target": None, "exit_strategy": "discretionary",
+        })
+
+    # Per back-compat, "decision" = primo elemento (entry decision)
+    primary = decisions_list[0]
+
     return {
         "reading": reading or txt[:800],
         "reasoning": reasoning or "",
-        "decision": {
-            "action": decision_json.get("action", "HOLD"),
-            "asset": decision_json.get("asset"),
-            "conviction": decision_json.get("conviction", "BASSA"),
-            "horizon": decision_json.get("horizon", "1settimana"),
-            "risk": decision_json.get("risk", ""),
-            # Nuovi campi SL/TP: opzionali, possono essere None
-            "stop_loss_target": decision_json.get("stop_loss_target"),
-            "take_profit_target": decision_json.get("take_profit_target"),
-            "exit_strategy": decision_json.get("exit_strategy", "discretionary"),
-        },
+        "decision": primary,
+        "decisions": decisions_list,   # NUOVO: lista completa
         "raw": txt,
+    }
+
+
+def _normalize_decision(d: dict) -> dict:
+    """Normalizza un singolo dict decisione applicando default + clipping."""
+    return {
+        "action": (d.get("action") or "HOLD").upper(),
+        "asset": d.get("asset"),
+        "conviction": (d.get("conviction") or "BASSA").upper(),
+        "horizon": d.get("horizon", "1settimana"),
+        "risk": (d.get("risk") or "")[:500],
+        "stop_loss_target": d.get("stop_loss_target"),
+        "take_profit_target": d.get("take_profit_target"),
+        "exit_strategy": d.get("exit_strategy", "discretionary"),
     }
 
 
@@ -687,7 +734,8 @@ async def execute_step(run_id: str, step_index: int) -> dict:
         "context": context_for_ui,
         "reading": parsed["reading"],
         "reasoning": parsed["reasoning"],
-        "decision": parsed["decision"],
+        "decision": parsed["decision"],          # primary (back-compat)
+        "decisions": parsed.get("decisions", [parsed["decision"]]),  # lista completa
         "raw": parsed["raw"][:3000],
         "is_last_step": (step_index + 1) >= state["total_steps"],
     }
@@ -741,23 +789,29 @@ def _build_run_data(run_id: str, state: dict) -> dict:
     decision = last_step.get("decision") or {}
     market_data = scenario.get("market_data") or []
 
-    # ── PERFORMANCE: usa la decisione di ENTRY (primo step), non l'ultima.
-    # In multi-step l'AI puo' fare HOLD/RUOTA negli step successivi, ma il
-    # P&L deve essere calcolato sull'azione iniziale altrimenti vedi sempre
-    # 0% se l'ultimo step era HOLD.
-    # Se primo step e' HOLD, prova lo step successivo che ha BUY/SELL.
+    # ── PERFORMANCE: usa la prima decisione di ENTRY (BUY/SELL) trovata
+    # esaminando TUTTE le decisions (non solo quella primary) di TUTTI gli
+    # step. Cosi' anche se l'AI fa multiple azioni per step e l'ultimo
+    # step e' HOLD, calcoliamo il P&L sull'entry effettiva.
     entry_decision = None
     for s in steps:
-        d = (s.get("decision") or {})
-        if d.get("action") in ("BUY", "SELL") and d.get("asset"):
-            entry_decision = d
+        # Esamina tutta la lista decisions (nuovo formato), fallback a 'decision'
+        candidates = s.get("decisions") or [s.get("decision") or {}]
+        for d in candidates:
+            if d and d.get("action") in ("BUY", "SELL") and d.get("asset"):
+                entry_decision = d
+                break
+        if entry_decision:
             break
+
     if entry_decision is None:
-        # Tutti HOLD → outcome = 0
-        entry_decision = decision
+        entry_decision = decision  # tutti HOLD → outcome = 0
 
     asset = entry_decision.get("asset") or decision.get("asset")
     entry_action = entry_decision.get("action") or decision.get("action")
+
+    logger.info("[SIM] _build_run_data run=%s entry: %s %s (steps=%d, last_action=%s)",
+                run_id, entry_action, asset, len(steps), decision.get("action"))
 
     perf_1w, perf_1m, perf_3m = _simulate_outcome(scenario, asset, entry_action)
     perf_sp_1m = 0.02
@@ -854,29 +908,58 @@ def _build_run_data(run_id: str, state: dict) -> dict:
         pnl_dollars_3m = round(notional * perf_3m, 2)
 
     # ── Step breakdown (ora anche per single-step, non solo multi)
+    # Ogni step puo' contenere multiple decisions (action multiple per step).
     steps_data = []
     for i, s in enumerate(steps):
-        d = s.get("decision") or {}
-        asset_step = d.get("asset")
-        price = None
-        if asset_step:
-            anchor_step = next(
-                (m for m in market_data if m.get("ticker") == asset_step), None
+        primary = s.get("decision") or {}
+        all_decisions = s.get("decisions") or [primary]
+        # Costruisci dict per ogni decisione
+        per_step_decisions = []
+        for d in all_decisions:
+            if not d:
+                continue
+            asset_step = d.get("asset")
+            price = None
+            if asset_step:
+                anchor_step = next(
+                    (m for m in market_data if m.get("ticker") == asset_step), None
+                )
+                if anchor_step:
+                    price = anchor_step.get("price_t0")
+            per_step_decisions.append({
+                "action": d.get("action"),
+                "asset": asset_step,
+                "conviction": d.get("conviction"),
+                "horizon": d.get("horizon"),
+                "price": price,
+                "stop_loss_target": d.get("stop_loss_target"),
+                "take_profit_target": d.get("take_profit_target"),
+                "exit_strategy": d.get("exit_strategy"),
+                "risk": (d.get("risk") or "")[:300],
+            })
+        # Manteniamo i campi flat (back-compat) della primary decision
+        primary_asset = primary.get("asset")
+        primary_price = None
+        if primary_asset:
+            anchor = next(
+                (m for m in market_data if m.get("ticker") == primary_asset), None
             )
-            if anchor_step:
-                price = anchor_step.get("price_t0")
+            if anchor:
+                primary_price = anchor.get("price_t0")
         steps_data.append({
             "step_index": i,
-            "action": d.get("action"),
-            "asset": asset_step,
-            "conviction": d.get("conviction"),
-            "horizon": d.get("horizon"),
-            "price": price,
-            "stop_loss_target": d.get("stop_loss_target"),
-            "take_profit_target": d.get("take_profit_target"),
-            "exit_strategy": d.get("exit_strategy"),
-            "risk": d.get("risk", "")[:300],
+            "action": primary.get("action"),
+            "asset": primary_asset,
+            "conviction": primary.get("conviction"),
+            "horizon": primary.get("horizon"),
+            "price": primary_price,
+            "stop_loss_target": primary.get("stop_loss_target"),
+            "take_profit_target": primary.get("take_profit_target"),
+            "exit_strategy": primary.get("exit_strategy"),
+            "risk": (primary.get("risk") or "")[:300],
             "perf_from_here": None,
+            "decisions": per_step_decisions,         # NUOVO: lista per UI
+            "decisions_count": len(per_step_decisions),
         })
 
     # ── Verifica TP/SL: i target proposti sarebbero stati toccati nel periodo?
@@ -1007,29 +1090,82 @@ async def _finalize_run(run_id: str):
 def _simulate_outcome(scenario: dict, asset: Optional[str], action: Optional[str]
                        ) -> tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    Simulazione semplice della performance dell'asset nel periodo.
-    Per ora basata sul description_reveal (semplificato — in v2 usare serie reali).
+    Simulazione della performance dell'asset nel periodo.
+
+    Pipeline (in ordine di precedenza):
+      1. Cerca pattern esplicito ASSET[^a-z]*([+-]?\\d+)% nel description_reveal
+      2. Cerca pattern esplicito ASSET .. (lost|gained|fell|rose) X% (frasi inglesi)
+      3. Heuristic per categoria scenario (crash_rally negativi, normale leggermente
+         positivo, ecc.) con seed deterministico ma con MAGNITUDE realistica
+         (range 4-15%, no piu' "0.00%" piatto a caso)
+
+    Action SELL inverte il segno (vendo bene se il prezzo scende).
+    HOLD ritorna 0,0,0.
     """
     if not asset or action == "HOLD":
         return 0.0, 0.0, 0.0
-    desc = (scenario.get("description_reveal") or "").lower()
-    base = 0.0
-    # Heuristic semplice: se asset compare nel reveal con +X%, usa quello
+
+    desc_lower = (scenario.get("description_reveal") or "").lower()
+    asset_lower = asset.lower()
+    base: float | None = None
+
     import re as _re
-    m = _re.search(rf"{asset.lower()}[^a-z]*([+\-]?\d+)%", desc)
+    # Pattern 1: ticker seguito da numero%  (es. "NVDA -25%", "BTC +12%")
+    m = _re.search(rf"\b{_re.escape(asset_lower)}\b[^a-z]{{0,40}}([+\-]?\d+(?:[.,]\d+)?)\s*%",
+                   desc_lower)
     if m:
-        base = int(m.group(1)) / 100.0
-    else:
-        # default: piccolo drift positivo casuale
+        try:
+            num_str = m.group(1).replace(",", ".")
+            base = float(num_str) / 100.0
+        except Exception:
+            pass
+
+    # Pattern 2: forme verbali inglesi/italiane  ("NVDA gained 15%", "BTC fell 22%")
+    if base is None:
+        verb_pos = r"(?:gain|gained|rose|rallied|surged|salì|cresciuto|guadagnato|recovered|recupera)"
+        verb_neg = r"(?:fell|fall|drop|dropped|lost|crash|crashed|plunged|sceso|perso|crolla|tonfo)"
+        m_pos = _re.search(rf"\b{_re.escape(asset_lower)}\b[^.]{{0,80}}{verb_pos}[^0-9]{{0,30}}(\d+(?:[.,]\d+)?)\s*%",
+                           desc_lower)
+        m_neg = _re.search(rf"\b{_re.escape(asset_lower)}\b[^.]{{0,80}}{verb_neg}[^0-9]{{0,30}}(\d+(?:[.,]\d+)?)\s*%",
+                           desc_lower)
+        if m_pos:
+            base = float(m_pos.group(1).replace(",", ".")) / 100.0
+        elif m_neg:
+            base = -float(m_neg.group(1).replace(",", ".")) / 100.0
+
+    # Pattern 3: heuristic per categoria (deterministica, magnitude realistica)
+    if base is None:
+        category = (scenario.get("category") or "").lower()
+        # Range realistici per categoria scenario
+        ranges_by_cat = {
+            "crash_rally":   (-0.12, +0.08),   # crash o rally, magnitude alta
+            "geopolitico":   (-0.08, +0.06),
+            "macro":         (-0.05, +0.07),
+            "normale":       (-0.04, +0.06),
+        }
+        lo, hi = ranges_by_cat.get(category, (-0.05, +0.07))
         import random
-        random.seed(hash(scenario["id"] + asset))
-        base = random.uniform(-0.1, 0.15)
+        random.seed(hash(str(scenario.get("id", "")) + asset) & 0xFFFFFFFF)
+        # uniform + bias verso center → meno chance di estremi
+        v1 = random.uniform(lo, hi)
+        v2 = random.uniform(lo, hi)
+        base = (v1 + v2) / 2.0
+        # Anti-zero: se troppo vicino a 0, sposta di almeno 1.5%
+        if abs(base) < 0.015:
+            base = 0.015 if base >= 0 else -0.015
 
     # Inverti se action=SELL
     if action == "SELL":
         base = -base
 
-    return round(base * 0.3, 4), round(base, 4), round(base * 1.4, 4)
+    perf_1w = round(base * 0.3, 4)
+    perf_1m = round(base, 4)
+    perf_3m = round(base * 1.4, 4)
+    logger.debug(
+        "[SIM] _simulate_outcome asset=%s action=%s scenario=%s → 1w=%.4f 1m=%.4f 3m=%.4f",
+        asset, action, scenario.get("id"), perf_1w, perf_1m, perf_3m,
+    )
+    return perf_1w, perf_1m, perf_3m
 
 
 def _evaluate_thesis(decision: dict, scenario: dict, perf_1m: Optional[float]) -> str:

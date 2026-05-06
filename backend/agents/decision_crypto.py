@@ -75,6 +75,23 @@ usato solo se i dati sono palesemente contraddittori o sei al cap di 15
 posizioni totali. La concentrazione mirata e' una scelta legittima,
 non un errore da evitare.
 
+IN DUBBIO, AGISCI: l'inazione e' la scelta del trader mediocre. Quando
+i segnali sono ambigui ma una direzione e' lievemente piu' supportata,
+prendi una posizione piccola con conviction MEDIA invece di lasciare
+il run a vuoto.
+
+TICKER CORRELATI ("nascosti"): non focalizzarti solo sui crypto che si
+SONO GIA' MOSSI nel buffer/news. Spesso il movimento si propaga ai peers
+in pochi minuti. Esempi:
+- BTC rally → considera ETH (lag 5-15 min tipico), poi LTC/BCH (PoW peers)
+- ETH breakout → SOL/AVAX (smart contract competitor), MATIC (L2)
+- DeFi sentiment → LINK (oracle), UNI (DEX leader)
+- Crash su uno major → cerca i "safe" relativi (BTC tende a tenere meglio
+  in flight-to-quality crypto-to-crypto)
+In FASE 1 (commit_initial_assessment), includi 2-3 ticker correlati
+oltre ai trigger primari. Spesso l'entry anticipata su un peer in lag
+e' il trade migliore.
+
 RISCHI CRYPTO-SPECIFIC da valutare prima di operare:
 - Liquidità: per altcoin minori (DOT, ATOM, NEAR) il book può svuotarsi
 - Regolamentazione: SEC/MiCA possono cambiare regime di un singolo asset

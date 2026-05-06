@@ -300,11 +300,12 @@ function ResultView({ run, runId, nav }) {
         </div>
       </div>
 
-      {/* STEP BREAKDOWN (anche per single-step ora, mostra dettaglio decisione) */}
+      {/* STEP BREAKDOWN — supporta multiple decisions per step */}
       {stepsData.length > 0 && (
         <div style={S.card}>
           <div style={S.cardTitle}>
-            Decisioni step-by-step ({stepsData.length} step)
+            Decisioni step-by-step ({stepsData.length} step
+            {stepsData.some(s => (s.decisions_count || 1) > 1) && ", multi-azione"})
           </div>
           <table style={S.stepsTable}>
             <thead>
@@ -314,26 +315,42 @@ function ResultView({ run, runId, nav }) {
               </tr>
             </thead>
             <tbody>
-              {stepsData.map((s, i) => (
-                <tr key={i}>
-                  <td style={{ fontFamily: "monospace" }}>T{i}</td>
-                  <td style={{
-                    color: s.action === "BUY" ? "#10b981"
-                         : s.action === "SELL" ? "#ef4444" : "#94a3b8",
-                    fontWeight: 600,
-                  }}>{s.action || "—"}</td>
-                  <td style={{ fontFamily: "monospace" }}>{s.asset || "—"}</td>
-                  <td>{s.conviction || "—"}</td>
-                  <td style={{ fontSize: 11, color: "#94a3b8" }}>{s.horizon || "—"}</td>
-                  <td>{s.price != null ? fmtUsd(s.price) : "—"}</td>
-                  <td style={{ fontSize: 11, color: "#fca5a5" }}>
-                    {s.stop_loss_target ? fmtUsd(s.stop_loss_target) : "—"}
-                  </td>
-                  <td style={{ fontSize: 11, color: "#86efac" }}>
-                    {s.take_profit_target ? fmtUsd(s.take_profit_target) : "—"}
-                  </td>
-                </tr>
-              ))}
+              {stepsData.map((s, i) => {
+                // Se lo step ha multiple decisions, mostra una row per ognuna
+                const dlist = (s.decisions && s.decisions.length > 0) ? s.decisions : [{
+                  action: s.action, asset: s.asset, conviction: s.conviction,
+                  horizon: s.horizon, price: s.price,
+                  stop_loss_target: s.stop_loss_target,
+                  take_profit_target: s.take_profit_target,
+                }];
+                return dlist.map((d, k) => (
+                  <tr key={`${i}-${k}`}>
+                    <td style={{ fontFamily: "monospace" }}>
+                      {k === 0 ? `T${i}` : ""}
+                      {dlist.length > 1 && k === 0 && (
+                        <span style={{ fontSize: 10, color: "#a78bfa", marginLeft: 4 }}>
+                          ×{dlist.length}
+                        </span>
+                      )}
+                    </td>
+                    <td style={{
+                      color: d.action === "BUY" ? "#10b981"
+                           : d.action === "SELL" ? "#ef4444" : "#94a3b8",
+                      fontWeight: 600,
+                    }}>{d.action || "—"}</td>
+                    <td style={{ fontFamily: "monospace" }}>{d.asset || "—"}</td>
+                    <td>{d.conviction || "—"}</td>
+                    <td style={{ fontSize: 11, color: "#94a3b8" }}>{d.horizon || "—"}</td>
+                    <td>{d.price != null ? fmtUsd(d.price) : "—"}</td>
+                    <td style={{ fontSize: 11, color: "#fca5a5" }}>
+                      {d.stop_loss_target ? fmtUsd(d.stop_loss_target) : "—"}
+                    </td>
+                    <td style={{ fontSize: 11, color: "#86efac" }}>
+                      {d.take_profit_target ? fmtUsd(d.take_profit_target) : "—"}
+                    </td>
+                  </tr>
+                ));
+              })}
             </tbody>
           </table>
         </div>
