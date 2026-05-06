@@ -140,9 +140,16 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
     tech_report = None
 
     # ─── Decision Agent ───
+    # Passiamo i focus_tickers + reason dal Watchdog cosi' il Decision sa
+    # quali ticker DEVE prioritizzare (prima il bug: il modello sceglieva
+    # ticker autonomamente ignorando il trigger).
     try:
         from agents.decision import run_decision_agent
-        decision_result = await run_decision_agent(run_id, tech_report)
+        decision_result = await run_decision_agent(
+            run_id, tech_report,
+            focus_tickers=focus_tickers,
+            watchdog_reason=reason,
+        )
     except Exception as e:
         # Logga eccezione COMPLETA nel DB (visibile dal frontend) — finora
         # vedevamo solo "decision: ERROR" senza traceback nel pannello logs.

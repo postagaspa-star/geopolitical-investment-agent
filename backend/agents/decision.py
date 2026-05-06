@@ -143,7 +143,41 @@ def _tools_for_openai():
 DECISION_SYSTEM_PROMPT_DEFAULT = """Sei il Decision Agent di GeoInvest AI — un sistema di trading autonomo ad alto rischio.
 
 HAI PIENA AUTONOMIA DECISIONALE. Non ci sono restrizioni conservative.
-Il tuo obiettivo è massimizzare i rendimenti accettando rischi calcolati.
+Il tuo obiettivo è MASSIMIZZARE i rendimenti accettando rischi calcolati.
+
+═══════════════════════════════════════════════════════════════════════
+FILOSOFIA OPERATIVA — ASSERTIVITÀ E DIVERSIFICAZIONE
+═══════════════════════════════════════════════════════════════════════
+
+1. **OSA**. Il "no-trade conservativo" è la peggior decisione.
+   - Se i segnali geopolitici + tecnici concordano (anche solo a livello MEDIO),
+     CONVERTI il segnale in operazione. Aspettare la "convinzione perfetta"
+     significa lasciare alpha sul tavolo.
+   - do_nothing è giustificato SOLO se: (a) i segnali sono frammentari
+     e contraddittori, (b) la confidence integrata e' < 50, oppure
+     (c) il portafoglio e' al limite di concentrazione (vedi punto 2).
+
+2. **ANTI-CONCENTRAZIONE SETTORIALE — VINCOLO RIGIDO**
+   Il rischio sistemico maggiore di un bot AI è il "tunnel vision":
+   accumula 5 posizioni tutte in tech, poi un sell-off settoriale liquida
+   il portafoglio. PREVIENI questo:
+   - MAX 2 POSIZIONI APERTE per settore (tech, financials, energy,
+     defense, consumer, healthcare, materials, commodity ETF, crypto).
+   - Prima di un BUY, controlla con get_portfolio_state quante posizioni
+     hai gia' nel settore del ticker proposto. Se gia' 2, scegli un
+     ticker di settore diverso oppure usa do_nothing motivando.
+   - Quando i segnali in un settore sono fortissimi ma sei al cap,
+     considera di RUOTARE (SELL della posizione meno convinta del settore
+     + BUY del nuovo target) invece di accumularne una terza.
+   - Diversificazione cross-asset: equity + commodity (GLD/SLV/USO) +
+     defensive (utilities, low-beta) sono complementari.
+
+3. **CONFIDENCE FLOORS** (rispetta SEMPRE):
+   - BUY/SELL con segnali concordi: confidence 60-85
+   - BUY/SELL con segnali discordi ma tesi forte: confidence 50-65
+   - HOLD/do_nothing: confidence range 35-55 — sotto e' dato_insufficient
+   - VIETATO confidence "piatta" del 35% su tutto: e' segno di pigrizia
+     analitica, non di prudenza.
 
 ═══════════════════════════════════════════════════════════════════════
 WORKFLOW OBBLIGATORIO A 4 FASI (enforced via tool state machine)
@@ -861,7 +895,9 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
 # Main Decision Loop
 # ============================================================
 
-async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
+async def run_decision_agent(run_id: str, tech_report: dict,
+                              focus_tickers: list[str] | None = None,
+                              watchdog_reason: str | None = None) -> dict:
     """
     Esegue il ciclo decisionale completo del Decision Agent.
 
@@ -939,11 +975,17 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
 
     # --- Costruisci messaggio utente ---
     user_message = _build_context_message(
-        rep_4d, rep_8h, recent_buffer, tech_report, portfolio_state, docs
+        rep_4d, rep_8h, recent_buffer, tech_report, portfolio_state, docs,
+        focus_tickers=focus_tickers, watchdog_reason=watchdog_reason,
     )
 
     database.insert_agent_log(run_id, "DECISION_CONTEXT",
-        json.dumps({"context_loaded": context_loaded, "buffer_size": len(recent_buffer)}))
+        json.dumps({
+            "context_loaded": context_loaded,
+            "buffer_size": len(recent_buffer),
+            "watchdog_focus": focus_tickers or [],
+            "watchdog_reason": (watchdog_reason or "")[:200],
+        }))
 
     # --- FASE B+C: Valutazione e Esecuzione ---
     _save_checkpoint(run_id, "decision", "RUNNING", {"phase": "evaluation"})
@@ -1382,12 +1424,54 @@ async def _run_deepseek_decision_loop(
 # Context Builder
 # ============================================================
 
-def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state, docs) -> str:
+def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state, docs,
+                           focus_tickers: list[str] | None = None,
+                           watchdog_reason: str | None = None) -> str:
     """
     Costruisce il messaggio di contesto per il Decision Agent.
     Riceve liste di report aggregati (sistema cascata 4D/8H).
+
+    Se il run e' stato triggerato dal Watchdog, focus_tickers contiene i
+    ticker che hanno scatenato il trigger (es. NVDA, GLD, QQQ con +5%, +3%,
+    +2% in 5 min). Questi DEVONO essere il punto di partenza dell'analisi
+    del Decision Agent — non possono essere ignorati senza giustificazione.
     """
     parts = []
+
+    # === WATCHDOG TRIGGER (in cima, alta priorita') ===
+    if focus_tickers or watchdog_reason:
+        wd_lines = ["=" * 60]
+        wd_lines.append("⚠️  WATCHDOG TRIGGER — INPUT PRIORITARIO ⚠️")
+        wd_lines.append("=" * 60)
+        if watchdog_reason:
+            wd_lines.append(f"Motivo: {watchdog_reason}")
+        if focus_tickers:
+            wd_lines.append(
+                f"FOCUS TICKERS (rilevati con movimento anomalo): "
+                f"{', '.join(focus_tickers)}"
+            )
+        wd_lines.append("")
+        wd_lines.append("ISTRUZIONI OBBLIGATORIE:")
+        wd_lines.append(
+            "  1. Includi TUTTI i FOCUS TICKERS in asset_candidates "
+            "    di FASE 1 (commit_initial_assessment)."
+        )
+        wd_lines.append(
+            "  2. Le tue technical_questions DEVONO riguardare PRIMA i FOCUS "
+            "    TICKERS, poi eventuali altri ticker correlati al tema."
+        )
+        wd_lines.append(
+            "  3. Il run e' stato attivato perche' QUESTI ticker si sono "
+            "    mossi: ignorarli per analizzarne altri e' uno spreco "
+            "    della trigger window."
+        )
+        wd_lines.append(
+            "  4. Se decidi di NON operare su un focus ticker, devi "
+            "    motivarlo esplicitamente nel commit_final_thesis "
+            "    (es. 'NVDA gia' overbought, attendo pullback')."
+        )
+        wd_lines.append("=" * 60)
+        parts.append("\n".join(wd_lines))
 
     # === Report 4D (visione macro/medio termine, ultimi 2) ===
     if rep_4d:
