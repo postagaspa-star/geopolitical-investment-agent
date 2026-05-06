@@ -166,13 +166,37 @@ function ResultView({ run, runId, nav }) {
       <div style={{ ...S.card, borderLeft: `4px solid ${outcomeColor}` }}>
         <div style={S.outcomeLabel}>{outcomeLabel}</div>
 
-        {/* Riga 1: Performance asset (1S, 1M, 3M) */}
-        <div style={S.perfSectionTitle}>Performance asset selezionato</div>
+        {/* Banner SHORT/LONG: chiarisce di che tipo di posizione si tratta */}
+        {run.is_short && (
+          <div style={S.shortBanner}>
+            🔻 Posizione SHORT su {run.asset_chosen}: profitto se l'asset scende.
+            Il P&L sotto è invertito rispetto al movimento del prezzo.
+          </div>
+        )}
+
+        {/* Riga 1: P&L della POSIZIONE (per SHORT è invertito vs movimento asset) */}
+        <div style={S.perfSectionTitle}>
+          P&L posizione {run.is_short ? "(SHORT)" : "(LONG)"}
+        </div>
         <div style={S.perfGrid3}>
           <PerfCol label="1 Settimana" v={run.perf_1w} />
           <PerfCol label="1 Mese" v={run.perf_1m} big />
           <PerfCol label="3 Mesi" v={run.perf_3m} />
         </div>
+
+        {/* Riga 1b: SOLO PER SHORT — mostra anche il movimento ASSET */}
+        {run.is_short && (run.asset_return_1m != null) && (
+          <>
+            <div style={S.perfSectionTitle}>
+              Movimento asset reale (long buy-and-hold)
+            </div>
+            <div style={S.perfGrid3}>
+              <PerfCol label="1 Settimana" v={run.asset_return_1w} muted />
+              <PerfCol label="1 Mese" v={run.asset_return_1m} muted />
+              <PerfCol label="3 Mesi" v={run.asset_return_3m} muted />
+            </div>
+          </>
+        )}
 
         {/* Riga 2: Δ vs benchmarks (1M) */}
         <div style={S.perfSectionTitle}>Alpha vs benchmark (1 mese)</div>
@@ -384,12 +408,12 @@ function Meta({ label, value, mono }) {
   );
 }
 
-function PerfCol({ label, v, big }) {
+function PerfCol({ label, v, big, muted }) {
   const pct = v != null ? (v * 100).toFixed(2) + "%" : "—";
-  const color = colorFor(v);
+  const color = muted ? "#94a3b8" : colorFor(v);
   const Icon = v != null && v >= 0 ? TrendingUp : TrendingDown;
   return (
-    <div style={S.perfCol}>
+    <div style={{ ...S.perfCol, opacity: muted ? 0.75 : 1 }}>
       <div style={S.perfLabel}>{label}</div>
       <div style={{
         fontSize: big ? 24 : 18, fontWeight: 700, color,
@@ -590,6 +614,18 @@ const S = {
     marginBottom: 14, display: "flex", alignItems: "center",
   },
   outcomeLabel: { fontSize: 18, fontWeight: 700, marginBottom: 16 },
+
+  // Banner SHORT/LONG explainer
+  shortBanner: {
+    background: "rgba(239,68,68,0.08)",
+    border: "1px solid rgba(239,68,68,0.25)",
+    borderRadius: 8,
+    padding: "10px 14px",
+    marginBottom: 14,
+    fontSize: 12.5,
+    color: "#fca5a5",
+    lineHeight: 1.55,
+  },
 
   // Performance grids (3 col)
   perfSectionTitle: {

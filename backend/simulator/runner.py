@@ -813,7 +813,15 @@ def _build_run_data(run_id: str, state: dict) -> dict:
     logger.info("[SIM] _build_run_data run=%s entry: %s %s (steps=%d, last_action=%s)",
                 run_id, entry_action, asset, len(steps), decision.get("action"))
 
-    perf_1w, perf_1m, perf_3m = _simulate_outcome(scenario, asset, entry_action)
+    # ── DUE METRICHE SEPARATE ──────────────────────────────────────────
+    # asset_*  : return dell'asset (long buy-and-hold). Usato per il
+    #            price chart (movimento reale dell'asset).
+    # perf_*   : P&L della POSIZIONE presa (BUY=asset_return, SELL=-asset_return).
+    #            Usato per outcome, "tesi confermata", display "Performance posizione".
+    asset_1w, asset_1m, asset_3m = _simulate_asset_return(scenario, asset)
+    perf_1w = _position_pnl(asset_1w, entry_action)
+    perf_1m = _position_pnl(asset_1m, entry_action)
+    perf_3m = _position_pnl(asset_3m, entry_action)
     perf_sp_1m = 0.02
     perf_sector_1m = 0.015
     perf_monkey_1m = 0.005
@@ -844,7 +852,9 @@ def _build_run_data(run_id: str, state: dict) -> dict:
     if asset and entry_price:
         import random
         random.seed(hash(str(scenario.get("id", "")) + (asset or "")))
-        target = entry_price * (1 + (perf_3m or 0))
+        # Usa ASSET return (non P&L posizione) per il price chart: il chart
+        # mostra il movimento REALE del prezzo, indipendente dal long/short.
+        target = entry_price * (1 + (asset_3m or 0))
         price_chart = []
         for i in range(90):
             t = i / 89
@@ -963,8 +973,11 @@ def _build_run_data(run_id: str, state: dict) -> dict:
         })
 
     # ── Verifica TP/SL: i target proposti sarebbero stati toccati nel periodo?
+    # LONG (BUY):  SL sotto entry (chiudo se cade), TP sopra entry (chiudo se sale)
+    # SHORT (SELL): SL sopra entry (chiudo se sale contro), TP sotto entry (chiudo se scende come previsto)
     sl_target = decision.get("stop_loss_target")
     tp_target = decision.get("take_profit_target")
+    is_short = (entry_action == "SELL")
     sl_hit = None
     tp_hit = None
     sl_hit_day = None
@@ -972,12 +985,16 @@ def _build_run_data(run_id: str, state: dict) -> dict:
     if price_chart:
         for day_obj in price_chart:
             p = day_obj["price"]
-            if sl_target and sl_hit is None and p <= sl_target:
-                sl_hit = True
-                sl_hit_day = day_obj["day"]
-            if tp_target and tp_hit is None and p >= tp_target:
-                tp_hit = True
-                tp_hit_day = day_obj["day"]
+            if sl_target and sl_hit is None:
+                hit = (p >= sl_target) if is_short else (p <= sl_target)
+                if hit:
+                    sl_hit = True
+                    sl_hit_day = day_obj["day"]
+            if tp_target and tp_hit is None:
+                hit = (p <= tp_target) if is_short else (p >= tp_target)
+                if hit:
+                    tp_hit = True
+                    tp_hit_day = day_obj["day"]
             if sl_hit and tp_hit:
                 break
         if sl_target and sl_hit is None:
@@ -1002,10 +1019,16 @@ def _build_run_data(run_id: str, state: dict) -> dict:
         "conviction": entry_decision.get("conviction") or decision.get("conviction"),
         "horizon": entry_decision.get("horizon") or decision.get("horizon"),
 
-        # Performance core
+        # Performance core (P&L della POSIZIONE: già invertita per SHORT)
         "perf_1w": perf_1w,
         "perf_1m": perf_1m,
         "perf_3m": perf_3m,
+        # Return ASSET (movimento prezzo, indipendente da long/short).
+        # Utile per il frontend: mostra "Asset SPY: -8% / La tua SHORT: +8%".
+        "asset_return_1w": asset_1w,
+        "asset_return_1m": asset_1m,
+        "asset_return_3m": asset_3m,
+        "is_short": is_short,
         "perf_sp_1m": perf_sp_1m,
         "perf_sector_1m": perf_sector_1m,
         "perf_monkey_1m": perf_monkey_1m,
@@ -1087,22 +1110,19 @@ async def _finalize_run(run_id: str):
         logger.error("[SIM] Errore salvataggio run %s: %s", run_id, exc, exc_info=True)
 
 
-def _simulate_outcome(scenario: dict, asset: Optional[str], action: Optional[str]
-                       ) -> tuple[Optional[float], Optional[float], Optional[float]]:
+def _simulate_asset_return(scenario: dict, asset: Optional[str]
+                            ) -> tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    Simulazione della performance dell'asset nel periodo.
+    Simula il ritorno dell'ASSET nel periodo (sempre dal punto di vista
+    long buy-and-hold). NON applica inversione per SELL — questa funzione
+    ritorna il movimento del prezzo, non il P&L dell'utente.
 
-    Pipeline (in ordine di precedenza):
-      1. Cerca pattern esplicito ASSET[^a-z]*([+-]?\\d+)% nel description_reveal
-      2. Cerca pattern esplicito ASSET .. (lost|gained|fell|rose) X% (frasi inglesi)
-      3. Heuristic per categoria scenario (crash_rally negativi, normale leggermente
-         positivo, ecc.) con seed deterministico ma con MAGNITUDE realistica
-         (range 4-15%, no piu' "0.00%" piatto a caso)
-
-    Action SELL inverte il segno (vendo bene se il prezzo scende).
-    HOLD ritorna 0,0,0.
+    Pipeline:
+      1. Pattern ASSET[+-]X% nel description_reveal
+      2. Pattern verbale (rose/fell/gained/lost X%)
+      3. Heuristic per categoria scenario con magnitude realistica
     """
-    if not asset or action == "HOLD":
+    if not asset:
         return 0.0, 0.0, 0.0
 
     desc_lower = (scenario.get("description_reveal") or "").lower()
@@ -1110,7 +1130,7 @@ def _simulate_outcome(scenario: dict, asset: Optional[str], action: Optional[str
     base: float | None = None
 
     import re as _re
-    # Pattern 1: ticker seguito da numero%  (es. "NVDA -25%", "BTC +12%")
+    # Pattern 1
     m = _re.search(rf"\b{_re.escape(asset_lower)}\b[^a-z]{{0,40}}([+\-]?\d+(?:[.,]\d+)?)\s*%",
                    desc_lower)
     if m:
@@ -1120,7 +1140,7 @@ def _simulate_outcome(scenario: dict, asset: Optional[str], action: Optional[str
         except Exception:
             pass
 
-    # Pattern 2: forme verbali inglesi/italiane  ("NVDA gained 15%", "BTC fell 22%")
+    # Pattern 2
     if base is None:
         verb_pos = r"(?:gain|gained|rose|rallied|surged|salì|cresciuto|guadagnato|recovered|recupera)"
         verb_neg = r"(?:fell|fall|drop|dropped|lost|crash|crashed|plunged|sceso|perso|crolla|tonfo)"
@@ -1133,12 +1153,11 @@ def _simulate_outcome(scenario: dict, asset: Optional[str], action: Optional[str
         elif m_neg:
             base = -float(m_neg.group(1).replace(",", ".")) / 100.0
 
-    # Pattern 3: heuristic per categoria (deterministica, magnitude realistica)
+    # Pattern 3: heuristic
     if base is None:
         category = (scenario.get("category") or "").lower()
-        # Range realistici per categoria scenario
         ranges_by_cat = {
-            "crash_rally":   (-0.12, +0.08),   # crash o rally, magnitude alta
+            "crash_rally":   (-0.12, +0.08),
             "geopolitico":   (-0.08, +0.06),
             "macro":         (-0.05, +0.07),
             "normale":       (-0.04, +0.06),
@@ -1146,26 +1165,50 @@ def _simulate_outcome(scenario: dict, asset: Optional[str], action: Optional[str
         lo, hi = ranges_by_cat.get(category, (-0.05, +0.07))
         import random
         random.seed(hash(str(scenario.get("id", "")) + asset) & 0xFFFFFFFF)
-        # uniform + bias verso center → meno chance di estremi
         v1 = random.uniform(lo, hi)
         v2 = random.uniform(lo, hi)
         base = (v1 + v2) / 2.0
-        # Anti-zero: se troppo vicino a 0, sposta di almeno 1.5%
         if abs(base) < 0.015:
             base = 0.015 if base >= 0 else -0.015
 
-    # Inverti se action=SELL
-    if action == "SELL":
-        base = -base
-
-    perf_1w = round(base * 0.3, 4)
-    perf_1m = round(base, 4)
-    perf_3m = round(base * 1.4, 4)
+    asset_1w = round(base * 0.3, 4)
+    asset_1m = round(base, 4)
+    asset_3m = round(base * 1.4, 4)
     logger.debug(
-        "[SIM] _simulate_outcome asset=%s action=%s scenario=%s → 1w=%.4f 1m=%.4f 3m=%.4f",
-        asset, action, scenario.get("id"), perf_1w, perf_1m, perf_3m,
+        "[SIM] _simulate_asset_return asset=%s scenario=%s → 1w=%.4f 1m=%.4f 3m=%.4f",
+        asset, scenario.get("id"), asset_1w, asset_1m, asset_3m,
     )
-    return perf_1w, perf_1m, perf_3m
+    return asset_1w, asset_1m, asset_3m
+
+
+def _position_pnl(asset_return: Optional[float], action: Optional[str]) -> Optional[float]:
+    """
+    Converte il return ASSET in P&L della POSIZIONE basata sull'azione.
+      - BUY:  P&L = asset_return  (lungo, profit se sale)
+      - SELL: P&L = -asset_return (corto, profit se scende)
+      - HOLD: P&L = 0
+    """
+    if asset_return is None or action is None:
+        return None
+    if action == "HOLD":
+        return 0.0
+    if action == "SELL":
+        return round(-asset_return, 4)
+    return round(asset_return, 4)
+
+
+# Wrapper legacy per back-compat (chiamato da altre parti?). Ora ritorna
+# sempre il P&L della posizione (con SELL inversion già applicata).
+def _simulate_outcome(scenario: dict, asset: Optional[str], action: Optional[str]
+                       ) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    if not asset or action == "HOLD":
+        return 0.0, 0.0, 0.0
+    a1w, a1m, a3m = _simulate_asset_return(scenario, asset)
+    return (
+        _position_pnl(a1w, action),
+        _position_pnl(a1m, action),
+        _position_pnl(a3m, action),
+    )
 
 
 def _evaluate_thesis(decision: dict, scenario: dict, perf_1m: Optional[float]) -> str:
