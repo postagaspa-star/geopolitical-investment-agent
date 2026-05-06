@@ -26,8 +26,8 @@ export default function SimAdvisorChat({ runId }) {
   const [showMemoryPanel, setShowMemoryPanel] = useState(false);
   const scrollRef = useRef(null);
 
-  const fetchState = async () => {
-    setLoading(true);
+  const fetchState = async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const res = await fetch(`${API}/api/simulator/advisor/${runId}`);
@@ -40,7 +40,7 @@ export default function SimAdvisorChat({ runId }) {
     } catch (e) {
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -102,8 +102,25 @@ export default function SimAdvisorChat({ runId }) {
         alert(`Errore: ${data.error || res.status}`);
       } else {
         setSavedIds((prev) => ({ ...prev, [key]: data.id }));
-        // Refresh existing_advices nel state
-        fetchState();
+        // FIX: aggiorno SOLO la lista existing_advices senza ricaricare
+        // tutta la chat. Prima il fetchState() metteva loading=true e
+        // l'utente vedeva il loader con conseguente perdita visiva degli
+        // altri proposed_advices non ancora salvati.
+        setState((prev) => prev ? {
+          ...prev,
+          existing_advices: [
+            {
+              id: data.id,
+              title: advice.title,
+              text: advice.text,
+              rationale: advice.rationale,
+              scenario_category: data.category_key,
+              apply_count: 0,
+              created_at: new Date().toISOString(),
+            },
+            ...(prev.existing_advices || []),
+          ],
+        } : prev);
       }
     } catch (e) {
       alert(`Errore: ${e}`);
@@ -117,7 +134,7 @@ export default function SimAdvisorChat({ runId }) {
     try {
       await fetch(`${API}/api/simulator/advisor/${runId}`, { method: "DELETE" });
       setSavedIds({});
-      fetchState();
+      fetchState();   // qui sì, full refresh: stiamo ricostruendo tutto
     } catch (e) {
       alert(`Errore reset: ${e}`);
     }
@@ -130,7 +147,11 @@ export default function SimAdvisorChat({ runId }) {
         `${API}/api/simulator/advisor/memory/${encodeURIComponent(categoryKey)}/${encodeURIComponent(adviceId)}`,
         { method: "DELETE" },
       );
-      fetchState();
+      // Update locale: rimuovi l'advice dalla lista senza full refresh
+      setState((prev) => prev ? {
+        ...prev,
+        existing_advices: (prev.existing_advices || []).filter((a) => a.id !== adviceId),
+      } : prev);
     } catch (e) {
       alert(`Errore delete: ${e}`);
     }
@@ -140,7 +161,7 @@ export default function SimAdvisorChat({ runId }) {
     return (
       <div style={S.loading}>
         <Loader2 size={16} className="spin" style={{ marginRight: 8 }} />
-        Generazione analisi iniziale in corso (DeepSeek-R1, ~30s)...
+        Generazione analisi iniziale (DeepSeek-V3, ~15s)...
       </div>
     );
   }

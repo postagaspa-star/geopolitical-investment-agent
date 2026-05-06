@@ -11,6 +11,7 @@ import {
   Trophy,
   ExternalLink,
   RefreshCw,
+  BookOpen,
 } from 'lucide-react';
 
 const MODE_LABELS = {
@@ -302,6 +303,11 @@ export default function Sidebar({
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             onClick={onCloseSidebar}>
             <BarChart3 /> Analytics
+          </NavLink>
+          <NavLink to="/live/coach-cards"
+            className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
+            onClick={onCloseSidebar}>
+            <BookOpen /> Coach Cards
           </NavLink>
           <NavLink to="/live/settings"
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}

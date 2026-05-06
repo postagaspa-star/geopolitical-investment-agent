@@ -697,22 +697,34 @@ async def execute_step(run_id: str, step_index: int) -> dict:
     # anche su pod diverso, vede gli step precedenti).
     _persist_active_run(run_id, state)
 
-    # Se è l'ultimo step, persisti il run e calcola gli outcome.
-    # IMPORTANTE: il finalize NON deve mai crashare l'execute_step, altrimenti
-    # il frontend riceve 500 e l'utente vede "errore di caricamento" all'ultimo
-    # step. Catturiamo tutto qui e flagghiamo lo step con eventuale errore.
+    # Se è l'ultimo step, FINALIZE IN BACKGROUND.
+    # Prima il _finalize era awaited inline → la request HTTP impiegava
+    # 30-60s perche' faceva _build_run_data + sim_db.insert_run sincronamente.
+    # Render kill connections > 60s → il frontend vedeva "ultimo turno mai
+    # portato a termine". Ora ritorniamo SUBITO il step_data e il finalize
+    # gira asincrono. Lo state e' gia' nel shadow persistence, quindi anche
+    # se il pod muore, get_run() ricostruisce dal shadow.
     if step_data["is_last_step"]:
         try:
-            await _finalize_run(run_id)
+            asyncio.create_task(_finalize_run_safe(run_id))
+            step_data["finalize_pending"] = True
         except Exception as exc:
-            logger.error("[SIM] _finalize_run crash su run %s: %s",
+            logger.error("[SIM] schedule _finalize_run fallito su %s: %s",
                          run_id, exc, exc_info=True)
             step_data["finalize_error"] = (
-                f"Salvataggio risultato fallito: {type(exc).__name__}: {str(exc)[:200]}. "
-                f"Il run e' visibile via fallback in-memory."
+                f"Schedule finalize fallito: {type(exc).__name__}: {str(exc)[:200]}"
             )
 
     return step_data
+
+
+async def _finalize_run_safe(run_id: str):
+    """Wrapper di _finalize_run che cattura ogni eccezione (no crash background)."""
+    try:
+        await _finalize_run(run_id)
+    except Exception as exc:
+        logger.error("[SIM] _finalize_run background crash %s: %s",
+                     run_id, exc, exc_info=True)
 
 
 def _build_run_data(run_id: str, state: dict) -> dict:
@@ -727,13 +739,27 @@ def _build_run_data(run_id: str, state: dict) -> dict:
     steps = state.get("steps") or []
     last_step = steps[-1] if steps else {}
     decision = last_step.get("decision") or {}
-    asset = decision.get("asset")
     market_data = scenario.get("market_data") or []
 
-    # ── Performance base
-    perf_1w, perf_1m, perf_3m = _simulate_outcome(
-        scenario, asset, decision.get("action")
-    )
+    # ── PERFORMANCE: usa la decisione di ENTRY (primo step), non l'ultima.
+    # In multi-step l'AI puo' fare HOLD/RUOTA negli step successivi, ma il
+    # P&L deve essere calcolato sull'azione iniziale altrimenti vedi sempre
+    # 0% se l'ultimo step era HOLD.
+    # Se primo step e' HOLD, prova lo step successivo che ha BUY/SELL.
+    entry_decision = None
+    for s in steps:
+        d = (s.get("decision") or {})
+        if d.get("action") in ("BUY", "SELL") and d.get("asset"):
+            entry_decision = d
+            break
+    if entry_decision is None:
+        # Tutti HOLD → outcome = 0
+        entry_decision = decision
+
+    asset = entry_decision.get("asset") or decision.get("asset")
+    entry_action = entry_decision.get("action") or decision.get("action")
+
+    perf_1w, perf_1m, perf_3m = _simulate_outcome(scenario, asset, entry_action)
     perf_sp_1m = 0.02
     perf_sector_1m = 0.015
     perf_monkey_1m = 0.005
@@ -886,11 +912,12 @@ def _build_run_data(run_id: str, state: dict) -> dict:
         "scenario_id": scenario.get("id", "unknown"),
         "historical_period": historical_period,
 
-        # Decision summary
+        # Decision summary — usa la decisione di ENTRY (primo BUY/SELL)
+        # cosi' le metriche sono coerenti con il P&L calcolato.
         "asset_chosen": asset,
-        "action_chosen": decision.get("action"),
-        "conviction": decision.get("conviction"),
-        "horizon": decision.get("horizon"),
+        "action_chosen": entry_action,
+        "conviction": entry_decision.get("conviction") or decision.get("conviction"),
+        "horizon": entry_decision.get("horizon") or decision.get("horizon"),
 
         # Performance core
         "perf_1w": perf_1w,

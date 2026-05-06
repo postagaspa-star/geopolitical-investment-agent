@@ -27,7 +27,20 @@ const PHASE_COLORS = {
   DECISION_TRADE: "#dc2626",
   DECISION_NO_TRADE: "#6b7280",
   DECISION_EXTRA_TA: "#8b5cf6",
+  DECISION_REALTIME_TA: "#8b5cf6",
   DECISION_COMPLETE: "#f59e0b",
+  DECISION_REASONING: "#fbbf24",
+  DECISION_PHASE1: "#fbbf24",
+  DECISION_PHASE3: "#f59e0b",
+  DECISION_WORKFLOW: "#d97706",
+  DECISION_SET_SL: "#9333ea",
+  DECISION_SET_TP: "#9333ea",
+  DECISION_CRYPTO_PHASE1: "#fbbf24",
+  DECISION_CRYPTO_PHASE3: "#f59e0b",
+  DECISION_CRYPTO_WORKFLOW: "#d97706",
+  DECISION_CRYPTO_REALTIME_TA: "#8b5cf6",
+  DECISION_CRYPTO_NO_TRADE: "#6b7280",
+  DECISION_CRYPTO_REJECTED: "#ef4444",
   GEO_WORKER: "#059669",
   MANAGER: "#dc2626",
   MANAGER_DECISION: "#f59e0b",
@@ -58,7 +71,20 @@ const PHASE_LABELS = {
   DECISION_TRADE: "TRADE ESEGUITO",
   DECISION_NO_TRADE: "No Trade",
   DECISION_EXTRA_TA: "Extra Analysis",
+  DECISION_REALTIME_TA: "Tech real-time",
   DECISION_COMPLETE: "Decision Complete",
+  DECISION_REASONING: "Reasoning",
+  DECISION_PHASE1: "FASE 1 — Pre-analisi",
+  DECISION_PHASE3: "FASE 3 — Tesi finale",
+  DECISION_WORKFLOW: "Workflow state",
+  DECISION_SET_SL: "Stop-Loss set",
+  DECISION_SET_TP: "Take-Profit set",
+  DECISION_CRYPTO_PHASE1: "[Crypto] FASE 1",
+  DECISION_CRYPTO_PHASE3: "[Crypto] FASE 3",
+  DECISION_CRYPTO_WORKFLOW: "[Crypto] Workflow",
+  DECISION_CRYPTO_REALTIME_TA: "[Crypto] Tech real-time",
+  DECISION_CRYPTO_NO_TRADE: "[Crypto] No Trade",
+  DECISION_CRYPTO_REJECTED: "[Crypto] Rejected",
   GEO_WORKER: "Worker Geopolitico",
   MANAGER: "Manager Agent",
   MANAGER_DECISION: "Decisione Manager",
@@ -114,8 +140,29 @@ function LogEntry({ log }) {
         .filter(([, v]) => v)
         .map(([k]) => k);
       summary = `Context loaded: ${loaded.join(", ")}`;
+    } else if (parsed.situation_overview) {
+      // FASE 1: pre-analisi committata dal Decision Agent
+      const head = parsed.situation_overview.substring(0, 200);
+      const candTxt = parsed.asset_candidates?.length
+        ? ` | candidates: ${parsed.asset_candidates.slice(0, 5).join(", ")}` : "";
+      const qTxt = parsed.technical_questions?.length
+        ? ` | ${parsed.technical_questions.length} domande tech` : "";
+      summary = head + candTxt + qTxt;
+    } else if (parsed.thesis) {
+      // FASE 3: tesi finale committata
+      summary = parsed.thesis.substring(0, 220);
+      if (parsed.action_plan) {
+        summary += ` → ${parsed.action_plan.substring(0, 80)}`;
+      }
+    } else if (parsed.phase && parsed.tech_request_count != null) {
+      // DECISION_WORKFLOW: stato finale state machine
+      summary = `phase=${parsed.phase} | tech_calls=${parsed.tech_request_count} | rejected=${parsed.rejected_calls?.length || 0}`;
     } else if (parsed.reasoning) {
       summary = parsed.reasoning.substring(0, 180);
+    } else if (parsed.focus || parsed.focus_question) {
+      // Tech real-time call
+      summary = `Focus: ${(parsed.focus || parsed.focus_question).substring(0, 140)}`;
+      if (parsed.tickers_analyzed) summary += ` | analyzed: ${parsed.tickers_analyzed.length}`;
     } else if (parsed.tool_name) {
       summary = `Tool: ${parsed.tool_name}`;
       if (parsed.tool_input?.ticker) summary += ` (${parsed.tool_input.ticker})`;

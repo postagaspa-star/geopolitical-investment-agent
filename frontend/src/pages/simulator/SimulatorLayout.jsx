@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { Home, Play, History, ArrowLeft, FlaskConical } from "lucide-react";
+import { Home, Play, History, ArrowLeft, FlaskConical, BookOpen } from "lucide-react";
 
 /**
  * Layout shared by tutte le schermate del Simulator.
@@ -29,6 +29,9 @@ export default function SimulatorLayout() {
           </NavLink>
           <NavLink to="/simulator/history" style={({isActive}) => ({...S.link, ...(isActive ? S.linkActive : {})})}>
             <History size={16} /> Storico & Analytics
+          </NavLink>
+          <NavLink to="/simulator/memory" style={({isActive}) => ({...S.link, ...(isActive ? S.linkActive : {})})}>
+            <BookOpen size={16} /> Memoria Consigli
           </NavLink>
         </nav>
 

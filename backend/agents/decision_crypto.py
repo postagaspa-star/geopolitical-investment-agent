@@ -718,11 +718,26 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
                     "content": result,
                 })
 
-    # Log finale workflow state per diagnostica
+    # Log finale workflow state + reasoning unificato per dashboard
     try:
         import database
         database.insert_agent_log(run_id, "DECISION_CRYPTO_WORKFLOW", json.dumps(
             workflow_state.to_dict(), default=str))
+        ia = workflow_state.initial_assessment or {}
+        ft = workflow_state.final_thesis or {}
+        database.insert_agent_log(run_id, "DECISION_REASONING", json.dumps({
+            "model": DEEPSEEK_R1_MODEL,
+            "agent": "crypto",
+            "phase_state": workflow_state.phase,
+            "situation_overview": (ia.get("situation_overview") or "")[:1500],
+            "asset_candidates": ia.get("asset_candidates") or [],
+            "technical_questions": ia.get("technical_questions") or [],
+            "thesis": (ft.get("thesis") or "")[:2000],
+            "action_plan": (ft.get("action_plan") or "")[:1000],
+            "primary_risk": (ft.get("primary_risk") or "")[:1000],
+            "final_text": final_text[:500],
+            "trades": len(trades_executed),
+        }, default=str))
     except Exception:
         pass
 

@@ -45,7 +45,12 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_R1_MODEL = "deepseek-reasoner"
+# Per l'advisor usiamo DeepSeek-V3 (deepseek-chat), NON R1 (deepseek-reasoner):
+#   - V3 risponde in ~10-20s, R1 in 40-90s
+#   - Per il task (coaching su trade-decision, output strutturato JSON),
+#     V3 e' piu' che sufficiente; il reasoning esplicito di R1 e' overkill
+#   - Costo simile (~$0.0006/run V3 vs ~$0.005/run R1) ma latenza incomparabile
+DEEPSEEK_MODEL = "deepseek-chat"
 MAX_RESPONSE_TOKENS = 3000
 
 # ─── Storage helpers (sim_settings con fallback a database.settings) ────────
@@ -600,7 +605,9 @@ async def chat_with_advisor(
         messages.append({"role": "user", "content": reminder})
 
     payload = {
-        "model": DEEPSEEK_R1_MODEL,
+        "model": DEEPSEEK_MODEL,
+        # V3 supporta temperature → consistency calibrata
+        "temperature": 0.5,
         "messages": messages,
         "max_tokens": MAX_RESPONSE_TOKENS,
     }

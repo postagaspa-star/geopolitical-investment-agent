@@ -1155,6 +1155,30 @@ async def run_decision_agent(run_id: str, tech_report: dict) -> dict:
     except Exception:
         pass
 
+    # Log RAGIONAMENTO unificato — la dashboard lo riconosce come summary
+    # del processo decisionale, indipendentemente dal workflow phases.
+    # Compone: situation_overview + thesis + final_text in un blocco coeso.
+    try:
+        ws = workflow_state.to_dict() if 'workflow_state' in locals() else {}
+        ia = (workflow_state.initial_assessment or {}) if 'workflow_state' in locals() else {}
+        ft = (workflow_state.final_thesis or {}) if 'workflow_state' in locals() else {}
+        reasoning_summary = {
+            "model": used_model,
+            "phase_state": ws.get("phase"),
+            "situation_overview": (ia.get("situation_overview") or "")[:1500],
+            "asset_candidates": ia.get("asset_candidates") or [],
+            "technical_questions": ia.get("technical_questions") or [],
+            "thesis": (ft.get("thesis") or "")[:2000],
+            "action_plan": (ft.get("action_plan") or "")[:1000],
+            "primary_risk": (ft.get("primary_risk") or "")[:1000],
+            "final_text": final_text[:500],
+            "trades": len(trades_executed),
+        }
+        database.insert_agent_log(run_id, "DECISION_REASONING",
+            json.dumps(reasoning_summary, default=str))
+    except Exception as _e:
+        logger.debug("[%s][DECISION] reasoning log failed: %s", run_id, _e)
+
     # Log finale
     database.insert_agent_log(run_id, "DECISION_COMPLETE",
         json.dumps({
@@ -1333,6 +1357,21 @@ async def _run_deepseek_decision_loop(
         import database
         database.insert_agent_log(run_id, "DECISION_WORKFLOW", json.dumps(
             workflow_state.to_dict(), default=str))
+        # Log unificato DECISION_REASONING per dashboard
+        ia = workflow_state.initial_assessment or {}
+        ft = workflow_state.final_thesis or {}
+        database.insert_agent_log(run_id, "DECISION_REASONING", json.dumps({
+            "model": DEEPSEEK_R1_MODEL,
+            "phase_state": workflow_state.phase,
+            "situation_overview": (ia.get("situation_overview") or "")[:1500],
+            "asset_candidates": ia.get("asset_candidates") or [],
+            "technical_questions": ia.get("technical_questions") or [],
+            "thesis": (ft.get("thesis") or "")[:2000],
+            "action_plan": (ft.get("action_plan") or "")[:1000],
+            "primary_risk": (ft.get("primary_risk") or "")[:1000],
+            "final_text": final_text[:500],
+            "trades": len(trades_executed),
+        }, default=str))
     except Exception:
         pass
 

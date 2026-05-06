@@ -6,6 +6,7 @@ import Sidebar from "./components/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import IntelligencePage from "./pages/IntelligencePage";
 import AnalyticsPage from "./pages/AnalyticsPage";
+import CoachCardsPage from "./pages/CoachCardsPage";
 import Settings from "./components/Settings";
 import ChatWidget from "./components/ChatWidget";
 
@@ -15,6 +16,7 @@ import SimDashboard from "./pages/simulator/SimDashboard";
 import SimRunner from "./pages/simulator/SimRunner";
 import SimResult from "./pages/simulator/SimResult";
 import SimHistory from "./pages/simulator/SimHistory";
+import SimMemory from "./pages/simulator/SimMemory";
 
 const API = window.location.origin;
 
@@ -166,6 +168,7 @@ function LiveApp() {
           } />
           <Route path="intelligence" element={<IntelligencePage />} />
           <Route path="analytics" element={<AnalyticsPage />} />
+          <Route path="coach-cards" element={<CoachCardsPage />} />
           <Route path="settings" element={<Settings onDataRefresh={fetchAll} />} />
         </Routes>
       </main>
@@ -192,6 +195,7 @@ function App() {
           <Route path="runner" element={<SimRunner />} />
           <Route path="result/:runId" element={<SimResult />} />
           <Route path="history" element={<SimHistory />} />
+          <Route path="memory" element={<SimMemory />} />
         </Route>
 
         {/* Fallback: redirect a entry page */}

@@ -460,6 +460,24 @@ async def _clawstreet_reconcile_job():
         logger.warning("Errore reconcile ClawStreet 6h: %s", e)
 
 
+async def _coach_cards_weekly_job():
+    """
+    Synthesis settimanale Coach Cards — ogni Lunedì alle 06:00 UTC.
+
+    Legge la memoria del Sim Advisor (advice salvati nei run del Simulator),
+    chiama DeepSeek-V3 per produrre 3-5 Coach Cards (regole operative
+    high-level), le salva su sim_settings. Le card vengono poi mostrate
+    nella sidebar Live ed eventualmente iniettate nel system prompt del
+    Decision Agent come reminder.
+
+    Costo: ~$0.001 per run (V3 cheap model).
+    """
+    try:
+        from agents import coach_cards
+        result = await coach_cards.run_weekly_synthesis()
+        logger.info("Coach Cards weekly synthesis: %s", result)
+    except Exception as e:
+        logger.error("Coach Cards weekly job crash: %s", e, exc_info=True)
 
 
 # ============================================================
@@ -641,6 +659,19 @@ def start_scheduler() -> AsyncIOScheduler:
         hours=6,
         id="clawstreet_reconcile",
         name="ClawStreet deep reconcile (6h, fetch CS trades)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ── Coach Cards weekly synthesis: ogni Lunedi' alle 06:00 UTC ──
+    # Legge la memoria del Sim Advisor e produce 3-5 Coach Cards per il
+    # Decision Live. Cheap (~$0.001 per run via DeepSeek-V3).
+    _scheduler.add_job(
+        _coach_cards_weekly_job,
+        trigger=CronTrigger(day_of_week="mon", hour=6, minute=0),
+        id="coach_cards_weekly",
+        name="Coach Cards weekly synthesis (Mon 06:00 UTC)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

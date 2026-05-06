@@ -1306,6 +1306,52 @@ async def sim_generate_patterns():
         return {"analysis": f"Errore generazione: {e}"}
 
 
+# ─── Coach Cards: synthesis settimanale del Sim Advisor → reminder Live ────
+
+@app.get("/api/coach-cards")
+async def coach_cards_list(active_only: bool = Query(default=True)):
+    """Lista le Coach Cards attive (non scadute) per la sidebar Live."""
+    try:
+        from agents import coach_cards
+        cards = coach_cards.list_cards(active_only=active_only)
+        status = coach_cards.get_status()
+        return {"cards": cards, "status": status, "total": len(cards)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/coach-cards/synthesize")
+async def coach_cards_synthesize(background_tasks: BackgroundTasks):
+    """
+    Trigger manuale della synthesis (utile per test). Lancia in background
+    e ritorna subito 200. La synthesis dura 30-60s; risultati in
+    /api/coach-cards.
+    """
+    async def _do():
+        try:
+            from agents import coach_cards
+            result = await coach_cards.run_weekly_synthesis()
+            logger.info("Coach cards synthesis manual: %s", result)
+        except Exception as e:
+            logger.error("Coach cards synthesis crash: %s", e, exc_info=True)
+
+    background_tasks.add_task(_do)
+    return {"status": "started"}
+
+
+@app.delete("/api/coach-cards/{card_id}")
+async def coach_cards_delete(card_id: str):
+    """Elimina una Coach Card (es. per scartare false positives)."""
+    try:
+        from agents import coach_cards
+        ok = coach_cards.delete_card(card_id)
+        if not ok:
+            return JSONResponse(status_code=404, content={"error": "Card non trovata"})
+        return {"deleted": True, "id": card_id}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ─── Daily scenario generator: ingestione scenari da GitHub Actions ────────
 
 class DynamicScenarioPayload(BaseModel):
