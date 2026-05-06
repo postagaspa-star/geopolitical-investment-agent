@@ -58,12 +58,14 @@ CONTESTO CHE RICEVI:
 
 REGOLE OPERATIVE:
 - Allocazione max 30% del cash per singola posizione crypto (volatilità alta)
-- Stop-loss tecnico OBBLIGATORIO (non opzionale come per l'equity)
+- Stop-loss tecnico OBBLIGATORIO sulle crypto: usa set_stop_loss o passa
+  stop_loss in execute_trade. Niente posizioni naked overnight.
 - Confidence threshold per BUY: >= 60%
-- Confidence threshold per SELL/take-profit: >= 50%
+- Confidence threshold per SELL/profit-taking discrezionale: >= 50%
 - Mai più di 5 posizioni crypto aperte contemporaneamente
-- Se unrealized loss > 8% e tecnico ha bias bearish → considera SELL stop-loss
-- Se unrealized gain > 25% → valuta SELL parziale (50%) per take-profit
+- GESTIONE POSIZIONI: nessuna soglia hardcoded di profit-taking o stop-loss.
+  Vedi RISK MANAGEMENT PRINCIPLES sotto. Sei tu a decidere i livelli SL/TP
+  basandoti su S/R tecnici, ATR, regime di mercato e narrazione corrente.
 
 RISCHI CRYPTO-SPECIFIC da valutare prima di operare:
 - Liquidità: per altcoin minori (DOT, ATOM, NEAR) il book può svuotarsi
@@ -95,15 +97,23 @@ def _get_deepseek_key() -> str:
 
 
 def _get_crypto_decision_prompt() -> str:
-    """Carica il prompt custom dalle settings (chiave 'prompt_decision_crypto')."""
+    """Carica il prompt custom dalle settings + inietta shared_principles."""
+    base = CRYPTO_DECISION_PROMPT_DEFAULT
     try:
         import database as _db
         custom = _db.get_setting("prompt_decision_crypto", "")
         if custom and isinstance(custom, str) and custom.strip():
-            return custom
+            base = custom
     except Exception:
         pass
-    return CRYPTO_DECISION_PROMPT_DEFAULT
+
+    # Inietta sempre i principi condivisi (SL/TP autonomy + Technical dialog).
+    try:
+        from agents.shared_principles import get_full_risk_block_for_live
+        shared = get_full_risk_block_for_live()
+        return base + "\n\n" + "═" * 60 + "\n" + shared
+    except Exception:
+        return base
 
 
 def is_cooldown_active() -> tuple[bool, int]:
@@ -174,8 +184,76 @@ CRYPTO_DECISION_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "request_crypto_technical_analysis",
+            "description": (
+                "Chiama il Technical Crypto Agent (DeepSeek-V3) IN TEMPO REALE per "
+                "ottenere analisi fresh su una lista di crypto (max 5). Risponde "
+                "con 'analyses' per i ticker analizzati e 'errors_per_ticker' per "
+                "quelli falliti. Se i dati che ti servivano sono in errors_per_ticker, "
+                "NON inventare: cambia ticker o usa do_nothing motivando."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tickers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1, "maxItems": 5,
+                        "description": "Crypto in formato yfinance (BTC-USD, ETH-USD, ...)",
+                    },
+                    "focus_question": {
+                        "type": "string",
+                        "description": "Cosa vuoi sapere (es. 'breakout 100k BTC?', 'RSI ETH 4H')",
+                    },
+                },
+                "required": ["tickers", "focus_question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_stop_loss",
+            "description": (
+                "Imposta o aggiorna lo stop-loss AUTOMATICO su una crypto in "
+                "portafoglio. Quando il prezzo scende a stop_price, il sistema "
+                "chiude automaticamente. Passa stop_price=0 per rimuovere."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "stop_price": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["ticker", "stop_price", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_take_profit",
+            "description": (
+                "Imposta o aggiorna il take-profit AUTOMATICO. Quando il prezzo "
+                "raggiunge target_price, il sistema chiude automaticamente."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "target_price": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["ticker", "target_price", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_portfolio_state",
-            "description": "Stato corrente cash + posizioni.",
+            "description": "Stato corrente cash + posizioni con SL/TP impostati.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -267,6 +345,17 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str) -> str:
                     confidence=confidence,
                 )
 
+            # Salva SL/TP automatici sulla posizione se BUY con livelli
+            if action == "BUY" and (stop_loss or take_profit):
+                try:
+                    if stop_loss and stop_loss > 0:
+                        portfolio.set_stop_loss(ticker, float(stop_loss), run_id=run_id)
+                    if take_profit and take_profit > 0:
+                        portfolio.set_take_profit(ticker, float(take_profit), run_id=run_id)
+                except Exception as exc:
+                    logger.warning("[%s][DEC-CRYPTO] auto SL/TP set fallito %s: %s",
+                                   run_id, ticker, exc)
+
             database.insert_agent_log(run_id, "DECISION_CRYPTO_TRADE", json.dumps({
                 "ticker": ticker, "action": action, "qty": quantity,
                 "price": current_price, "confidence": confidence,
@@ -297,6 +386,78 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str) -> str:
             database.insert_agent_log(run_id, "DECISION_CRYPTO_NO_TRADE",
                 json.dumps({"reasoning": reasoning[:1000]}))
             return json.dumps({"action": "no_trade", "reasoning": reasoning})
+
+        elif tool_name == "request_crypto_technical_analysis":
+            tickers = tool_input.get("tickers") or []
+            focus = tool_input.get("focus_question", "")
+            if not isinstance(tickers, list) or not tickers:
+                return json.dumps({"error": "tickers deve essere una lista non vuota"})
+            tickers = [str(t).upper().strip() for t in tickers if t][:5]
+
+            logger.info("[%s][DEC-CRYPTO] request_crypto_technical_analysis: %s — focus: %s",
+                        run_id, tickers, focus[:80])
+            try:
+                from agents.technical_crypto import run_crypto_technical
+                report = await run_crypto_technical(run_id, tickers)
+            except Exception as exc:
+                logger.error("[%s][DEC-CRYPTO] crypto technical realtime failed: %s",
+                             run_id, exc, exc_info=True)
+                return json.dumps({
+                    "error": f"Technical Crypto fallito: {exc}",
+                    "tickers_requested": tickers,
+                })
+
+            analyses = report.get("analyses") or []
+            analyzed = {a.get("ticker") for a in analyses if a.get("ticker")}
+            errors_per_ticker = {}
+            for t in tickers:
+                if t not in analyzed:
+                    raw_list = report.get("raw_indicators") or []
+                    if isinstance(raw_list, list):
+                        for r in raw_list:
+                            if isinstance(r, dict) and r.get("ticker") == t and r.get("error"):
+                                errors_per_ticker[t] = r.get("error", "no data")
+                                break
+                    if t not in errors_per_ticker:
+                        errors_per_ticker[t] = "non analizzato (out of universe / no data)"
+
+            database.insert_agent_log(run_id, "DECISION_CRYPTO_REALTIME_TA", json.dumps({
+                "tickers_requested": tickers,
+                "tickers_analyzed": list(analyzed),
+                "errors_per_ticker": errors_per_ticker,
+                "engine": report.get("engine"),
+                "focus": focus[:200],
+            }, default=str))
+
+            return json.dumps({
+                "focus_question": focus,
+                "analyses": analyses,
+                "summary": report.get("summary", ""),
+                "engine": report.get("engine", ""),
+                "errors_per_ticker": errors_per_ticker,
+            }, default=str)
+
+        elif tool_name == "set_stop_loss":
+            ticker = (tool_input.get("ticker") or "").upper().strip()
+            stop_price = float(tool_input.get("stop_price") or 0)
+            reason = tool_input.get("reason", "")
+            result = portfolio.set_stop_loss(ticker, stop_price, run_id=run_id)
+            database.insert_agent_log(run_id, "DECISION_CRYPTO_SET_SL", json.dumps({
+                "ticker": ticker, "stop_price": stop_price,
+                "success": result.get("success"), "reason": reason[:300],
+            }))
+            return json.dumps(result, default=str)
+
+        elif tool_name == "set_take_profit":
+            ticker = (tool_input.get("ticker") or "").upper().strip()
+            target_price = float(tool_input.get("target_price") or 0)
+            reason = tool_input.get("reason", "")
+            result = portfolio.set_take_profit(ticker, target_price, run_id=run_id)
+            database.insert_agent_log(run_id, "DECISION_CRYPTO_SET_TP", json.dumps({
+                "ticker": ticker, "target_price": target_price,
+                "success": result.get("success"), "reason": reason[:300],
+            }))
+            return json.dumps(result, default=str)
 
         elif tool_name == "get_portfolio_state":
             state = portfolio.get_portfolio_state()

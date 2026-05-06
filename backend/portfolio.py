@@ -19,6 +19,17 @@ from database import (
     insert_trade, get_setting,
 )
 
+# Helpers per SL/TP automatici impostati dall'agente.
+# Import lazy con try/except per non rompere se le colonne non esistono ancora
+# (es. migration non ancora applicata su un Supabase legacy).
+try:
+    from database import update_position_auto_exit, get_positions_with_auto_exits
+except ImportError:
+    def update_position_auto_exit(*a, **kw):  # type: ignore
+        return False
+    def get_positions_with_auto_exits():  # type: ignore
+        return []
+
 
 def calculate_total_value():
     """Ricalcola il valore totale del portafoglio (liquidita' + posizioni aperte)."""
@@ -232,6 +243,152 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
     }
 
 
+def set_stop_loss(ticker: str, stop_price: float, run_id: str = "") -> dict:
+    """
+    Imposta o rimuove (stop_price=0) lo stop-loss automatico su una posizione.
+    Se stop_price > 0 e current_price <= stop_price → la posizione verra'
+    chiusa automaticamente al prossimo update prezzi.
+    """
+    pos = get_position(ticker)
+    if pos is None:
+        return {"success": False, "reason": f"Nessuna posizione su {ticker}"}
+    if stop_price < 0:
+        return {"success": False, "reason": "stop_price deve essere >= 0"}
+    if stop_price > 0 and stop_price >= pos["avg_buy_price"]:
+        # Warning soft: SL sopra il prezzo di carico significa lock-in di gain
+        # (non vietato ma raro); il modello potrebbe averlo voluto come trail.
+        pass
+    ok = update_position_auto_exit(ticker, stop_loss_price=stop_price, set_by=run_id)
+    if not ok:
+        return {"success": False, "reason": "Aggiornamento DB fallito"}
+    return {
+        "success": True, "ticker": ticker,
+        "stop_loss_price": stop_price,
+        "current_price": pos.get("current_price"),
+        "avg_buy_price": pos.get("avg_buy_price"),
+        "note": "Lo stop-loss verra' eseguito automaticamente al raggiungimento.",
+    }
+
+
+def set_take_profit(ticker: str, target_price: float, run_id: str = "") -> dict:
+    """
+    Imposta o rimuove (target_price=0) il take-profit automatico.
+    Se target_price > 0 e current_price >= target_price → chiusura auto.
+    """
+    pos = get_position(ticker)
+    if pos is None:
+        return {"success": False, "reason": f"Nessuna posizione su {ticker}"}
+    if target_price < 0:
+        return {"success": False, "reason": "target_price deve essere >= 0"}
+    if target_price > 0 and target_price <= pos["avg_buy_price"]:
+        pass  # warning soft (TP sotto carico = lock-in di loss; raro ma non vietato)
+    ok = update_position_auto_exit(ticker, take_profit_price=target_price, set_by=run_id)
+    if not ok:
+        return {"success": False, "reason": "Aggiornamento DB fallito"}
+    return {
+        "success": True, "ticker": ticker,
+        "take_profit_price": target_price,
+        "current_price": pos.get("current_price"),
+        "avg_buy_price": pos.get("avg_buy_price"),
+        "note": "Il take-profit verra' eseguito automaticamente al raggiungimento.",
+    }
+
+
+def check_and_execute_auto_exits(prices: dict | None = None) -> list:
+    """
+    Per ogni posizione con SL/TP impostato, controlla se il prezzo corrente
+    ha attivato l'exit automatico e in tal caso esegue execute_sell.
+
+    Args:
+        prices: dict {ticker: current_price} aggiornato da price_polling.
+                Se None, usa il current_price gia' salvato sulla posizione.
+
+    Ritorna lista di dict con i trade eseguiti automaticamente.
+    """
+    executed = []
+    try:
+        positions = get_positions_with_auto_exits()
+    except Exception:
+        positions = []
+
+    for p in positions:
+        ticker = p.get("ticker")
+        if not ticker:
+            continue
+        # Prezzo corrente: prima dal dict prices (fresh), poi dal DB
+        cur_price = None
+        if prices and ticker in prices:
+            try:
+                cur_price = float(prices[ticker])
+            except Exception:
+                cur_price = None
+        if cur_price is None or cur_price <= 0:
+            cur_price = p.get("current_price") or 0
+        if not cur_price or cur_price <= 0:
+            continue
+
+        sl = float(p.get("stop_loss_price") or 0)
+        tp = float(p.get("take_profit_price") or 0)
+        qty = int(p.get("quantity") or 0)
+        avg = float(p.get("avg_buy_price") or 0)
+        if qty <= 0:
+            continue
+
+        trigger = None
+        if tp > 0 and cur_price >= tp:
+            trigger = "take_profit"
+        elif sl > 0 and cur_price <= sl:
+            trigger = "stop_loss"
+
+        if not trigger:
+            continue
+
+        # Esegue la vendita auto. Reasoning include il trigger per audit.
+        reason = (
+            f"AUTO {trigger.upper()}: prezzo {cur_price:.4f} ha "
+            f"{'superato TP' if trigger == 'take_profit' else 'rotto SL'} "
+            f"a {(tp if trigger == 'take_profit' else sl):.4f} "
+            f"(carico {avg:.4f}, qty {qty})."
+        )
+        try:
+            result = execute_sell(
+                ticker, qty, cur_price,
+                geo_reasoning=f"auto_{trigger}",
+                tech_reasoning=reason,
+                confidence=100,
+            )
+            executed.append({
+                "ticker": ticker,
+                "trigger": trigger,
+                "trigger_price": tp if trigger == "take_profit" else sl,
+                "executed_price": cur_price,
+                "quantity": qty,
+                "result": result,
+            })
+            # Log nel DB cosi' appare nelle dashboard
+            try:
+                from database import insert_agent_log
+                import json as _json
+                insert_agent_log(
+                    "auto_exit", "DECISION_AUTO_EXIT",
+                    _json.dumps({
+                        "event": f"auto_{trigger}",
+                        "ticker": ticker, "qty": qty,
+                        "trigger_price": tp if trigger == "take_profit" else sl,
+                        "executed_price": cur_price,
+                        "avg_buy_price": avg,
+                    }, default=str),
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            executed.append({
+                "ticker": ticker, "trigger": trigger, "error": str(e),
+            })
+
+    return executed
+
+
 def update_prices(prices: dict):
     """
     Aggiorna i prezzi correnti di tutte le posizioni e ricalcola il P&L.
@@ -259,9 +416,20 @@ def update_prices(prices: dict):
     # Ricalcola il valore totale dopo l'aggiornamento dei prezzi
     total_value = calculate_total_value()
 
+    # Controlla auto-exits SL/TP e chiude le posizioni che hanno raggiunto i livelli
+    auto_exits = []
+    try:
+        auto_exits = check_and_execute_auto_exits(prices)
+        if auto_exits:
+            # Ricalcola dopo le chiusure automatiche
+            total_value = calculate_total_value()
+    except Exception:
+        pass
+
     return {
         "updated_positions": updated,
         "portfolio_total_value": round(total_value, 2),
+        "auto_exits_executed": auto_exits,
     }
 
 

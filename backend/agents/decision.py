@@ -195,11 +195,12 @@ CONTESTO CHE RICEVI:
 
 REGOLE OPERATIVE Fase ESECUZIONE:
   - ALLOCAZIONE: Fino al 50% del portafoglio per singola operazione
-  - STOP-LOSS: Decidi autonomamente se metterlo, a quale distanza (basati sull'ATR), o se non metterlo
   - CONFIDENCE: Se geo + tecnico concordano, la confidence aumenta del 15%
   - Max 5 posizioni aperte contemporaneamente
-  - Se unrealized loss > 10%, valuta chiusura
-  - Se unrealized gain > 20%, valuta presa di profitto
+  - GESTIONE POSIZIONI ESISTENTI: nessuna soglia hardcoded di profit-taking
+    o stop-loss. Vedi RISK MANAGEMENT PRINCIPLES sotto. Sei tu a decidere
+    quando proteggere il profitto o tagliare la perdita basandoti su segnali
+    tecnici, news, regime di mercato e tempo trascorso dall'apertura.
 
 UNIVERSO INVESTIBILE — VINCOLO RIGIDO ClawStreet:
 Il portfolio è specchiato live su ClawStreet (vetrina pubblica del bot, leaderboard
@@ -320,6 +321,9 @@ def _get_decision_prompt(engine: str | None = None) -> str:
 
     Per Claude:    setting key 'prompt_decision'    → fallback DECISION_SYSTEM_PROMPT_DEFAULT
     Per R1:        setting key 'prompt_decision_r1' → fallback DECISION_R1_SYSTEM_PROMPT_DEFAULT
+
+    Inietta SEMPRE alla fine il blocco shared_principles (gestione SL/TP +
+    dialog Technical) che e' identico tra Live e Simulator.
     """
     if engine is None:
         engine = _resolve_engine_for_run()
@@ -327,14 +331,24 @@ def _get_decision_prompt(engine: str | None = None) -> str:
     setting_key = "prompt_decision_r1" if engine == "deepseek-r1" else "prompt_decision"
     default = DECISION_R1_SYSTEM_PROMPT_DEFAULT if engine == "deepseek-r1" else DECISION_SYSTEM_PROMPT_DEFAULT
 
+    base_prompt = default
     try:
         import database as _db
         custom = _db.get_setting(setting_key, "")
         if custom and isinstance(custom, str) and custom.strip():
-            return custom
+            base_prompt = custom
     except Exception:
         pass
-    return default
+
+    # Inietta i principi condivisi (SL/TP autonomy + Technical dialog).
+    # Idempotente: se sono gia' presenti per via di un custom prompt,
+    # l'utente puo' rimuoverli editando le settings.
+    try:
+        from agents.shared_principles import get_full_risk_block_for_live
+        shared = get_full_risk_block_for_live()
+        return base_prompt + "\n\n" + "═" * 60 + "\n" + shared
+    except Exception:
+        return base_prompt
 
 
 def _get_client() -> Anthropic:
@@ -402,7 +416,11 @@ DECISION_TOOLS = [
     },
     {
         "name": "request_extra_analysis",
-        "description": "Richiedi analisi tecnica aggiuntiva per un ticker non coperto dal report iniziale.",
+        "description": (
+            "Richiedi indicatori GREZZI (no LLM) per UN ticker. "
+            "Veloce e a costo zero. Usa request_technical_analysis se vuoi "
+            "analisi interpretata da DeepSeek-V3 su piu' ticker insieme."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -413,8 +431,72 @@ DECISION_TOOLS = [
         },
     },
     {
+        "name": "request_technical_analysis",
+        "description": (
+            "Chiama il Technical Agent (DeepSeek-V3) IN TEMPO REALE per ottenere "
+            "analisi interpretata su una lista di ticker (max 5). Usalo quando "
+            "il report tecnico iniziale non basta: ticker mancante, indicatori "
+            "stale, dubbio su livelli S/R o ATR, conferma fresh prima di un trade. "
+            "Risponde con `analyses` per i ticker analizzati e `errors_per_ticker` "
+            "per quelli falliti (dato non disponibile, V3 down, ecc.). "
+            "Se i dati che ti servivano sono in errors_per_ticker, NON inventare: "
+            "cambia ticker o usa do_nothing motivando."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tickers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1, "maxItems": 5,
+                    "description": "Ticker equity/ETF (no crypto). Max 5.",
+                },
+                "focus_question": {
+                    "type": "string",
+                    "description": "Cosa vuoi sapere (es. 'RSI + S/R per dimensionare SL su NVDA')",
+                },
+            },
+            "required": ["tickers", "focus_question"],
+        },
+    },
+    {
+        "name": "set_stop_loss",
+        "description": (
+            "Imposta o aggiorna lo stop-loss AUTOMATICO su una posizione "
+            "esistente. Quando il prezzo corrente raggiunge stop_price, il "
+            "sistema CHIUDE la posizione automaticamente al prossimo update prezzi. "
+            "Passa stop_price=0 per rimuovere lo SL. Errore se la posizione non esiste."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "stop_price": {"type": "number", "description": "Prezzo SL assoluto (>0). 0 = rimuovi."},
+                "reason": {"type": "string", "description": "Motivazione tecnica (livello chiave invalidato, ATR multiplier, ecc.)"},
+            },
+            "required": ["ticker", "stop_price", "reason"],
+        },
+    },
+    {
+        "name": "set_take_profit",
+        "description": (
+            "Imposta o aggiorna il take-profit AUTOMATICO su una posizione "
+            "esistente. Quando il prezzo corrente raggiunge target_price, il "
+            "sistema CHIUDE automaticamente. Passa target_price=0 per rimuovere."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "target_price": {"type": "number", "description": "Prezzo TP assoluto (>0). 0 = rimuovi."},
+                "reason": {"type": "string", "description": "Motivazione (resistenza, livello psicologico, ecc.)"},
+            },
+            "required": ["ticker", "target_price", "reason"],
+        },
+    },
+    {
         "name": "get_portfolio_state",
-        "description": "Ottieni lo stato aggiornato del portafoglio (cash, posizioni, P&L).",
+        "description": "Ottieni lo stato aggiornato del portafoglio (cash, posizioni con SL/TP impostati, P&L).",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]
@@ -535,6 +617,18 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
                     geo_part, tech_part, confidence
                 )
 
+            # Se BUY con SL/TP specificati nel tool: registra anche sui livelli
+            # automatici della posizione (cosi' price_polling li triggera).
+            if action == "BUY" and (stop_loss or take_profit):
+                try:
+                    if stop_loss and stop_loss > 0:
+                        portfolio.set_stop_loss(ticker, float(stop_loss), run_id=run_id)
+                    if take_profit and take_profit > 0:
+                        portfolio.set_take_profit(ticker, float(take_profit), run_id=run_id)
+                except Exception as exc:
+                    logger.warning("[%s][DECISION] auto SL/TP set fallito %s: %s",
+                                   run_id, ticker, exc)
+
             # Salva in trades_high_risk
             _save_high_risk_trade(database, run_id, ticker, action, current_price,
                                   quantity, logic_chain, stop_loss, take_profit, confidence)
@@ -581,6 +675,81 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
             data = await _fetch_ticker_indicators(ticker)
             database.insert_agent_log(run_id, "DECISION_EXTRA_TA", f"Extra TA: {ticker}")
             return json.dumps(data, default=str)
+
+        elif tool_name == "request_technical_analysis":
+            tickers = tool_input.get("tickers") or []
+            focus = tool_input.get("focus_question", "")
+            if not isinstance(tickers, list) or not tickers:
+                return json.dumps({"error": "tickers deve essere una lista non vuota"})
+            tickers = [str(t).upper().strip() for t in tickers if t][:5]
+
+            logger.info("[%s][DECISION] request_technical_analysis: %s — focus: %s",
+                        run_id, tickers, focus[:80])
+            try:
+                from agents.technical import run_technical_analysis
+                report = await run_technical_analysis(run_id, tickers)
+            except Exception as exc:
+                logger.error("[%s][DECISION] technical realtime failed: %s",
+                             run_id, exc, exc_info=True)
+                return json.dumps({
+                    "error": f"Technical Agent fallito: {exc}",
+                    "tickers_requested": tickers,
+                })
+
+            # Costruisci risposta strutturata: chi e' stato analizzato, chi e' fallito
+            analyses = report.get("analyses") or []
+            analyzed_tickers = {a.get("ticker") for a in analyses if a.get("ticker")}
+            errors_per_ticker = {}
+            for t in tickers:
+                if t not in analyzed_tickers:
+                    # Cerca motivo nel raw_indicators
+                    raw_list = report.get("raw_indicators") or []
+                    if isinstance(raw_list, list):
+                        for r in raw_list:
+                            if isinstance(r, dict) and r.get("ticker") == t and r.get("error"):
+                                errors_per_ticker[t] = r.get("error", "no data")
+                                break
+                    if t not in errors_per_ticker:
+                        errors_per_ticker[t] = "non analizzato (out of universe / no data)"
+
+            database.insert_agent_log(run_id, "DECISION_REALTIME_TA", json.dumps({
+                "tickers_requested": tickers,
+                "tickers_analyzed": list(analyzed_tickers),
+                "errors_per_ticker": errors_per_ticker,
+                "engine": report.get("engine"),
+                "focus": focus[:200],
+            }, default=str))
+
+            return json.dumps({
+                "focus_question": focus,
+                "analyses": analyses,
+                "summary": report.get("summary", ""),
+                "engine": report.get("engine", ""),
+                "errors_per_ticker": errors_per_ticker,
+                "raw_indicators_available": bool(report.get("raw_indicators")),
+            }, default=str)
+
+        elif tool_name == "set_stop_loss":
+            ticker = (tool_input.get("ticker") or "").upper().strip()
+            stop_price = float(tool_input.get("stop_price") or 0)
+            reason = tool_input.get("reason", "")
+            result = portfolio.set_stop_loss(ticker, stop_price, run_id=run_id)
+            database.insert_agent_log(run_id, "DECISION_SET_SL", json.dumps({
+                "ticker": ticker, "stop_price": stop_price,
+                "success": result.get("success"), "reason": reason[:300],
+            }))
+            return json.dumps(result, default=str)
+
+        elif tool_name == "set_take_profit":
+            ticker = (tool_input.get("ticker") or "").upper().strip()
+            target_price = float(tool_input.get("target_price") or 0)
+            reason = tool_input.get("reason", "")
+            result = portfolio.set_take_profit(ticker, target_price, run_id=run_id)
+            database.insert_agent_log(run_id, "DECISION_SET_TP", json.dumps({
+                "ticker": ticker, "target_price": target_price,
+                "success": result.get("success"), "reason": reason[:300],
+            }))
+            return json.dumps(result, default=str)
 
         elif tool_name == "get_portfolio_state":
             state = portfolio.get_portfolio_state()

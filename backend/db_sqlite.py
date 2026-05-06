@@ -169,6 +169,20 @@ def init_db():
             bal = float(os.environ.get("INITIAL_PORTFOLIO_BALANCE", 100000))
             conn.execute("INSERT INTO portfolio (cash_balance, total_value) VALUES (?,?)", (bal, bal))
 
+        # ── Migrazione tabella positions: SL/TP automatici impostati dall'agente ──
+        # Quando il prezzo corrente raggiunge questi livelli, price_polling
+        # esegue la chiusura automatica via auto_exit job. 0 = non impostato.
+        for col_def in (
+            "stop_loss_price REAL DEFAULT 0",
+            "take_profit_price REAL DEFAULT 0",
+            "auto_exit_set_at TEXT",
+            "auto_exit_set_by TEXT",
+        ):
+            try:
+                conn.execute(f"ALTER TABLE positions ADD COLUMN {col_def}")
+            except Exception:
+                pass
+
         # ── Migrazione tabella trades: aggiunta colonne ClawStreet mirror ──
         # Permette di tracciare per ogni trade se è stato specchiato con
         # successo su ClawStreet e di riprovare le mirror fallite.
@@ -235,6 +249,47 @@ def upsert_position(ticker, quantity, avg_buy_price, current_price=0):
         else:
             conn.execute("INSERT INTO positions (ticker,quantity,avg_buy_price,current_price,unrealized_pnl) VALUES (?,?,?,?,?)",
                          (ticker, quantity, avg_buy_price, current_price, pnl))
+
+
+def update_position_auto_exit(ticker, stop_loss_price=None, take_profit_price=None, set_by=""):
+    """
+    Aggiorna i livelli SL/TP automatici di una posizione esistente.
+    Se un parametro e' None, NON viene modificato; per rimuovere passa 0.
+    Ritorna True se la posizione esiste ed e' stata aggiornata.
+    """
+    with get_db() as conn:
+        existing = conn.execute("SELECT id FROM positions WHERE ticker=?", (ticker,)).fetchone()
+        if not existing:
+            return False
+        sets = []
+        params = []
+        if stop_loss_price is not None:
+            sets.append("stop_loss_price=?")
+            params.append(float(stop_loss_price))
+        if take_profit_price is not None:
+            sets.append("take_profit_price=?")
+            params.append(float(take_profit_price))
+        if not sets:
+            return True  # nothing to update
+        sets.append("auto_exit_set_at=datetime('now')")
+        sets.append("auto_exit_set_by=?")
+        params.append(set_by or "")
+        params.append(ticker)
+        conn.execute(f"UPDATE positions SET {', '.join(sets)} WHERE ticker=?", params)
+        return True
+
+
+def get_positions_with_auto_exits():
+    """
+    Ritorna le posizioni che hanno almeno uno tra stop_loss_price o
+    take_profit_price > 0 (cioe' impostati dall'agente).
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions "
+            "WHERE COALESCE(stop_loss_price, 0) > 0 OR COALESCE(take_profit_price, 0) > 0"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 def delete_position(ticker):
     with get_db() as conn:

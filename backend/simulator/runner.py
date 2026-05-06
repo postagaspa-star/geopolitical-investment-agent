@@ -58,7 +58,10 @@ PROCEDURA OBBLIGATORIA (3 sezioni nominate, in ordine, NESSUNA OMISSIONE):
       "asset": "TICKER",  // se action=HOLD, può essere null
       "conviction": "BASSA" | "MEDIA" | "ALTA",
       "horizon": "1g" | "1settimana" | "1mese" | "3mesi",
-      "risk": "frase breve sul rischio principale (1-2 righe)"
+      "risk": "frase breve sul rischio principale (1-2 righe)",
+      "stop_loss_target": null | <prezzo assoluto>,
+      "take_profit_target": null | <prezzo assoluto>,
+      "exit_strategy": "trailing_atr" | "level_target" | "time_based" | "discretionary"
     }
 
 REGOLE:
@@ -66,6 +69,12 @@ REGOLE:
 - La sezione [3] DEVE essere un JSON valido nel formato specificato
 - Asset deve essere uno dei ticker dell'asset_universe fornito
 - Niente testo dopo il JSON di [3]
+- I campi stop_loss_target e take_profit_target sono PREZZI ASSOLUTI (es. 150.50),
+  non percentuali. Se action='HOLD' o non riesci a fissarli, usa null.
+- exit_strategy descrive il TUO approccio: 'level_target' se hai mirato livelli
+  tecnici precisi, 'trailing_atr' se prevedi adattamento via ATR, 'time_based'
+  se chiuderesti dopo X giorni indipendentemente dal prezzo, 'discretionary'
+  se preferisci decidere step-by-step.
 """
 
 SIM_PROMPT_MULTI_UPDATE = """\
@@ -197,10 +206,24 @@ def _build_context_prompt(scenario: dict, step_index: int = 0,
 
 
 async def _call_r1(system_prompt: str, user_message: str) -> str:
-    """Chiama DeepSeek-R1. Ritorna il response_text."""
+    """Chiama DeepSeek-R1. Ritorna il response_text.
+
+    Inietta automaticamente i shared_principles (SL/TP autonomy) cosi' il
+    Simulator e il bot Live ragionano con la stessa filosofia di gestione
+    del rischio.
+    """
     api_key = _get_deepseek_key()
     if not api_key:
         raise ValueError("DEEPSEEK_API_KEY non configurata")
+
+    # Inietta shared principles in coda al system_prompt (idempotente: se gia'
+    # presenti per via di un prompt custom, e' solo ridondanza inerte).
+    try:
+        from agents.shared_principles import get_full_risk_block_for_simulator
+        system_prompt = system_prompt + "\n\n" + ("═" * 60) + "\n" + get_full_risk_block_for_simulator()
+    except Exception:
+        pass
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": DEEPSEEK_R1,
@@ -278,6 +301,10 @@ def _parse_response(raw: str) -> dict:
             "conviction": decision_json.get("conviction", "BASSA"),
             "horizon": decision_json.get("horizon", "1settimana"),
             "risk": decision_json.get("risk", ""),
+            # Nuovi campi SL/TP: opzionali, possono essere None
+            "stop_loss_target": decision_json.get("stop_loss_target"),
+            "take_profit_target": decision_json.get("take_profit_target"),
+            "exit_strategy": decision_json.get("exit_strategy", "discretionary"),
         },
         "raw": txt,
     }

@@ -132,6 +132,14 @@ def _ensure_cs_mirror_columns():
         -- v8: flag is_preset per i documenti precaricati (PDF crypto forniti
         -- nei preset_documents/). Non eliminabili dall'UI.
         ALTER TABLE technical_documents ADD COLUMN IF NOT EXISTS is_preset BOOLEAN DEFAULT FALSE;
+        -- v10: SL/TP automatici impostati dall'agente sulle posizioni.
+        -- Quando il prezzo corrente raggiunge questi livelli, price_polling
+        -- esegue la chiusura automatica. 0 (default) = non impostato.
+        ALTER TABLE positions ADD COLUMN IF NOT EXISTS stop_loss_price DOUBLE PRECISION DEFAULT 0;
+        ALTER TABLE positions ADD COLUMN IF NOT EXISTS take_profit_price DOUBLE PRECISION DEFAULT 0;
+        ALTER TABLE positions ADD COLUMN IF NOT EXISTS auto_exit_set_at TIMESTAMPTZ;
+        ALTER TABLE positions ADD COLUMN IF NOT EXISTS auto_exit_set_by TEXT;
+
         -- v9: chat assistant (conversazioni con AI DeepSeek-R1).
         -- Mini-memoria delle ultime 10 conversazioni dell'utente.
         CREATE TABLE IF NOT EXISTS chat_conversations (
@@ -268,6 +276,41 @@ def update_position_price(ticker, current_price):
             "current_price": current_price,
             "unrealized_pnl": pnl,
         }).eq("ticker", ticker).execute()
+
+
+def update_position_auto_exit(ticker, stop_loss_price=None, take_profit_price=None, set_by=""):
+    """Aggiorna i livelli SL/TP di una posizione (Supabase)."""
+    client = _get_client()
+    existing = get_position(ticker)
+    if not existing:
+        return False
+    update_fields = {"auto_exit_set_at": _now_iso(), "auto_exit_set_by": set_by or ""}
+    if stop_loss_price is not None:
+        update_fields["stop_loss_price"] = float(stop_loss_price)
+    if take_profit_price is not None:
+        update_fields["take_profit_price"] = float(take_profit_price)
+    try:
+        client.table("positions").update(update_fields).eq("ticker", ticker).execute()
+        return True
+    except Exception as e:
+        logger.warning("update_position_auto_exit fallita: %s", e)
+        return False
+
+
+def get_positions_with_auto_exits():
+    """Posizioni con SL o TP > 0 impostati."""
+    client = _get_client()
+    try:
+        # Supabase non ha OR composto facilmente: facciamo due query e mergiamo
+        sl_rows = client.table("positions").select("*").gt("stop_loss_price", 0).execute()
+        tp_rows = client.table("positions").select("*").gt("take_profit_price", 0).execute()
+        merged = {}
+        for r in (sl_rows.data or []) + (tp_rows.data or []):
+            merged[r["id"]] = r
+        return list(merged.values())
+    except Exception as e:
+        logger.warning("get_positions_with_auto_exits fallita: %s", e)
+        return []
 
 
 def count_positions():
