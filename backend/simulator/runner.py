@@ -395,10 +395,32 @@ def _build_context_prompt(scenario: dict, step_index: int = 0,
             "asset_performance_text": asset_perf.strip(),
         }
 
-    # Inietta memoria
+    # Inietta memoria descrittiva (run recenti, neutra)
     memory = _load_memory_summary(scenario.get("category", ""))
     if memory:
         parts.insert(0, memory + "\n\n" + "=" * 60)
+
+    # Inietta advice categorizzati (lezioni operative dall'advisor)
+    try:
+        from agents import sim_advisor
+        advice_block, category_key, advice_ids = (
+            sim_advisor.get_advice_block_for_runner(scenario, max_items=5)
+        )
+        if advice_block:
+            parts.insert(0, advice_block + "\n")
+            # Track apply_count: solo al primo step (T0) per non gonfiare
+            if step_index == 0 and advice_ids:
+                try:
+                    sim_advisor.increment_apply_count(advice_ids, category_key)
+                except Exception:
+                    pass
+            context_for_ui["advice_applied"] = {
+                "category_key": category_key,
+                "advice_ids": advice_ids,
+                "count": len(advice_ids),
+            }
+    except Exception as exc:
+        logger.debug("[SIM] advice injection skipped: %s", exc)
 
     return "\n".join(parts), context_for_ui
 

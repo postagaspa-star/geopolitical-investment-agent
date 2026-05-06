@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Eye, Brain, Target, AlertCircle, TrendingUp, TrendingDown } from "lucide-react";
+import { ArrowLeft, ArrowRight, Eye, Brain, Target, AlertCircle, TrendingUp, TrendingDown, Sparkles, BarChart3 } from "lucide-react";
+import SimAdvisorChat from "../../components/SimAdvisorChat";
 
 const API = window.location.origin;
 
@@ -19,6 +20,7 @@ export default function SimResult() {
   const [run, setRun] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [activeTab, setActiveTab] = useState("result"); // "result" | "advisor"
 
   useEffect(() => {
     let cancelled = false;
@@ -71,6 +73,54 @@ export default function SimResult() {
   }
   if (!run) return <div style={S.empty}>Risultato non trovato</div>;
 
+  return (
+    <div>
+      {/* HEADER */}
+      <div style={S.headerRow}>
+        <button style={S.backBtn} onClick={() => nav("/simulator")}>
+          <ArrowLeft size={16} /> Dashboard
+        </button>
+        <h1 style={S.h1}>Risultato Scenario</h1>
+        <button style={S.btnPrimary} onClick={() => nav("/simulator/runner")}>
+          Avvia nuovo <ArrowRight size={16} />
+        </button>
+      </div>
+
+      {/* TAB SWITCHER */}
+      <div style={S.tabBar}>
+        <button
+          style={{ ...S.tabBtn, ...(activeTab === "result" ? S.tabBtnActive : {}) }}
+          onClick={() => setActiveTab("result")}
+        >
+          <BarChart3 size={14} style={{ marginRight: 6 }} />
+          Risultato & Analisi
+        </button>
+        <button
+          style={{ ...S.tabBtn, ...(activeTab === "advisor" ? S.tabBtnActive : {}) }}
+          onClick={() => setActiveTab("advisor")}
+        >
+          <Sparkles size={14} style={{ marginRight: 6 }} />
+          Analizza & Migliora
+        </button>
+      </div>
+
+      {activeTab === "advisor" ? (
+        <div style={S.card}>
+          <div style={S.advisorIntro}>
+            La AI analizza questo run e propone consigli operativi per migliorare
+            il Decision Agent in scenari simili. I consigli che salvi vengono
+            iniettati automaticamente nei run futuri della stessa categoria.
+          </div>
+          <SimAdvisorChat runId={runId} />
+        </div>
+      ) : (
+        <ResultView run={run} runId={runId} nav={nav} />
+      )}
+    </div>
+  );
+}
+
+function ResultView({ run, runId, nav }) {
   const full = run.full_data || {};
   const stats = full.chart_stats || {};
   const slTp = full.sl_tp_analysis || {};
@@ -89,18 +139,7 @@ export default function SimResult() {
   const actionColor = isHold ? "#94a3b8" : isBuy ? "#10b981" : "#ef4444";
 
   return (
-    <div>
-      {/* HEADER */}
-      <div style={S.headerRow}>
-        <button style={S.backBtn} onClick={() => nav("/simulator")}>
-          <ArrowLeft size={16} /> Dashboard
-        </button>
-        <h1 style={S.h1}>Risultato Scenario</h1>
-        <button style={S.btnPrimary} onClick={() => nav("/simulator/runner")}>
-          Avvia nuovo <ArrowRight size={16} />
-        </button>
-      </div>
-
+    <>
       {/* META INFO esteso (8 box) */}
       <div style={S.metaGrid}>
         <Meta label="Categoria" value={run.category} mono />
@@ -311,7 +350,7 @@ export default function SimResult() {
           )}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -600,4 +639,29 @@ const S = {
   },
 
   empty: { padding: 40, textAlign: "center", color: "#94a3b8" },
+
+  // Tab switcher
+  tabBar: {
+    display: "flex", gap: 4, marginBottom: 16,
+    borderBottom: "1px solid #1f2937", paddingBottom: 0,
+  },
+  tabBtn: {
+    background: "transparent", color: "#94a3b8", border: 0,
+    padding: "10px 18px", cursor: "pointer", fontSize: 13,
+    fontWeight: 600, fontFamily: "inherit",
+    display: "inline-flex", alignItems: "center",
+    borderBottom: "2px solid transparent",
+    transition: "all 0.15s ease",
+    marginBottom: -1, // sovrappone il border del tabBar
+  },
+  tabBtnActive: {
+    color: "#a78bfa", borderBottom: "2px solid #a78bfa",
+  },
+
+  // Advisor intro (descrittivo, sopra la chat)
+  advisorIntro: {
+    fontSize: 12, color: "#94a3b8", lineHeight: 1.6,
+    padding: "10px 12px", background: "#0a1018", borderRadius: 6,
+    border: "1px solid #1f2937", marginBottom: 14,
+  },
 };

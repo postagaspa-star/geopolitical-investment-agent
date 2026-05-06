@@ -8,6 +8,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import BackgroundTasks, FastAPI, File, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -1294,6 +1295,250 @@ async def sim_generate_patterns():
         return {"analysis": text}
     except Exception as e:
         return {"analysis": f"Errore generazione: {e}"}
+
+
+# ─── Sim Advisor: chat AI per consigli post-run + memoria categorizzata ─────
+
+@app.get("/api/simulator/advisor/{run_id}")
+async def sim_advisor_get(run_id: str):
+    """
+    Stato della chat advisor per un run.
+    - Se non esiste ancora, genera il primo "proposal" automaticamente.
+    - Se esiste, ritorna messaggi salvati + advice già archiviati per la
+      stessa categoria (per UI).
+    """
+    try:
+        from simulator import db as sim_db
+        from agents import sim_advisor
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"import fallito: {e}"})
+
+    run = sim_db.get_run(run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={
+            "error": "Run non trovato",
+            "run_id": run_id,
+        })
+
+    # Ricava category_key e tags dal run
+    category_key, tags = sim_advisor.detect_scenario_key(run)
+
+    # Stato chat esistente o nuovo
+    state = sim_advisor.load_advisor_chat(run_id) or {}
+    messages: list = state.get("messages", [])
+
+    existing_for_category = sim_advisor.load_advice_for_key(category_key, max_items=20)
+
+    # Se la chat è vuota → genera la proposta iniziale on-demand
+    if not messages:
+        run_context = sim_advisor.build_run_context(run, existing_for_category)
+        try:
+            text, _reasoning, advices = await sim_advisor.chat_with_advisor(
+                history=[], user_message="", run_context=run_context,
+            )
+        except Exception as e:
+            logger.error("sim_advisor initial proposal failed: %s", e, exc_info=True)
+            return JSONResponse(status_code=500, content={
+                "error": f"Generazione proposta iniziale fallita: {e}",
+                "category_key": category_key,
+                "scenario_tags": tags,
+            })
+
+        messages = [{
+            "role": "assistant",
+            "content": text,
+            "proposed_advices": advices,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }]
+        state = {
+            "run_id": run_id,
+            "category_key": category_key,
+            "scenario_tags": tags,
+            "messages": messages,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        sim_advisor.save_advisor_chat(run_id, state)
+
+    return {
+        "run_id": run_id,
+        "category_key": category_key,
+        "scenario_tags": tags,
+        "messages": messages,
+        "existing_advices": existing_for_category,
+    }
+
+
+class SimAdvisorMessageReq(BaseModel):
+    message: str
+
+
+@app.post("/api/simulator/advisor/{run_id}/message")
+async def sim_advisor_message(run_id: str, req: SimAdvisorMessageReq):
+    """Invia un messaggio user nella chat advisor di un run e ottiene la risposta R1."""
+    try:
+        from simulator import db as sim_db
+        from agents import sim_advisor
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"import fallito: {e}"})
+
+    user_msg = (req.message or "").strip()
+    if not user_msg:
+        return JSONResponse(status_code=400, content={"error": "Messaggio vuoto"})
+
+    run = sim_db.get_run(run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": "Run non trovato"})
+
+    state = sim_advisor.load_advisor_chat(run_id) or {}
+    messages: list = state.get("messages", [])
+    category_key = state.get("category_key")
+    if not category_key:
+        category_key, tags = sim_advisor.detect_scenario_key(run)
+        state["category_key"] = category_key
+        state["scenario_tags"] = tags
+
+    existing_for_category = sim_advisor.load_advice_for_key(category_key, max_items=20)
+    run_context = sim_advisor.build_run_context(run, existing_for_category)
+
+    # Append messaggio user
+    user_entry = {
+        "role": "user",
+        "content": user_msg,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    messages.append(user_entry)
+
+    # History per il modello: tutti i messaggi precedenti
+    history_for_llm = [{"role": m["role"], "content": m["content"]}
+                       for m in messages[:-1]]
+
+    try:
+        text, _reasoning, advices = await sim_advisor.chat_with_advisor(
+            history=history_for_llm,
+            user_message=user_msg,
+            run_context=run_context,
+        )
+    except Exception as e:
+        logger.error("sim_advisor message failed: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={
+            "error": f"Chiamata advisor fallita: {e}",
+        })
+
+    assistant_entry = {
+        "role": "assistant",
+        "content": text,
+        "proposed_advices": advices,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    messages.append(assistant_entry)
+
+    state["messages"] = messages
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    sim_advisor.save_advisor_chat(run_id, state)
+
+    return {
+        "user_message": user_entry,
+        "assistant_message": assistant_entry,
+        "category_key": category_key,
+    }
+
+
+class SimAdvisorSaveReq(BaseModel):
+    title: str
+    text: str
+    rationale: str = ""
+
+
+@app.post("/api/simulator/advisor/{run_id}/save")
+async def sim_advisor_save(run_id: str, req: SimAdvisorSaveReq):
+    """Salva manualmente un advice nella memoria categorizzata."""
+    try:
+        from simulator import db as sim_db
+        from agents import sim_advisor
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"import fallito: {e}"})
+
+    if not (req.title or "").strip() or not (req.text or "").strip():
+        return JSONResponse(status_code=400, content={
+            "error": "title e text sono obbligatori",
+        })
+
+    run = sim_db.get_run(run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": "Run non trovato"})
+
+    category_key, tags = sim_advisor.detect_scenario_key(run)
+
+    advice = {
+        "run_id": run_id,
+        "scenario_category": category_key,
+        "scenario_tags": tags,
+        "title": req.title.strip()[:200],
+        "text": req.text.strip()[:1000],
+        "rationale": (req.rationale or "").strip()[:600],
+    }
+
+    try:
+        aid = sim_advisor.save_advice(advice)
+    except Exception as e:
+        logger.error("sim_advisor save failed: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={
+            "error": f"Salvataggio fallito: {e}",
+        })
+
+    return {
+        "id": aid,
+        "category_key": category_key,
+        "scenario_tags": tags,
+        "saved": True,
+    }
+
+
+@app.get("/api/simulator/advisor/memory/all")
+async def sim_advisor_memory_all():
+    """Lista tutti gli advice in memoria, raggruppati per category_key."""
+    try:
+        from agents import sim_advisor
+        grouped = sim_advisor.list_all_advice()
+        return {"groups": grouped, "category_count": len(grouped),
+                "total_advices": sum(len(v) for v in grouped.values())}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/simulator/advisor/memory/{category_key}")
+async def sim_advisor_memory_for_key(category_key: str):
+    """Lista gli advice per una specifica category_key."""
+    try:
+        from agents import sim_advisor
+        items = sim_advisor.load_advice_for_key(category_key, max_items=50)
+        return {"category_key": category_key, "items": items}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/api/simulator/advisor/memory/{category_key}/{advice_id}")
+async def sim_advisor_memory_delete(category_key: str, advice_id: str):
+    """Elimina un advice specifico dalla memoria."""
+    try:
+        from agents import sim_advisor
+        ok = sim_advisor.delete_advice(advice_id, category_key)
+        if not ok:
+            return JSONResponse(status_code=404, content={"error": "Advice non trovato"})
+        return {"deleted": True, "id": advice_id, "category_key": category_key}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/api/simulator/advisor/{run_id}")
+async def sim_advisor_chat_delete(run_id: str):
+    """Reset della chat advisor per un run (la memoria archiviata resta)."""
+    try:
+        from agents import sim_advisor
+        sim_advisor.save_advisor_chat(run_id, {})
+        return {"reset": True, "run_id": run_id}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/api/settings/prompt-defaults")
