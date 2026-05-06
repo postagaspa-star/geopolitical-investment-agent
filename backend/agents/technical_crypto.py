@@ -314,14 +314,30 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
         logger.debug("[%s][TECH-CRYPTO] enrich failed: %s", run_id, e)
         ticker_data_enriched = ticker_data
 
-    context_payload = {
-        "tickers_data": ticker_data_enriched,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "instruction": (
-            "Per ogni crypto leggi PRIMA signals_summary (bullish/bearish counts), "
-            "POI calibra confidence. NON usare 35% piatto come fallback: rispetta i floor."
-        ),
-    }
+    # Scrub NaN/Inf prima della serializzazione: il fix evita che json.dumps
+    # con default=str li converta in stringhe "nan" che il modello scambia
+    # per dato valido. Riusiamo l'helper di technical standard.
+    try:
+        from agents.technical import _clean_for_json
+        context_payload = _clean_for_json({
+            "tickers_data": ticker_data_enriched,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "instruction": (
+                "Per ogni crypto leggi PRIMA signals_summary (bullish/bearish counts), "
+                "POI calibra confidence. NON usare 35% piatto come fallback: rispetta i floor. "
+                "Se signals_summary.data_quality='insufficient', NON inventare una "
+                "direzione: ritorna signal='HOLD' con reasoning='data_insufficient'."
+            ),
+        })
+    except Exception:
+        context_payload = {
+            "tickers_data": ticker_data_enriched,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "instruction": (
+                "Per ogni crypto leggi PRIMA signals_summary (bullish/bearish counts), "
+                "POI calibra confidence. NON usare 35% piatto come fallback: rispetta i floor."
+            ),
+        }
     context = json.dumps(context_payload, default=str, ensure_ascii=False)
     if crypto_docs_blob:
         context = crypto_docs_blob + "\n\n" + "=" * 60 + "\n\n" + context
@@ -337,10 +353,25 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
             }))
         except Exception:
             pass
-        return {"analyses": [], "raw_indicators": ticker_data,
-                "engine": "error",
-                "summary": f"DeepSeek error: {exc}",
-                "filtered_count": filtered_count}
+        # Scrub anche raw_indicators del fallback
+        try:
+            from agents.technical import _clean_for_json
+            cleaned_raw = _clean_for_json(ticker_data)
+        except Exception:
+            cleaned_raw = ticker_data
+        return {
+            "analyses": [],
+            "raw_indicators": cleaned_raw,
+            "engine": "error",
+            "summary": f"DeepSeek error: {exc}",
+            "filtered_count": filtered_count,
+            "data_warning": (
+                "TECHNICAL CRYPTO ANALYSIS FAILED. raw_indicators contiene SOLO "
+                "indicatori grezzi non interpretati. Per ogni ticker, controlla "
+                "data_quality (ok/degraded/insufficient/no_data); se != 'ok' "
+                "usa do_nothing motivando 'crypto technical data unavailable'."
+            ),
+        }
 
     # 3. Parse JSON
     parse_ok = False

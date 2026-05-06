@@ -193,10 +193,133 @@ async def _call_claude_fallback(context: str) -> tuple[str, str]:
     return text, "claude-sonnet-fallback"
 
 
+def _is_bad_number(x) -> bool:
+    """True se il valore e' NaN, Inf, None, o non numerico."""
+    if x is None:
+        return True
+    try:
+        import math
+        if isinstance(x, (int, float)):
+            return math.isnan(x) or math.isinf(x)
+    except Exception:
+        return True
+    return False
+
+
+def _clean_for_json(obj):
+    """
+    Walk ricorsivo che sostituisce NaN/Inf/numpy NaN con None.
+    Risolve il bug per cui json.dumps(..., default=str) trasformava NaN in
+    "nan" (stringa) — il modello la scambiava per dato valido.
+    """
+    import math
+    # numpy types: NaN/Inf check senza importare numpy esplicitamente
+    if obj is None:
+        return None
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, (int, str, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {k: _clean_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_clean_for_json(v) for v in obj]
+    # Tipi numpy: forza float-like check
+    try:
+        v = float(obj)
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+    except (TypeError, ValueError):
+        pass
+    return obj
+
+
+def _validate_indicators(ticker_data: dict) -> tuple[dict, list]:
+    """
+    Sanity-check sui dati indicatori. Ritorna (cleaned_data, warnings).
+
+    Controlli:
+      - prezzo corrente > 0
+      - RSI in [0, 100], altrimenti None
+      - ATR >= 0
+      - support < current_price (altrimenti potrebbe essere swappato)
+      - resistance > current_price
+      - rimuove NaN/Inf da tutti i campi numerici
+    """
+    warnings: list[str] = []
+    if not isinstance(ticker_data, dict):
+        return ticker_data, ["non-dict ticker_data"]
+
+    ticker = ticker_data.get("ticker", "?")
+    cp = ticker_data.get("current_price")
+    if _is_bad_number(cp) or (isinstance(cp, (int, float)) and cp <= 0):
+        warnings.append(f"current_price invalido ({cp})")
+        ticker_data["current_price"] = None
+
+    atr = ticker_data.get("atr")
+    if _is_bad_number(atr) or (isinstance(atr, (int, float)) and atr < 0):
+        warnings.append(f"ATR invalido ({atr})")
+        ticker_data["atr"] = None
+
+    analysis = ticker_data.get("analysis") or {}
+    indicators = analysis.get("indicators") or {}
+
+    # RSI: range valido [0, 100]
+    rsi = indicators.get("rsi_14")
+    if rsi is not None:
+        if _is_bad_number(rsi) or not (0 <= float(rsi) <= 100):
+            warnings.append(f"RSI fuori range ({rsi})")
+            indicators["rsi_14"] = None
+
+    # MACD histogram: niente NaN
+    for key in ("macd_histogram", "macd_signal", "macd_value"):
+        v = indicators.get(key)
+        if _is_bad_number(v):
+            indicators[key] = None
+            if v is not None:
+                warnings.append(f"{key} NaN/Inf")
+
+    # Support/Resistance: rispetto al prezzo corrente, segnaliamo se swappati
+    sr = analysis.get("support_resistance") or {}
+    sup = sr.get("support")
+    res = sr.get("resistance")
+    cur = ticker_data.get("current_price")
+    if cur and isinstance(cur, (int, float)) and cur > 0:
+        if isinstance(sup, (int, float)) and sup > cur * 1.5:
+            warnings.append(f"support {sup} > current {cur}*1.5 (sospetto)")
+            sr["support"] = None
+        if isinstance(res, (int, float)) and res < cur * 0.7:
+            warnings.append(f"resistance {res} < current {cur}*0.7 (sospetto)")
+            sr["resistance"] = None
+    # NaN check su S/R
+    if _is_bad_number(sr.get("support")):
+        sr["support"] = None
+    if _is_bad_number(sr.get("resistance")):
+        sr["resistance"] = None
+
+    # Data points: < 20 = troppi pochi per indicatori affidabili
+    dp = ticker_data.get("data_points") or 0
+    if dp < 20:
+        warnings.append(f"only {dp} data points (< 20) — indicators unreliable")
+
+    # Aggiungi flag esplicito di qualita' dati
+    if warnings:
+        ticker_data["data_quality"] = "degraded"
+        ticker_data["data_warnings"] = warnings[:6]
+    else:
+        ticker_data["data_quality"] = "ok"
+
+    return ticker_data, warnings
+
+
 async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
     """
     Recupera dati OHLCV e calcola indicatori tecnici per un ticker.
     Usa yfinance con fallback ClawStreet (via data_fetchers).
+    Output validato con sanity check + scrubbed di NaN/Inf.
     """
     import data_fetchers
     import technical_analysis
@@ -215,6 +338,7 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
             "ticker": ticker,
             "error": market_data.get("error", "No data"),
             "source": market_data.get("source", "unknown"),
+            "data_quality": "no_data",
         }
 
     # Calcola indicatori
@@ -230,7 +354,7 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
     # Calcola ATR manualmente (14 periodi)
     atr = _calculate_atr(market_data["data"])
 
-    return {
+    raw = {
         "ticker": ticker,
         "current_price": current_price,
         "atr": atr,
@@ -238,6 +362,13 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
         "data_points": len(market_data["data"]),
         "source": market_data.get("source", "yfinance"),
     }
+
+    # Sanity validation: scrub NaN/Inf, range checks, S/R sanity
+    cleaned = _clean_for_json(raw)
+    cleaned, warnings = _validate_indicators(cleaned)
+    if warnings:
+        logger.warning("[TECH] %s data_quality=degraded: %s", ticker, warnings[:3])
+    return cleaned
 
 
 def _build_signals_summary(ticker_data: dict) -> dict:
@@ -247,15 +378,17 @@ def _build_signals_summary(ticker_data: dict) -> dict:
     setup attivi. Cosi' il LLM vede subito il quadro aggregato e non deve
     indovinare partendo dai numeri raw.
 
+    Se i dati sono insufficienti (no analysis, no signals) ritorna esplicito
+    `data_quality: "insufficient"` invece di mascherarsi come trend UNKNOWN
+    + zero segnali (che il modello scambiava per HOLD legittimo).
+
     Returns:
         {
-          "bullish_count": int,
-          "bearish_count": int,
-          "neutral_count": int,
-          "bullish_signals": [str],
-          "bearish_signals": [str],
-          "trend": str,
-          "key_observations": [str],
+          "bullish_count": int, "bearish_count": int, "neutral_count": int,
+          "bullish_signals": [str], "bearish_signals": [str],
+          "trend": str, "key_observations": [str],
+          "data_quality": "ok" | "insufficient",
+          "aggregated_bias": "BULLISH" | "BEARISH" | "MIXED" | "INSUFFICIENT_DATA",
         }
     """
     out = {
@@ -263,10 +396,32 @@ def _build_signals_summary(ticker_data: dict) -> dict:
         "bullish_signals": [], "bearish_signals": [],
         "trend": ticker_data.get("analysis", {}).get("trend", "UNKNOWN"),
         "key_observations": [],
+        "data_quality": "ok",
     }
     analysis = ticker_data.get("analysis") or {}
     signals = analysis.get("signals") or {}
     indicators = analysis.get("indicators") or {}
+
+    # ── Detect early data insufficiency ─────────────────────────────────────
+    # Se i 3 campi essenziali mancano → flag esplicito che il LLM legge.
+    # Cosi' il modello sa che NON deve produrre BUY/SELL/HOLD su questi dati.
+    has_signals = bool(signals)
+    has_indicators = bool(indicators)
+    rsi_present = indicators.get("rsi_14") is not None
+    macd_present = (indicators.get("macd_value") is not None
+                    or indicators.get("macd_histogram") is not None)
+    if not (has_signals and has_indicators and (rsi_present or macd_present)):
+        out["data_quality"] = "insufficient"
+        out["aggregated_bias"] = "INSUFFICIENT_DATA"
+        out["key_observations"].append(
+            "DATA QUALITY: insufficient — non producing directional call. "
+            "Skip ticker or use do_nothing."
+        )
+        # Riporta anche eventuali warnings dal validator
+        warns = ticker_data.get("data_warnings") or []
+        if warns:
+            out["data_warnings"] = warns
+        return out
 
     # Mappa parole-chiave → bullish/bearish (sia inglese che italiano,
     # perche' technical_analysis.py potrebbe ritornare l'una o l'altra)
@@ -458,16 +613,21 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     # deve indovinare partendo dai numeri raw → meno bias HOLD/35%.
     ticker_data_enriched = _enrich_ticker_data(ticker_data)
 
-    # 3. Prepara contesto per DeepSeek con istruzione esplicita
-    context = json.dumps({
+    # 3. Prepara contesto per DeepSeek — scrub NaN/Inf prima della serializzazione
+    # (altrimenti json.dumps con default=str li converte in stringa "nan"
+    # che il modello scambia per dato valido).
+    payload = _clean_for_json({
         "tickers_data": ticker_data_enriched,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "instruction": (
             "Per ogni ticker leggi PRIMA signals_summary (gia' aggregato), "
             "POI calibra confidence integrando indicatori raw. NON usare "
-            "confidence 35% piatto come fallback: rispetta i floor del prompt."
+            "confidence 35% piatto come fallback: rispetta i floor del prompt. "
+            "Se signals_summary.data_quality='insufficient', NON inventare "
+            "una direzione: ritorna signal='HOLD' con reasoning='data_insufficient'."
         ),
-    }, default=str, ensure_ascii=False)
+    })
+    context = json.dumps(payload, default=str, ensure_ascii=False)
 
     # 3. Chiama DeepSeek-V3 (engine FISSO, no fallback Claude per controllo costi)
     # Il Technical Agent gira sempre 24/7 a costo predicibile (~$0.0006/run).
@@ -482,17 +642,32 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     except Exception as ds_err:
         logger.warning("[%s][TECH] DeepSeek-V3 fallito (%s) — Pure Macro mode (no Claude fallback)",
                        run_id, ds_err)
-        database.insert_agent_log(run_id, "TECH_WORKER", json.dumps({
-            "event": "technical_pure_macro_fallback",
-            "error": str(ds_err)[:200],
-            "tickers": list(ticker_data.keys()),
-        }))
+        try:
+            database.insert_agent_log(run_id, "TECH_WORKER", json.dumps({
+                "event": "technical_pure_macro_fallback",
+                "error": str(ds_err)[:200],
+                "tickers": [t.get("ticker") for t in ticker_data if isinstance(t, dict)],
+            }))
+        except Exception:
+            pass
+        # Scrub NaN/Inf prima di tornarli al Decision Agent.
+        cleaned_raw = _clean_for_json(ticker_data)
         return {
             "analyses": [],
-            "raw_indicators": ticker_data,
+            "raw_indicators": cleaned_raw,
             "engine": "pure_macro_fallback",
             "error": f"DeepSeek failed: {ds_err}",
-            "summary": "Technical DeepSeek-V3 non disponibile — Decision opera in Pure Macro mode con indicatori grezzi.",
+            "data_warning": (
+                "TECHNICAL ANALYSIS FAILED. raw_indicators contiene SOLO numeri "
+                "grezzi (RSI, ATR, support/resistance) NON interpretati da un LLM. "
+                "Ogni ticker ha un campo 'data_quality' = ok|degraded|insufficient. "
+                "Per i ticker con data_quality != 'ok', usa do_nothing motivando "
+                "'technical data unavailable'. NON inventare confidence."
+            ),
+            "summary": (
+                "Technical DeepSeek-V3 NON disponibile — il Decision Agent deve "
+                "operare in Pure Macro mode. Vedi data_warning + raw_indicators."
+            ),
         }
 
     # 4. Parse risultato
