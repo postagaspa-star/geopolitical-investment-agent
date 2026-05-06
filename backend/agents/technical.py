@@ -21,17 +21,43 @@ DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 FALLBACK_MODEL = "claude-sonnet-4-20250514"
 
-TECH_PROMPT_DEFAULT = """You are a quantitative technical analyst. You receive raw OHLCV data and pre-calculated indicators.
+TECH_PROMPT_DEFAULT = """You are an ASSERTIVE quantitative technical analyst. You receive
+raw OHLCV data, pre-calculated indicators, AND a pre-interpreted "signals_summary"
+that already classifies each indicator as bullish/bearish/neutral.
 
-RULES:
-- Analyze ALL indicators: RSI, MACD, Bollinger Bands, SMA crossovers, Stochastic, ATR, Volume
-- For each ticker give a clear BUY/SELL/HOLD signal with confidence (0-100)
-- Calculate key support/resistance levels from the data
-- Use ATR for suggested stop-loss distance
-- Flag divergences between price and indicators
-- Determine the market regime: TRENDING_UP, TRENDING_DOWN, RANGING, VOLATILE
+═══════════════════════════════════════════════════════════════════════
+DECISION POLICY — DO NOT BE CONSERVATIVE BY DEFAULT
+═══════════════════════════════════════════════════════════════════════
 
-OUTPUT MUST be valid JSON:
+Your job is to AGGREGATE the pre-interpreted signals into a clear directional call.
+Counting rule (use this as floor, not ceiling):
+
+- 4+ bullish signals (out of: SMA, RSI, MACD, Stochastic, Momentum, Volume) → BUY conf 70-85
+- 3 bullish + 1-2 neutral → BUY conf 60-72
+- 4+ bearish signals → SELL conf 70-85
+- 3 bearish + 1-2 neutral → SELL conf 60-72
+- Mix di bullish e bearish (es. 2-2 o 3-3) → HOLD conf 45-55
+- Trend molto forte (TRENDING_UP) + 2-3 conferme → BUY conf 75-90
+- Pattern raro (golden cross, oversold bounce con RSI<30) → BUY conf 80-90
+
+CONFIDENCE FLOORS (rispettare rigorosamente):
+- BUY/SELL: confidence MAI sotto 50. Se non puoi dare ≥50 di confidence,
+  preferisci HOLD ma con conf 45-55 (NON 35).
+- HOLD: confidence range valido 35-60. Sotto 35 NON è accettabile —
+  segnala invece "data_insufficient" nel reasoning.
+- Vietato 35% piatto su tutti i ticker: se lo fai, stai sottoperformando.
+
+INSTRUCTIONS:
+- Leggi PRIMA il campo signals_summary (gia' interpretato), POI integra con i numeri raw
+  per calibrare la confidence
+- Calcola support/resistance dai livelli forniti in support_resistance
+- Suggerisci stop-loss usando ATR (typical: SL = current - 1.5×ATR per BUY)
+- Flag divergences (es. prezzo SMA200, RSI < 50 → bearish divergence)
+- Market regime determinato dal trend pre-calcolato
+
+═══════════════════════════════════════════════════════════════════════
+OUTPUT — JSON valido (no preamble, solo JSON):
+═══════════════════════════════════════════════════════════════════════
 {
   "analyses": [
     {
@@ -44,16 +70,16 @@ OUTPUT MUST be valid JSON:
       "atr": 2.15,
       "rsi": {"value": 35.2, "signal": "OVERSOLD_BUY"},
       "macd": {"value": 0.45, "signal": "BULLISH_CROSS"},
-      "bollinger": {"position": "LOWER_BAND", "signal": "BUY"},
+      "stoch": {"value": 22.5, "signal": "OVERSOLD"},
       "sma_cross": {"signal": "GOLDEN_CROSS"},
-      "stochastic": {"value": 22.5, "signal": "OVERSOLD"},
       "volume_trend": "HIGH",
-      "market_regime": "TRENDING_DOWN",
-      "reasoning": "RSI oversold near strong support with bullish MACD divergence..."
+      "trend": "TRENDING_UP",
+      "suggested_stop_loss": 102.30,
+      "reasoning": "4 segnali bullish (RSI oversold bounce, MACD bullish cross, golden cross SMA, volume HIGH) + trend up → BUY conf 72."
     }
   ],
   "market_regime": "RANGING",
-  "summary": "Overall market assessment..."
+  "summary": "2 BUY (XOM, NVDA), 1 SELL (MSFT), 1 HOLD (GLD). Tech sector mostra rotazione positiva."
 }"""
 
 
@@ -98,7 +124,10 @@ async def _call_deepseek(context: str, max_retries: int = 3) -> tuple[str, str]:
             {"role": "user", "content": context},
         ],
         "max_tokens": 4096,
-        "temperature": 0.2,
+        # Temperature 0.4 (era 0.2): piu' espressivita' nelle confidence
+        # senza perdere consistency sui segnali. 0.2 era troppo conservativa
+        # e produceva HOLD/35% sistematici.
+        "temperature": 0.4,
     }
 
     last_error = None
@@ -211,6 +240,118 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
     }
 
 
+def _build_signals_summary(ticker_data: dict) -> dict:
+    """
+    Estrae i signals interpretati da analyze_ticker (technical_analysis.py)
+    e li riassume come "bullish/bearish/neutral counts" + lista chiara dei
+    setup attivi. Cosi' il LLM vede subito il quadro aggregato e non deve
+    indovinare partendo dai numeri raw.
+
+    Returns:
+        {
+          "bullish_count": int,
+          "bearish_count": int,
+          "neutral_count": int,
+          "bullish_signals": [str],
+          "bearish_signals": [str],
+          "trend": str,
+          "key_observations": [str],
+        }
+    """
+    out = {
+        "bullish_count": 0, "bearish_count": 0, "neutral_count": 0,
+        "bullish_signals": [], "bearish_signals": [],
+        "trend": ticker_data.get("analysis", {}).get("trend", "UNKNOWN"),
+        "key_observations": [],
+    }
+    analysis = ticker_data.get("analysis") or {}
+    signals = analysis.get("signals") or {}
+    indicators = analysis.get("indicators") or {}
+
+    # Mappa parole-chiave → bullish/bearish (sia inglese che italiano,
+    # perche' technical_analysis.py potrebbe ritornare l'una o l'altra)
+    bullish_kw = ["BUY", "BULLISH", "GOLDEN", "OVERSOLD", "POSITIVE", "ACQUISTO",
+                  "RIALZISTA", "BULLISH_CROSS", "OVERSOLD_BUY"]
+    bearish_kw = ["SELL", "BEARISH", "DEATH", "OVERBOUGHT", "NEGATIVE", "VENDITA",
+                  "RIBASSISTA", "BEARISH_CROSS", "OVERBOUGHT_SELL"]
+
+    def _classify(sig_value: str) -> str:
+        s = (sig_value or "").upper()
+        if any(kw in s for kw in bullish_kw):
+            return "bullish"
+        if any(kw in s for kw in bearish_kw):
+            return "bearish"
+        return "neutral"
+
+    for indicator_name, sig in signals.items():
+        # sig puo' essere una stringa direttamente o un dict {signal, value, ...}
+        if isinstance(sig, dict):
+            sig_str = sig.get("signal") or sig.get("interpretazione") or ""
+        else:
+            sig_str = str(sig)
+
+        cat = _classify(sig_str)
+        label = f"{indicator_name.upper()}: {sig_str}"
+        if cat == "bullish":
+            out["bullish_count"] += 1
+            out["bullish_signals"].append(label)
+        elif cat == "bearish":
+            out["bearish_count"] += 1
+            out["bearish_signals"].append(label)
+        else:
+            out["neutral_count"] += 1
+
+    # Key observations dal trend e indicatori chiave
+    trend = out["trend"]
+    if trend in ("TRENDING_UP", "RIALZISTA"):
+        out["key_observations"].append("Trend STRUTTURALE rialzista (SMA20 > SMA50 > SMA200)")
+    elif trend in ("TRENDING_DOWN", "RIBASSISTA"):
+        out["key_observations"].append("Trend STRUTTURALE ribassista")
+
+    rsi = indicators.get("rsi_14")
+    if rsi is not None:
+        if rsi < 30:
+            out["key_observations"].append(f"RSI {rsi:.0f} → OVERSOLD estremo (potenziale bounce)")
+        elif rsi > 70:
+            out["key_observations"].append(f"RSI {rsi:.0f} → OVERBOUGHT (potenziale pullback)")
+        elif 50 <= rsi <= 65:
+            out["key_observations"].append(f"RSI {rsi:.0f} → momentum positivo in trend")
+
+    macd_h = indicators.get("macd_histogram")
+    if macd_h is not None:
+        if macd_h > 0:
+            out["key_observations"].append("MACD histogram positivo (espansione bullish)")
+        else:
+            out["key_observations"].append("MACD histogram negativo (espansione bearish)")
+
+    # Verdict aggregato (suggerisce all'LLM la direzione)
+    if out["bullish_count"] >= out["bearish_count"] + 2:
+        out["aggregated_bias"] = "BULLISH"
+    elif out["bearish_count"] >= out["bullish_count"] + 2:
+        out["aggregated_bias"] = "BEARISH"
+    else:
+        out["aggregated_bias"] = "MIXED"
+
+    return out
+
+
+def _enrich_ticker_data(ticker_data_list: list) -> list:
+    """Aggiunge signals_summary a ogni ticker_data prima di mandarlo al LLM."""
+    enriched = []
+    for td in ticker_data_list:
+        if not isinstance(td, dict):
+            enriched.append(td)
+            continue
+        td_copy = dict(td)
+        try:
+            td_copy["signals_summary"] = _build_signals_summary(td)
+        except Exception as e:
+            logger.debug("[TECH] _build_signals_summary failed for %s: %s",
+                         td.get("ticker"), e)
+        enriched.append(td_copy)
+    return enriched
+
+
 def _calculate_atr(data: list[dict], period: int = 14) -> float:
     """Calcola Average True Range dagli ultimi N periodi."""
     if len(data) < period + 1:
@@ -312,11 +453,20 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
             "failed_tickers": failed_tickers,
         }
 
-    # 2. Prepara contesto per DeepSeek
+    # 2. Pre-processing: aggiungi signals_summary aggregato per ogni ticker
+    # Cosi' il LLM vede subito quanti segnali bullish/bearish ci sono e non
+    # deve indovinare partendo dai numeri raw → meno bias HOLD/35%.
+    ticker_data_enriched = _enrich_ticker_data(ticker_data)
+
+    # 3. Prepara contesto per DeepSeek con istruzione esplicita
     context = json.dumps({
-        "tickers_data": ticker_data,
+        "tickers_data": ticker_data_enriched,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "instruction": "Analyze these technical indicators and produce the JSON report.",
+        "instruction": (
+            "Per ogni ticker leggi PRIMA signals_summary (gia' aggregato), "
+            "POI calibra confidence integrando indicatori raw. NON usare "
+            "confidence 35% piatto come fallback: rispetta i floor del prompt."
+        ),
     }, default=str, ensure_ascii=False)
 
     # 3. Chiama DeepSeek-V3 (engine FISSO, no fallback Claude per controllo costi)

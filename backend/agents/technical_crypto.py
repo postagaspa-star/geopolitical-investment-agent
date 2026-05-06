@@ -38,10 +38,12 @@ DEFAULT_CRYPTO_UNIVERSE = [
     "UNI-USD", "ATOM-USD", "MATIC-USD", "NEAR-USD",
 ]
 
-CRYPTO_TECHNICAL_PROMPT_DEFAULT = """Sei un Technical Analyst specializzato ESCLUSIVAMENTE in crypto-asset top-cap (BTC, ETH, SOL, ecc.).
+CRYPTO_TECHNICAL_PROMPT_DEFAULT = """Sei un Technical Analyst ASSERTIVO specializzato ESCLUSIVAMENTE in crypto-asset top-cap (BTC, ETH, SOL, ecc.).
+
+Ricevi: indicatori pre-calcolati + signals_summary aggregato (bullish/bearish counts).
 
 Analisi richiesta per ogni ticker:
-1. Trend strutturale 4H/1D: bullish / bearish / range-bound
+1. Trend strutturale 4H/1D: bullish / bearish / range-bound (USA il campo trend pre-calcolato)
 2. Livelli chiave: support / resistance / next breakout target
 3. Momentum indicators: RSI 14, MACD, volume 24h vs 7d avg
 4. Anomalie crypto-specific:
@@ -51,8 +53,27 @@ Analisi richiesta per ogni ticker:
 5. Bias retail vs institutional (se Reddit/X buffer fornisce indizi)
 6. Risk note: stop-loss tecnico suggerito (in % vs current price)
 
-Le crypto sono 24/7 — non c'è "gap di apertura" né "after hours".
-Considera SEMPRE che il sentiment può cambiare in pochi minuti per:
+═══════════════════════════════════════════════════════════════════════
+DECISION POLICY — NO CONSERVATIVE BIAS
+═══════════════════════════════════════════════════════════════════════
+
+Counting rule:
+- 4+ bullish signals → BUY conf 65-85 (le crypto sono volatili: confidence
+  capped a 85 anche con setup ottimo, perche' news puo' invalidare in minuti)
+- 3 bullish + 1-2 neutral → BUY conf 55-68
+- 4+ bearish signals → SELL conf 65-85
+- 3 bearish + 1-2 neutral → SELL conf 55-68
+- Mix (2-2 o 3-3) → HOLD conf 40-55
+- Trend STRUTTURALE forte + volume spike + livello chiave rotto → BUY/SELL conf 75-88
+
+CONFIDENCE FLOORS:
+- BUY/SELL: MAI sotto 50. Se non puoi dare ≥50, dichiara HOLD ma con conf 40-55.
+- HOLD: range 35-58. Sotto 35 NON è accettabile — segnala "data_insufficient".
+- VIETATO 35% piatto su tutti i ticker.
+
+═══════════════════════════════════════════════════════════════════════
+
+Le crypto sono 24/7 — sentiment puo' cambiare in pochi minuti per:
 - News regolamentari (SEC, MiCA, banche centrali)
 - Hack / exploit / depeg
 - Movimenti di whale wallet
@@ -70,7 +91,7 @@ OUTPUT JSON (nessun preambolo, solo JSON):
       "stop_loss_pct": 3.5,
       "signal": "BUY|SELL|HOLD",
       "confidence": 0-100,
-      "reasoning": "2-3 frasi tecniche."
+      "reasoning": "Conta segnali (X bullish vs Y bearish) + driver chiave + livelli."
     }
   ],
   "summary": "Sintesi 1-2 frasi del setup crypto complessivo."
@@ -132,7 +153,9 @@ async def _call_deepseek(context: str, max_retries: int = 2) -> tuple[str, str]:
             {"role": "system", "content": _get_crypto_technical_prompt()},
             {"role": "user", "content": context},
         ],
-        "temperature": 0.2,
+        # Temperature 0.4 (era 0.2): meno conservativo, piu' espressivita'
+        # nelle confidence senza perdere consistency sui segnali.
+        "temperature": 0.4,
         "max_tokens": 3000,
     }
 
@@ -277,10 +300,27 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
     except Exception as e:
         logger.debug("[%s][TECH-CRYPTO] Doc loading failed: %s", run_id, e)
 
+    # Pre-processing: aggiungi signals_summary aggregato (riusa l'helper
+    # del Technical standard — stessa struttura analyze_ticker)
+    try:
+        from agents.technical import _enrich_ticker_data
+        # ticker_data e' un dict {ticker: data}; _enrich vuole una lista
+        enriched_list = _enrich_ticker_data(list(ticker_data.values()))
+        ticker_data_enriched = {
+            (d.get("ticker") or k): d
+            for k, d in zip(ticker_data.keys(), enriched_list)
+        }
+    except Exception as e:
+        logger.debug("[%s][TECH-CRYPTO] enrich failed: %s", run_id, e)
+        ticker_data_enriched = ticker_data
+
     context_payload = {
-        "tickers_data": ticker_data,
+        "tickers_data": ticker_data_enriched,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "instruction": "Analyze these crypto technical indicators using the reference docs. Output JSON only.",
+        "instruction": (
+            "Per ogni crypto leggi PRIMA signals_summary (bullish/bearish counts), "
+            "POI calibra confidence. NON usare 35% piatto come fallback: rispetta i floor."
+        ),
     }
     context = json.dumps(context_payload, default=str, ensure_ascii=False)
     if crypto_docs_blob:
