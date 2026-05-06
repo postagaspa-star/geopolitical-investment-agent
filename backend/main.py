@@ -48,6 +48,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Simulator schema init fallita (non bloccante): %s", e)
 
+    # Schema Chat Assistant (idempotente, fail-safe)
+    # Crea le tabelle chat_conversations / chat_messages al volo se mancano.
+    # Su Supabase richiede DATABASE_URL o SUPABASE_DB_PASSWORD.
+    try:
+        from agents import chat_assistant
+        ok, err = chat_assistant.ensure_chat_tables()
+        if ok:
+            logger.info("Chat assistant: tabelle chat_* verificate.")
+        else:
+            logger.warning("Chat assistant: tabelle non verificate (%s). "
+                           "Verra' ritentato alla prima richiesta.", err)
+    except Exception as e:
+        logger.warning("Chat assistant init fallita (non bloccante): %s", e)
+
     # Preset documents crypto: scansiona backend/preset_documents/crypto/
     # e fa upsert nel DB con is_preset=true. Idempotente: re-run sicuro.
     try:
@@ -567,6 +581,34 @@ class ChatSendPayload(BaseModel):
     selected_trade_ids: list[int] | None = None  # trade scelti dall'utente
 
 
+@app.get("/api/chat/health")
+async def chat_health():
+    """
+    Diagnostica del chat assistant: verifica tabelle, API key, e prova a
+    costruire il live_context. Endpoint utile per debug del HTTP 500.
+    """
+    try:
+        from agents import chat_assistant
+        ok, err = chat_assistant.ensure_chat_tables()
+        api_key = chat_assistant._get_api_key()
+        live_ctx_len = 0
+        live_ctx_err = None
+        try:
+            live_ctx = chat_assistant.build_live_context()
+            live_ctx_len = len(live_ctx)
+        except Exception as e:
+            live_ctx_err = str(e)
+        return {
+            "tables_ok": ok,
+            "tables_error": err if not ok else None,
+            "deepseek_api_key_set": bool(api_key),
+            "live_context_chars": live_ctx_len,
+            "live_context_error": live_ctx_err,
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e), "type": type(e).__name__})
+
+
 @app.get("/api/chat/conversations")
 async def chat_list_conversations(limit: int = Query(default=10, ge=1, le=50)):
     """Lista delle ultime conversazioni con l'analista AI."""
@@ -631,8 +673,9 @@ async def chat_send(payload: ChatSendPayload):
     conversazione se conversation_id e' None. Ritorna la risposta completa
     (non-streaming per semplicita').
 
-    Se selected_trade_ids e' fornito, i trade corrispondenti vengono
-    iniettati come contesto nel prompt user.
+    Il prompt include sempre: portfolio, posizioni, market state, ultime
+    decisioni, briefing. Se selected_trade_ids e' fornito, anche i trade
+    selezionati come contesto specifico.
     """
     try:
         from agents import chat_assistant
@@ -641,63 +684,110 @@ async def chat_send(payload: ChatSendPayload):
         if not message:
             return JSONResponse(status_code=400, content={"error": "Messaggio vuoto"})
 
+        # 0. Verifica/crea le tabelle chat_* se mancano (Supabase first-deploy)
+        ok, err_msg = chat_assistant.ensure_chat_tables()
+        if not ok:
+            logger.error("chat_send: tabelle chat non disponibili: %s", err_msg)
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "Tabelle chat non inizializzate.",
+                    "detail": err_msg,
+                    "hint": "Verifica DATABASE_URL su Render oppure esegui la migration manualmente.",
+                },
+            )
+
         # 1. Determina/crea la conversazione
         conv_id = payload.conversation_id
         is_new_conversation = False
         if conv_id is None:
             title = chat_assistant.auto_title_from_first_message(message)
             sel_json = json.dumps(payload.selected_trade_ids) if payload.selected_trade_ids else None
-            conv_id = database.create_chat_conversation(title=title, selected_decisions=sel_json)
+            try:
+                conv_id = database.create_chat_conversation(title=title, selected_decisions=sel_json)
+            except Exception as e:
+                logger.error("chat_send: create_chat_conversation crash: %s", e, exc_info=True)
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "Errore creazione conversazione", "detail": str(e)},
+                )
             is_new_conversation = True
             if conv_id is None:
                 return JSONResponse(
                     status_code=500,
-                    content={"error": "Impossibile creare la conversazione"},
+                    content={"error": "Impossibile creare la conversazione (DB ha ritornato None)"},
                 )
 
         # 2. Carica history esistente (esclude il nuovo messaggio)
-        history = database.get_chat_messages(conv_id) or []
+        try:
+            history = database.get_chat_messages(conv_id) or []
+        except Exception as e:
+            logger.warning("chat_send: get_chat_messages failed: %s", e)
+            history = []
 
         # 3. Costruisci contesto decisioni (solo dai trade_ids forniti ora;
         #    se non passati, usa quelli salvati sulla conversazione)
         trade_ids = payload.selected_trade_ids
         if not trade_ids and not is_new_conversation:
-            convs = database.get_chat_conversations(limit=50) or []
-            for c in convs:
-                if c.get("id") == conv_id and c.get("selected_decisions"):
-                    try:
-                        trade_ids = json.loads(c["selected_decisions"])
-                    except Exception:
-                        trade_ids = None
-                    break
-
-        decisions_context = ""
-        if trade_ids:
-            all_trades = database.get_trades(limit=200) or []
-            trade_id_set = set(trade_ids)
-            selected = [t for t in all_trades if t.get("id") in trade_id_set]
-            decisions_context = chat_assistant.build_decisions_context(selected)
-            # Aggiorna la conversazione con i trade_ids piu' recenti
             try:
-                database.update_chat_conversation_decisions(conv_id, json.dumps(trade_ids))
+                convs = database.get_chat_conversations(limit=50) or []
+                for c in convs:
+                    if c.get("id") == conv_id and c.get("selected_decisions"):
+                        try:
+                            trade_ids = json.loads(c["selected_decisions"])
+                        except Exception:
+                            trade_ids = None
+                        break
             except Exception:
                 pass
 
-        # 4. Salva il messaggio user PRIMA di chiamare l'AI
-        database.insert_chat_message(conv_id, "user", message)
+        decisions_context = ""
+        if trade_ids:
+            try:
+                all_trades = database.get_trades(limit=200) or []
+                trade_id_set = set(trade_ids)
+                selected = [t for t in all_trades if t.get("id") in trade_id_set]
+                decisions_context = chat_assistant.build_decisions_context(selected)
+                try:
+                    database.update_chat_conversation_decisions(conv_id, json.dumps(trade_ids))
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning("chat_send: decisions_context build failed: %s", e)
 
-        # 5. Chiama R1
+        # 4. Costruisci sempre il live_context (portfolio + market + ...)
+        try:
+            live_context = chat_assistant.build_live_context()
+        except Exception as e:
+            logger.warning("chat_send: live_context build failed: %s", e)
+            live_context = ""
+
+        # 5. Salva il messaggio user PRIMA di chiamare l'AI
+        try:
+            database.insert_chat_message(conv_id, "user", message)
+        except Exception as e:
+            logger.error("chat_send: insert_chat_message (user) failed: %s", e, exc_info=True)
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Errore salvataggio messaggio user", "detail": str(e)},
+            )
+
+        # 6. Chiama R1
         reply, reasoning = await chat_assistant.chat_completion(
             system_prompt=chat_assistant.SYSTEM_PROMPT,
             history=history,
             user_message=message,
             decisions_context=decisions_context,
+            live_context=live_context,
         )
 
-        # 6. Salva la risposta dell'assistant
-        database.insert_chat_message(conv_id, "assistant", reply)
+        # 7. Salva la risposta dell'assistant (anche se è errore, per la cronologia)
+        try:
+            database.insert_chat_message(conv_id, "assistant", reply)
+        except Exception as e:
+            logger.warning("chat_send: insert_chat_message (assistant) failed: %s", e)
 
-        # 7. Mini-memoria: trim a 10 conversazioni totali
+        # 8. Mini-memoria: trim a 10 conversazioni totali
         try:
             database.trim_chat_conversations(keep_last=10)
         except Exception:
@@ -708,10 +798,14 @@ async def chat_send(payload: ChatSendPayload):
             "is_new": is_new_conversation,
             "reply": reply,
             "trades_used": len(trade_ids) if trade_ids else 0,
+            "live_context_chars": len(live_context),
         }
     except Exception as e:
-        logger.error(f"Errore chat send: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        logger.error(f"Errore chat send (top-level): {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__},
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════
