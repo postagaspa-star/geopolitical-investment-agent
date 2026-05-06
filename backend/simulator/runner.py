@@ -342,9 +342,7 @@ def rebuild_run_from_memory(run_id: str) -> dict | None:
     """
     Ricostruisce i dati di un run gia' eseguito ma non ancora salvato nel DB
     (es. l'INSERT su Supabase e' fallito ma _active_runs ce l'ha).
-
-    Robusto: ogni accesso a campi dello scenario usa .get() con fallback,
-    cosi' anche se uno scenario ha schema parziale, il rebuild non crasha.
+    Usa la stessa _build_run_data di _finalize_run per consistency.
     """
     state = _active_runs.get(run_id)
     if not state:
@@ -355,101 +353,8 @@ def rebuild_run_from_memory(run_id: str) -> dict | None:
         logger.warning("[SIM] rebuild_run_from_memory: %s ha steps vuoti", run_id)
         return None
     try:
-        scenario = state.get("scenario") or {}
-        last_step = state["steps"][-1] if state.get("steps") else {}
-        decision = last_step.get("decision") or {}
-        asset = decision.get("asset")
-
-        perf_1w, perf_1m, perf_3m = _simulate_outcome(
-            scenario, asset, decision.get("action")
-        )
-        perf_sp_1m = 0.02
-        perf_sector_1m = 0.015
-        perf_monkey_1m = 0.005
-        delta_sp = perf_1m - perf_sp_1m if perf_1m is not None else None
-        delta_sector = perf_1m - perf_sector_1m if perf_1m is not None else None
-        delta_monkey = perf_1m - perf_monkey_1m if perf_1m is not None else None
-
-        if perf_1m is None:
-            outcome = "yellow"
-        elif delta_sp and delta_sp > 0.005 and delta_sector and delta_sector > 0:
-            outcome = "green"
-        elif delta_sp and delta_sp < -0.01:
-            outcome = "red"
-        else:
-            outcome = "yellow"
-
-        # Robust: usa .get() con fallback su tutti i campi scenario
-        period_start = scenario.get("period_start", "?")
-        period_end = scenario.get("period_end", "?")
-        historical_period = f"{period_start} → {period_end}"
-
-        market_data = scenario.get("market_data") or []
-        if asset and market_data:
-            anchor = next((m for m in market_data if m.get("ticker") == asset), None)
-            anchor_price = anchor.get("price_t0", 100.0) if anchor else 100.0
-            import random
-            random.seed(hash(str(scenario.get("id", "")) + (asset or "")))
-            target = anchor_price * (1 + (perf_3m or 0))
-            price_chart = []
-            for i in range(90):
-                t = i / 89
-                base = anchor_price + (target - anchor_price) * t
-                noise = random.uniform(-0.02, 0.02) * anchor_price
-                price_chart.append({"day": i, "price": round(base + noise, 2)})
-        else:
-            price_chart = []
-
-        steps_data = []
-        for s in state.get("steps", []):
-            d = s.get("decision") or {}
-            asset_step = d.get("asset")
-            price = None
-            if asset_step and market_data:
-                price = next(
-                    (m.get("price_t0") for m in market_data if m.get("ticker") == asset_step),
-                    None,
-                )
-            steps_data.append({
-                "action": d.get("action"),
-                "asset": asset_step,
-                "price": price,
-                "perf_from_here": None,
-            })
-
-        result = {
-            "id": run_id,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "mode": state.get("mode", "manual"),
-            "category": scenario.get("category", "unknown"),
-            "scenario_type": state.get("scenario_type", "single"),
-            "steps": state.get("total_steps", 1),
-            "scenario_id": scenario.get("id", "unknown"),
-            "historical_period": historical_period,
-            "asset_chosen": asset,
-            "action_chosen": decision.get("action"),
-            "conviction": decision.get("conviction"),
-            "horizon": decision.get("horizon"),
-            "perf_1w": perf_1w,
-            "perf_1m": perf_1m,
-            "perf_3m": perf_3m,
-            "perf_sp_1m": perf_sp_1m,
-            "perf_sector_1m": perf_sector_1m,
-            "perf_monkey_1m": perf_monkey_1m,
-            "delta_sp": delta_sp,
-            "delta_sector": delta_sector,
-            "delta_monkey": delta_monkey,
-            "outcome": outcome,
-            "original_thesis": (last_step.get("reasoning") or "")[:1500],
-            "what_happened": scenario.get("description_reveal", ""),
-            "thesis_evaluation": _evaluate_thesis(decision, scenario, perf_1m),
-            "full_data": {
-                "steps": state.get("steps", []),
-                "price_chart": price_chart,
-                "steps_data": steps_data,
-            },
-            "_source": "in_memory_fallback",
-        }
+        result = _build_run_data(run_id, state)
+        result["_source"] = "in_memory_fallback"
         logger.info("[SIM] rebuild_run_from_memory ok: %s", run_id)
         return result
     except Exception as exc:
@@ -488,28 +393,32 @@ async def execute_step(run_id: str, step_index: int) -> dict:
     return step_data
 
 
-async def _finalize_run(run_id: str):
-    """Salva il run completo nel DB con benchmark + outcome calcolati."""
-    state = _active_runs.get(run_id)
-    if not state:
-        return
-    scenario = state["scenario"]
-    last_step = state["steps"][-1]
-    decision = last_step["decision"]
+def _build_run_data(run_id: str, state: dict) -> dict:
+    """
+    Costruisce il dict run_data finale dal state in-memory.
+    Condiviso tra _finalize_run (persistence) e rebuild_run_from_memory
+    (fallback). Calcola metriche estese per la pagina di risultato:
+    prezzo entry, drawdown massimo, volatilita', P&L su $10k notional,
+    SL/TP target proposti dal modello, ecc.
+    """
+    scenario = state.get("scenario") or {}
+    steps = state.get("steps") or []
+    last_step = steps[-1] if steps else {}
+    decision = last_step.get("decision") or {}
     asset = decision.get("asset")
+    market_data = scenario.get("market_data") or []
 
-    # Benchmark calculation: per la fase 1, usiamo i campi description_reveal
-    # come base + simulazione realistica. In v2 si può collegare a serie
-    # storiche reali con yfinance.
-    perf_1w, perf_1m, perf_3m = _simulate_outcome(scenario, asset, decision.get("action"))
-    perf_sp_1m = 0.02   # benchmark statico, in v2 serie reali
+    # ── Performance base
+    perf_1w, perf_1m, perf_3m = _simulate_outcome(
+        scenario, asset, decision.get("action")
+    )
+    perf_sp_1m = 0.02
     perf_sector_1m = 0.015
     perf_monkey_1m = 0.005
     delta_sp = perf_1m - perf_sp_1m if perf_1m is not None else None
     delta_sector = perf_1m - perf_sector_1m if perf_1m is not None else None
     delta_monkey = perf_1m - perf_monkey_1m if perf_1m is not None else None
 
-    # Outcome semaforo
     if perf_1m is None:
         outcome = "yellow"
     elif delta_sp and delta_sp > 0.005 and delta_sector and delta_sector > 0:
@@ -519,47 +428,149 @@ async def _finalize_run(run_id: str):
     else:
         outcome = "yellow"
 
-    historical_period = f"{scenario['period_start']} → {scenario['period_end']}"
+    period_start = scenario.get("period_start", "?")
+    period_end = scenario.get("period_end", "?")
+    historical_period = f"{period_start} → {period_end}"
 
-    # Costruisci price_chart simulato per UI (90 punti tra T0 e fine periodo)
+    # ── Prezzi: entry, exit a 1S/1M/3M, max/min nel periodo
+    entry_price = None
     if asset:
-        anchor = next((m for m in scenario["market_data"] if m["ticker"] == asset), None)
-        anchor_price = anchor["price_t0"] if anchor else 100.0
-        # genera curva semplice con drift verso il perf_3m
+        anchor = next((m for m in market_data if m.get("ticker") == asset), None)
+        if anchor:
+            entry_price = float(anchor.get("price_t0") or 0)
+
+    if asset and entry_price:
         import random
-        random.seed(hash(scenario["id"] + (asset or "")))
-        target = anchor_price * (1 + (perf_3m or 0))
+        random.seed(hash(str(scenario.get("id", "")) + (asset or "")))
+        target = entry_price * (1 + (perf_3m or 0))
         price_chart = []
         for i in range(90):
             t = i / 89
-            base = anchor_price + (target - anchor_price) * t
-            noise = random.uniform(-0.02, 0.02) * anchor_price
+            base = entry_price + (target - entry_price) * t
+            noise = random.uniform(-0.02, 0.02) * entry_price
             price_chart.append({"day": i, "price": round(base + noise, 2)})
     else:
         price_chart = []
 
-    # Steps_data per multi-step UI
-    steps_data = [{
-        "action": s["decision"].get("action"),
-        "asset": s["decision"].get("asset"),
-        "price": next((m["price_t0"] for m in scenario["market_data"]
-                        if m["ticker"] == s["decision"].get("asset")), None),
-        "perf_from_here": None,   # calcolabile in v2
-    } for s in state["steps"]]
+    # Prezzi a milestone (interpolati dal price_chart)
+    def _price_at_day(day: int) -> float | None:
+        if not price_chart or day < 0 or day >= len(price_chart):
+            return None
+        return price_chart[day]["price"]
 
-    run_data = {
+    price_at_1w = _price_at_day(7)
+    price_at_1m = _price_at_day(30)
+    price_at_3m = _price_at_day(89) if price_chart else None
+
+    # Stats sul price_chart: max, min, drawdown, volatilita'
+    chart_stats = {}
+    if price_chart and entry_price:
+        prices = [p["price"] for p in price_chart]
+        max_price = max(prices)
+        min_price = min(prices)
+        # Max drawdown (peak-to-trough running)
+        peak = prices[0]
+        max_dd = 0
+        for p in prices:
+            if p > peak:
+                peak = p
+            dd = (p - peak) / peak if peak > 0 else 0
+            if dd < max_dd:
+                max_dd = dd
+        # Volatilita' annualizzata (std dei daily returns × sqrt(252))
+        daily_returns = []
+        for i in range(1, len(prices)):
+            if prices[i - 1] > 0:
+                daily_returns.append((prices[i] - prices[i - 1]) / prices[i - 1])
+        if daily_returns:
+            mean = sum(daily_returns) / len(daily_returns)
+            var = sum((r - mean) ** 2 for r in daily_returns) / len(daily_returns)
+            vol = (var ** 0.5) * (252 ** 0.5)
+        else:
+            vol = 0.0
+        chart_stats = {
+            "max_price_period": round(max_price, 2),
+            "min_price_period": round(min_price, 2),
+            "max_runup_pct": round(((max_price - entry_price) / entry_price) * 100, 2),
+            "max_drawdown_pct": round(max_dd * 100, 2),
+            "annualized_volatility_pct": round(vol * 100, 2),
+        }
+
+    # ── P&L assoluto su $10k notional (per dare un riferimento concreto)
+    notional = 10000.0
+    pnl_dollars_1m = None
+    if perf_1m is not None:
+        pnl_dollars_1m = round(notional * perf_1m, 2)
+    pnl_dollars_3m = None
+    if perf_3m is not None:
+        pnl_dollars_3m = round(notional * perf_3m, 2)
+
+    # ── Step breakdown (ora anche per single-step, non solo multi)
+    steps_data = []
+    for i, s in enumerate(steps):
+        d = s.get("decision") or {}
+        asset_step = d.get("asset")
+        price = None
+        if asset_step:
+            anchor_step = next(
+                (m for m in market_data if m.get("ticker") == asset_step), None
+            )
+            if anchor_step:
+                price = anchor_step.get("price_t0")
+        steps_data.append({
+            "step_index": i,
+            "action": d.get("action"),
+            "asset": asset_step,
+            "conviction": d.get("conviction"),
+            "horizon": d.get("horizon"),
+            "price": price,
+            "stop_loss_target": d.get("stop_loss_target"),
+            "take_profit_target": d.get("take_profit_target"),
+            "exit_strategy": d.get("exit_strategy"),
+            "risk": d.get("risk", "")[:300],
+            "perf_from_here": None,
+        })
+
+    # ── Verifica TP/SL: i target proposti sarebbero stati toccati nel periodo?
+    sl_target = decision.get("stop_loss_target")
+    tp_target = decision.get("take_profit_target")
+    sl_hit = None
+    tp_hit = None
+    sl_hit_day = None
+    tp_hit_day = None
+    if price_chart:
+        for day_obj in price_chart:
+            p = day_obj["price"]
+            if sl_target and sl_hit is None and p <= sl_target:
+                sl_hit = True
+                sl_hit_day = day_obj["day"]
+            if tp_target and tp_hit is None and p >= tp_target:
+                tp_hit = True
+                tp_hit_day = day_obj["day"]
+            if sl_hit and tp_hit:
+                break
+        if sl_target and sl_hit is None:
+            sl_hit = False
+        if tp_target and tp_hit is None:
+            tp_hit = False
+
+    return {
         "id": run_id,
         "completed_at": datetime.now(timezone.utc).isoformat(),
-        "mode": state["mode"],
-        "category": scenario["category"],
-        "scenario_type": state["scenario_type"],
-        "steps": state["total_steps"],
-        "scenario_id": scenario["id"],
+        "mode": state.get("mode", "manual"),
+        "category": scenario.get("category", "unknown"),
+        "scenario_type": state.get("scenario_type", "single"),
+        "steps": state.get("total_steps", 1),
+        "scenario_id": scenario.get("id", "unknown"),
         "historical_period": historical_period,
+
+        # Decision summary
         "asset_chosen": asset,
         "action_chosen": decision.get("action"),
         "conviction": decision.get("conviction"),
         "horizon": decision.get("horizon"),
+
+        # Performance core
         "perf_1w": perf_1w,
         "perf_1m": perf_1m,
         "perf_3m": perf_3m,
@@ -570,18 +581,65 @@ async def _finalize_run(run_id: str):
         "delta_sector": delta_sector,
         "delta_monkey": delta_monkey,
         "outcome": outcome,
+
+        # Reasoning
         "original_thesis": (last_step.get("reasoning") or "")[:1500],
         "what_happened": scenario.get("description_reveal", ""),
         "thesis_evaluation": _evaluate_thesis(decision, scenario, perf_1m),
+
+        # full_data: dati estesi non flatable, JSON nel DB
         "full_data": {
-            "steps": state["steps"],
+            "steps": steps,
             "price_chart": price_chart,
             "steps_data": steps_data,
+
+            # Prezzi e milestone
+            "entry_price": entry_price,
+            "price_at_1w": price_at_1w,
+            "price_at_1m": price_at_1m,
+            "price_at_3m": price_at_3m,
+
+            # Statistiche periodo
+            "chart_stats": chart_stats,
+
+            # P&L assoluto su $10k
+            "pnl_on_10k": {
+                "notional": notional,
+                "pnl_1m": pnl_dollars_1m,
+                "pnl_3m": pnl_dollars_3m,
+            },
+
+            # Reasoning completo (sezioni del prompt) — non solo troncato
+            "reading_text": last_step.get("reading", ""),
+            "reasoning_full": last_step.get("reasoning", ""),
+            "decision_full": decision,  # incluso stop_loss_target/take_profit_target
+
+            # SL/TP analysis: il target sarebbe stato toccato?
+            "sl_tp_analysis": {
+                "stop_loss_target": sl_target,
+                "take_profit_target": tp_target,
+                "exit_strategy": decision.get("exit_strategy"),
+                "stop_loss_would_hit": sl_hit,
+                "stop_loss_hit_day": sl_hit_day,
+                "take_profit_would_hit": tp_hit,
+                "take_profit_hit_day": tp_hit_day,
+            },
+
+            # Risk identificato dall'agente
+            "risk_identified": decision.get("risk", ""),
         },
     }
+
+
+async def _finalize_run(run_id: str):
+    """Salva il run completo nel DB con benchmark + outcome calcolati."""
+    state = _active_runs.get(run_id)
+    if not state:
+        return
+    run_data = _build_run_data(run_id, state)
     try:
         sim_db.insert_run(run_data)
-        logger.info("[SIM] Run %s salvato (outcome=%s)", run_id, outcome)
+        logger.info("[SIM] Run %s salvato (outcome=%s)", run_id, run_data.get("outcome"))
     except Exception as exc:
         logger.error("[SIM] Errore salvataggio run %s: %s", run_id, exc, exc_info=True)
 
