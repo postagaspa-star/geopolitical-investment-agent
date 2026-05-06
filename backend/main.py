@@ -615,6 +615,49 @@ async def chat_health():
         })
 
 
+@app.post("/api/chat/init-tables")
+async def chat_init_tables():
+    """
+    Forza la creazione delle tabelle chat_* su Supabase via psycopg2.
+    Utile se la migration automatica all'avvio non e' passata (es.
+    DATABASE_URL non era configurato al momento del primo deploy).
+    """
+    try:
+        from agents import chat_assistant
+        ok, err = chat_assistant.ensure_chat_tables()
+        # Verifica esplicita post-creazione
+        try:
+            test_id = database.create_chat_conversation(
+                title="__health_check__",
+                selected_decisions=None,
+            )
+            if test_id:
+                # Cleanup: rimuovi la conversazione di test
+                try:
+                    database.delete_chat_conversation(test_id)
+                except Exception:
+                    pass
+                return {"ok": True, "tables_ready": True, "test_id_created": test_id}
+            else:
+                return {
+                    "ok": ok, "tables_ready": ok,
+                    "error": err, "test_failed": "INSERT returned None",
+                }
+        except Exception as test_err:
+            return {
+                "ok": False, "tables_ready": ok,
+                "error": err,
+                "test_failed": f"INSERT raised: {type(test_err).__name__}: {test_err}",
+            }
+    except Exception as e:
+        import traceback
+        return JSONResponse(status_code=500, content={
+            "ok": False,
+            "error": str(e), "type": type(e).__name__,
+            "traceback": traceback.format_exc()[-1500:],
+        })
+
+
 @app.post("/api/chat/test-deepseek")
 async def chat_test_deepseek():
     """
@@ -758,15 +801,55 @@ async def chat_send(payload: ChatSendPayload):
                 conv_id = database.create_chat_conversation(title=title, selected_decisions=sel_json)
             except Exception as e:
                 logger.error("chat_send: create_chat_conversation crash: %s", e, exc_info=True)
-                return JSONResponse(
-                    status_code=500,
-                    content={"error": "Errore creazione conversazione", "detail": str(e)},
-                )
+                err_str = str(e).lower()
+                # Recovery automatico: se "relation does not exist" o "no such table",
+                # tenta migration al volo e ritenta UNA volta
+                if any(s in err_str for s in ["does not exist", "no such table", "relation"]):
+                    logger.info("chat_send: tentativo recovery via ensure_chat_tables...")
+                    ok2, err2 = chat_assistant.ensure_chat_tables()
+                    if ok2:
+                        try:
+                            conv_id = database.create_chat_conversation(
+                                title=title, selected_decisions=sel_json,
+                            )
+                        except Exception as e2:
+                            return JSONResponse(
+                                status_code=500,
+                                content={
+                                    "error": "Errore creazione conversazione (recovery fallito)",
+                                    "detail": f"{type(e2).__name__}: {e2}",
+                                    "hint": "Le tabelle non sono accessibili. Prova POST /api/chat/init-tables.",
+                                },
+                            )
+                    else:
+                        return JSONResponse(
+                            status_code=500,
+                            content={
+                                "error": "Tabelle chat_* non create",
+                                "detail": err2,
+                                "hint": "Configura DATABASE_URL su Render, poi fai POST /api/chat/init-tables.",
+                            },
+                        )
+                else:
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "error": "Errore creazione conversazione",
+                            "detail": f"{type(e).__name__}: {e}",
+                        },
+                    )
             is_new_conversation = True
             if conv_id is None:
                 return JSONResponse(
                     status_code=500,
-                    content={"error": "Impossibile creare la conversazione (DB ha ritornato None)"},
+                    content={
+                        "error": "Impossibile creare la conversazione (DB ha ritornato None)",
+                        "hint": (
+                            "Insert su chat_conversations e' tornato senza errori "
+                            "ma senza data. Verifica /api/chat/health e prova "
+                            "POST /api/chat/init-tables per ricreare lo schema."
+                        ),
+                    },
                 )
 
         # 2. Carica history esistente (esclude il nuovo messaggio)

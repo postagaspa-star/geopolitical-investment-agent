@@ -703,16 +703,24 @@ def get_portfolio_history(days=30):
 
 def create_chat_conversation(title: str = "Nuova conversazione",
                              selected_decisions: str | None = None) -> int | None:
-    """Crea una nuova conversazione e ritorna l'id."""
+    """
+    Crea una nuova conversazione e ritorna l'id.
+    Propaga l'eccezione originale se l'INSERT fallisce, cosi' main.py puo'
+    ritornare un errore specifico al client invece di un generico "ritorna None".
+    """
     client = _get_client()
+    payload = {"title": title[:120], "selected_decisions": selected_decisions}
     try:
-        payload = {"title": title[:120], "selected_decisions": selected_decisions}
         result = client.table("chat_conversations").insert(payload).execute()
         if result.data and len(result.data) > 0:
             return result.data[0].get("id")
+        # INSERT senza eccezione ma senza data: situazione anomala
+        logger.error("create_chat_conversation: insert ok ma no data ritornata")
+        return None
     except Exception as e:
-        logger.warning("create_chat_conversation fallita: %s", e)
-    return None
+        # NON loggiamo come warning: questo e' un errore vero, propaga
+        logger.error("create_chat_conversation: INSERT fallito: %s", e)
+        raise
 
 
 def get_chat_conversations(limit: int = 10) -> list:

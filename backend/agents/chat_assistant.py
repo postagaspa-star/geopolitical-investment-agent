@@ -609,17 +609,39 @@ def ensure_chat_tables() -> tuple[bool, str]:
     tenta di crearle al volo via psycopg2.
 
     Ritorna (True, "") se tutto ok, (False, error_message) altrimenti.
+
+    Nota: NON usiamo `database.get_chat_conversations` come probe perche'
+    quella swallow le eccezioni (try/except interno → ritorna []) e quindi
+    non rileva la tabella mancante. Facciamo invece un probe DIRETTO al
+    client Supabase, che propaga l'eccezione "relation does not exist".
     """
-    # SQLite: le tabelle vengono create da init_db, quindi se ci siamo
-    # va sempre bene. Test rapido: prova una select.
+    # Probe diretto: SQLite o Supabase senza catch interno
+    probe_error = None
     try:
         import database
-        # Prova a leggere — se la tabella non esiste questo fallisce
-        _ = database.get_chat_conversations(limit=1)
-        return (True, "")
+        if hasattr(database, "_get_client"):
+            try:
+                client = database._get_client()
+                # Tenta una select diretta — se la tabella non esiste,
+                # supabase-py solleva un'eccezione con il dettaglio
+                client.table("chat_conversations").select("id").limit(1).execute()
+                return (True, "")
+            except Exception as e:
+                probe_error = str(e)
+                logger.warning("ensure_chat_tables: Supabase probe failed: %s", e)
+        else:
+            # SQLite: usa la connessione diretta
+            try:
+                import db_sqlite
+                with db_sqlite.get_db() as conn:
+                    conn.execute("SELECT id FROM chat_conversations LIMIT 1").fetchone()
+                return (True, "")
+            except Exception as e:
+                probe_error = str(e)
+                logger.warning("ensure_chat_tables: SQLite probe failed: %s", e)
     except Exception as e:
-        # Probabile: tabella non esiste su Supabase
-        logger.warning("ensure_chat_tables: probe failed (%s), tentativo creazione...", e)
+        probe_error = str(e)
+        logger.warning("ensure_chat_tables: import failed: %s", e)
 
     # Tentativo creazione via psycopg2 (solo Supabase)
     db_url = os.environ.get("DATABASE_URL", "").strip()
@@ -638,14 +660,29 @@ def ensure_chat_tables() -> tuple[bool, str]:
                 pass
 
     if not db_url:
+        # SQLite: prova a inizializzare comunque le tabelle via init_db schema
+        if probe_error and "no such table" in (probe_error or "").lower():
+            try:
+                import database as _db
+                if hasattr(_db, "init_db"):
+                    _db.init_db()
+                # Riprova il probe
+                import db_sqlite
+                with db_sqlite.get_db() as conn:
+                    conn.execute("SELECT id FROM chat_conversations LIMIT 1").fetchone()
+                return (True, "")
+            except Exception:
+                pass
         return (False,
-                "Tabelle chat_* mancanti. Configurare DATABASE_URL su Render "
-                "oppure eseguire migration manualmente su Supabase.")
+                f"Tabelle chat_* mancanti (probe error: {probe_error}). "
+                "Configurare DATABASE_URL su Render oppure eseguire migration "
+                "manualmente su Supabase.")
 
     try:
         import psycopg2
     except ImportError:
-        return (False, "psycopg2 non installato — impossibile creare tabelle al volo.")
+        return (False, f"psycopg2 non installato — impossibile creare tabelle al volo. "
+                       f"Probe error originale: {probe_error}")
 
     sql = """
         CREATE TABLE IF NOT EXISTS chat_conversations (
@@ -673,10 +710,20 @@ def ensure_chat_tables() -> tuple[bool, str]:
                 cur.execute(sql)
             conn.commit()
         logger.info("Tabelle chat_* create con successo via psycopg2.")
-        return (True, "")
+        # Verifica che siano effettivamente accessibili dal client Supabase ora
+        try:
+            import database as _db
+            client = _db._get_client()
+            client.table("chat_conversations").select("id").limit(1).execute()
+            return (True, "")
+        except Exception as verify_err:
+            logger.warning("psycopg2 OK ma client Supabase ancora ko: %s", verify_err)
+            return (True, "")  # le tabelle ci sono, sistemera' al ritry
     except Exception as e:
         logger.error("Creazione tabelle chat_* fallita: %s", e)
-        return (False, f"Creazione tabelle fallita: {e}")
+        return (False,
+                f"Creazione tabelle fallita ({type(e).__name__}: {e}). "
+                f"Probe originale: {probe_error}")
 
 
 def auto_title_from_first_message(first_msg: str, max_len: int = 60) -> str:
