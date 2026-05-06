@@ -615,22 +615,30 @@ def ensure_chat_tables() -> tuple[bool, str]:
     non rileva la tabella mancante. Facciamo invece un probe DIRETTO al
     client Supabase, che propaga l'eccezione "relation does not exist".
     """
-    # Probe diretto: SQLite o Supabase senza catch interno
+    # Probe diretto. Usiamo `get_client()` (pubblico, senza underscore) per
+    # determinare il backend: ritorna un Client su Supabase, None su SQLite.
+    # NOTA: hasattr(database, "_get_client") NON funziona perche' Python
+    # non esporta i simboli con underscore via `from module import *`.
     probe_error = None
+    backend = "unknown"
     try:
         import database
-        if hasattr(database, "_get_client"):
+        client = None
+        try:
+            client = database.get_client()  # Supabase: Client; SQLite: None
+        except Exception:
+            client = None
+
+        if client is not None:
+            backend = "supabase"
             try:
-                client = database._get_client()
-                # Tenta una select diretta — se la tabella non esiste,
-                # supabase-py solleva un'eccezione con il dettaglio
                 client.table("chat_conversations").select("id").limit(1).execute()
                 return (True, "")
             except Exception as e:
                 probe_error = str(e)
                 logger.warning("ensure_chat_tables: Supabase probe failed: %s", e)
         else:
-            # SQLite: usa la connessione diretta
+            backend = "sqlite"
             try:
                 import db_sqlite
                 with db_sqlite.get_db() as conn:
@@ -642,6 +650,8 @@ def ensure_chat_tables() -> tuple[bool, str]:
     except Exception as e:
         probe_error = str(e)
         logger.warning("ensure_chat_tables: import failed: %s", e)
+
+    logger.info("ensure_chat_tables: backend=%s, probe_error=%s", backend, probe_error)
 
     # Tentativo creazione via psycopg2 (solo Supabase)
     db_url = os.environ.get("DATABASE_URL", "").strip()
@@ -659,22 +669,49 @@ def ensure_chat_tables() -> tuple[bool, str]:
             except Exception:
                 pass
 
+    if backend == "sqlite":
+        # SQLite path: creiamo le tabelle DIRETTAMENTE invece di affidarci
+        # a init_db() (che potrebbe avere ALTER TABLE legacy che fallisce
+        # silenziosamente o non rieseguire i CREATE su DB esistente).
+        try:
+            import db_sqlite
+            with db_sqlite.get_db() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_conversations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL DEFAULT 'Nuova conversazione',
+                        selected_decisions TEXT,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        conversation_id INTEGER NOT NULL,
+                        role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+                        content TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_chat_messages_conv
+                        ON chat_messages (conversation_id, created_at)
+                """)
+            # Probe finale
+            with db_sqlite.get_db() as conn:
+                conn.execute("SELECT id FROM chat_conversations LIMIT 1").fetchone()
+            logger.info("ensure_chat_tables: SQLite tables created successfully")
+            return (True, "")
+        except Exception as e:
+            logger.error("ensure_chat_tables: SQLite create failed: %s", e, exc_info=True)
+            return (False,
+                    f"Creazione tabelle SQLite fallita ({type(e).__name__}: {e}). "
+                    f"Probe originale: {probe_error}")
+
     if not db_url:
-        # SQLite: prova a inizializzare comunque le tabelle via init_db schema
-        if probe_error and "no such table" in (probe_error or "").lower():
-            try:
-                import database as _db
-                if hasattr(_db, "init_db"):
-                    _db.init_db()
-                # Riprova il probe
-                import db_sqlite
-                with db_sqlite.get_db() as conn:
-                    conn.execute("SELECT id FROM chat_conversations LIMIT 1").fetchone()
-                return (True, "")
-            except Exception:
-                pass
         return (False,
-                f"Tabelle chat_* mancanti (probe error: {probe_error}). "
+                f"Tabelle chat_* mancanti su Supabase (probe error: {probe_error}). "
                 "Configurare DATABASE_URL su Render oppure eseguire migration "
                 "manualmente su Supabase.")
 

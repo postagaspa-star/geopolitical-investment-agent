@@ -150,24 +150,42 @@ CREATE TABLE IF NOT EXISTS sim_settings (
 
 
 def ensure_schema():
-    """Applica la migration. Chiamata all'avvio dell'app."""
+    """
+    Applica la migration. Chiamata all'avvio dell'app.
+
+    Determina il backend via database.get_client():
+      - None  → SQLite (crea tabelle direttamente)
+      - non-None → Supabase (crea via psycopg2 + DATABASE_URL)
+
+    NOTA: hasattr(database, "_sqlite_db") NON funziona perche' Python non
+    esporta i simboli con underscore via `from module import *`.
+    """
     import database
 
-    # Tenta SQLite prima (più semplice, idempotente)
+    # Determina il backend
     try:
-        if hasattr(database, "_sqlite_db") or "sqlite" in repr(type(database)).lower():
+        client = database.get_client()
+    except Exception:
+        client = None
+
+    is_sqlite = client is None
+
+    if is_sqlite:
+        # SQLite: crea le tabelle inline (fail-safe, idempotente)
+        try:
             import db_sqlite
             with db_sqlite.get_db() as conn:
                 for stmt in SIM_MIGRATION_SQLITE.split(";"):
                     if stmt.strip():
                         try:
                             conn.execute(stmt)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("[SIM] SQLite stmt skip: %s", e)
             logger.info("[SIM] Schema SQLite ok.")
             return
-    except Exception:
-        pass
+        except Exception as exc:
+            logger.error("[SIM] Errore creazione schema SQLite: %s", exc, exc_info=True)
+            return
 
     # Supabase: usa l'auto-migration via psycopg2 (stesso pattern di cs_mirror)
     import os
