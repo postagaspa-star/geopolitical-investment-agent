@@ -710,10 +710,33 @@ def ensure_chat_tables() -> tuple[bool, str]:
                     f"Probe originale: {probe_error}")
 
     if not db_url:
+        # Su Supabase senza DATABASE_URL non possiamo fare DDL. Ma c'e' un
+        # fallback automatico in db_supabase.py che usa la tabella `settings`
+        # come storage chiave-valore per la chat. Verifichiamo che funzioni
+        # provando una conversazione di test.
+        try:
+            import database
+            test_id = database.create_chat_conversation(
+                title="__fallback_test__", selected_decisions=None,
+            )
+            if test_id:
+                # Cleanup
+                try:
+                    database.delete_chat_conversation(test_id)
+                except Exception:
+                    pass
+                logger.info(
+                    "ensure_chat_tables: fallback settings-based attivo (DATABASE_URL "
+                    "non configurato, le chat usano la tabella settings)"
+                )
+                return (True, "")
+        except Exception as fb_err:
+            logger.warning("ensure_chat_tables: fallback test fallito: %s", fb_err)
         return (False,
-                f"Tabelle chat_* mancanti su Supabase (probe error: {probe_error}). "
-                "Configurare DATABASE_URL su Render oppure eseguire migration "
-                "manualmente su Supabase.")
+                f"Tabelle chat_* mancanti su Supabase E fallback settings non funziona "
+                f"(probe error: {probe_error}). "
+                "Configurare DATABASE_URL su Render oppure creare le tabelle "
+                "manualmente da Supabase Dashboard → SQL Editor.")
 
     try:
         import psycopg2

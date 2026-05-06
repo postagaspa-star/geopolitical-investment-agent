@@ -701,126 +701,343 @@ def get_portfolio_history(days=30):
 # Chat Assistant (conversazioni con l'analista AI DeepSeek-R1)
 # ============================================================
 
+# ─── Chat storage: dual mode (table preferito, settings fallback) ──────────
+# Se le tabelle chat_conversations/chat_messages non esistono su Supabase
+# (DATABASE_URL non configurato → migration psycopg2 saltata), il sistema
+# automaticamente cade su una serializzazione JSON nella tabella `settings`
+# che esiste sempre. Cosi' la chat funziona anche senza migrations DDL.
+
+_CHAT_FALLBACK_MODE = False  # True dopo il primo errore di tabella mancante
+_CHAT_FALLBACK_KEY_LIST = "_chat_fallback::conv_list"   # JSON list di id ordinati
+_CHAT_FALLBACK_KEY_CONV = "_chat_fallback::conv::{id}"  # JSON per ogni conv
+_CHAT_FALLBACK_KEY_MSGS = "_chat_fallback::msgs::{id}"  # JSON list di messaggi
+
+
+def _chat_should_fallback(exc: Exception) -> bool:
+    """Decide se l'errore indica che la tabella manca → switch a fallback mode."""
+    s = str(exc).lower()
+    return ("pgrst205" in s
+            or "does not exist" in s
+            or "no such table" in s
+            or "could not find the table" in s
+            or "schema cache" in s)
+
+
+def _chat_fallback_load_list() -> list:
+    """Carica la lista di conversazioni dal fallback (tabella settings)."""
+    raw = get_setting(_CHAT_FALLBACK_KEY_LIST, "[]") or "[]"
+    try:
+        return json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except Exception:
+        return []
+
+
+def _chat_fallback_save_list(lst: list):
+    set_setting(_CHAT_FALLBACK_KEY_LIST, json.dumps(lst, default=str))
+
+
+def _chat_fallback_load_conv(conv_id) -> dict | None:
+    raw = get_setting(_CHAT_FALLBACK_KEY_CONV.format(id=conv_id), "")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
+
+
+def _chat_fallback_save_conv(conv_id, conv: dict):
+    set_setting(_CHAT_FALLBACK_KEY_CONV.format(id=conv_id),
+                json.dumps(conv, default=str))
+
+
+def _chat_fallback_load_msgs(conv_id) -> list:
+    raw = get_setting(_CHAT_FALLBACK_KEY_MSGS.format(id=conv_id), "[]") or "[]"
+    try:
+        return json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except Exception:
+        return []
+
+
+def _chat_fallback_save_msgs(conv_id, msgs: list):
+    set_setting(_CHAT_FALLBACK_KEY_MSGS.format(id=conv_id),
+                json.dumps(msgs, default=str))
+
+
 def create_chat_conversation(title: str = "Nuova conversazione",
                              selected_decisions: str | None = None) -> int | None:
     """
-    Crea una nuova conversazione e ritorna l'id.
-    Propaga l'eccezione originale se l'INSERT fallisce, cosi' main.py puo'
-    ritornare un errore specifico al client invece di un generico "ritorna None".
+    Crea una nuova conversazione su tabella dedicata. Se manca, cade
+    automaticamente su settings come storage chiave-valore.
     """
+    global _CHAT_FALLBACK_MODE
     client = _get_client()
     payload = {"title": title[:120], "selected_decisions": selected_decisions}
-    try:
-        result = client.table("chat_conversations").insert(payload).execute()
-        if result.data and len(result.data) > 0:
-            return result.data[0].get("id")
-        # INSERT senza eccezione ma senza data: situazione anomala
-        logger.error("create_chat_conversation: insert ok ma no data ritornata")
-        return None
-    except Exception as e:
-        # NON loggiamo come warning: questo e' un errore vero, propaga
-        logger.error("create_chat_conversation: INSERT fallito: %s", e)
-        raise
+
+    if not _CHAT_FALLBACK_MODE:
+        try:
+            result = client.table("chat_conversations").insert(payload).execute()
+            if result.data and len(result.data) > 0:
+                return result.data[0].get("id")
+            logger.error("create_chat_conversation: insert ok ma no data")
+            return None
+        except Exception as e:
+            if _chat_should_fallback(e):
+                logger.warning("create_chat_conversation: tabella mancante, switch a settings fallback (%s)", e)
+                _CHAT_FALLBACK_MODE = True
+            else:
+                raise
+
+    # Fallback mode: usa settings table
+    import time as _t
+    new_id = int(_t.time() * 1000)  # millisecond timestamp come id univoco
+    now_iso = _now_iso()
+    conv = {
+        "id": new_id, "title": title[:120],
+        "selected_decisions": selected_decisions,
+        "created_at": now_iso, "updated_at": now_iso,
+    }
+    _chat_fallback_save_conv(new_id, conv)
+    lst = _chat_fallback_load_list()
+    lst.insert(0, new_id)  # piu' recente in cima
+    _chat_fallback_save_list(lst[:50])  # cap a 50 totali
+    return new_id
 
 
 def get_chat_conversations(limit: int = 10) -> list:
-    """Lista le ultime N conversazioni (default 10)."""
+    """Lista le ultime N conversazioni (tabella o fallback settings)."""
+    global _CHAT_FALLBACK_MODE
     client = _get_client()
+    if not _CHAT_FALLBACK_MODE:
+        try:
+            result = (client.table("chat_conversations")
+                      .select("id, title, selected_decisions, created_at, updated_at")
+                      .order("updated_at", desc=True)
+                      .limit(limit)
+                      .execute())
+            return result.data or []
+        except Exception as e:
+            if _chat_should_fallback(e):
+                logger.warning("get_chat_conversations: switch a settings fallback")
+                _CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("get_chat_conversations fallita: %s", e)
+                return []
+
+    # Fallback
     try:
-        result = (client.table("chat_conversations")
-                  .select("id, title, selected_decisions, created_at, updated_at")
-                  .order("updated_at", desc=True)
-                  .limit(limit)
-                  .execute())
-        return result.data or []
+        ids = _chat_fallback_load_list()[:limit]
+        out = []
+        for cid in ids:
+            conv = _chat_fallback_load_conv(cid)
+            if conv:
+                out.append(conv)
+        return out
     except Exception as e:
-        logger.warning("get_chat_conversations fallita: %s", e)
+        logger.warning("get_chat_conversations fallback fallita: %s", e)
         return []
 
 
 def get_chat_messages(conversation_id: int) -> list:
-    """Tutti i messaggi di una conversazione, in ordine cronologico."""
+    """Messaggi di una conversazione, in ordine cronologico."""
+    global _CHAT_FALLBACK_MODE
     client = _get_client()
+    if not _CHAT_FALLBACK_MODE:
+        try:
+            result = (client.table("chat_messages")
+                      .select("id, role, content, created_at")
+                      .eq("conversation_id", conversation_id)
+                      .order("created_at")
+                      .execute())
+            return result.data or []
+        except Exception as e:
+            if _chat_should_fallback(e):
+                logger.warning("get_chat_messages: switch a settings fallback")
+                _CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("get_chat_messages fallita: %s", e)
+                return []
+
+    # Fallback
     try:
-        result = (client.table("chat_messages")
-                  .select("id, role, content, created_at")
-                  .eq("conversation_id", conversation_id)
-                  .order("created_at")
-                  .execute())
-        return result.data or []
+        return _chat_fallback_load_msgs(conversation_id)
     except Exception as e:
-        logger.warning("get_chat_messages fallita: %s", e)
+        logger.warning("get_chat_messages fallback fallita: %s", e)
         return []
 
 
 def insert_chat_message(conversation_id: int, role: str, content: str) -> int | None:
     """Aggiunge un messaggio e aggiorna updated_at della conversazione."""
+    global _CHAT_FALLBACK_MODE
     client = _get_client()
+    if not _CHAT_FALLBACK_MODE:
+        try:
+            result = client.table("chat_messages").insert({
+                "conversation_id": conversation_id,
+                "role": role,
+                "content": content,
+            }).execute()
+            client.table("chat_conversations").update({
+                "updated_at": _now_iso(),
+            }).eq("id", conversation_id).execute()
+            if result.data and len(result.data) > 0:
+                return result.data[0].get("id")
+        except Exception as e:
+            if _chat_should_fallback(e):
+                logger.warning("insert_chat_message: switch a settings fallback")
+                _CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("insert_chat_message fallita: %s", e)
+                return None
+
+    # Fallback
     try:
-        result = client.table("chat_messages").insert({
-            "conversation_id": conversation_id,
-            "role": role,
-            "content": content,
-        }).execute()
-        client.table("chat_conversations").update({
-            "updated_at": _now_iso(),
-        }).eq("id", conversation_id).execute()
-        if result.data and len(result.data) > 0:
-            return result.data[0].get("id")
+        import time as _t
+        msg_id = int(_t.time() * 1000)
+        msgs = _chat_fallback_load_msgs(conversation_id)
+        msgs.append({
+            "id": msg_id, "role": role, "content": content,
+            "created_at": _now_iso(),
+        })
+        _chat_fallback_save_msgs(conversation_id, msgs[-200:])  # cap 200 msg per conv
+
+        # Aggiorna updated_at della conversazione
+        conv = _chat_fallback_load_conv(conversation_id)
+        if conv:
+            conv["updated_at"] = _now_iso()
+            _chat_fallback_save_conv(conversation_id, conv)
+            # Sposta in cima alla lista
+            lst = _chat_fallback_load_list()
+            if conversation_id in lst:
+                lst.remove(conversation_id)
+            lst.insert(0, conversation_id)
+            _chat_fallback_save_list(lst[:50])
+        return msg_id
     except Exception as e:
-        logger.warning("insert_chat_message fallita: %s", e)
-    return None
+        logger.warning("insert_chat_message fallback fallita: %s", e)
+        return None
 
 
 def update_chat_conversation_title(conversation_id: int, title: str):
+    global _CHAT_FALLBACK_MODE
     client = _get_client()
+    if not _CHAT_FALLBACK_MODE:
+        try:
+            client.table("chat_conversations").update({
+                "title": title[:120], "updated_at": _now_iso(),
+            }).eq("id", conversation_id).execute()
+            return
+        except Exception as e:
+            if _chat_should_fallback(e):
+                _CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("update_chat_conversation_title fallita: %s", e)
+                return
     try:
-        client.table("chat_conversations").update({
-            "title": title[:120], "updated_at": _now_iso(),
-        }).eq("id", conversation_id).execute()
+        conv = _chat_fallback_load_conv(conversation_id)
+        if conv:
+            conv["title"] = title[:120]
+            conv["updated_at"] = _now_iso()
+            _chat_fallback_save_conv(conversation_id, conv)
     except Exception as e:
-        logger.warning("update_chat_conversation_title fallita: %s", e)
+        logger.warning("update_title fallback fallita: %s", e)
 
 
 def update_chat_conversation_decisions(conversation_id: int, selected_decisions: str):
+    global _CHAT_FALLBACK_MODE
     client = _get_client()
+    if not _CHAT_FALLBACK_MODE:
+        try:
+            client.table("chat_conversations").update({
+                "selected_decisions": selected_decisions,
+                "updated_at": _now_iso(),
+            }).eq("id", conversation_id).execute()
+            return
+        except Exception as e:
+            if _chat_should_fallback(e):
+                _CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("update_chat_conversation_decisions fallita: %s", e)
+                return
     try:
-        client.table("chat_conversations").update({
-            "selected_decisions": selected_decisions,
-            "updated_at": _now_iso(),
-        }).eq("id", conversation_id).execute()
+        conv = _chat_fallback_load_conv(conversation_id)
+        if conv:
+            conv["selected_decisions"] = selected_decisions
+            conv["updated_at"] = _now_iso()
+            _chat_fallback_save_conv(conversation_id, conv)
     except Exception as e:
-        logger.warning("update_chat_conversation_decisions fallita: %s", e)
+        logger.warning("update_decisions fallback fallita: %s", e)
 
 
 def delete_chat_conversation(conversation_id: int):
     """Elimina una conversazione (cascade sui messaggi via FK)."""
+    global _CHAT_FALLBACK_MODE
     client = _get_client()
+    if not _CHAT_FALLBACK_MODE:
+        try:
+            client.table("chat_messages").delete().eq("conversation_id", conversation_id).execute()
+            client.table("chat_conversations").delete().eq("id", conversation_id).execute()
+            return
+        except Exception as e:
+            if _chat_should_fallback(e):
+                _CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("delete_chat_conversation fallita: %s", e)
+                return
     try:
-        # Cancellazione esplicita per sicurezza (FK ON DELETE CASCADE è in SQL)
-        client.table("chat_messages").delete().eq("conversation_id", conversation_id).execute()
-        client.table("chat_conversations").delete().eq("id", conversation_id).execute()
+        # Rimuovi da lista, poi cancella conv + msgs
+        lst = _chat_fallback_load_list()
+        if conversation_id in lst:
+            lst.remove(conversation_id)
+            _chat_fallback_save_list(lst)
+        # Settings non ha delete diretto: sovrascriviamo con stringa vuota
+        # (alla rilettura ritorna None/[])
+        try:
+            set_setting(_CHAT_FALLBACK_KEY_CONV.format(id=conversation_id), "")
+            set_setting(_CHAT_FALLBACK_KEY_MSGS.format(id=conversation_id), "[]")
+        except Exception:
+            pass
     except Exception as e:
-        logger.warning("delete_chat_conversation fallita: %s", e)
+        logger.warning("delete fallback fallita: %s", e)
 
 
 def trim_chat_conversations(keep_last: int = 10):
     """Mantiene solo le ultime N conversazioni; elimina le altre."""
+    global _CHAT_FALLBACK_MODE
     client = _get_client()
-    try:
-        # Prendi tutte le conversazioni ordinate per updated_at desc
-        result = (client.table("chat_conversations")
-                  .select("id")
-                  .order("updated_at", desc=True)
-                  .execute())
-        rows = result.data or []
-        if len(rows) <= keep_last:
+    if not _CHAT_FALLBACK_MODE:
+        try:
+            result = (client.table("chat_conversations")
+                      .select("id")
+                      .order("updated_at", desc=True)
+                      .execute())
+            rows = result.data or []
+            if len(rows) <= keep_last:
+                return
+            to_delete = [r["id"] for r in rows[keep_last:]]
+            for cid in to_delete:
+                client.table("chat_messages").delete().eq("conversation_id", cid).execute()
+                client.table("chat_conversations").delete().eq("id", cid).execute()
             return
-        to_delete = [r["id"] for r in rows[keep_last:]]
+        except Exception as e:
+            if _chat_should_fallback(e):
+                _CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("trim_chat_conversations fallita: %s", e)
+                return
+    try:
+        lst = _chat_fallback_load_list()
+        if len(lst) <= keep_last:
+            return
+        to_delete = lst[keep_last:]
         for cid in to_delete:
-            client.table("chat_messages").delete().eq("conversation_id", cid).execute()
-            client.table("chat_conversations").delete().eq("id", cid).execute()
+            try:
+                set_setting(_CHAT_FALLBACK_KEY_CONV.format(id=cid), "")
+                set_setting(_CHAT_FALLBACK_KEY_MSGS.format(id=cid), "[]")
+            except Exception:
+                pass
+        _chat_fallback_save_list(lst[:keep_last])
     except Exception as e:
-        logger.warning("trim_chat_conversations fallita: %s", e)
+        logger.warning("trim fallback fallita: %s", e)
 
 
