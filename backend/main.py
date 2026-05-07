@@ -1314,6 +1314,104 @@ async def sim_v2_finalize(req: SimV2FinalizeReq):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+class SimV2SaveAdviceReq(BaseModel):
+    scenario: dict
+    history: list[dict]
+    final_result: dict
+    title: str
+    text: str
+    rationale: str = ""
+    targets: list[str] = ["simulator"]   # "simulator" e/o "live"
+
+
+@app.post("/api/simulator/v2/save-advice")
+async def sim_v2_save_advice(req: SimV2SaveAdviceReq):
+    """
+    Salva un consiglio del debrief / advisor nella memoria.
+
+    targets:
+      - "simulator": memoria categorizzata sim_advisor (iniettata nei
+        prossimi run del Simulator della stessa categoria)
+      - "live": documento nella knowledge base del bot Live (categoria
+        "lessons-learned"), iniettato nei prompt del Decision Agent
+    """
+    try:
+        from agents import sim_advisor
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"import fallito: {e}"})
+
+    title = (req.title or "").strip()
+    text = (req.text or "").strip()
+    if not title or not text:
+        return JSONResponse(status_code=400, content={
+            "error": "title e text sono obbligatori",
+        })
+
+    saved_to: list[str] = []
+    errors: list[str] = []
+
+    # ─── SIMULATOR memory ─────────────────────────────────────────────
+    if "simulator" in (req.targets or []):
+        try:
+            # Componiamo un fake "run" record per detect_scenario_key
+            cat = req.scenario.get("category", "unknown")
+            v = (req.final_result.get("final_valuation") or {})
+            fake_run = {
+                "category": cat,
+                "scenario_id": req.scenario.get("id"),
+                "perf_1m": (v.get("total_pnl_pct", 0) or 0) / 100.0,
+                "outcome": req.final_result.get("outcome", "yellow"),
+                "asset_chosen": (req.final_result.get("asset_breakdown", [{}])[0]
+                                 .get("asset")) if req.final_result.get("asset_breakdown") else None,
+            }
+            category_key, tags = sim_advisor.detect_scenario_key(fake_run)
+            advice = {
+                "run_id": req.final_result.get("persisted_run_id"),
+                "scenario_category": category_key,
+                "scenario_tags": tags,
+                "title": title[:200],
+                "text": text[:1000],
+                "rationale": (req.rationale or "").strip()[:600],
+            }
+            aid = sim_advisor.save_advice(advice)
+            saved_to.append(f"simulator:{category_key}:{aid}")
+        except Exception as e:
+            logger.error("sim_advisor save_advice fallito: %s", e, exc_info=True)
+            errors.append(f"simulator: {e}")
+
+    # ─── LIVE knowledge (documento) ───────────────────────────────────
+    if "live" in (req.targets or []):
+        try:
+            scenario_title = req.scenario.get("title", "Scenario")
+            doc_filename = (
+                f"sim-lesson-{(req.scenario.get('id') or 'x')[:24]}-"
+                f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.txt"
+            )
+            doc_content = (
+                f"# Lezione operativa estratta dal Simulator\n\n"
+                f"Titolo: {title}\n"
+                f"Scenario di partenza: {scenario_title}\n"
+                f"Categoria: {req.scenario.get('category', '?')}\n"
+                f"Periodo: {req.scenario.get('period_start', '?')} → "
+                f"{req.scenario.get('period_end', '?')}\n\n"
+                f"## Regola operativa\n{text}\n\n"
+                f"## Razionale\n{req.rationale or '(nessuno)'}\n"
+            )
+            database.insert_document(
+                doc_filename, doc_content, len(doc_content.encode("utf-8")),
+                category="lessons-learned",
+            )
+            saved_to.append(f"live:{doc_filename}")
+        except Exception as e:
+            logger.error("insert_document live fallito: %s", e, exc_info=True)
+            errors.append(f"live: {e}")
+
+    if not saved_to and errors:
+        return JSONResponse(status_code=500, content={"errors": errors})
+
+    return {"status": "ok", "saved_to": saved_to, "errors": errors}
+
+
 class SimV2AdvisorReq(BaseModel):
     scenario: dict
     history: list[dict]
@@ -1340,6 +1438,121 @@ async def sim_v2_advisor(req: SimV2AdvisorReq):
         return {"reply": reply}
     except Exception as e:
         logger.error("[SIM-V2] advisor crash: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Simulator V2 CRYPTO — partita 2-giorni-per-turno, AI = Decision Crypto R1
+# ════════════════════════════════════════════════════════════════════════
+
+class SimV2CryptoStartReq(BaseModel):
+    category: str | None = None
+    num_steps: int = 6           # 5-7 turni
+    scenario_id: str | None = None
+    initial_capital: float = 100000.0
+
+
+@app.get("/api/simulator/v2/crypto/scenarios")
+async def sim_v2_crypto_scenarios(category: str | None = None):
+    """Lista scenari crypto disponibili (filtro opzionale per categoria)."""
+    from simulator import crypto_scenarios as _cs
+    scenarios = _cs.list_crypto_scenarios(category)
+    return [{"id": s["id"], "category": s["category"],
+             "title": s["title"], "brief": s.get("brief", ""),
+             "period_start": s["period_start"],
+             "period_end": s["period_end"]}
+            for s in scenarios]
+
+
+@app.get("/api/simulator/v2/crypto/scenarios/counts")
+async def sim_v2_crypto_scenario_counts():
+    from simulator import crypto_scenarios as _cs
+    return _cs.crypto_scenario_counts()
+
+
+@app.post("/api/simulator/v2/crypto/start")
+async def sim_v2_crypto_start(req: SimV2CryptoStartReq):
+    from simulator import v2_crypto_engine as engine
+    try:
+        return await engine.start_crypto_run(
+            category=req.category, num_steps=req.num_steps,
+            scenario_id=req.scenario_id, initial_capital=req.initial_capital,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        logger.error("[SIM-CRYPTO] start crash: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class SimV2CryptoStepReq(BaseModel):
+    scenario: dict
+    portfolio: dict
+    history: list[dict] = []
+    step_index: int
+
+
+@app.post("/api/simulator/v2/crypto/step")
+async def sim_v2_crypto_step(req: SimV2CryptoStepReq):
+    from simulator import v2_crypto_engine as engine
+    try:
+        return await engine.execute_crypto_step(
+            scenario=req.scenario, portfolio=req.portfolio,
+            history=req.history, step_index=req.step_index,
+        )
+    except ValueError as e:
+        msg = str(e)
+        is_transient = any(x in msg.lower() for x in ["429", "timeout", "503", "502", "504"])
+        return JSONResponse(
+            status_code=503,
+            content={"error": msg,
+                     "type": "transient" if is_transient else "fatal"},
+        )
+    except Exception as e:
+        logger.error("[SIM-CRYPTO] step %d crash: %s", req.step_index, e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class SimV2CryptoFinalizeReq(BaseModel):
+    scenario: dict
+    portfolio: dict
+    history: list[dict]
+    persist: bool = True
+
+
+@app.post("/api/simulator/v2/crypto/finalize")
+async def sim_v2_crypto_finalize(req: SimV2CryptoFinalizeReq):
+    from simulator import v2_crypto_engine as engine
+    try:
+        return await engine.finalize_crypto_run(
+            scenario=req.scenario, portfolio=req.portfolio,
+            history=req.history, persist=req.persist,
+        )
+    except Exception as e:
+        logger.error("[SIM-CRYPTO] finalize crash: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class SimV2CryptoAdvisorReq(BaseModel):
+    scenario: dict
+    history: list[dict]
+    final_result: dict
+    user_message: str
+    chat_history: list[dict] = []
+
+
+@app.post("/api/simulator/v2/crypto/advisor")
+async def sim_v2_crypto_advisor(req: SimV2CryptoAdvisorReq):
+    from simulator import v2_crypto_engine as engine
+    try:
+        reply = await engine.crypto_advisor_chat(
+            scenario=req.scenario, history=req.history,
+            final_result=req.final_result, user_message=req.user_message,
+            chat_history=req.chat_history,
+        )
+        return {"reply": reply}
+    except Exception as e:
+        logger.error("[SIM-CRYPTO] advisor crash: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

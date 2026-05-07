@@ -2,23 +2,36 @@ import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Play, ChevronRight, Loader2, Wallet, AlertCircle, Trophy,
-  ChevronLeft, MessageCircle, Send, TrendingUp, TrendingDown,
+  ChevronLeft, MessageCircle, Send, TrendingUp, BookmarkPlus,
+  CheckCircle2, Bitcoin, LineChart,
 } from "lucide-react";
 
 const API = window.location.origin;
 
-const CATEGORIES = [
+// Categorie per modalità EQUITY (legacy)
+const EQUITY_CATEGORIES = [
   { key: "normale", name: "Normale", desc: "Mercato in condizioni standard" },
   { key: "geopolitico", name: "Geopolitico", desc: "Crisi, conflitti, sanzioni, elezioni" },
   { key: "macro", name: "Macro", desc: "FOMC, dati CPI/NFP, banche centrali" },
   { key: "crash_rally", name: "Crash/Rally", desc: "Shock acuti: crash, rally, panic" },
 ];
 
+// Categorie per modalità CRYPTO
+const CRYPTO_CATEGORIES = [
+  { key: "bull_cycle", name: "Bull Cycle", desc: "Rally crypto, mania retail, ETF flows" },
+  { key: "crash", name: "Crash", desc: "Exchange collapse, depeg, capitulation" },
+  { key: "regulatory_event", name: "Regolamentazione", desc: "ETF, ban, settlement, tax events" },
+  { key: "sideways", name: "Range/Sideways", desc: "Consolidamento post-rally, volume basso" },
+];
+
 export default function SimRunner() {
   const nav = useNavigate();
 
+  // ── Mode toggle: equity (default, 7 giorni/turno, 3-5 turni) o crypto (2 giorni/turno, 5-7 turni) ──
+  const [mode, setMode] = useState(null);   // null fino a scelta → "equity" | "crypto"
+
   // ── Setup state ────────────────────────────────────────────────
-  const [phase, setPhase] = useState("config1");
+  const [phase, setPhase] = useState("modeSelect");   // modeSelect → config1 → config2 → config3 → playing → finalizing → done
   const [category, setCategory] = useState(null);
   const [numSteps, setNumSteps] = useState(4);
   const [scenarios, setScenarios] = useState([]);
@@ -36,23 +49,36 @@ export default function SimRunner() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    fetch(`${API}/api/simulator/scenarios/counts`)
-      .then(r => r.ok ? r.json() : {}).then(setScenarioCounts).catch(() => {});
-  }, []);
+  const isCrypto = mode === "crypto";
+  const stepUnit = isCrypto ? "2 giorni" : "1 settimana";
+  const validStepCounts = isCrypto ? [5, 6, 7] : [3, 4, 5];
 
   useEffect(() => {
-    if (!category) return;
-    fetch(`${API}/api/simulator/scenarios?category=${category}`)
+    if (!mode) return;
+    const url = isCrypto
+      ? `${API}/api/simulator/v2/crypto/scenarios/counts`
+      : `${API}/api/simulator/scenarios/counts`;
+    fetch(url).then(r => r.ok ? r.json() : {}).then(setScenarioCounts).catch(() => {});
+  }, [mode, isCrypto]);
+
+  useEffect(() => {
+    if (!category || !mode) return;
+    const url = isCrypto
+      ? `${API}/api/simulator/v2/crypto/scenarios?category=${category}`
+      : `${API}/api/simulator/scenarios?category=${category}`;
+    fetch(url)
       .then(r => r.ok ? r.json() : [])
       .then(d => setScenarios(Array.isArray(d) ? d : []))
       .catch(() => setScenarios([]));
-  }, [category]);
+  }, [category, mode, isCrypto]);
+
+  // Endpoint base in base alla modalità
+  const apiBase = isCrypto ? "/api/simulator/v2/crypto" : "/api/simulator/v2";
 
   async function startGame() {
     setBusy(true); setError(null);
     try {
-      const resp = await fetch(`${API}/api/simulator/v2/start`, {
+      const resp = await fetch(`${API}${apiBase}/start`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           category, num_steps: numSteps,
@@ -78,7 +104,7 @@ export default function SimRunner() {
     if (!scenario || !portfolio) return;
     setBusy(true); setError(null);
     try {
-      const resp = await fetch(`${API}/api/simulator/v2/step`, {
+      const resp = await fetch(`${API}${apiBase}/step`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           scenario, portfolio, history, step_index: currentStepIdx,
@@ -104,7 +130,7 @@ export default function SimRunner() {
 
   async function finalizeGame(finalPortfolio, finalHistory) {
     try {
-      const resp = await fetch(`${API}/api/simulator/v2/finalize`, {
+      const resp = await fetch(`${API}${apiBase}/finalize`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           scenario, portfolio: finalPortfolio,
@@ -122,16 +148,30 @@ export default function SimRunner() {
   }
 
   function resetGame() {
-    setPhase("config1"); setScenario(null); setPortfolio(null);
+    setPhase("modeSelect"); setMode(null); setScenario(null); setPortfolio(null);
     setHistory([]); setCurrentStepIdx(0); setFinalResult(null);
-    setError(null); setScenarioId(null); setT0Prices({});
+    setError(null); setScenarioId(null); setT0Prices({}); setCategory(null);
   }
+
+  function pickMode(m) {
+    setMode(m);
+    setCategory(null); setScenarioId(null);
+    setNumSteps(m === "crypto" ? 6 : 4);
+    setPhase("config1");
+  }
+
+  const categories = isCrypto ? CRYPTO_CATEGORIES : EQUITY_CATEGORIES;
 
   return (
     <div style={S.root}>
       <header style={S.header}>
         <h1 style={S.h1}>Simulator</h1>
-        <span style={S.badge}>Stateless · Prezzi reali Polygon</span>
+        {mode && (
+          <span style={{ ...S.badge, background: isCrypto ? "#7c2d12" : "#1e293b",
+                         color: isCrypto ? "#fb923c" : "#a78bfa" }}>
+            {isCrypto ? "Crypto · 2g/turno · R1" : "Equity · 1sett/turno"}
+          </span>
+        )}
       </header>
 
       {error && (
@@ -141,12 +181,19 @@ export default function SimRunner() {
         </div>
       )}
 
+      {phase === "modeSelect" && (
+        <ModeSelect onPick={pickMode} />
+      )}
       {phase === "config1" && (
         <ConfigStep1 category={category} setCategory={setCategory}
-                     counts={scenarioCounts} onNext={() => setPhase("config2")} />
+                     counts={scenarioCounts} categories={categories}
+                     isCrypto={isCrypto}
+                     onBack={() => setPhase("modeSelect")}
+                     onNext={() => setPhase("config2")} />
       )}
       {phase === "config2" && (
         <ConfigStep2 numSteps={numSteps} setNumSteps={setNumSteps}
+                     validCounts={validStepCounts} stepUnit={stepUnit}
                      onBack={() => setPhase("config1")} onNext={() => setPhase("config3")} />
       )}
       {phase === "config3" && (
@@ -158,6 +205,7 @@ export default function SimRunner() {
       {phase === "playing" && scenario && portfolio && (
         <PlayingView scenario={scenario} portfolio={portfolio} history={history}
                      currentStepIdx={currentStepIdx} t0Prices={t0Prices}
+                     stepUnit={stepUnit} isCrypto={isCrypto}
                      onNextStep={executeNextStep} busy={busy} />
       )}
       {phase === "finalizing" && (
@@ -168,9 +216,54 @@ export default function SimRunner() {
       )}
       {phase === "done" && finalResult && (
         <DoneView finalResult={finalResult} scenario={scenario}
-                  history={history} onRestart={resetGame}
+                  history={history} isCrypto={isCrypto}
+                  onRestart={resetGame}
                   onViewHistory={() => nav("/simulator/history")} />
       )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// MODE SELECT (nuovo step iniziale)
+// ════════════════════════════════════════════════════════════════════
+
+function ModeSelect({ onPick }) {
+  return (
+    <div>
+      <h2 style={S.h2}>Scegli la modalità</h2>
+      <p style={S.subtitle}>
+        Due simulatori diversi: l'<strong>Equity</strong> (azioni/ETF) usa Decision Sonnet
+        + DeepSeek-R1 e turni di 1 settimana, ideale per scenari geopolitici/macro.
+        Il <strong>Crypto</strong> usa il Decision Crypto R1 (stesso modello del bot Live)
+        e turni di 2 giorni, ideale per la volatilità 24/7.
+      </p>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <button style={{ ...S.modeCard, borderColor: "#a78bfa" }}
+                onClick={() => onPick("equity")}>
+          <LineChart size={36} color="#a78bfa" />
+          <div style={{ fontSize: 22, fontWeight: 700, marginTop: 12 }}>Equity</div>
+          <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 6, lineHeight: 1.5 }}>
+            Azioni, ETF, settori. Turni di <strong>1 settimana</strong>, da
+            <strong> 3 a 5 turni</strong>.<br />
+            <span style={{ color: "#cbd5e1" }}>17 scenari storici disponibili.</span>
+          </div>
+          <div style={S.modeBadge}>R1 reasoning · 1 sett/turno</div>
+        </button>
+        <button style={{ ...S.modeCard, borderColor: "#fb923c" }}
+                onClick={() => onPick("crypto")}>
+          <Bitcoin size={36} color="#fb923c" />
+          <div style={{ fontSize: 22, fontWeight: 700, marginTop: 12 }}>Crypto</div>
+          <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 6, lineHeight: 1.5 }}>
+            BTC, ETH, SOL e altre crypto. Turni di <strong>2 giorni</strong>, da
+            <strong> 5 a 7 turni</strong>.<br />
+            <span style={{ color: "#cbd5e1" }}>Decision Crypto R1, max 30%/posizione.</span>
+          </div>
+          <div style={{ ...S.modeBadge, background: "#7c2d12", color: "#fb923c" }}>
+            Decision Crypto R1 · 2gg/turno
+          </div>
+        </button>
+      </div>
     </div>
   );
 }
@@ -179,18 +272,21 @@ export default function SimRunner() {
 // CONFIG STEPS
 // ════════════════════════════════════════════════════════════════════
 
-function ConfigStep1({ category, setCategory, counts, onNext }) {
+function ConfigStep1({ category, setCategory, counts, categories, isCrypto, onBack, onNext }) {
   return (
     <div>
-      <h2 style={S.h2}>1 · Categoria scenario</h2>
+      <h2 style={S.h2}>1 · Categoria scenario {isCrypto ? "crypto" : ""}</h2>
       <p style={S.subtitle}>
-        Tutti gli scenari sono basati su EVENTI STORICI REALI con prezzi
-        di mercato di quei giorni (Polygon.io).
+        {isCrypto
+          ? "Eventi crypto-specifici: halving, ETF, hack, depeg, exchange collapse."
+          : "Eventi storici reali con prezzi Polygon di quei giorni."}
       </p>
       <div style={S.cardsGrid}>
-        {CATEGORIES.map(c => (
+        {categories.map(c => (
           <button key={c.key}
-                  style={{ ...S.catCard, ...(category === c.key ? S.catCardSel : {}) }}
+                  style={{ ...S.catCard, ...(category === c.key ? S.catCardSel : {}),
+                           borderColor: category === c.key
+                             ? (isCrypto ? "#fb923c" : "#a78bfa") : "transparent" }}
                   onClick={() => setCategory(c.key)}>
             <div style={S.catName}>{c.name}</div>
             <div style={S.catDesc}>{c.desc}</div>
@@ -198,27 +294,39 @@ function ConfigStep1({ category, setCategory, counts, onNext }) {
           </button>
         ))}
       </div>
-      <button style={S.btnPrimary} disabled={!category} onClick={onNext}>
-        Avanti <ChevronRight size={16} />
-      </button>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={S.btnGhost} onClick={onBack}>
+          <ChevronLeft size={16} /> Cambia modalità
+        </button>
+        <button style={S.btnPrimary} disabled={!category} onClick={onNext}>
+          Avanti <ChevronRight size={16} />
+        </button>
+      </div>
     </div>
   );
 }
 
-function ConfigStep2({ numSteps, setNumSteps, onBack, onNext }) {
+function ConfigStep2({ numSteps, setNumSteps, validCounts, stepUnit, onBack, onNext }) {
+  // Quando si cambia modalità, force-aggiorna numSteps se non è valido
+  useEffect(() => {
+    if (!validCounts.includes(numSteps)) {
+      setNumSteps(validCounts[Math.floor(validCounts.length / 2)]);
+    }
+  }, [validCounts, numSteps, setNumSteps]);
+
   return (
     <div>
       <h2 style={S.h2}>2 · Numero di turni</h2>
       <p style={S.subtitle}>
-        Ogni turno = <strong>1 settimana</strong> di tempo simulato.
+        Ogni turno = <strong>{stepUnit}</strong> di tempo simulato.
         L'AI può riconsiderare la posizione solo all'inizio del turno successivo.
       </p>
       <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
-        {[3, 4, 5].map(n => (
+        {validCounts.map(n => (
           <button key={n} style={{ ...S.numBtn, ...(numSteps === n ? S.numBtnSel : {}) }}
                   onClick={() => setNumSteps(n)}>
             <div style={{ fontSize: 32, fontWeight: 800 }}>{n}</div>
-            <div style={{ fontSize: 12, color: "#94a3b8" }}>{n} turni · {n} settimane</div>
+            <div style={{ fontSize: 12, color: "#94a3b8" }}>{n} turni · {n} × {stepUnit}</div>
           </button>
         ))}
       </div>
@@ -273,7 +381,8 @@ function ConfigStep3({ scenarios, scenarioId, setScenarioId, onBack, onStart, bu
 // PLAYING VIEW
 // ════════════════════════════════════════════════════════════════════
 
-function PlayingView({ scenario, portfolio, history, currentStepIdx, t0Prices, onNextStep, busy }) {
+function PlayingView({ scenario, portfolio, history, currentStepIdx, t0Prices,
+                       stepUnit, isCrypto, onNextStep, busy }) {
   const lastStep = history[history.length - 1] || null;
   const currentDate = scenario.step_dates?.[currentStepIdx] || "?";
   const currentPrices = lastStep ? lastStep.prices : t0Prices;
@@ -286,9 +395,13 @@ function PlayingView({ scenario, portfolio, history, currentStepIdx, t0Prices, o
           <div style={S.scenTitle}>{scenario.title}</div>
           <div style={S.scenSubtitle}>{scenario.brief}</div>
         </div>
-        <div style={S.turnBadge}>
+        <div style={{ ...S.turnBadge,
+                      borderColor: isCrypto ? "#fb923c" : "#6d28d9",
+                      color: isCrypto ? "#fb923c" : "#a78bfa" }}>
           Turno {currentStepIdx + 1} / {scenario.num_steps}
-          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>{currentDate}</div>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
+            {currentDate} · {stepUnit}/turno
+          </div>
         </div>
       </div>
 
@@ -297,7 +410,8 @@ function PlayingView({ scenario, portfolio, history, currentStepIdx, t0Prices, o
       {/* Asset universe con prezzi attuali e delta */}
       {lastStep && lastStep.price_changes && (
         <PriceTablePanel priceChanges={lastStep.price_changes}
-                         universe={scenario.asset_universe} />
+                         universe={scenario.asset_universe}
+                         stepUnit={stepUnit} />
       )}
 
       {history.length > 0 && (
@@ -328,7 +442,13 @@ function PlayingView({ scenario, portfolio, history, currentStepIdx, t0Prices, o
   );
 }
 
-function PriceTablePanel({ priceChanges, universe }) {
+function PriceTablePanel({ priceChanges, universe, stepUnit = "1 settimana" }) {
+  // Etichetta variazione: "1 sett." o "2 giorni"
+  const stepLabel = stepUnit === "2 giorni" ? "2 giorni" : "1 sett.";
+  // Helper per il valore del chg in base al field disponibile
+  const getChgStep = (pc) => pc?.chg_1w_pct ?? pc?.chg_2d_pct ?? null;
+  const isCrypto = stepUnit === "2 giorni";
+
   return (
     <div style={S.portfolioBox}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
@@ -340,7 +460,7 @@ function PriceTablePanel({ priceChanges, universe }) {
                     gap: 8, fontSize: 12, color: "#94a3b8", padding: "4px 8px" }}>
         <span>Ticker</span>
         <span style={{ textAlign: "right" }}>Prezzo</span>
-        <span style={{ textAlign: "right" }}>1 sett.</span>
+        <span style={{ textAlign: "right" }}>{stepLabel}</span>
         <span style={{ textAlign: "right" }}>Dal T0</span>
       </div>
       {(universe || []).map(t => {
@@ -350,14 +470,17 @@ function PriceTablePanel({ priceChanges, universe }) {
             <span>{t}</span><span>—</span><span>—</span><span>—</span>
           </div>
         );
+        const chgStep = getChgStep(pc);
         return (
           <div key={t} style={S.priceRow}>
             <span style={{ fontWeight: 600 }}>{t}</span>
-            <span style={{ textAlign: "right", fontFamily: "monospace" }}>${pc.current?.toFixed(2)}</span>
+            <span style={{ textAlign: "right", fontFamily: "monospace" }}>
+              ${pc.current?.toFixed(isCrypto ? 4 : 2)}
+            </span>
             <span style={{ textAlign: "right",
-                           color: pc.chg_1w_pct == null ? "#64748b"
-                                  : pc.chg_1w_pct >= 0 ? "#10b981" : "#ef4444" }}>
-              {pc.chg_1w_pct != null ? `${pc.chg_1w_pct >= 0 ? "+" : ""}${pc.chg_1w_pct.toFixed(2)}%` : "—"}
+                           color: chgStep == null ? "#64748b"
+                                  : chgStep >= 0 ? "#10b981" : "#ef4444" }}>
+              {chgStep != null ? `${chgStep >= 0 ? "+" : ""}${chgStep.toFixed(2)}%` : "—"}
             </span>
             <span style={{ textAlign: "right",
                            color: pc.chg_total_pct == null ? "#64748b"
@@ -524,10 +647,13 @@ function StepCard({ step }) {
 // DONE VIEW
 // ════════════════════════════════════════════════════════════════════
 
-function DoneView({ finalResult, scenario, history, onRestart, onViewHistory }) {
+function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewHistory }) {
   const v = finalResult.final_valuation;
   const outcomeColor = {green: "#10b981", yellow: "#f59e0b", red: "#ef4444"}[finalResult.outcome] || "#94a3b8";
-  const bench = finalResult.benchmark_spy_pnl_pct;
+  const bench = isCrypto
+    ? finalResult.benchmark_btc_pnl_pct
+    : finalResult.benchmark_spy_pnl_pct;
+  const benchLabel = isCrypto ? "BTC buy & hold" : "SPY buy & hold";
   const portfolioSeries = finalResult.portfolio_value_series || [];
   const priceSeries = finalResult.price_series || {};
   const stepDates = finalResult.step_dates || scenario.step_dates || [];
@@ -555,7 +681,7 @@ function DoneView({ finalResult, scenario, history, onRestart, onViewHistory }) 
           </div>
         </div>
         <div style={S.finalBox}>
-          <div style={S.statLabel}>Benchmark SPY (buy &amp; hold)</div>
+          <div style={S.statLabel}>Benchmark {benchLabel}</div>
           <div style={{ fontSize: 28, fontWeight: 800 }}>
             {bench !== null && bench !== undefined ? `${bench >= 0 ? "+" : ""}${bench.toFixed(2)}%` : "n/d"}
           </div>
@@ -612,6 +738,9 @@ function DoneView({ finalResult, scenario, history, onRestart, onViewHistory }) 
             <Trophy size={18} style={{ verticalAlign: "middle" }} /> Debrief AI
           </h3>
           <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{finalResult.debrief}</div>
+          <SaveAdviceWidget scenario={scenario} history={history}
+                            finalResult={finalResult}
+                            initialText={finalResult.debrief} />
         </div>
       )}
 
@@ -772,6 +901,127 @@ function PriceMultiChart({ series, stepDates, assetBreakdown }) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// SAVE ADVICE WIDGET — salva il debrief o un consiglio nella memoria
+// ════════════════════════════════════════════════════════════════════
+
+function SaveAdviceWidget({ scenario, history, finalResult, initialText }) {
+  const [expanded, setExpanded] = useState(false);
+  const [title, setTitle] = useState("");
+  const [text, setText] = useState(initialText || "");
+  const [rationale, setRationale] = useState("");
+  const [targetSimulator, setTargetSimulator] = useState(true);
+  const [targetLive, setTargetLive] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [savedMsg, setSavedMsg] = useState("");
+
+  async function save() {
+    if (!title.trim() || !text.trim()) return;
+    const targets = [];
+    if (targetSimulator) targets.push("simulator");
+    if (targetLive) targets.push("live");
+    if (targets.length === 0) return;
+
+    setBusy(true); setSavedMsg("");
+    try {
+      const resp = await fetch(`${API}/api/simulator/v2/save-advice`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scenario, history, final_result: finalResult,
+          title: title.trim(), text: text.trim(),
+          rationale: rationale.trim(), targets,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setSavedMsg(`Errore: ${data.error || data.errors?.join(", ") || "unknown"}`);
+      } else {
+        const where = data.saved_to || [];
+        setSavedMsg(`✓ Salvato in: ${where.length > 0 ? where.join(", ") : "(nulla)"}`);
+        setTimeout(() => { setExpanded(false); setSavedMsg(""); }, 3000);
+      }
+    } catch (e) {
+      setSavedMsg(`Errore: ${e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!expanded) {
+    return (
+      <button style={{ ...S.btnGhost, marginTop: 12 }}
+              onClick={() => setExpanded(true)}>
+        <BookmarkPlus size={14} /> Salva questo consiglio nella memoria
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 12, padding: 12, background: "#0a0e1a",
+                  border: "1px solid #6d28d9", borderRadius: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <BookmarkPlus size={16} color="#a78bfa" />
+        <strong>Salva consiglio nella memoria</strong>
+      </div>
+      <input
+        type="text" value={title} onChange={e => setTitle(e.target.value)}
+        placeholder="Titolo (es. 'Crypto crash: ridurre exposure quando BTC dominance scende')"
+        style={{ ...S.chatInput, marginBottom: 8, width: "100%", boxSizing: "border-box" }}
+      />
+      <textarea
+        value={text} onChange={e => setText(e.target.value)}
+        placeholder="Regola operativa o lezione (1-3 frasi)"
+        rows={3}
+        style={{ ...S.chatInput, marginBottom: 8, width: "100%", boxSizing: "border-box",
+                 fontFamily: "inherit", resize: "vertical" }}
+      />
+      <textarea
+        value={rationale} onChange={e => setRationale(e.target.value)}
+        placeholder="Razionale: perché questa regola? (opzionale)"
+        rows={2}
+        style={{ ...S.chatInput, marginBottom: 12, width: "100%", boxSizing: "border-box",
+                 fontFamily: "inherit", resize: "vertical" }}
+      />
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 6 }}>Salva in:</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6,
+                        cursor: "pointer", fontSize: 13 }}>
+          <input type="checkbox" checked={targetSimulator}
+                 onChange={e => setTargetSimulator(e.target.checked)} />
+          <strong>Memoria Simulator</strong>
+          <span style={{ color: "#64748b" }}>
+            (iniettata nei prossimi run della stessa categoria)
+          </span>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 8,
+                        cursor: "pointer", fontSize: 13 }}>
+          <input type="checkbox" checked={targetLive}
+                 onChange={e => setTargetLive(e.target.checked)} />
+          <strong>Knowledge Base Live</strong>
+          <span style={{ color: "#64748b" }}>
+            (documento "lessons-learned" letto dal bot operativo)
+          </span>
+        </label>
+      </div>
+      {savedMsg && (
+        <div style={{ marginBottom: 8, fontSize: 13,
+                      color: savedMsg.startsWith("✓") ? "#10b981" : "#ef4444" }}>
+          {savedMsg}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={S.btnPrimary} onClick={save}
+                disabled={busy || !title.trim() || !text.trim()
+                          || (!targetSimulator && !targetLive)}>
+          {busy ? <><Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Salvo...</>
+                : <><CheckCircle2 size={14} /> Salva</>}
+        </button>
+        <button style={S.btnGhost} onClick={() => setExpanded(false)}>Annulla</button>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════
 // AI ADVISOR CHAT
 // ════════════════════════════════════════════════════════════════════
 
@@ -779,11 +1029,18 @@ function AdvisorChat({ scenario, history, finalResult }) {
   const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [savePanelMsgIdx, setSavePanelMsgIdx] = useState(null);
   const endRef = useRef(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs]);
+
+  // Endpoint advisor in base al mode (l'engine_mode è dentro lo scenario)
+  const isCryptoMode = scenario?.engine_mode === "crypto";
+  const advisorUrl = isCryptoMode
+    ? `${API}/api/simulator/v2/crypto/advisor`
+    : `${API}/api/simulator/v2/advisor`;
 
   async function send() {
     if (!input.trim() || busy) return;
@@ -792,7 +1049,7 @@ function AdvisorChat({ scenario, history, finalResult }) {
     const newMsgs = [...msgs, { role: "user", content: userMsg }];
     setMsgs(newMsgs);
     try {
-      const resp = await fetch(`${API}/api/simulator/v2/advisor`, {
+      const resp = await fetch(advisorUrl, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           scenario, history, final_result: finalResult,
@@ -828,10 +1085,21 @@ function AdvisorChat({ scenario, history, finalResult }) {
             background: m.role === "user" ? "#1e1b3a" : "#1e293b",
             border: m.role === "user" ? "1px solid #6d28d9" : "1px solid #334155",
           }}>
-            <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>
-              {m.role === "user" ? "Tu" : "AI Advisor"}
+            <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4,
+                          display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{m.role === "user" ? "Tu" : "AI Advisor"}</span>
+              {m.role === "assistant" && (
+                <button style={{ ...S.btnGhost, padding: "2px 8px", fontSize: 11, gap: 4 }}
+                        onClick={() => setSavePanelMsgIdx(savePanelMsgIdx === i ? null : i)}>
+                  <BookmarkPlus size={12} /> Salva
+                </button>
+              )}
             </div>
             <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{m.content}</div>
+            {savePanelMsgIdx === i && m.role === "assistant" && (
+              <SaveAdviceWidget scenario={scenario} history={history}
+                                finalResult={finalResult} initialText={m.content} />
+            )}
           </div>
         ))}
         {busy && (
@@ -918,6 +1186,12 @@ const S = {
               borderRadius: 8, cursor: "pointer", textAlign: "left", color: "#e2e8f0" },
   scenCardSel: { borderColor: "#a78bfa", background: "#1e1b3a" },
   scenMeta: { fontSize: 12, color: "#94a3b8", marginTop: 4 },
+  modeCard: { padding: 24, background: "#1e293b", border: "2px solid",
+              borderRadius: 12, cursor: "pointer", textAlign: "left",
+              color: "#e2e8f0", display: "flex", flexDirection: "column",
+              alignItems: "flex-start", gap: 4 },
+  modeBadge: { marginTop: 12, padding: "4px 10px", background: "#1e1b3a",
+               borderRadius: 12, color: "#a78bfa", fontSize: 11 },
   btnPrimary: { display: "inline-flex", alignItems: "center", gap: 6, padding: "10px 18px",
                 background: "#a78bfa", color: "#0a0e1a", border: "none", borderRadius: 6,
                 fontWeight: 600, cursor: "pointer", fontSize: 14 },
