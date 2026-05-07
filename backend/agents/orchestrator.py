@@ -108,15 +108,24 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         market_open = False
 
     # ─── ROUTE 1: Trigger crypto → Decision Crypto (R1) ───
+    # Quando il watchdog include crypto nei focus_tickers, ESCLUSIVAMENTE
+    # Decision Crypto. Anche se ci sono ticker equity nel pattern, non
+    # facciamo doppio run nello stesso ciclo: il cron L-V 13/15/17/19/21
+    # gestisce gli equity in modo schedulato. Questo evita:
+    #   1. Doppio costo API in un singolo trigger
+    #   2. Cross-contamination del workflow (Decision standard "vede" un
+    #      crypto trade appena fatto e si confonde)
+    #   3. UI che mostra entrambi gli agenti in run contemporaneamente
     if crypto_focus:
         logger.info("[%s][WATCHDOG] TRIGGER crypto urgency=%d: %s "
-                    "(focus=%s) — avvio Decision Crypto",
-                    run_id, urgency, reason, crypto_focus)
+                    "(focus=%s, equity_focus_ignorati=%s) — avvio Decision Crypto",
+                    run_id, urgency, reason, crypto_focus, equity_focus or [])
         database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
             "event": "watchdog_triggered_crypto",
             "urgency": urgency,
             "reason": reason,
             "focus_tickers": crypto_focus,
+            "equity_focus_ignored": equity_focus or [],
             "route": "decision_crypto",
         }))
         try:
@@ -126,20 +135,16 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
                          run_id, e, exc_info=True)
             crypto_result = {"decision": "ERROR", "trades": [], "error": str(e)}
 
-        # Se non c'erano anche equity ticker, esci qui
-        if not equity_focus:
-            return {
-                "run_id": run_id,
-                "triggered": True,
-                "urgency": urgency,
-                "reason": reason,
-                "route": "crypto",
-                "decision": crypto_result.get("decision", "UNKNOWN"),
-                "trades": crypto_result.get("trades", []),
-                "duration_seconds": round(time.time() - start, 2),
-            }
-        # Altrimenti: continuiamo per processare gli equity ticker
-        focus_tickers = equity_focus
+        return {
+            "run_id": run_id,
+            "triggered": True,
+            "urgency": urgency,
+            "reason": reason,
+            "route": "crypto",
+            "decision": crypto_result.get("decision", "UNKNOWN"),
+            "trades": crypto_result.get("trades", []),
+            "duration_seconds": round(time.time() - start, 2),
+        }
 
     # ─── ROUTE 2: equity ticker — richiede mercato aperto ───
     if not market_open:

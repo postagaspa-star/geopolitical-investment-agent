@@ -68,23 +68,38 @@ function AgentRow({ agentKey, info, tick }) {
   const meta = AGENT_LABELS[agentKey] || { name: agentKey, tone: '#9ca3af' };
   const nextRun = info?.next_run;
   const lastRun = info?.last_run;
-  const lastAttempt = info?.last_attempt;
+  // Nuova logica: last_failure = solo errori reali, last_started = run in corso.
+  // Backward-compat: se il backend manda last_attempt (vecchio), lo trattiamo
+  // come last_failure (era usato così a livello UI).
+  const lastFailure = info?.last_failure ?? info?.last_attempt ?? null;
+  const lastStarted = info?.last_started ?? null;
   const active = !!info?.active;
 
-  // Warning: c'è un tentativo PIÙ RECENTE dell'ultimo successo → fallimenti
-  // recenti. Esempio: last_run = 11h fa ma last_attempt = 2m fa → l'agent
-  // sta crashando da 11h.
+  // FAIL warning: si attiva solo se l'ULTIMO ERRORE è più recente
+  // dell'ultimo run completato. Non più triggerato da un run normale
+  // in corso (CONTEXT phase) come prima.
   let attemptWarn = false;
-  if (lastAttempt && lastRun) {
-    attemptWarn = new Date(lastAttempt) > new Date(lastRun);
-  } else if (lastAttempt && !lastRun) {
+  if (lastFailure && lastRun) {
+    attemptWarn = new Date(lastFailure) > new Date(lastRun);
+  } else if (lastFailure && !lastRun) {
     attemptWarn = true;
+  }
+
+  // "In corso": run started più recente del completed e niente errori dopo.
+  let inProgress = false;
+  if (lastStarted && lastRun && !attemptWarn) {
+    inProgress = new Date(lastStarted) > new Date(lastRun);
+  } else if (lastStarted && !lastRun && !attemptWarn) {
+    inProgress = true;
   }
 
   // Mostra il countdown se c'e' un next_run; altrimenti "ultimo: 5m fa"; altrimenti "in attesa"
   let statusText;
   let statusColor;
-  if (nextRun) {
+  if (inProgress) {
+    statusText = 'in corso...';
+    statusColor = '#a78bfa';
+  } else if (nextRun) {
     statusText = `tra ${formatCountdown(nextRun)}`;
     statusColor = '#94a3b8';
   } else if (lastRun) {
@@ -127,7 +142,7 @@ function AgentRow({ agentKey, info, tick }) {
         {statusText}
       </span>
       {attemptWarn && (
-        <span title={`Tentativo fallito: ${formatTimeAgo(lastAttempt)} fa`}
+        <span title={`Errore: ${formatTimeAgo(lastFailure)} fa`}
               style={{
                 fontSize: '0.65rem',
                 color: '#ef4444',
@@ -135,7 +150,7 @@ function AgentRow({ agentKey, info, tick }) {
                 marginLeft: 'auto',
                 whiteSpace: 'nowrap',
               }}>
-          ⚠ FAIL {formatTimeAgo(lastAttempt)}
+          ⚠ FAIL {formatTimeAgo(lastFailure)}
         </span>
       )}
     </div>

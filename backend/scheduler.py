@@ -787,19 +787,25 @@ def get_scheduler_info() -> dict:
 
     # --- Decision split: Sonnet (orari mercato) vs R1 (overnight crypto) ---
     # last_run = ultimo run COMPLETATO con successo (DECISION_COMPLETE)
-    # last_attempt = ultimo TENTATIVO (anche fallito) — per warning UI
+    # last_failure = ultimo ERRORE — per warning UI
+    # last_started = ultimo CONTEXT (run in corso) — per status "in corso"
+    #
+    # Bug precedente: il warning FAIL si attivava quando last_attempt
+    # (qualunque tentativo, anche un CONTEXT in corso normalmente)
+    # era piu' recente di last_run. Risultato: durante ogni run di 2 min,
+    # la sidebar mostrava FAIL anche se non c'era nessun fail.
+    # Fix: warning solo su ERROR, non su CONTEXT (in-progress).
     try:
         decision_sonnet_last = (database.get_setting("last_decision_sonnet_run_at", "")
                                 or _last_log_for_phases(["DECISION_COMPLETE"]))
         decision_r1_last = database.get_setting("last_decision_r1_run_at", "") or None
-        # Ultimo tentativo (success o fail). Se diverso da last_run → warning UI.
-        decision_last_attempt = _last_log_for_phases([
-            "DECISION_COMPLETE", "DECISION_ERROR", "DECISION_CONTEXT",
-        ])
+        decision_last_failure = _last_log_for_phases(["DECISION_ERROR"])
+        decision_last_started = _last_log_for_phases(["DECISION_CONTEXT"])
     except Exception:
         decision_sonnet_last = _last_log_for_phases(["DECISION_COMPLETE"])
         decision_r1_last = None
-        decision_last_attempt = None
+        decision_last_failure = None
+        decision_last_started = None
 
     agents = {
         "watchdog": {
@@ -836,7 +842,11 @@ def get_scheduler_info() -> dict:
             "schedule": "cron L-V 13/15/17/19/21 UTC + on-demand watchdog (Sonnet 4.5)",
             "next_run": standard_pipeline_next,
             "last_run": decision_sonnet_last,
-            "last_attempt": decision_last_attempt,   # warning UI se diverso da last_run
+            # last_failure = ultimo ERROR; mostra "FAIL" solo se ERROR
+            # è successivo all'ultimo run completato con successo.
+            "last_failure": decision_last_failure,
+            # last_started = ultimo CONTEXT, per status "in corso" senza FAIL
+            "last_started": decision_last_started,
             "active": running and market_open,
             "model": "claude-sonnet-4-5",
         },
@@ -851,9 +861,8 @@ def get_scheduler_info() -> dict:
             "schedule": "ogni 1h, 24/7 (DeepSeek-R1 reasoning, solo crypto)",
             "next_run": crypto_pipeline_next,
             "last_run": _last_log_for_phases(["DECISION_CRYPTO_COMPLETE"]),
-            "last_attempt": _last_log_for_phases([
-                "DECISION_CRYPTO_COMPLETE", "DECISION_CRYPTO_ERROR", "DECISION_CRYPTO_CONTEXT",
-            ]),
+            "last_failure": _last_log_for_phases(["DECISION_CRYPTO_ERROR"]),
+            "last_started": _last_log_for_phases(["DECISION_CRYPTO_CONTEXT"]),
             "active": running,
             "model": "deepseek-r1",
         },
