@@ -524,8 +524,15 @@ def _build_context_prompt(scenario: dict, step_index: int = 0,
     return "\n".join(parts), context_for_ui
 
 
-async def _call_r1(system_prompt: str, user_message: str) -> str:
+async def _call_r1(system_prompt: str, user_message: str,
+                   max_retries: int = 3) -> str:
     """Chiama DeepSeek-R1. Ritorna il response_text.
+
+    Retry automatico su 429 (rate limit), 5xx (server error), e timeout.
+    Backoff esponenziale: 2s, 4s, 8s.
+
+    Bug precedente: nessun retry → un singolo 429/timeout faceva HTTP 500
+    sul single-step (visto che c'e' una sola chiamata _call_r1).
 
     Inietta automaticamente i shared_principles (SL/TP autonomy) cosi' il
     Simulator e il bot Live ragionano con la stessa filosofia di gestione
@@ -552,14 +559,57 @@ async def _call_r1(system_prompt: str, user_message: str) -> str:
         ],
         "max_tokens": 4500,
     }
-    async with aiohttp.ClientSession() as sess:
-        async with sess.post(DEEPSEEK_API_URL, json=payload, headers=headers,
-                              timeout=aiohttp.ClientTimeout(total=180)) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise ValueError(f"DeepSeek-R1 HTTP {resp.status}: {body[:300]}")
-            data = await resp.json()
-    return data["choices"][0]["message"]["content"] or ""
+
+    last_error: str = ""
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(
+                    DEEPSEEK_API_URL, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=180)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["choices"][0]["message"]["content"] or ""
+                    body = await resp.text()
+                    last_error = f"HTTP {resp.status}: {body[:200]}"
+                    # Retry solo su errori transitori (429, 5xx)
+                    if resp.status == 429 or 500 <= resp.status < 600:
+                        if attempt < max_retries - 1:
+                            wait_s = 2 ** (attempt + 1)
+                            logger.warning(
+                                "[SIM] DeepSeek-R1 %d (attempt %d/%d), retry in %ds: %s",
+                                resp.status, attempt + 1, max_retries, wait_s,
+                                body[:120]
+                            )
+                            await asyncio.sleep(wait_s)
+                            continue
+                    # Errore non transitorio (4xx eccetto 429): fail immediato
+                    raise ValueError(f"DeepSeek-R1 {last_error}")
+        except asyncio.TimeoutError:
+            last_error = "timeout"
+            if attempt < max_retries - 1:
+                wait_s = 2 ** (attempt + 1)
+                logger.warning(
+                    "[SIM] DeepSeek-R1 timeout (attempt %d/%d), retry in %ds",
+                    attempt + 1, max_retries, wait_s
+                )
+                await asyncio.sleep(wait_s)
+                continue
+            raise ValueError(f"DeepSeek-R1 timeout dopo {max_retries} tentativi")
+        except aiohttp.ClientError as e:
+            last_error = f"network: {e}"
+            if attempt < max_retries - 1:
+                wait_s = 2 ** (attempt + 1)
+                logger.warning(
+                    "[SIM] DeepSeek-R1 network err (attempt %d/%d), retry in %ds: %s",
+                    attempt + 1, max_retries, wait_s, str(e)[:120]
+                )
+                await asyncio.sleep(wait_s)
+                continue
+            raise ValueError(f"DeepSeek-R1 network error: {e}")
+
+    raise ValueError(f"DeepSeek-R1 fallito dopo {max_retries} tentativi: {last_error}")
 
 
 def _parse_response(raw: str) -> dict:
@@ -805,26 +855,71 @@ def _build_run_data(run_id: str, state: dict) -> dict:
     decision = last_step.get("decision") or {}
     market_data = scenario.get("market_data") or []
 
-    # ── PERFORMANCE: usa la prima decisione di ENTRY (BUY/SELL) trovata
-    # esaminando TUTTE le decisions (non solo quella primary) di TUTTI gli
-    # step. Cosi' anche se l'AI fa multiple azioni per step e l'ultimo
-    # step e' HOLD, calcoliamo il P&L sull'entry effettiva.
-    entry_decision = None
+    # ── PERFORMANCE: aggregazione per-asset across all steps.
+    #
+    # Bug precedente: prendevamo la PRIMA BUY/SELL trovata. Ma se l'AI fa
+    # T0=SELL ZION → T1=BUY ZION (chiude la SHORT) → T2=HOLD ZION,
+    # il calcolo era SHORT P&L ignorando il reversal a T1.
+    #
+    # Logica corretta:
+    #   1. Per ogni asset, raccogli TUTTE le decisions (BUY/SELL/HOLD) in
+    #      ordine cronologico.
+    #   2. Identifica il "main asset": quello con piu' decisions. In caso di
+    #      tie, l'asset con la prima entry chronologica.
+    #   3. Per il main asset, prendi l'ULTIMA azione non-HOLD: quella e' la
+    #      posizione netta che l'utente terrebbe alla fine della sequenza.
+    #      (Un SELL seguito da BUY sullo stesso asset = posizione FLAT/LONG,
+    #       non SHORT come prima.)
+    #   4. Se tutte le decisions sull'asset sono HOLD → tratta come HOLD.
+    asset_actions: dict[str, list[tuple[int, str, dict]]] = {}
     for s in steps:
-        # Esamina tutta la lista decisions (nuovo formato), fallback a 'decision'
+        step_idx = s.get("step_index", 0)
         candidates = s.get("decisions") or [s.get("decision") or {}]
         for d in candidates:
-            if d and d.get("action") in ("BUY", "SELL") and d.get("asset"):
+            if not d:
+                continue
+            asset_d = d.get("asset")
+            action_d = d.get("action")
+            if not asset_d or not action_d:
+                continue
+            asset_actions.setdefault(asset_d, []).append((step_idx, action_d, d))
+
+    main_asset = None
+    if asset_actions:
+        # Score per-asset: (n_decisions, -first_step_idx). Piu' decisioni vince;
+        # in caso di tie, l'asset entrato prima vince.
+        def _asset_score(actions_list):
+            return (len(actions_list), -actions_list[0][0])
+        main_asset = max(asset_actions.keys(),
+                         key=lambda a: _asset_score(asset_actions[a]))
+
+    entry_decision = None
+    if main_asset:
+        actions = asset_actions[main_asset]
+        # Ultima azione non-HOLD = posizione netta finale
+        for step_idx, action, d in reversed(actions):
+            if action in ("BUY", "SELL"):
                 entry_decision = d
                 break
-        if entry_decision:
-            break
+        # Se tutte HOLD → tratta la prima come "no-entry"
+        if entry_decision is None and actions:
+            entry_decision = actions[0][2]
 
     if entry_decision is None:
-        entry_decision = decision  # tutti HOLD → outcome = 0
+        entry_decision = decision  # nessuna decisione valida → ultima del run
 
     asset = entry_decision.get("asset") or decision.get("asset")
     entry_action = entry_decision.get("action") or decision.get("action")
+
+    # Diagnostic log per debug del fix aggregation
+    if asset_actions and main_asset:
+        n_decs = len(asset_actions[main_asset])
+        all_actions_main = [a for _, a, _ in asset_actions[main_asset]]
+        logger.info(
+            "[SIM] aggregation run=%s main_asset=%s decisions=%d actions=%s "
+            "→ net=%s",
+            run_id, main_asset, n_decs, all_actions_main, entry_action
+        )
 
     logger.info("[SIM] _build_run_data run=%s entry: %s %s (steps=%d, last_action=%s)",
                 run_id, entry_action, asset, len(steps), decision.get("action"))

@@ -27,7 +27,9 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 MASSIVE_BASE_URL = "https://api.massive.com"
-MASSIVE_TIMEOUT = 10  # secondi
+POLYGON_BASE_URL = "https://api.polygon.io"
+PROVIDER_TIMEOUT = 10  # secondi (uguale per Polygon e Massive)
+MASSIVE_TIMEOUT = PROVIDER_TIMEOUT  # back-compat
 
 
 def _get_massive_key() -> str:
@@ -37,6 +39,18 @@ def _get_massive_key() -> str:
         try:
             import database as _db
             key = _db.get_setting("massive_api_key", "") or ""
+        except Exception:
+            pass
+    return key
+
+
+def _get_polygon_key() -> str:
+    """Recupera la API key di Polygon da env var o database settings."""
+    key = os.environ.get("POLYGON_API_KEY", "")
+    if not key:
+        try:
+            import database as _db
+            key = _db.get_setting("polygon_api_key", "") or ""
         except Exception:
             pass
     return key
@@ -95,22 +109,28 @@ def _collect_polling_tickers() -> list[str]:
     return sorted(tickers)[:30]
 
 
-# Cache giornaliera per prev_close (evita di chiamare l'endpoint ogni 60s)
-_prev_close_cache: dict[str, tuple[str, float]] = {}  # {ticker: (date_str, prev_close)}
+# Cache giornaliera per prev_close (evita di chiamare l'endpoint ogni 60s).
+# Chiave: f"{provider}:{ticker}" — separa Polygon e Massive (potrebbero divergere)
+_prev_close_cache: dict[str, tuple[str, float]] = {}
 
 
-async def _fetch_massive_prev_close(session, ticker: str, api_key: str) -> float | None:
-    """Ritorna prev_close per il ticker, con cache giornaliera."""
+async def _fetch_provider_prev_close(session, base_url: str, ticker: str,
+                                     api_key: str, provider: str = "massive") -> float | None:
+    """
+    Ritorna prev_close via API Polygon-compatible (funziona per Polygon e Massive,
+    stessa API). Con cache giornaliera per ridurre chiamate.
+    """
     today_str = datetime.now(timezone.utc).date().isoformat()
-    cached = _prev_close_cache.get(ticker)
+    cache_key = f"{provider}:{ticker}"
+    cached = _prev_close_cache.get(cache_key)
     if cached and cached[0] == today_str:
         return cached[1]
 
-    url = f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker}/prev"
+    url = f"{base_url}/v2/aggs/ticker/{ticker}/prev"
     params = {"adjusted": "true", "apiKey": api_key}
     try:
         async with session.get(url, params=params,
-                               timeout=aiohttp.ClientTimeout(total=MASSIVE_TIMEOUT)) as resp:
+                               timeout=aiohttp.ClientTimeout(total=PROVIDER_TIMEOUT)) as resp:
             if resp.status != 200:
                 return None
             data = await resp.json()
@@ -118,26 +138,29 @@ async def _fetch_massive_prev_close(session, ticker: str, api_key: str) -> float
             if results:
                 pc = float(results[0].get("c") or 0)
                 if pc > 0:
-                    _prev_close_cache[ticker] = (today_str, pc)
+                    _prev_close_cache[cache_key] = (today_str, pc)
                     return pc
     except Exception:
         pass
     return None
 
 
-async def _fetch_massive_current(session, ticker: str, api_key: str,
-                                 retries: int = 2) -> dict | None:
-    """Ultimo close 1-min via Massive aggregates. Retry automatico su 429."""
+async def _fetch_provider_current(session, base_url: str, ticker: str, api_key: str,
+                                  retries: int = 2) -> dict | None:
+    """
+    Ultimo close 1-min via API Polygon-compatible. Retry automatico su 429.
+    Funziona per Polygon e Massive (stessa API).
+    """
     today = datetime.now(timezone.utc).date()
     from_date = (today - timedelta(days=4)).isoformat()
     to_date = today.isoformat()
-    url = f"{MASSIVE_BASE_URL}/v2/aggs/ticker/{ticker}/range/1/minute/{from_date}/{to_date}"
+    url = f"{base_url}/v2/aggs/ticker/{ticker}/range/1/minute/{from_date}/{to_date}"
     params = {"adjusted": "true", "sort": "desc", "limit": 1, "apiKey": api_key}
 
     for attempt in range(retries + 1):
         try:
             async with session.get(url, params=params,
-                                   timeout=aiohttp.ClientTimeout(total=MASSIVE_TIMEOUT)) as resp:
+                                   timeout=aiohttp.ClientTimeout(total=PROVIDER_TIMEOUT)) as resp:
                 if resp.status == 429:
                     # Rate limit: backoff esponenziale
                     await asyncio.sleep(0.5 * (2 ** attempt))
@@ -170,13 +193,24 @@ async def _fetch_massive_current(session, ticker: str, api_key: str,
     return None
 
 
-async def _fetch_massive_one(session, ticker: str, api_key: str) -> dict | None:
+# ── Wrapper Massive (back-compat) ─────────────────────────────────────────────
+async def _fetch_massive_prev_close(session, ticker: str, api_key: str) -> float | None:
+    return await _fetch_provider_prev_close(session, MASSIVE_BASE_URL, ticker, api_key, "massive")
+
+
+async def _fetch_massive_current(session, ticker: str, api_key: str,
+                                 retries: int = 2) -> dict | None:
+    return await _fetch_provider_current(session, MASSIVE_BASE_URL, ticker, api_key, retries)
+
+
+async def _fetch_provider_one(session, base_url: str, ticker: str, api_key: str,
+                              provider: str = "massive") -> dict | None:
     """Combina current price + prev_close (con cache) in un singolo dict ticker."""
-    current = await _fetch_massive_current(session, ticker, api_key)
+    current = await _fetch_provider_current(session, base_url, ticker, api_key)
     if not current:
         return None
 
-    prev_close = await _fetch_massive_prev_close(session, ticker, api_key)
+    prev_close = await _fetch_provider_prev_close(session, base_url, ticker, api_key, provider)
     if prev_close is None:
         prev_close = current["price"]
 
@@ -192,21 +226,30 @@ async def _fetch_massive_one(session, ticker: str, api_key: str) -> dict | None:
     }
 
 
-async def _fetch_massive_quotes(tickers: list[str], api_key: str) -> dict[str, dict]:
+async def _fetch_provider_quotes(tickers: list[str], api_key: str, base_url: str,
+                                 provider: str = "massive",
+                                 max_concurrency: int = 4) -> dict[str, dict]:
     """
-    Batch fetch via Massive API con concurrency limitata e logging diagnostico.
-    Free tier: ~5 req/sec → cap concurrency a 4 e dilato richieste con piccoli delay.
+    Batch fetch via API Polygon-compatible (Polygon o Massive).
+    Concurrency cap per non saturare il rate limit del free tier.
+
+    Args:
+        tickers: lista ticker da fetchare
+        api_key: API key del provider
+        base_url: base URL (es. POLYGON_BASE_URL o MASSIVE_BASE_URL)
+        provider: nome label per logging e cache key (es. "polygon", "massive")
+        max_concurrency: max chiamate parallele
     """
     quotes: dict[str, dict] = {}
     if not tickers or not api_key:
         return quotes
 
-    sem = asyncio.Semaphore(4)
+    sem = asyncio.Semaphore(max_concurrency)
     failed_tickers: list[str] = []
 
     async def _fetch_with_sem(session, t):
         async with sem:
-            result = await _fetch_massive_one(session, t, api_key)
+            result = await _fetch_provider_one(session, base_url, t, api_key, provider)
             if result is None:
                 failed_tickers.append(t)
             return t, result
@@ -218,13 +261,73 @@ async def _fetch_massive_quotes(tickers: list[str], api_key: str) -> dict[str, d
                 if q is not None:
                     quotes[ticker] = q
     except Exception as e:
-        logger.warning("Massive batch error: %s", e)
+        logger.warning("%s batch error: %s", provider, e)
 
     if failed_tickers:
-        logger.info("Massive: %d/%d ticker falliti (es. %s)",
-                    len(failed_tickers), len(tickers), ", ".join(failed_tickers[:5]))
+        logger.info("%s: %d/%d ticker falliti (es. %s)",
+                    provider, len(failed_tickers), len(tickers),
+                    ", ".join(failed_tickers[:5]))
 
     return quotes
+
+
+# ── Wrapper Polygon (primario) e Massive (fallback) ───────────────────────────
+async def _fetch_polygon_quotes(tickers: list[str], api_key: str) -> dict[str, dict]:
+    """Polygon.io free tier: ~5 req/sec — concurrency 4."""
+    return await _fetch_provider_quotes(tickers, api_key, POLYGON_BASE_URL,
+                                        provider="polygon", max_concurrency=4)
+
+
+async def _fetch_massive_quotes(tickers: list[str], api_key: str) -> dict[str, dict]:
+    """Massive.com (Polygon-compatible) — fallback se Polygon non risponde."""
+    return await _fetch_provider_quotes(tickers, api_key, MASSIVE_BASE_URL,
+                                        provider="massive", max_concurrency=4)
+
+
+# ── Back-compat alias (codice esterno potrebbe importarlo) ───────────────────
+async def _fetch_massive_one(session, ticker: str, api_key: str) -> dict | None:
+    return await _fetch_provider_one(session, MASSIVE_BASE_URL, ticker, api_key, "massive")
+
+
+def _detect_yfinance_corruption(quotes: dict[str, dict]) -> tuple[bool, str]:
+    """
+    Detect yFinance batch corruption: quando il batch download è rate-limited,
+    yFinance restituisce silenziosamente lo stesso bar cached per tutti i ticker,
+    producendo prezzi identici (bug documentato in yfinance#2022).
+
+    Soglia: 3+ ticker con prezzo identico (arrotondato a 2 dp), OPPURE
+    ≥50% dei ticker se il batch è ≥4 elementi.
+
+    Returns:
+        (is_corrupted, description_string)
+    """
+    if len(quotes) < 3:
+        return False, ""
+
+    from collections import Counter
+    price_counter = Counter(
+        round(q.get("price", 0), 2) for q in quotes.values() if q.get("price", 0) > 0
+    )
+    if not price_counter:
+        return False, ""
+
+    most_common_price, most_common_count = price_counter.most_common(1)[0]
+    total = len(quotes)
+
+    is_corrupted = most_common_count >= 3 or (
+        total >= 4 and most_common_count >= max(2, total // 2)
+    )
+    if is_corrupted:
+        corrupted_tickers = [
+            t for t, q in quotes.items()
+            if round(q.get("price", 0), 2) == most_common_price
+        ]
+        desc = (
+            f"{most_common_count}/{total} ticker con prezzo identico "
+            f"${most_common_price} ({', '.join(corrupted_tickers[:6])})"
+        )
+        return True, desc
+    return False, ""
 
 
 def _fetch_yfinance_per_ticker_fallback(tickers: list[str]) -> dict[str, dict]:
@@ -363,6 +466,38 @@ def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
     except Exception as e:
         logger.warning("yfinance batch error: %s", e)
 
+    # ── Corruption guard ──────────────────────────────────────────────────────
+    # Se yfinance ha restituito lo stesso prezzo per N≥3 ticker diversi, il
+    # batch è corrotto (rate-limit silenzioso → tutti i ticker ricevono lo
+    # stesso bar cached). Scartiamo i risultati e ritentiamo per-ticker.
+    if quotes:
+        corrupted, corruption_desc = _detect_yfinance_corruption(quotes)
+        if corrupted:
+            logger.warning(
+                "⚠ yfinance BATCH CORROTTO — %s. "
+                "Scarto risultati e retry per-ticker singolo.", corruption_desc
+            )
+            # Invalida cache interna yfinance (best-effort: API non pubblica)
+            try:
+                import yfinance as _yf
+                if hasattr(_yf, "shared") and hasattr(_yf.shared, "_DFS"):
+                    _yf.shared._DFS.clear()
+            except Exception:
+                pass
+            # Per-ticker usa fast_info: path diverso, non soffre del batch bug
+            fallback_quotes = _fetch_yfinance_per_ticker_fallback(tickers)
+            # Secondo controllo: se anche il fallback ritorna corruzione, scarta tutto
+            if fallback_quotes:
+                still_corrupted, _ = _detect_yfinance_corruption(fallback_quotes)
+                if still_corrupted:
+                    logger.error(
+                        "yfinance per-ticker ancora corrotto — feed non affidabile. "
+                        "Ritorno dict vuoto (il Decision Agent userà data_quality=feed_corrupted)."
+                    )
+                    return {}
+            return fallback_quotes
+    # ─────────────────────────────────────────────────────────────────────────
+
     return quotes
 
 
@@ -454,23 +589,43 @@ async def update_price_cache() -> dict:
     except Exception:
         market_state = "UNKNOWN"
 
-    # 1. Provider primario: Massive API (se key configurata)
-    massive_quotes = {}
-    massive_key = _get_massive_key()
-    if massive_key:
+    # ── Cascade: Polygon (primario) → Massive (fallback) → yFinance (ultima spiaggia)
+    # 1. Provider primario: Polygon.io (se key configurata)
+    polygon_quotes = {}
+    polygon_key = _get_polygon_key()
+    if polygon_key:
         try:
-            massive_quotes = await _fetch_massive_quotes(tickers, massive_key)
+            polygon_quotes = await _fetch_polygon_quotes(tickers, polygon_key)
         except Exception as e:
-            logger.warning("Massive provider failed: %s", e)
+            logger.warning("Polygon provider failed: %s", e)
 
-    # 2. Per i ticker mancanti, completa con yfinance
-    missing_tickers = [t for t in tickers if t not in massive_quotes]
+    # 2. Provider secondario: Massive (per ticker mancanti da Polygon)
+    missing_after_polygon = [t for t in tickers if t not in polygon_quotes]
+    massive_quotes = {}
+    if missing_after_polygon:
+        massive_key = _get_massive_key()
+        if massive_key:
+            try:
+                massive_quotes = await _fetch_massive_quotes(missing_after_polygon, massive_key)
+            except Exception as e:
+                logger.warning("Massive provider failed: %s", e)
+
+    # 3. Ultima spiaggia: yfinance (per ticker ancora mancanti)
+    #    yfinance ha il corruption detector integrato, quindi se restituisce
+    #    dati corrotti (stesso prezzo per N ticker) li scarta automaticamente.
+    missing_after_massive = [
+        t for t in tickers
+        if t not in polygon_quotes and t not in massive_quotes
+    ]
     yf_quotes = {}
-    if missing_tickers:
-        yf_quotes = await asyncio.to_thread(_fetch_yfinance_quotes, missing_tickers)
+    if missing_after_massive:
+        yf_quotes = await asyncio.to_thread(_fetch_yfinance_quotes, missing_after_massive)
 
-    # 3. Combina e salva con source corretta per ogni ticker
+    # 4. Combina e salva con source corretta per ogni ticker
     qw_total, hw_total = 0, 0
+    if polygon_quotes:
+        qw, hw = await asyncio.to_thread(_upsert_quotes, polygon_quotes, market_state, "polygon")
+        qw_total += qw; hw_total += hw
     if massive_quotes:
         qw, hw = await asyncio.to_thread(_upsert_quotes, massive_quotes, market_state, "massive")
         qw_total += qw; hw_total += hw
@@ -478,33 +633,33 @@ async def update_price_cache() -> dict:
         qw, hw = await asyncio.to_thread(_upsert_quotes, yf_quotes, market_state, "yfinance")
         qw_total += qw; hw_total += hw
 
-    # 4. Aggiorna current_price + unrealized_pnl di ogni posizione aperta
+    # 5. Aggiorna current_price + unrealized_pnl di ogni posizione aperta
     #    e salva uno snapshot del portfolio (per popolare l'equity curve).
     #    SEMPRE — anche fuori orario di mercato:
     #      - le crypto (BTC-USD, ETH-USD, ...) si muovono 24/7
     #      - per le equity i prezzi restano fermi al last close, ma è
     #        comunque corretto aggiornare current_price = last close
     #        e mantenere snapshot continui per l'equity curve.
-    #    Era gated su REGULAR e creava "buchi" dei dati portfolio.
-    all_quotes = {**yf_quotes, **massive_quotes}  # massive ha la precedenza
+    # Precedenza in caso di sovrapposizioni: Polygon > Massive > yfinance
+    all_quotes = {**yf_quotes, **massive_quotes, **polygon_quotes}
     positions_updated, snapshot_saved = await asyncio.to_thread(
         _update_positions_and_snapshot, all_quotes
     )
 
-    if massive_quotes and yf_quotes:
-        source_used = f"massive+yfinance"
-    elif massive_quotes:
-        source_used = "massive"
-    elif yf_quotes:
-        source_used = "yfinance"
-    else:
-        source_used = "none"
+    sources_active = [
+        s for s, q in [("polygon", polygon_quotes),
+                       ("massive", massive_quotes),
+                       ("yfinance", yf_quotes)] if q
+    ]
+    source_used = "+".join(sources_active) if sources_active else "none"
 
     duration = round(time.time() - start, 2)
     logger.info(
-        "Price polling [%s]: %d ticker richiesti, %d quotes salvate (massive=%d, yf=%d), "
-        "%d storia, %d posizioni aggiornate, snapshot=%s (%.1fs)",
-        source_used, len(tickers), qw_total, len(massive_quotes), len(yf_quotes),
+        "Price polling [%s]: %d ticker richiesti, %d quotes salvate "
+        "(polygon=%d, massive=%d, yf=%d), %d storia, %d posizioni aggiornate, "
+        "snapshot=%s (%.1fs)",
+        source_used, len(tickers), qw_total, len(polygon_quotes),
+        len(massive_quotes), len(yf_quotes),
         hw_total, positions_updated, snapshot_saved, duration,
     )
 
@@ -515,6 +670,7 @@ async def update_price_cache() -> dict:
         "positions_updated": positions_updated,
         "snapshot_saved": snapshot_saved,
         "source": source_used,
+        "polygon_count": len(polygon_quotes),
         "massive_count": len(massive_quotes),
         "yfinance_count": len(yf_quotes),
         "duration_seconds": duration,

@@ -1191,9 +1191,32 @@ async def sim_run_step(run_id: str, req: SimStepReq):
     from simulator import runner as _runner
     try:
         return await _runner.execute_step(run_id, req.step_index)
+    except ValueError as e:
+        # ValueError = errore noto/recuperabile (rate limit, parsing, ecc.)
+        # Ritorniamo 503 con messaggio chiaro invece di 500 generico.
+        logger.error("[SIM] step %s/%d ValueError: %s", run_id, req.step_index, e)
+        msg = str(e)
+        is_transient = ("429" in msg or "timeout" in msg.lower()
+                        or "503" in msg or "504" in msg or "502" in msg)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": msg,
+                "type": "transient" if is_transient else "fatal",
+                "hint": ("Riprova tra qualche secondo: il modello e' temporaneamente"
+                         " sovraccarico o non risponde."
+                         if is_transient
+                         else "Errore inaspettato sul step. Controlla i log."),
+            },
+        )
     except Exception as e:
-        logger.error("Errore sim step: %s", e, exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        logger.error("[SIM] step %s/%d crash: %s", run_id, req.step_index, e,
+                     exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__,
+                     "hint": "Errore inaspettato. Riprova; se persiste segnala con i log."}
+        )
 
 
 @app.get("/api/simulator/auto-mode")

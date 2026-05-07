@@ -490,35 +490,213 @@ async def fetch_clawstreet_price_data(ticker: str, period_days: int = 90) -> Dic
     }
 
 
+# ============================================================
+# OHLCV via Polygon-compatible API (Polygon.io e Massive.com)
+# Usato come PRIMARIO da fetch_market_data (yfinance è solo fallback).
+# ============================================================
+POLYGON_BASE_URL = "https://api.polygon.io"
+MASSIVE_BASE_URL_OHLCV = "https://api.massive.com"
+PROVIDER_OHLCV_TIMEOUT = 15  # secondi (OHLCV può essere più lento del current price)
+
+
+def _get_polygon_key() -> str:
+    """API key Polygon.io da env var o DB settings."""
+    key = os.environ.get("POLYGON_API_KEY", "")
+    if not key:
+        try:
+            import database as _db
+            key = _db.get_setting("polygon_api_key", "") or ""
+        except Exception:
+            pass
+    return key
+
+
+def _get_massive_key_ohlcv() -> str:
+    """API key Massive.com da env var o DB settings."""
+    key = os.environ.get("MASSIVE_API_KEY", "")
+    if not key:
+        try:
+            import database as _db
+            key = _db.get_setting("massive_api_key", "") or ""
+        except Exception:
+            pass
+    return key
+
+
+async def _fetch_provider_ohlcv_async(
+    base_url: str, ticker: str, period_days: int, api_key: str, provider: str
+) -> Dict[str, Any]:
+    """
+    Fetch OHLCV daily bars via API Polygon-compatible.
+    Endpoint: /v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}
+
+    Returns: {ticker, data: [{date, open, high, low, close, volume}], error, source}
+    """
+    if not api_key:
+        return {"ticker": ticker, "data": [], "error": f"{provider}: no API key", "source": provider}
+
+    end_date = datetime.utcnow().date()
+    start_date = end_date - timedelta(days=period_days + 5)  # buffer per weekend
+    url = (
+        f"{base_url}/v2/aggs/ticker/{ticker}/range/1/day/"
+        f"{start_date.isoformat()}/{end_date.isoformat()}"
+    )
+    params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": api_key}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, params=params,
+                timeout=aiohttp.ClientTimeout(total=PROVIDER_OHLCV_TIMEOUT)
+            ) as resp:
+                if resp.status == 429:
+                    return {"ticker": ticker, "data": [],
+                            "error": f"{provider}: rate limit (429)", "source": provider}
+                if resp.status != 200:
+                    body = await resp.text()
+                    return {"ticker": ticker, "data": [],
+                            "error": f"{provider}: HTTP {resp.status}: {body[:150]}",
+                            "source": provider}
+                data = await resp.json()
+                results = data.get("results") or []
+                if not results:
+                    return {"ticker": ticker, "data": [],
+                            "error": f"{provider}: no results", "source": provider}
+                records: List[Dict[str, Any]] = []
+                for bar in results:
+                    ts_ms = bar.get("t", 0)
+                    if not ts_ms:
+                        continue
+                    date_str = datetime.fromtimestamp(
+                        ts_ms / 1000, tz=__import__("datetime").timezone.utc
+                    ).date().isoformat()
+                    records.append({
+                        "date": date_str,
+                        "open": float(bar.get("o") or 0),
+                        "high": float(bar.get("h") or 0),
+                        "low": float(bar.get("l") or 0),
+                        "close": float(bar.get("c") or 0),
+                        "volume": int(bar.get("v") or 0),
+                    })
+                if not records:
+                    return {"ticker": ticker, "data": [],
+                            "error": f"{provider}: empty records", "source": provider}
+                return {
+                    "ticker": ticker,
+                    "data": records,
+                    "fetched_at": datetime.utcnow().isoformat(),
+                    "error": None,
+                    "source": provider,
+                }
+    except Exception as exc:
+        return {"ticker": ticker, "data": [],
+                "error": f"{provider}: {str(exc)[:200]}", "source": provider}
+
+
+def _fetch_provider_ohlcv_sync(base_url: str, ticker: str, period_days: int,
+                               api_key: str, provider: str) -> Dict[str, Any]:
+    """
+    Wrapper sincrono per _fetch_provider_ohlcv_async.
+    Necessario perché fetch_market_data è sincrona e chiamata da
+    contesti misti (sync da scheduler, async da agenti).
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # Già in event loop: thread pool per evitare deadlock
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(
+                lambda: asyncio.run(
+                    _fetch_provider_ohlcv_async(base_url, ticker, period_days,
+                                                api_key, provider)
+                )
+            ).result(timeout=PROVIDER_OHLCV_TIMEOUT + 5)
+    return asyncio.run(
+        _fetch_provider_ohlcv_async(base_url, ticker, period_days, api_key, provider)
+    )
+
+
+def _is_ohlcv_corrupted(records: List[Dict[str, Any]]) -> bool:
+    """
+    Detect OHLCV corruption: se ≥90% dei close sono identici, i dati sono
+    stantii/cached da feed corrotto (yfinance rate-limit silenzioso).
+    """
+    if len(records) < 5:
+        return False
+    closes = [r.get("close", 0) for r in records if r.get("close", 0) > 0]
+    if len(closes) < 5:
+        return False
+    from collections import Counter
+    most_common_close, count = Counter(round(c, 2) for c in closes).most_common(1)[0]
+    return count >= max(5, int(len(closes) * 0.9))
+
+
 # ------------------------------------------------------------
-# Recupero dati di mercato tramite yfinance (sincrono)
-# Con fallback a ClawStreet se yfinance fallisce
+# Recupero dati di mercato (cascade Polygon → Massive → yfinance → ClawStreet)
 # ------------------------------------------------------------
 def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
     """
-    Scarica i dati OHLCV per un singolo ticker usando yfinance.
-    Include cache in-memory (5 min TTL) per evitare rate-limit 429.
-    Se yfinance fallisce (dati vuoti, eccezione, 429), prova ClawStreet come fallback.
+    Scarica i dati OHLCV per un singolo ticker.
+    Cascade: Polygon.io → Massive → yfinance (con corruption check) → ClawStreet.
+
+    Cache in-memory (5 min TTL) condivisa tra tutte le fonti.
 
     Parametri:
         ticker: simbolo del titolo (es. "XOM")
         period_days: numero di giorni di storico da recuperare (default 90)
 
     Restituisce un dizionario con:
-        - ticker: simbolo del titolo
-        - data: lista di record OHLCV giornalieri
-        - fetched_at: timestamp del recupero
-        - error: eventuale messaggio di errore
+        - ticker, data, fetched_at, error, source
     """
-    # Controlla la cache
+    # Controlla la cache (chiave indipendente da fonte)
     cache_key = f"{ticker}:{period_days}"
     now = time.time()
     if cache_key in _yfinance_cache:
         cached_time, cached_result = _yfinance_cache[cache_key]
         if now - cached_time < _YFINANCE_CACHE_TTL:
-            logger.debug("yfinance cache hit per %s", cache_key)
+            logger.debug("OHLCV cache hit per %s (source=%s)",
+                         cache_key, cached_result.get("source", "?"))
             return cached_result
 
+    # ── Provider 1: Polygon.io (primario) ────────────────────────────────────
+    polygon_key = _get_polygon_key()
+    if polygon_key:
+        try:
+            result = _fetch_provider_ohlcv_sync(
+                POLYGON_BASE_URL, ticker, period_days, polygon_key, "polygon"
+            )
+            if result.get("data") and not result.get("error"):
+                logger.debug("Polygon OK per %s (%d bars)", ticker, len(result["data"]))
+                _yfinance_cache[cache_key] = (now, result)
+                return result
+            else:
+                logger.info("Polygon fallito per %s: %s — provo Massive",
+                            ticker, result.get("error"))
+        except Exception as exc:
+            logger.warning("Polygon eccezione per %s: %s — provo Massive", ticker, exc)
+
+    # ── Provider 2: Massive (secondario, Polygon-compatible) ─────────────────
+    massive_key = _get_massive_key_ohlcv()
+    if massive_key:
+        try:
+            result = _fetch_provider_ohlcv_sync(
+                MASSIVE_BASE_URL_OHLCV, ticker, period_days, massive_key, "massive"
+            )
+            if result.get("data") and not result.get("error"):
+                logger.debug("Massive OK per %s (%d bars)", ticker, len(result["data"]))
+                _yfinance_cache[cache_key] = (now, result)
+                return result
+            else:
+                logger.info("Massive fallito per %s: %s — provo yfinance",
+                            ticker, result.get("error"))
+        except Exception as exc:
+            logger.warning("Massive eccezione per %s: %s — provo yfinance", ticker, exc)
+
+    # ── Provider 3: yfinance (ultima spiaggia) ───────────────────────────────
     yfinance_error = None
     try:
         # Pausa breve tra richieste consecutive per evitare rate-limit
@@ -540,7 +718,7 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
         )
 
         if df.empty:
-            logger.warning("Nessun dato ricevuto da yfinance per il ticker: %s — provo ClawStreet fallback", ticker)
+            logger.warning("yfinance vuoto per %s — provo ClawStreet fallback", ticker)
             yfinance_error = "Nessun dato disponibile da yfinance"
         else:
             # yfinance >= 0.2.31 restituisce colonne multi-index (Price, Ticker).
@@ -560,15 +738,26 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
                     "volume": int(row.get("Volume", 0)),
                 })
 
-            result = {
-                "ticker": ticker,
-                "data": records,
-                "fetched_at": datetime.utcnow().isoformat(),
-                "error": None,
-            }
-            # Salva in cache
-            _yfinance_cache[cache_key] = (now, result)
-            return result
+            # ── Corruption guard: yfinance può restituire stesso bar cached
+            # per tutti i timestamp quando rate-limited. Se ≥90% dei close
+            # sono identici, scartiamo i dati e passiamo al fallback successivo.
+            if _is_ohlcv_corrupted(records):
+                logger.warning(
+                    "⚠ yfinance OHLCV CORROTTO per %s: ≥90%% close identici — "
+                    "scarto e provo ClawStreet", ticker
+                )
+                yfinance_error = "yfinance OHLCV corruption (identical closes)"
+            else:
+                result = {
+                    "ticker": ticker,
+                    "data": records,
+                    "fetched_at": datetime.utcnow().isoformat(),
+                    "error": None,
+                    "source": "yfinance",
+                }
+                # Salva in cache
+                _yfinance_cache[cache_key] = (now, result)
+                return result
 
     except Exception as exc:
         logger.error("Errore yfinance per '%s': %s — provo ClawStreet fallback", ticker, exc)
