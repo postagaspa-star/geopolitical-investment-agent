@@ -75,6 +75,11 @@ function Settings({ onBack, onDataRefresh }) {
   const [csDiagLoading, setCsDiagLoading] = useState(false);
   const [csRetrying, setCsRetrying] = useState(false);
 
+  // === Direttive Utente (priorità massima, free-form text) ===
+  const [directivesText, setDirectivesText] = useState("");
+  const [directivesTextSaved, setDirectivesTextSaved] = useState("");
+  const [directivesSaving, setDirectivesSaving] = useState(false);
+
   // === UI ===
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
@@ -168,6 +173,17 @@ function Settings({ onBack, onDataRefresh }) {
       } catch (err) {
         console.error("Errore caricamento impostazioni:", err);
       }
+
+      // Direttive utente (free-form text)
+      try {
+        const dirRes = await fetch(`${API}/api/settings/directives`);
+        if (dirRes.ok) {
+          const dirData = await dirRes.json();
+          const t = (dirData && typeof dirData.text === "string") ? dirData.text : "";
+          setDirectivesText(t);
+          setDirectivesTextSaved(t);
+        }
+      } catch {}
 
       // Carica documenti
       const docs = await loadDocumentsRaw();
@@ -530,6 +546,97 @@ function Settings({ onBack, onDataRefresh }) {
         <style>{`
           @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
         `}</style>
+
+        {/* === DIRETTIVE UTENTE (PRIORITÀ MASSIMA) === */}
+        <div style={{ ...cardStyle, borderLeft: "4px solid #dc2626" }}>
+          <div style={{ ...sectionTitle, color: "#dc2626" }}>
+            🔴 Direttive Utente (Priorità Massima)
+          </div>
+          <p style={{ color: "#374151", fontSize: "0.9rem", margin: "0 0 16px 0", lineHeight: 1.6 }}>
+            Testo libero che viene iniettato <strong>IN CIMA</strong> al system prompt di
+            <strong> Decision (Sonnet 4.5)</strong>, <strong>Decision Crypto (R1)</strong> e
+            dei <strong>Simulator</strong> (Equity + Crypto). Ha priorità su prompt base
+            e principi condivisi. Usalo per imporre regole tipo:
+            <em> "Non limitarti a 5 trade, lavora fino al cap di 15", "Ignora segnali contradditori se VIX &gt; 30",
+            "Non shortare durante regimi rialzisti BTC".</em>
+          </p>
+
+          <textarea
+            rows={10}
+            style={textareaStyle}
+            value={directivesText}
+            onChange={(e) => setDirectivesText(e.target.value)}
+            placeholder={
+              "Esempio (puoi scrivere liberamente):\n\n" +
+              "1. Non limitarti mai a 5 operazioni: il vero cap è 15. Apri tutte le\n" +
+              "   posizioni che la tesi giustifica fino a quel cap.\n\n" +
+              "2. Quando BTC fa breakout > 3% in 24h, non fare HOLD su crypto:\n" +
+              "   o entri o esci esplicitamente, niente esitazioni.\n\n" +
+              "3. Stop loss su conviction ALTA: usa 1/3 della distanza tecnica\n" +
+              "   normale (sei più sicuro, accetti meno rumore).\n"
+            }
+            maxLength={5000}
+          />
+
+          <div style={{ display: "flex", justifyContent: "space-between",
+                        alignItems: "center", marginTop: 8 }}>
+            <div style={{ fontSize: "0.75rem", color: "#9ca3af" }}>
+              {directivesText.length}/5000 caratteri
+              {directivesText !== directivesTextSaved && (
+                <span style={{ color: "#dc2626", marginLeft: 8 }}>· non salvato</span>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {directivesText !== directivesTextSaved && (
+                <button
+                  onClick={() => setDirectivesText(directivesTextSaved)}
+                  disabled={directivesSaving}
+                  style={{
+                    padding: "8px 14px", background: "#f3f4f6", color: "#374151",
+                    border: "1px solid #d1d5db", borderRadius: 6, fontSize: "0.85rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  Annulla modifiche
+                </button>
+              )}
+              <button
+                onClick={async () => {
+                  setDirectivesSaving(true);
+                  try {
+                    const r = await fetch(`${API}/api/settings/directives`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ text: directivesText }),
+                    });
+                    if (r.ok) {
+                      const data = await r.json();
+                      const t = data.text ?? directivesText;
+                      setDirectivesText(t); setDirectivesTextSaved(t);
+                      showMessage("Direttive salvate. Verranno applicate ai prossimi run.");
+                    } else {
+                      showMessage("Errore salvataggio direttive.", true);
+                    }
+                  } catch {
+                    showMessage("Errore di rete.", true);
+                  } finally {
+                    setDirectivesSaving(false);
+                  }
+                }}
+                disabled={directivesSaving || directivesText === directivesTextSaved}
+                style={{
+                  padding: "8px 18px", background: "#dc2626", color: "#fff",
+                  border: "none", borderRadius: 6, fontWeight: 600, fontSize: "0.85rem",
+                  cursor: (directivesSaving || directivesText === directivesTextSaved)
+                            ? "not-allowed" : "pointer",
+                  opacity: (directivesSaving || directivesText === directivesTextSaved) ? 0.5 : 1,
+                }}
+              >
+                {directivesSaving ? "Salvo..." : "Salva direttive"}
+              </button>
+            </div>
+          </div>
+        </div>
 
         {/* === PROMPT DI SISTEMA (3 AGENTI) === */}
         <div style={cardStyle}>

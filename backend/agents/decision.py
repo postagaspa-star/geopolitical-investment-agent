@@ -233,6 +233,11 @@ FILOSOFIA OPERATIVA — ASSERTIVITÀ MASSIMA, NESSUN VINCOLO DI DIVERSIFICAZIONE
    - MAX 15 POSIZIONI APERTE totali (eviti di disperdersi su troppi
      ticker con tesi sottili). Quando sei vicino al cap, valuta se
      ruotare le posizioni meno convinte invece di non operare.
+   - **NON LIMITARTI A 5 OPERAZIONI**: il cap reale è 15. Se hai tesi
+     forti su più ticker, apri tutte le posizioni che la tesi giustifica
+     fino a quel cap. Essere troppo cauti = perdere alpha. La conservazione
+     eccessiva è un anti-pattern noto: spara pochi colpi ma azzeccati,
+     non zero colpi per paura di sbagliare.
 
 5. **CONFIDENCE FLOORS** (rispetta SEMPRE):
    - BUY/SELL con segnali concordi: confidence 60-85
@@ -408,6 +413,45 @@ geo-trigger → conferma tecnica → ragione di entrata/uscita.
 Se il caso non è chiaro, usa do_nothing senza forzare l'operazione."""
 
 
+def get_user_directives_text() -> str:
+    """
+    Carica le DIRETTIVE UTENTE — testo libero a priorità massima che l'utente
+    configura dalle Settings. Vengono iniettate IN CIMA al system prompt di
+    TUTTI gli agenti decisionali (Decision, Decision Crypto, Simulator).
+
+    Setting key: 'user_directives_text' = stringa free-form (max ~5000 char).
+    """
+    try:
+        import database as _db
+        raw = _db.get_setting("user_directives_text", "")
+        if not isinstance(raw, str):
+            return ""
+        return raw.strip()
+    except Exception:
+        return ""
+
+
+def _build_directives_block() -> str:
+    """
+    Compone il blocco direttive utente da prependere al system prompt.
+    Ritorna stringa vuota se l'utente non ha configurato direttive.
+    """
+    text = get_user_directives_text()
+    if not text:
+        return ""
+
+    return (
+        "█" * 60 + "\n"
+        "🔴 DIRETTIVE UTENTE — PRIORITÀ MASSIMA\n"
+        + "█" * 60 + "\n\n"
+        "Le seguenti istruzioni sono state configurate ESPLICITAMENTE dall'utente\n"
+        "e hanno la PRIORITÀ PIÙ ALTA. In caso di conflitto con altre regole del\n"
+        "sistema, queste prevalgono SEMPRE. Applicarle è OBBLIGATORIO.\n\n"
+        + text + "\n\n"
+        + "█" * 60 + "\n\n"
+    )
+
+
 def _get_decision_prompt(engine: str | None = None) -> str:
     """
     Carica il system prompt del Decision Agent.
@@ -418,8 +462,9 @@ def _get_decision_prompt(engine: str | None = None) -> str:
     Per Claude:    setting key 'prompt_decision'    → fallback DECISION_SYSTEM_PROMPT_DEFAULT
     Per R1:        setting key 'prompt_decision_r1' → fallback DECISION_R1_SYSTEM_PROMPT_DEFAULT
 
-    Inietta SEMPRE alla fine il blocco shared_principles (gestione SL/TP +
-    dialog Technical) che e' identico tra Live e Simulator.
+    Inietta IN CIMA le direttive utente (priorità massima) e in coda il
+    blocco shared_principles (gestione SL/TP + dialog Technical) condiviso
+    tra Live e Simulator.
     """
     if engine is None:
         engine = _resolve_engine_for_run()
@@ -436,15 +481,16 @@ def _get_decision_prompt(engine: str | None = None) -> str:
     except Exception:
         pass
 
-    # Inietta i principi condivisi (SL/TP autonomy + Technical dialog).
-    # Idempotente: se sono gia' presenti per via di un custom prompt,
-    # l'utente puo' rimuoverli editando le settings.
+    # 1. Direttive utente (in cima, max priority)
+    directives_block = _build_directives_block()
+
+    # 2. Shared principles (in coda)
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        return base_prompt + "\n\n" + "═" * 60 + "\n" + shared
+        return directives_block + base_prompt + "\n\n" + "═" * 60 + "\n" + shared
     except Exception:
-        return base_prompt
+        return directives_block + base_prompt
 
 
 def _get_client() -> Anthropic:

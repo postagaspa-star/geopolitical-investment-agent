@@ -158,7 +158,13 @@ def _get_deepseek_key() -> str:
 
 
 def _get_crypto_decision_prompt() -> str:
-    """Carica il prompt custom dalle settings + inietta shared_principles."""
+    """Carica il prompt custom dalle settings + direttive utente + shared_principles.
+
+    Ordine di priorità nel prompt finale:
+      1. Direttive Utente (in cima, max priority)
+      2. Prompt base (custom o default)
+      3. Shared principles (in coda)
+    """
     base = CRYPTO_DECISION_PROMPT_DEFAULT
     try:
         import database as _db
@@ -168,13 +174,20 @@ def _get_crypto_decision_prompt() -> str:
     except Exception:
         pass
 
-    # Inietta sempre i principi condivisi (SL/TP autonomy + Technical dialog).
+    # 1. Direttive utente in cima
+    try:
+        from agents.decision import _build_directives_block
+        directives_block = _build_directives_block()
+    except Exception:
+        directives_block = ""
+
+    # 2. Shared principles in coda
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        return base + "\n\n" + "═" * 60 + "\n" + shared
+        return directives_block + base + "\n\n" + "═" * 60 + "\n" + shared
     except Exception:
-        return base
+        return directives_block + base
 
 
 def is_cooldown_active() -> tuple[bool, int]:

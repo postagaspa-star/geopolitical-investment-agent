@@ -422,7 +422,13 @@ async def execute_crypto_step(
         headlines, history, step_index, num_steps, target_date
     )
 
-    raw = await _call_crypto_r1(SIM_CRYPTO_SYSTEM_PROMPT, user_msg)
+    # Inietta direttive utente in cima al system prompt
+    try:
+        from agents.decision import _build_directives_block
+        sys_prompt = _build_directives_block() + SIM_CRYPTO_SYSTEM_PROMPT
+    except Exception:
+        sys_prompt = SIM_CRYPTO_SYSTEM_PROMPT
+    raw = await _call_crypto_r1(sys_prompt, user_msg)
     parsed = _parse_crypto_response(raw)
 
     apply_result = apply_trades(portfolio, parsed["trades"], prices)

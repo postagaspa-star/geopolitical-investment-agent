@@ -2168,6 +2168,43 @@ async def sim_advisor_chat_delete(run_id: str):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ════════════════════════════════════════════════════════════════════════
+# Direttive Utente — istruzioni a priorità massima per gli agenti AI
+# ════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/settings/directives")
+async def get_directives():
+    """Direttive utente correnti (testo libero a priorità massima)."""
+    try:
+        from agents.decision import get_user_directives_text
+        return {"text": get_user_directives_text()}
+    except Exception as e:
+        logger.error("get_directives error: %s", e)
+        return {"text": ""}
+
+
+class DirectivesUpdateReq(BaseModel):
+    text: str
+
+
+@app.post("/api/settings/directives")
+async def set_directives(req: DirectivesUpdateReq):
+    """
+    Aggiorna le direttive utente. Testo libero (max ~5000 char) iniettato
+    IN CIMA al system prompt di Decision, Decision Crypto, Simulator V2 ed
+    Equity/Crypto come "PRIORITÀ MASSIMA".
+    """
+    text = (req.text or "").strip()
+    if len(text) > 5000:
+        text = text[:5000]
+    try:
+        database.set_setting("user_directives_text", text)
+        return {"status": "ok", "length": len(text), "text": text}
+    except Exception as e:
+        logger.error("set_directives error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/settings/prompt-defaults")
 async def get_prompt_defaults():
     """
