@@ -331,7 +331,8 @@ CRYPTO_DECISION_TOOLS = [
 
 # ─── Tool handler ───────────────────────────────────────────────────────────
 
-async def _handle_tool(tool_name: str, tool_input: dict, run_id: str) -> str:
+async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
+                        workflow_state=None) -> str:
     import data_fetchers
     import database
     import portfolio
@@ -374,6 +375,24 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str) -> str:
             confidence = tool_input["confidence_level"]
             stop_loss = tool_input.get("stop_loss") or None
             take_profit = tool_input.get("take_profit") or None
+
+            # ── ARRICCHIMENTO logic_chain con thesis dal workflow_state ──
+            if workflow_state is not None and getattr(workflow_state, "final_thesis", None):
+                ft = workflow_state.final_thesis or {}
+                thesis = (ft.get("thesis") or "").strip()
+                plan = (ft.get("action_plan") or "").strip()
+                risk = (ft.get("primary_risk") or "").strip()
+                enriched_parts = []
+                if thesis:
+                    enriched_parts.append(f"[TESI] {thesis[:1500]}")
+                if plan:
+                    enriched_parts.append(f"[PIANO] {plan[:600]}")
+                if risk:
+                    enriched_parts.append(f"[RISCHIO] {risk[:400]}")
+                if enriched_parts and (logic_chain or "").strip():
+                    enriched_parts.append(f"[ESECUZIONE] {logic_chain.strip()[:1000]}")
+                if enriched_parts:
+                    logic_chain = "\n\n".join(enriched_parts)
 
             # Pre-validation HARD: solo crypto ClawStreet supportate
             try:
@@ -716,8 +735,10 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
                     })
                     continue
 
-                # Esegui tool
-                result = await _handle_tool(tool_name, tool_input, run_id)
+                # Esegui tool — workflow_state per arricchimento logic_chain
+                result = await _handle_tool(
+                    tool_name, tool_input, run_id, workflow_state=workflow_state,
+                )
 
                 # Aggiorna state machine
                 workflow_state = apply_tool_transition(

@@ -577,8 +577,16 @@ DECISION_TOOLS = [
 # Tool Handler
 # ============================================================
 
-async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -> str:
-    """Gestisce le chiamate tool del Decision Agent."""
+async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
+                                  workflow_state: "WorkflowState | None" = None) -> str:
+    """Gestisce le chiamate tool del Decision Agent.
+
+    workflow_state: se passato, viene usato per ARRICCHIRE il logic_chain
+    di execute_trade con il contenuto di commit_final_thesis (thesis,
+    action_plan, primary_risk) — cosi' il reasoning del trade nel DB
+    contiene tutto il workflow, non solo la stringa scarsa che il modello
+    a volte passa direttamente.
+    """
     import data_fetchers
     import database
     import portfolio
@@ -621,6 +629,28 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str) -
             confidence = tool_input["confidence_level"]
             stop_loss = tool_input.get("stop_loss", 0) or None
             take_profit = tool_input.get("take_profit", 0) or None
+
+            # ── ARRICCHIMENTO logic_chain con thesis dal workflow_state ──
+            # Il modello a volte passa logic_chain corti e generici nel tool
+            # (es. "esegui per breakout"). Il VERO reasoning e' in
+            # commit_final_thesis. Lo prependiamo cosi' il trade record nel
+            # DB contiene il pensiero completo, non solo lo slot del tool.
+            if workflow_state is not None and getattr(workflow_state, "final_thesis", None):
+                ft = workflow_state.final_thesis or {}
+                thesis = (ft.get("thesis") or "").strip()
+                plan = (ft.get("action_plan") or "").strip()
+                risk = (ft.get("primary_risk") or "").strip()
+                enriched_parts = []
+                if thesis:
+                    enriched_parts.append(f"[TESI] {thesis[:1500]}")
+                if plan:
+                    enriched_parts.append(f"[PIANO] {plan[:600]}")
+                if risk:
+                    enriched_parts.append(f"[RISCHIO] {risk[:400]}")
+                if enriched_parts and (logic_chain or "").strip():
+                    enriched_parts.append(f"[ESECUZIONE] {logic_chain.strip()[:1000]}")
+                if enriched_parts:
+                    logic_chain = "\n\n".join(enriched_parts)
 
             logger.info("[%s][DECISION] TRADE: %s %d %s (conf: %.0f%%, SL: %s)",
                         run_id, action, quantity, ticker, confidence, stop_loss)
@@ -1167,8 +1197,11 @@ async def run_decision_agent(run_id: str, tech_report: dict,
                 })
                 continue
 
-            # Esegui il tool
-            result = await _handle_decision_tool(block.name, block.input, run_id)
+            # Esegui il tool — passiamo workflow_state per arricchire il
+            # logic_chain di execute_trade con il commit_final_thesis.
+            result = await _handle_decision_tool(
+                block.name, block.input, run_id, workflow_state=workflow_state,
+            )
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
@@ -1388,8 +1421,10 @@ async def _run_deepseek_decision_loop(
                     })
                     continue
 
-                # Esegui tool
-                result = await _handle_decision_tool(tool_name, tool_input, run_id)
+                # Esegui tool — workflow_state per arricchimento logic_chain
+                result = await _handle_decision_tool(
+                    tool_name, tool_input, run_id, workflow_state=workflow_state,
+                )
 
                 # Aggiorna state machine
                 workflow_state = apply_tool_transition(

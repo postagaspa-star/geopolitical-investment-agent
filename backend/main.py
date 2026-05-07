@@ -1352,6 +1352,74 @@ async def coach_cards_delete(card_id: str):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+class ChatToCardReq(BaseModel):
+    title: str
+    content: str
+
+
+@app.post("/api/coach-cards/from-chat")
+async def coach_cards_from_chat(req: ChatToCardReq):
+    """
+    Crea una Coach Card direttamente dal contenuto di un messaggio della chat
+    Live. Permette all'utente di salvare insight della chat come consiglio
+    operativo che il Decision Agent legge nei run successivi.
+
+    Il content del messaggio viene messo nel campo 'rationale' della card +
+    tentativo di estrazione di "DO" / "DON'T" euristica (cerca pattern
+    "fai X", "non fare Y" nel testo).
+    """
+    try:
+        from agents import coach_cards
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"import: {e}"})
+
+    title = (req.title or "").strip()
+    content = (req.content or "").strip()
+    if not title or not content:
+        return JSONResponse(status_code=400, content={"error": "title/content mancanti"})
+
+    # Heuristic: estrazione DO/DON'T dal contenuto. Se non trovati, mette
+    # il content intero come 'do' (l'utente ha scelto questo messaggio
+    # come consiglio operativo, presumibile sia un suggerimento).
+    do_text = ""
+    dont_text = ""
+    import re as _re
+    # Pattern "DO: ... DON'T: ..." espliciti
+    m_do = _re.search(r"(?:^|\n)\s*(?:DO|FARE|DA FARE|✓)\s*[:\-]\s*([^\n]{10,400})",
+                       content, _re.IGNORECASE)
+    m_dont = _re.search(r"(?:^|\n)\s*(?:DON'T|NON FARE|DA EVITARE|✗)\s*[:\-]\s*([^\n]{10,400})",
+                         content, _re.IGNORECASE)
+    if m_do:
+        do_text = m_do.group(1).strip()
+    if m_dont:
+        dont_text = m_dont.group(1).strip()
+    # Se non estratti, usa l'intero content come DO (l'utente ha selezionato
+    # questo messaggio quindi lo considera un suggerimento positivo)
+    if not do_text and not dont_text:
+        do_text = content[:600]
+        dont_text = "(non specificato — vedi rationale)"
+
+    card = {
+        "week_of": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "category_focus": "user_chat",
+        "title": title[:200],
+        "do": (do_text or "(vuoto)")[:600],
+        "dont": (dont_text or "(vuoto)")[:600],
+        "rationale": (
+            f"Consiglio aggiunto dall'utente via chat Live. "
+            f"Contenuto originale: {content[:400]}"
+        )[:600],
+        "scenarios_signature": "user_advice",
+        "source_advice_count": 1,
+    }
+
+    try:
+        cid = coach_cards.save_card(card)
+        return {"saved": True, "id": cid, "card": card}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ─── Daily scenario generator: ingestione scenari da GitHub Actions ────────
 
 class DynamicScenarioPayload(BaseModel):

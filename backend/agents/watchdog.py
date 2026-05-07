@@ -480,6 +480,37 @@ async def run_watchdog(run_id: str) -> dict:
 
     elapsed = round(time.time() - t0, 2)
 
+    # 5b. DEDUP TRIGGER RICORRENTI
+    # Se lo stesso trigger (stesso pattern di focus_tickers + reason
+    # normalizzata) si e' presentato negli ultimi 30 minuti, suppress.
+    # Esempio: se NVDA/GLD/QQQ sono in trigger da 5 minuti, il prossimo
+    # ciclo del watchdog (5 min dopo) non deve attivare un altro Decision
+    # run sullo stesso pattern — sarebbe spreco di tokens + decisional
+    # confuso da contesti molto simili in sequenza.
+    suppressed_by_dedup = False
+    if trigger:
+        try:
+            current_sig = _trigger_signature(reason, focus_tickers)
+            last_sig = database.get_setting("watchdog_last_trigger_sig", "") or ""
+            last_at_iso = database.get_setting("watchdog_last_trigger_at", "") or ""
+            if last_sig == current_sig and last_at_iso:
+                last_at = datetime.fromisoformat(last_at_iso.replace("Z", "+00:00"))
+                age_min = (datetime.now(timezone.utc) - last_at).total_seconds() / 60
+                if age_min < 30:
+                    suppressed_by_dedup = True
+                    trigger = False
+                    logger.info(
+                        "[%s][WATCHDOG] DEDUP: stesso pattern triggered %dmin fa, suppress",
+                        run_id, int(age_min),
+                    )
+            if not suppressed_by_dedup:
+                # Salva il signature corrente come ultimo
+                database.set_setting("watchdog_last_trigger_sig", current_sig)
+                database.set_setting("watchdog_last_trigger_at",
+                                      datetime.now(timezone.utc).isoformat())
+        except Exception as exc:
+            logger.warning("[%s][WATCHDOG] dedup check failed: %s", run_id, exc)
+
     # 5. Logga
     database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
         "event": "watchdog_complete",
@@ -491,15 +522,38 @@ async def run_watchdog(run_id: str) -> dict:
         "deep_check": deep_check,
         "portfolio_tickers": portfolio_tickers if deep_check else [],
         "run_counter": counter,
+        "suppressed_by_dedup": suppressed_by_dedup,
     }))
 
-    logger.info("[%s][WATCHDOG] trigger=%s urgency=%d reason='%s' (%.2fs)",
-                run_id, trigger, urgency, reason, elapsed)
+    logger.info("[%s][WATCHDOG] trigger=%s urgency=%d reason='%s' (%.2fs)%s",
+                run_id, trigger, urgency, reason, elapsed,
+                " [DEDUP]" if suppressed_by_dedup else "")
 
     return {
         "should_trigger": trigger,
         "urgency": urgency,
-        "reason": reason,
+        "reason": reason if not suppressed_by_dedup else f"DEDUP: {reason}",
         "focus_tickers": focus_tickers,
         "elapsed_seconds": elapsed,
+        "suppressed_by_dedup": suppressed_by_dedup,
     }
+
+
+def _trigger_signature(reason: str, focus_tickers: list) -> str:
+    """
+    Computa una signature stabile del trigger per dedup.
+    - reason normalizzata: lowercase, no punctuation, prime 8 parole significative
+    - focus_tickers: sorted, uppercase
+    - hash SHA1 dei primi 80 chars canonici
+    """
+    import hashlib
+    import re as _re
+    if not isinstance(reason, str):
+        reason = str(reason or "")
+    txt = reason.lower()
+    txt = _re.sub(r"[^\w\s]", " ", txt)
+    txt = _re.sub(r"\s+", " ", txt).strip()
+    words = [w for w in txt.split() if len(w) > 2][:8]
+    tickers = sorted({(t or "").upper().strip() for t in (focus_tickers or [])})
+    canonical = (" ".join(words) + "|" + ",".join(tickers))[:80]
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]

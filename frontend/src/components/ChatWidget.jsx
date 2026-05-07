@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { MessageCircle, X, Send, Trash2, Plus, History } from "lucide-react";
+import { MessageCircle, X, Send, Trash2, Plus, History, BookOpen, Check } from "lucide-react";
 
 const API = window.location.origin;
 
@@ -306,11 +306,70 @@ function ChatView({ messages, sending, selectedIds, decisionsCount, onOpenSelect
 
 function MessageBubble({ msg }) {
   const isUser = msg.role === "user";
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const saveAsCoachCard = async () => {
+    if (saving || saved) return;
+    const title = window.prompt(
+      "Titolo del consiglio (max 80 char):",
+      msg.content.slice(0, 80),
+    );
+    if (!title) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`${API}/api/coach-cards/from-chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: title.slice(0, 200),
+          content: msg.content,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(`Errore: ${data.error || res.status}`);
+      } else {
+        setSaved(true);
+      }
+    } catch (e) {
+      alert(`Errore: ${e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div style={isUser ? S.bubbleUser : S.bubbleAssistant}>
       <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
         {msg.content}
       </div>
+      {!isUser && msg.content && msg.content.length > 40 && (
+        <div style={{
+          marginTop: 6, paddingTop: 6,
+          borderTop: "1px dashed rgba(255,255,255,0.06)",
+          display: "flex", gap: 6, justifyContent: "flex-end",
+        }}>
+          <button
+            onClick={saveAsCoachCard}
+            disabled={saving || saved}
+            style={{
+              background: saved ? "rgba(16,185,129,0.15)" : "rgba(167,139,250,0.12)",
+              color: saved ? "#6ee7b7" : "#c4b5fd",
+              border: `1px solid ${saved ? "rgba(16,185,129,0.3)" : "rgba(167,139,250,0.3)"}`,
+              padding: "3px 9px", borderRadius: 999, fontSize: 10,
+              cursor: saving || saved ? "default" : "pointer",
+              display: "inline-flex", alignItems: "center", gap: 4,
+              fontFamily: "inherit",
+            }}
+            title="Salva questo consiglio come Coach Card per il bot Live"
+          >
+            {saved ? <><Check size={11} /> Salvato</>
+                   : saving ? "..."
+                   : <><BookOpen size={11} /> Salva come consiglio</>}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -11,6 +11,11 @@ Il codice si limita a eseguire gli ordini e a verificare che ci sia
 liquidita' sufficiente e che le posizioni esistano prima di venderle.
 """
 
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
 from database import (
     get_portfolio, update_portfolio,
     get_positions, get_position,
@@ -243,21 +248,108 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# SL/TP SANITY VALIDATION
+# Bug noto: il modello a volte confondeva la quantity (es. 150) con il
+# prezzo del SL, impostando SL=$145 su GLD a $420. Risultato: chiusura
+# istantanea della posizione a prezzo assurdo. Queste funzioni rifiutano
+# tutti i SL/TP che si discostano > 50% dal prezzo corrente.
+# ═══════════════════════════════════════════════════════════════════════
+
+# Soglie di sanita' per i livelli SL/TP. Ratio = level / current_price.
+# Un livello "ragionevole" e' tra 0.5 e 1.5 (cioe' entro ±50%).
+_SLTP_MIN_RATIO = 0.50
+_SLTP_MAX_RATIO = 1.50
+
+
+def _validate_sltp_level(level_price: float, current_price: float,
+                          kind: str, is_long: bool = True
+                          ) -> tuple[bool, str]:
+    """
+    Verifica che un livello SL/TP sia plausibile rispetto al prezzo corrente.
+
+    Args:
+      level_price:  prezzo proposto del SL/TP (deve essere > 0)
+      current_price: prezzo corrente dell'asset
+      kind:  'SL' o 'TP' per messaggi di errore
+      is_long: True se LONG (BUY), False se SHORT (SELL)
+
+    Ritorna (ok, reason).
+    """
+    if not isinstance(level_price, (int, float)) or level_price <= 0:
+        return False, f"{kind} non valido (deve essere > 0)"
+    if not isinstance(current_price, (int, float)) or current_price <= 0:
+        return False, f"current_price non valido per validare {kind}"
+
+    ratio = float(level_price) / float(current_price)
+    if ratio < _SLTP_MIN_RATIO or ratio > _SLTP_MAX_RATIO:
+        return False, (
+            f"{kind} ({level_price}) si discosta {abs(1 - ratio) * 100:.0f}% "
+            f"dal prezzo corrente ({current_price}). Range accettato: "
+            f"{current_price * _SLTP_MIN_RATIO:.2f} - "
+            f"{current_price * _SLTP_MAX_RATIO:.2f}. "
+            f"Probabile errore (forse hai confuso quantita' con prezzo?)."
+        )
+
+    # Verifica direzione corretta vs current_price
+    if kind == "SL":
+        if is_long and level_price >= current_price:
+            return False, (
+                f"SL ({level_price}) DEVE essere SOTTO current ({current_price}) "
+                f"per un LONG."
+            )
+        if (not is_long) and level_price <= current_price:
+            return False, (
+                f"SL ({level_price}) DEVE essere SOPRA current ({current_price}) "
+                f"per uno SHORT."
+            )
+    elif kind == "TP":
+        if is_long and level_price <= current_price:
+            return False, (
+                f"TP ({level_price}) DEVE essere SOPRA current ({current_price}) "
+                f"per un LONG."
+            )
+        if (not is_long) and level_price >= current_price:
+            return False, (
+                f"TP ({level_price}) DEVE essere SOTTO current ({current_price}) "
+                f"per uno SHORT."
+            )
+
+    return True, ""
+
+
 def set_stop_loss(ticker: str, stop_price: float, run_id: str = "") -> dict:
     """
     Imposta o rimuove (stop_price=0) lo stop-loss automatico su una posizione.
-    Se stop_price > 0 e current_price <= stop_price → la posizione verra'
-    chiusa automaticamente al prossimo update prezzi.
+    Sanity check: rifiuta SL che si discostano > 50% dal prezzo corrente
+    (preveniva il bug "SL=145 su GLD@420" che chiudeva la posizione subito).
     """
     pos = get_position(ticker)
     if pos is None:
         return {"success": False, "reason": f"Nessuna posizione su {ticker}"}
-    if stop_price < 0:
+    if stop_price is None or stop_price < 0:
         return {"success": False, "reason": "stop_price deve essere >= 0"}
-    if stop_price > 0 and stop_price >= pos["avg_buy_price"]:
-        # Warning soft: SL sopra il prezzo di carico significa lock-in di gain
-        # (non vietato ma raro); il modello potrebbe averlo voluto come trail.
-        pass
+
+    if float(stop_price) > 0:
+        cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
+        # Per il sistema attuale tutte le posizioni sono LONG (BUY); il
+        # validatore copre comunque il caso SHORT futuro.
+        ok, reason = _validate_sltp_level(
+            float(stop_price), float(cur), kind="SL", is_long=True,
+        )
+        if not ok:
+            try:
+                import database as _db
+                _db.insert_agent_log(run_id or "", "SL_REJECTED", json.dumps({
+                    "ticker": ticker,
+                    "stop_price_proposed": stop_price,
+                    "current_price": cur,
+                    "reason": reason,
+                }, default=str))
+            except Exception:
+                pass
+            return {"success": False, "reason": reason}
+
     ok = update_position_auto_exit(ticker, stop_loss_price=stop_price, set_by=run_id)
     if not ok:
         return {"success": False, "reason": "Aggiornamento DB fallito"}
@@ -273,15 +365,32 @@ def set_stop_loss(ticker: str, stop_price: float, run_id: str = "") -> dict:
 def set_take_profit(ticker: str, target_price: float, run_id: str = "") -> dict:
     """
     Imposta o rimuove (target_price=0) il take-profit automatico.
-    Se target_price > 0 e current_price >= target_price → chiusura auto.
+    Sanity check: stesso pattern di set_stop_loss (rifiuta level > ±50%).
     """
     pos = get_position(ticker)
     if pos is None:
         return {"success": False, "reason": f"Nessuna posizione su {ticker}"}
-    if target_price < 0:
+    if target_price is None or target_price < 0:
         return {"success": False, "reason": "target_price deve essere >= 0"}
-    if target_price > 0 and target_price <= pos["avg_buy_price"]:
-        pass  # warning soft (TP sotto carico = lock-in di loss; raro ma non vietato)
+
+    if float(target_price) > 0:
+        cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
+        ok, reason = _validate_sltp_level(
+            float(target_price), float(cur), kind="TP", is_long=True,
+        )
+        if not ok:
+            try:
+                import database as _db
+                _db.insert_agent_log(run_id or "", "TP_REJECTED", json.dumps({
+                    "ticker": ticker,
+                    "target_price_proposed": target_price,
+                    "current_price": cur,
+                    "reason": reason,
+                }, default=str))
+            except Exception:
+                pass
+            return {"success": False, "reason": reason}
+
     ok = update_position_auto_exit(ticker, take_profit_price=target_price, set_by=run_id)
     if not ok:
         return {"success": False, "reason": "Aggiornamento DB fallito"}
