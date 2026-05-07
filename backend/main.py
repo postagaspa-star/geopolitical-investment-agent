@@ -1314,6 +1314,35 @@ async def sim_v2_finalize(req: SimV2FinalizeReq):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+class SimV2AdvisorReq(BaseModel):
+    scenario: dict
+    history: list[dict]
+    final_result: dict
+    user_message: str
+    chat_history: list[dict] = []
+
+
+@app.post("/api/simulator/v2/advisor")
+async def sim_v2_advisor(req: SimV2AdvisorReq):
+    """
+    Chat advisor end-of-game: risponde a domande sull'andamento della partita.
+    Stateless: il client tiene la chat_history e la rimanda.
+    """
+    from simulator import v2_engine
+    try:
+        reply = await v2_engine.advisor_chat(
+            scenario=req.scenario,
+            history=req.history,
+            final_result=req.final_result,
+            user_message=req.user_message,
+            chat_history=req.chat_history,
+        )
+        return {"reply": reply}
+    except Exception as e:
+        logger.error("[SIM-V2] advisor crash: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/simulator/auto-mode")
 async def sim_get_auto_mode():
     from simulator import db as sim_db
