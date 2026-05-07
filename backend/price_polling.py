@@ -570,20 +570,36 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
         if quote and "price" in quote:
             new_price = float(quote.get("price") or 0)
             prev_close = float(quote.get("prev_close") or 0)
-            # Reference per il sanity check: prev_close dal quote, fallback a old_current
-            ref = prev_close if prev_close > 0 else old_current
-            if new_price > 0 and ref > 0:
-                ratio = new_price / ref
+            # Reference per il sanity check: prev_close dal quote ESCLUSIVAMENTE.
+            # BUG FIXATO: prima fallback a old_current creava un loop — il
+            # prezzo veniva confrontato contro se stesso, sempre validato
+            # anche se stale. Ora se prev_close manca, accetta solo se la
+            # variazione vs old_current e' < 10% (sanity light); oltre il
+            # 10% richiediamo prev_close del quote source.
+            if new_price <= 0:
+                logger.warning("[POLLING] Prezzo NULLO/NEGATIVO per %s: %.4f, scartato",
+                               ticker, new_price)
+                quote = None
+            elif prev_close > 0:
+                ratio = new_price / prev_close
                 if ratio < 0.6 or ratio > 1.4:
                     logger.warning(
-                        "[POLLING] Prezzo IMPLAUSIBILE per %s: nuovo=%.2f, ref=%.2f (ratio %.2f). "
-                        "Aggiornamento RIFIUTATO. Source=%s",
-                        ticker, new_price, ref, ratio, quote.get("source", "?")
+                        "[POLLING] Prezzo IMPLAUSIBILE per %s: nuovo=%.2f vs prev_close=%.2f "
+                        "(ratio %.2f). RIFIUTATO. Source=%s",
+                        ticker, new_price, prev_close, ratio, quote.get("source", "?"),
                     )
-                    quote = None  # forza fallback al prezzo precedente
-            elif new_price <= 0:
-                logger.warning("[POLLING] Prezzo NULLO/NEGATIVO per %s: %.4f, scartato", ticker, new_price)
-                quote = None
+                    quote = None
+            elif old_current > 0:
+                # Nessun prev_close → check soft: se varia < 10% accetta;
+                # se >10% rifiuta (potrebbe essere fat-finger)
+                ratio = new_price / old_current
+                if ratio < 0.9 or ratio > 1.1:
+                    logger.warning(
+                        "[POLLING] Prezzo SUSPECT per %s: nuovo=%.2f vs old_current=%.2f "
+                        "(ratio %.2f, no prev_close). RIFIUTATO per cautela.",
+                        ticker, new_price, old_current, ratio,
+                    )
+                    quote = None
         if quote and "price" in quote:
             current_price = float(quote["price"])
             try:

@@ -116,7 +116,21 @@ def can_buy(ticker, quantity, price):
     if p is None:
         return False, "Portafoglio non inizializzato"
 
-    cost = quantity * price
+    # Sanity check: quantity > 0 e price > 0
+    try:
+        q_int = int(quantity)
+    except (TypeError, ValueError):
+        return False, f"Quantity non numerica: {quantity}"
+    if q_int <= 0:
+        return False, f"Quantity deve essere > 0 (ricevuto {quantity})"
+    try:
+        p_float = float(price)
+    except (TypeError, ValueError):
+        return False, f"Price non numerico: {price}"
+    if p_float <= 0:
+        return False, f"Price deve essere > 0 (ricevuto {price})"
+
+    cost = q_int * p_float
 
     if cost > p["cash_balance"]:
         return False, (
@@ -132,8 +146,11 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
     Esegue un ordine di acquisto verificando solo la disponibilita' di liquidita'.
     L'AI decide autonomamente quando e quanto comprare.
     Restituisce un dizionario con l'esito dell'operazione.
+
+    Sanity checks: rifiuta quantity<=0, price<=0 (BUG: prima il bot poteva
+    creare ordini fantasma con quantity=0 che inquinavano i log).
     """
-    # Controllo liquidita'
+    # Controllo liquidita' (include validation quantity/price > 0)
     allowed, reason = can_buy(ticker, quantity, price)
     if not allowed:
         return {"success": False, "reason": reason}
@@ -510,10 +527,23 @@ def update_prices(prices: dict):
         ticker = pos["ticker"]
         if ticker in prices:
             new_price = prices[ticker]
-            update_position_price(ticker, new_price)
-            # Calcola il P&L aggiornato
-            pnl = (new_price - pos["avg_buy_price"]) * pos["quantity"]
-            pnl_pct = ((new_price - pos["avg_buy_price"]) / pos["avg_buy_price"]) * 100
+            # Skip se il prezzo nuovo non e' valido (NaN, 0, negativo)
+            try:
+                new_price_f = float(new_price)
+                if new_price_f <= 0 or new_price_f != new_price_f:  # NaN check
+                    logger.warning("update_prices skip %s: prezzo invalido %s",
+                                   ticker, new_price)
+                    continue
+            except (TypeError, ValueError):
+                logger.warning("update_prices skip %s: prezzo non numerico %s",
+                               ticker, new_price)
+                continue
+            update_position_price(ticker, new_price_f)
+            # Calcola il P&L aggiornato (guard contro avg_buy_price=0)
+            avg = float(pos.get("avg_buy_price") or 0)
+            qty = float(pos.get("quantity") or 0)
+            pnl = (new_price_f - avg) * qty if avg > 0 else 0
+            pnl_pct = ((new_price_f - avg) / avg) * 100 if avg > 0 else 0
             updated.append({
                 "ticker": ticker,
                 "old_price": pos["current_price"],

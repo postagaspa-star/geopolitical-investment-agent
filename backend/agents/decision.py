@@ -627,8 +627,19 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
             quantity = tool_input["quantity"]
             logic_chain = tool_input["logic_chain"]
             confidence = tool_input["confidence_level"]
-            stop_loss = tool_input.get("stop_loss", 0) or None
-            take_profit = tool_input.get("take_profit", 0) or None
+            # NOTA: usiamo controllo esplicito (non `or None`) per non confondere
+            # 0 con None. Schema dichiara: 0 = "nessun SL/TP esplicito", None
+            # equivalente. Se valore > 0, applica.
+            sl_raw = tool_input.get("stop_loss")
+            tp_raw = tool_input.get("take_profit")
+            try:
+                stop_loss = float(sl_raw) if sl_raw is not None and float(sl_raw) > 0 else None
+            except (TypeError, ValueError):
+                stop_loss = None
+            try:
+                take_profit = float(tp_raw) if tp_raw is not None and float(tp_raw) > 0 else None
+            except (TypeError, ValueError):
+                take_profit = None
 
             # ── ARRICCHIMENTO logic_chain con thesis dal workflow_state ──
             # Il modello a volte passa logic_chain corti e generici nel tool

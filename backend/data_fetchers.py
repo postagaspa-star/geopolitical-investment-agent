@@ -374,7 +374,16 @@ async def fetch_clawstreet_price(ticker: str) -> Dict[str, Any]:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
                 if resp.status != 200:
-                    return {"ticker": ticker, "price": None, "data": None, "error": f"HTTP {resp.status}"}
+                    # Distinguere 4xx (errore client, no retry sensato) da
+                    # 5xx (server, retry potrebbe avere senso). 404 = ticker
+                    # non supportato → retryable=False per non bombardare.
+                    is_4xx = 400 <= resp.status < 500
+                    return {
+                        "ticker": ticker, "price": None, "data": None,
+                        "error": f"HTTP {resp.status}",
+                        "retryable": not is_4xx,
+                        "permanent_error": is_4xx,
+                    }
                 data = await resp.json(content_type=None)
                 # Estrai prezzo dalla risposta ClawStreet
                 price = None

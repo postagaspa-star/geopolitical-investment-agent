@@ -686,6 +686,32 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     report["engine"] = engine
     report["raw_indicators"] = ticker_data
 
+    # 5a. ENFORCEMENT data_quality: anche se il modello ha hallucinato un
+    # BUY/SELL su ticker con data_quality=insufficient, lo sovrascriviamo
+    # forzatamente a HOLD + reasoning="data_insufficient".
+    # Questo previene "halluccinated buys" che il prompt da solo non
+    # garantiva (il modello a volte ignora le istruzioni).
+    qmap = {td.get("ticker"): td.get("data_quality") for td in ticker_data
+            if isinstance(td, dict) and td.get("ticker")}
+    forced = []
+    for a in (report.get("analyses") or []):
+        tk = a.get("ticker")
+        dq = qmap.get(tk)
+        if dq == "insufficient" and a.get("signal") in ("BUY", "SELL"):
+            forced.append({
+                "ticker": tk,
+                "original_signal": a.get("signal"),
+                "original_confidence": a.get("confidence"),
+            })
+            a["signal"] = "HOLD"
+            a["confidence"] = 35
+            a["reasoning"] = (
+                f"data_insufficient (forced HOLD): il modello aveva proposto "
+                f"{forced[-1]['original_signal']} confidence "
+                f"{forced[-1]['original_confidence']} ma data_quality e' "
+                f"insufficient — direzione sovrascritta dal sistema."
+            )
+
     # 5. Log con visibilità del contenuto effettivo
     analyses_summary = []
     for a in (report.get("analyses") or [])[:6]:
@@ -695,6 +721,9 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
             "trend": a.get("trend"),
             "confidence": a.get("confidence"),
         })
+    if forced:
+        logger.warning("[%s][TECH] Forzati a HOLD %d ticker con data_quality=insufficient: %s",
+                       run_id, len(forced), forced)
     database.insert_agent_log(run_id, "TECH_WORKER",
         json.dumps({
             "event": "technical_analysis_complete",

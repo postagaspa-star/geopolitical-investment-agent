@@ -30,7 +30,13 @@ DEEPSEEK_R1 = "deepseek-reasoner"
 # Soluzione: SHADOW PERSIST su sim_settings come JSON, key
 #   _sim_active_run::{run_id}
 # Caricato lazy in execute_step() se manca dal dict in-memory.
+#
+# THREAD SAFETY: il dict e' acceduto da multiple coroutines (start_run,
+# execute_step, _finalize_run, rebuild_run_from_memory). asyncio non garantisce
+# atomicita' su read-modify-write tra due await. Lock per gli accessi mutativi.
+import threading as _threading
 _active_runs: dict[str, dict] = {}
+_active_runs_lock = _threading.Lock()
 _ACTIVE_RUN_KEY_PREFIX = "_sim_active_run::"
 _ACTIVE_RUN_TTL_HOURS = 24   # cleanup degli abbandonati dopo 24h
 
@@ -88,14 +94,23 @@ def _get_or_load_active_run(run_id: str) -> dict | None:
     """
     Ritorna lo state da memoria o lo recupera dal shadow store.
     Se ricarica, popola anche `_active_runs` per i call successivi nello stesso pod.
+    Thread-safe via _active_runs_lock per evitare race su read-modify-write.
     """
-    state = _active_runs.get(run_id)
-    if state is not None:
-        return state
+    with _active_runs_lock:
+        state = _active_runs.get(run_id)
+        if state is not None:
+            return state
+    # Load shadow fuori dal lock (potrebbe essere I/O lento)
     state = _load_active_run(run_id)
     if state is not None:
-        _active_runs[run_id] = state
-        logger.info("[SIM] state %s ricaricato da shadow persistence", run_id)
+        with _active_runs_lock:
+            # Double-check: un altro thread potrebbe averlo gia' caricato
+            existing = _active_runs.get(run_id)
+            if existing is None:
+                _active_runs[run_id] = state
+                logger.info("[SIM] state %s ricaricato da shadow persistence", run_id)
+            else:
+                state = existing
     return state
 
 
@@ -671,7 +686,8 @@ async def start_run(category: str, scenario_type: str, num_steps: int,
         "mode": mode,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
-    _active_runs[run_id] = state
+    with _active_runs_lock:
+        _active_runs[run_id] = state
     # Shadow persist subito: cosi' anche se il pod si riavvia tra start_run e
     # il primo execute_step, lo state e' recuperabile.
     _persist_active_run(run_id, state)

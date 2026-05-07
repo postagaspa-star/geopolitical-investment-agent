@@ -507,7 +507,11 @@ def start_scheduler() -> AsyncIOScheduler:
 
     logger.info("Avvio scheduler autonomo (intervallo: %d minuti)...", interval_minutes)
 
-    _scheduler = AsyncIOScheduler()
+    # CRITICO: timezone esplicito UTC. Senza, APScheduler usa la TZ del
+    # server (es. su Render potrebbe essere UTC, ma in altri host locale).
+    # Tutte le CronTrigger sono dichiarate in UTC nei commenti, quindi la
+    # scheduler stessa deve operare in UTC per coerenza.
+    _scheduler = AsyncIOScheduler(timezone=pytz.utc)
 
     # ── Price Polling: ogni 10 minuti (yfinance/Massive → Supabase) ──
     # Frequenza ridotta da 60s a 600s per:
