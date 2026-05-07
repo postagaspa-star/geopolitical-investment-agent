@@ -2172,6 +2172,30 @@ async def sim_advisor_chat_delete(run_id: str):
 # Direttive Utente — istruzioni a priorità massima per gli agenti AI
 # ════════════════════════════════════════════════════════════════════════
 
+@app.get("/api/_debug/sim-settings-raw")
+async def debug_sim_settings(prefix: str = ""):
+    """DEBUG: dump raw delle entry sim_settings (filter opzionale by prefix)."""
+    try:
+        from simulator import db as sim_db
+        client = sim_db._get_client()
+        if not client:
+            return {"error": "no client"}
+        q = client.table("sim_settings").select("key,value").limit(200)
+        if prefix:
+            q = q.like("key", f"{prefix}%")
+        res = q.execute()
+        rows = res.data or []
+        return {
+            "count": len(rows),
+            "keys": [r["key"] for r in rows],
+            "samples": [{"key": r["key"], "value_len": len(r.get("value") or ""),
+                         "value_preview": (r.get("value") or "")[:200]}
+                        for r in rows[:30]],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/settings/directives")
 async def get_directives():
     """Direttive utente correnti (testo libero a priorità massima)."""
