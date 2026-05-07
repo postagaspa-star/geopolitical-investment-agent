@@ -655,26 +655,73 @@ def list_runs(category: str | None = None, scenario_type: str | None = None,
         return []
 
 
+# Tracking per evitare di hammerare Supabase con la stessa table-missing query.
+# Una volta scoperto che sim_settings non esiste, fallback IMMEDIATO a settings.
+_SIM_SETTINGS_TABLE_MISSING = False
+
+
 def get_setting(key: str, default: str = "") -> str:
+    """
+    Legge una chiave da sim_settings. Se la tabella non esiste su Supabase
+    (PGRST205), fallback automatico alla tabella standard `settings` del Live.
+
+    Bug precedente: get_setting silently ritornava default quando sim_settings
+    mancava. Tutti i save (advice, sim_run fallback) erano "successi" ma le
+    letture successive non trovavano nulla → memoria advice sempre vuota.
+    """
+    global _SIM_SETTINGS_TABLE_MISSING
     client = _get_client()
-    if client:
+
+    if client and not _SIM_SETTINGS_TABLE_MISSING:
         try:
             r = client.table("sim_settings").select("value").eq("key", key).limit(1).execute()
             if r.data:
                 return r.data[0].get("value") or default
-        except Exception:
-            pass
-    return default
+            return default   # tabella OK ma chiave non presente
+        except Exception as exc:
+            if _is_table_missing_error(exc):
+                _SIM_SETTINGS_TABLE_MISSING = True
+                logger.warning("[SIM] sim_settings missing → fallback a tabella settings")
+            else:
+                logger.debug("[SIM] get_setting %s error (non-DDL): %s", key, exc)
+
+    # Fallback: tabella `settings` del Live (sempre presente)
+    try:
+        import database
+        return database.get_setting(key, default) or default
+    except Exception:
+        return default
 
 
 def set_setting(key: str, value: str):
+    """
+    Scrive una chiave su sim_settings. Se la tabella non esiste, fallback
+    automatico a database.set_setting (tabella `settings` del Live).
+
+    Bug precedente: la upsert su sim_settings falliva silenziosamente
+    (try/except senza fallback). Ora rilancia su `settings` se sim_settings
+    è inaccessibile, garantendo persistenza cross-deploy.
+    """
+    global _SIM_SETTINGS_TABLE_MISSING
     client = _get_client()
-    if client:
+
+    if client and not _SIM_SETTINGS_TABLE_MISSING:
         try:
             client.table("sim_settings").upsert({"key": key, "value": value}).execute()
             return
-        except Exception:
-            pass
+        except Exception as exc:
+            if _is_table_missing_error(exc):
+                _SIM_SETTINGS_TABLE_MISSING = True
+                logger.warning("[SIM] sim_settings missing → fallback a tabella settings")
+            else:
+                logger.debug("[SIM] set_setting %s error (non-DDL): %s", key, exc)
+
+    # Fallback: tabella `settings` del Live
+    try:
+        import database
+        database.set_setting(key, value)
+    except Exception as exc:
+        logger.warning("[SIM] set_setting fallback su `settings` fallito: %s", exc)
 
 
 def runs_today(mode: str = "auto") -> int:

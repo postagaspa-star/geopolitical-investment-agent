@@ -182,15 +182,31 @@ function computeKpis(positions, trades, closedTrades) {
 // Section components
 // ============================================================
 
+// Downsampling: aggrega N record in 1 (riduce rumore visivo dell'equity curve
+// quando ci sono molti snapshot al minuto).
+function downsampleHistory(history, targetPoints = 100) {
+  if (!history?.length || history.length <= targetPoints) return history;
+  const step = Math.ceil(history.length / targetPoints);
+  const out = [];
+  for (let i = 0; i < history.length; i += step) {
+    // Prendi l'ultimo punto del bucket (il più recente in ordine ASC)
+    out.push(history[Math.min(i + step - 1, history.length - 1)]);
+  }
+  return out;
+}
+
 // Equity curve con drawdown
 function EquityCurveCard({ history }) {
   if (!history?.length) {
-    return <div className="empty-state">Equity history non disponibile</div>;
+    return <div className="empty-state">Nessuno snapshot di portafoglio nel periodo selezionato</div>;
   }
+
+  // Downsample per leggibilità (max ~100 punti)
+  const sampled = downsampleHistory(history, 100);
 
   // Calcola drawdown rispetto al massimo precedente
   let runningMax = -Infinity;
-  const data = history.map((p) => {
+  const data = sampled.map((p) => {
     const v = Number(p.total_value ?? 0);
     runningMax = Math.max(runningMax, v);
     const drawdown = runningMax > 0 ? ((v - runningMax) / runningMax) * 100 : 0;
@@ -576,14 +592,64 @@ function WinRateByTickerCard({ closedTrades }) {
   );
 }
 
+// Card riusabile con titolo + descrizione esplicativa + subtitle
+function ChartCard({ title, description, subtitle, children }) {
+  return (
+    <div className="card" style={{
+      background: '#111827',
+      border: '1px solid #1f2937',
+      borderRadius: 10,
+      padding: '1rem 1.1rem',
+    }}>
+      <div className="card-header" style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        marginBottom: 6,
+        gap: 12,
+      }}>
+        <span className="card-title" style={{
+          fontSize: '0.95rem',
+          fontWeight: 700,
+          color: '#f1f5f9',
+        }}>{title}</span>
+        {subtitle && (
+          <span style={{ fontSize: '0.7rem', color: '#64748b',
+                         flexShrink: 0, paddingTop: 3 }}>
+            {subtitle}
+          </span>
+        )}
+      </div>
+      {description && (
+        <p style={{
+          fontSize: '0.72rem',
+          color: '#64748b',
+          margin: '0 0 12px 0',
+          lineHeight: 1.45,
+        }}>{description}</p>
+      )}
+      {children}
+    </div>
+  );
+}
+
 // ============================================================
 // Main component
 // ============================================================
+
+const PERIOD_OPTIONS = [
+  { key: "1d", label: "1 giorno" },
+  { key: "7d", label: "7 giorni" },
+  { key: "30d", label: "30 giorni" },
+  { key: "90d", label: "90 giorni" },
+  { key: "all", label: "Tutto" },
+];
 
 export default function AnalyticsPage() {
   const [positions, setPositions] = useState([]);
   const [trades, setTrades] = useState([]);
   const [history, setHistory] = useState([]);
+  const [period, setPeriod] = useState("30d");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -595,7 +661,7 @@ export default function AnalyticsPage() {
         const [posRes, tradeRes, histRes] = await Promise.all([
           fetch(`${API}/api/positions`),
           fetch(`${API}/api/trades`),
-          fetch(`${API}/api/portfolio/history?period=30d`),
+          fetch(`${API}/api/portfolio/history?period=${period}`),
         ]);
 
         const [posData, tradeData, histData] = await Promise.all([
@@ -615,7 +681,7 @@ export default function AnalyticsPage() {
     };
 
     fetchData();
-  }, []);
+  }, [period]);
 
   const closedTrades = useMemo(() => computeClosedTrades(trades), [trades]);
   const kpis = useMemo(() => computeKpis(positions, trades, closedTrades), [positions, trades, closedTrades]);
@@ -642,13 +708,33 @@ export default function AnalyticsPage() {
 
   return (
     <div className="main-content">
-      <div style={{ marginBottom: '1.5rem' }}>
-        <h2 style={{ fontSize: '1.4rem', fontWeight: 700, color: '#f1f5f9', marginBottom: '0.25rem' }}>
-          Analytics
-        </h2>
-        <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
-          {kpis.totalPositions} posizioni aperte · {kpis.totalTrades} trade totali · {closedTrades.length} chiusi
-        </p>
+      <div style={{ marginBottom: '1.5rem', display: 'flex',
+                    justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <h2 style={{ fontSize: '1.4rem', fontWeight: 700, color: '#f1f5f9', marginBottom: '0.25rem' }}>
+            Analytics
+          </h2>
+          <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+            {kpis.totalPositions} posizioni aperte · {kpis.totalTrades} trade totali · {closedTrades.length} chiusi
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 4, background: '#0f172a',
+                      border: '1px solid #1e293b', borderRadius: 8, padding: 4 }}>
+          {PERIOD_OPTIONS.map((p) => (
+            <button key={p.key}
+                    onClick={() => setPeriod(p.key)}
+                    style={{
+                      padding: '6px 12px',
+                      background: period === p.key ? '#3b82f6' : 'transparent',
+                      color: period === p.key ? '#fff' : '#94a3b8',
+                      border: 'none', borderRadius: 6,
+                      fontSize: '0.75rem', fontWeight: 600,
+                      cursor: 'pointer',
+                    }}>
+              {p.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* KPI Cards */}
@@ -701,61 +787,47 @@ export default function AnalyticsPage() {
         gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
         gap: '1rem',
       }}>
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">Equity Curve & Drawdown</span>
-            <span style={{ fontSize: '0.7rem', color: '#64748b' }}>Ultimi 30 giorni</span>
-          </div>
+        <ChartCard title="Equity Curve & Drawdown"
+                   description="Valore del portafoglio nel tempo (linea blu, asse sx) e perdita rispetto al massimo storico (rosso, asse dx). Un drawdown -10% significa che ora vali il 10% in meno del tuo picco."
+                   subtitle={`Periodo: ${PERIOD_OPTIONS.find(o => o.key === period)?.label}`}>
           <EquityCurveCard history={history} />
-        </div>
+        </ChartCard>
 
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">P&L Cumulativo</span>
-            <span style={{ fontSize: '0.7rem', color: '#64748b' }}>Sui trade chiusi</span>
-          </div>
+        <ChartCard title="P&L Cumulativo"
+                   description="Somma progressiva dei profitti realizzati su trade chiusi (BUY → SELL). Linea che sale = guadagni, scende = perdite. Asse X = numero del trade."
+                   subtitle={`${closedTrades.length} trade chiusi`}>
           <CumulativePnlCard closedTrades={closedTrades} />
-        </div>
+        </ChartCard>
 
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">Distribuzione Rendimenti</span>
-            <span style={{ fontSize: '0.7rem', color: '#64748b' }}>% per trade chiuso</span>
-          </div>
+        <ChartCard title="Distribuzione Rendimenti"
+                   description="Quanti trade chiusi cadono in ogni fascia di rendimento %. Idealmente più barre verdi (positive) che rosse, e poche barre estreme. Mostra se l'AI fa molti trade con piccoli guadagni e poche grandi perdite (o viceversa)."
+                   subtitle={`Bucket: 10`}>
           <PnlDistributionCard closedTrades={closedTrades} />
-        </div>
+        </ChartCard>
 
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">P&L per Ticker</span>
-            <span style={{ fontSize: '0.7rem', color: '#64748b' }}>Top 12</span>
-          </div>
+        <ChartCard title="P&L per Ticker"
+                   description="Quale asset ti ha fatto guadagnare o perdere di più (somma dei P&L sui trade chiusi). Verde = vincente, rosso = perdente."
+                   subtitle="Top 12">
           <PnlByTickerCard closedTrades={closedTrades} />
-        </div>
+        </ChartCard>
 
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">Esposizione Attuale</span>
-            <span style={{ fontSize: '0.7rem', color: '#64748b' }}>Posizioni aperte</span>
-          </div>
+        <ChartCard title="Esposizione Attuale"
+                   description="Quanto del portafoglio è investito in ogni asset (in % del valore totale delle posizioni aperte). Aiuta a vedere se sei concentrato o diversificato."
+                   subtitle={`${positions.length} posizioni aperte`}>
           <ExposurePieCard positions={positions} />
-        </div>
+        </ChartCard>
 
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">Win Rate per Ticker</span>
-            <span style={{ fontSize: '0.7rem', color: '#64748b' }}>Top 10</span>
-          </div>
+        <ChartCard title="Win Rate per Ticker"
+                   description="Per ogni asset: % di trade chiusi in profitto. Verde >= 50% (più vincenti che perdenti), rosso < 50%."
+                   subtitle="Top 10">
           <WinRateByTickerCard closedTrades={closedTrades} />
-        </div>
+        </ChartCard>
 
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">Attività per Giorno</span>
-            <span style={{ fontSize: '0.7rem', color: '#64748b' }}>Buy / Sell</span>
-          </div>
+        <ChartCard title="Attività Giorno della Settimana"
+                   description="Numero di operazioni (BUY in verde, SELL in rosso) per giorno della settimana. Utile per vedere se l'AI è più attiva certi giorni."
+                   subtitle="Aggregato">
           <TradesPerWeekdayCard trades={trades} />
-        </div>
+        </ChartCard>
       </div>
     </div>
   );

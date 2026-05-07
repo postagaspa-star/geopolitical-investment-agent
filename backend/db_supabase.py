@@ -493,16 +493,44 @@ def get_all_settings():
 # ============================================================
 
 def insert_document(filename, content, file_size=0, category="generic", is_preset=False):
+    """
+    Inserisce un documento nella knowledge base. Cascade defensiva per gestire
+    schemi minori che potrebbero mancare di colonne (`is_preset`, `category`).
+
+    Bug precedente: se l'INSERT con is_preset+category falliva (anche per
+    motivi non legati alla colonna), il primo fallback rimuoveva is_preset
+    ma non distingueva. Il secondo fallback rimuoveva ANCHE category. Risultato:
+    documenti salvati con category=None invece di quella richiesta.
+
+    Fix: cascade più mirata, log esplicito quando si rimuove category.
+    """
     client = _get_client()
     payload = {"filename": filename, "content": content, "file_size": file_size}
-    payload_full = {**payload, "category": category, "is_preset": is_preset}
+
+    # Tentativo 1: schema completo (is_preset + category)
     try:
-        client.table("technical_documents").insert(payload_full).execute()
-    except Exception:
-        try:
-            client.table("technical_documents").insert({**payload, "category": category}).execute()
-        except Exception:
-            client.table("technical_documents").insert(payload).execute()
+        client.table("technical_documents").insert(
+            {**payload, "category": category, "is_preset": is_preset}
+        ).execute()
+        return
+    except Exception as exc1:
+        # Solo se l'errore è specifico a is_preset → ritenta senza
+        msg1 = str(exc1).lower()
+        is_preset_missing = "is_preset" in msg1 or "column" in msg1 and "is_preset" in msg1
+
+    # Tentativo 2: senza is_preset, mantieni category (campo importante!)
+    try:
+        client.table("technical_documents").insert(
+            {**payload, "category": category}
+        ).execute()
+        return
+    except Exception as exc2:
+        msg2 = str(exc2).lower()
+        category_missing = "category" in msg2 or "column" in msg2 and "category" in msg2
+        logger.warning("[insert_document] retry-no-category necessario: %s", str(exc2)[:200])
+
+    # Tentativo 3 (last resort): solo campi base
+    client.table("technical_documents").insert(payload).execute()
 
 
 def upsert_preset_document(filename, content, file_size=0, category="crypto"):
@@ -691,10 +719,28 @@ def insert_portfolio_snapshot(total_value, cash_balance):
 
 
 def get_portfolio_history(days=30):
+    """
+    Ritorna gli snapshot di portafoglio degli ultimi N giorni.
+
+    Bug precedente: Supabase impone un limite default di 1000 righe per query
+    e l'order era ASC senza limit esplicito, quindi venivano restituite le
+    PRIME 1000 righe del periodo (le più vecchie). I grafici Live Analytics
+    mostravano dati di settimane fa invece dei più recenti.
+
+    Fix: ordine DESC + limit esplicito → prendiamo le 1000 più recenti, poi
+    invertiamo lato Python per restituirle ASC (compatibile col frontend).
+    """
     client = _get_client()
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    result = client.table("portfolio_snapshots").select("total_value, cash_balance, timestamp").gte("timestamp", since).order("timestamp").execute()
-    return result.data or []
+    result = (client.table("portfolio_snapshots")
+              .select("total_value, cash_balance, timestamp")
+              .gte("timestamp", since)
+              .order("timestamp", desc=True)
+              .limit(1000)
+              .execute())
+    rows = result.data or []
+    rows.reverse()   # da DESC a ASC per il chart (timeline cronologica)
+    return rows
 
 
 # ============================================================
