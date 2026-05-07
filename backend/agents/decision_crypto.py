@@ -821,14 +821,23 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
 
 # ─── Main entry ─────────────────────────────────────────────────────────────
 
-async def run_crypto_decision(run_id: str, tech_report: dict) -> dict:
-    """Esegue il Decision Crypto Agent con DeepSeek-R1 reasoning."""
+async def run_crypto_decision(run_id: str, tech_report: dict | None) -> dict:
+    """Esegue il Decision Crypto Agent con DeepSeek-R1 reasoning.
+
+    NOTA: tech_report e' Optional. Nel workflow a 4 fasi (default ora),
+    l'orchestrator passa None: il Decision Crypto deve richiedere il
+    tech_report via tool durante la FASE 2. Per back-compat con chiamate
+    legacy che lo passano come dict, accettiamo entrambi i casi.
+    """
     import database
     from agents.scout import get_recent_buffer
     import portfolio
 
     logger.info("[%s][DECISION-CRYPTO] === Avvio ===", run_id)
     start_time = datetime.now(timezone.utc)
+
+    # Normalizza tech_report (None → {} per evitare AttributeError)
+    tech_report = tech_report or {}
 
     # Carica contesto specifico crypto
     recent_buffer = get_recent_buffer(database, minutes=60)
@@ -838,7 +847,7 @@ async def run_crypto_decision(run_id: str, tech_report: dict) -> dict:
     user_message = _build_context(tech_report, recent_buffer, portfolio_state, crypto_docs)
 
     database.insert_agent_log(run_id, "DECISION_CRYPTO_CONTEXT", json.dumps({
-        "tech_engine": tech_report.get("engine", "?"),
+        "tech_engine": tech_report.get("engine", "deferred_to_decision"),
         "buffer_size": len(recent_buffer),
         "crypto_docs": len(crypto_docs),
         "portfolio_total": portfolio_state.get("total_value", 0),
