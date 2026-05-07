@@ -33,6 +33,24 @@ logger = logging.getLogger(__name__)
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_R1_MODEL = "deepseek-reasoner"
 
+# Riusiamo l'helper del decision.py per coerenza dashboard.
+# Import lazy per evitare circular dependency a load-time.
+def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
+    try:
+        from agents.decision import _build_reasoning_text as _impl
+        return _impl(ia, ft, final_text)
+    except Exception:
+        # Fallback inline se l'import fallisce
+        parts = []
+        if ia.get("situation_overview"):
+            parts.append(f"SITUAZIONE: {ia['situation_overview']}")
+        if ft.get("thesis"):
+            parts.append(f"TESI: {ft['thesis']}")
+        if final_text:
+            parts.append(f"CONCLUSIONE: {final_text[:500]}")
+        return "\n\n".join(parts) or final_text or "(no reasoning)"
+
+
 # Cooldown per evitare doppi run nello stesso ora (es. test manuali)
 CRYPTO_COOLDOWN_KEY = "last_decision_crypto_run_at"
 CRYPTO_COOLDOWN_SECONDS = 50 * 60   # 50 min: lascia 10 min di margine vs schedule 1h
@@ -785,6 +803,7 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
             "model": DEEPSEEK_R1_MODEL,
             "agent": "crypto",
             "phase_state": workflow_state.phase,
+            "reasoning_text": _build_reasoning_text(ia, ft, final_text),
             "situation_overview": (ia.get("situation_overview") or "")[:1500],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],

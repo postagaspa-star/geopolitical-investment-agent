@@ -87,25 +87,71 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         }
 
     # ──────────────────────────────────────────────────────────────
-    # GATE: il Decision NORMALE opera SOLO con NYSE aperto.
-    # Mercati chiusi → skip silenzioso. Le crypto sono dominio del
-    # Decision Crypto agent (cron 1h indipendente). Niente più hybrid R1.
+    # ROUTING per tipo di ticker:
+    #   - focus_tickers contiene SOLO crypto → route a run_crypto_pipeline
+    #     (Decision Crypto R1, opera 24/7 indipendentemente da market state)
+    #   - focus_tickers contiene equity → require market_open
+    #     (Decision standard Sonnet 4.5, opera solo NYSE aperto)
+    #   - misto → split: crypto va al crypto pipeline, equity solo se aperto
+    #
+    # Bug precedente: il watchdog identificava correttamente un breakout BTC
+    # ma l'orchestrator bloccava TUTTO con "market_closed" → BTC notturno
+    # non triggerava mai il Decision Crypto on-event (solo schedulato 1h).
     # ──────────────────────────────────────────────────────────────
+    crypto_focus = [t for t in (focus_tickers or []) if _is_crypto_ticker(t)]
+    equity_focus = [t for t in (focus_tickers or []) if not _is_crypto_ticker(t)]
+
     try:
         from scheduler import is_market_open
         market_open = is_market_open()
     except Exception:
         market_open = False
 
+    # ─── ROUTE 1: Trigger crypto → Decision Crypto (R1) ───
+    if crypto_focus:
+        logger.info("[%s][WATCHDOG] TRIGGER crypto urgency=%d: %s "
+                    "(focus=%s) — avvio Decision Crypto",
+                    run_id, urgency, reason, crypto_focus)
+        database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+            "event": "watchdog_triggered_crypto",
+            "urgency": urgency,
+            "reason": reason,
+            "focus_tickers": crypto_focus,
+            "route": "decision_crypto",
+        }))
+        try:
+            crypto_result = await run_crypto_pipeline(run_id=run_id)
+        except Exception as e:
+            logger.error("[%s][ORCHESTRATOR] Crypto pipeline (event-driven) fallita: %s",
+                         run_id, e, exc_info=True)
+            crypto_result = {"decision": "ERROR", "trades": [], "error": str(e)}
+
+        # Se non c'erano anche equity ticker, esci qui
+        if not equity_focus:
+            return {
+                "run_id": run_id,
+                "triggered": True,
+                "urgency": urgency,
+                "reason": reason,
+                "route": "crypto",
+                "decision": crypto_result.get("decision", "UNKNOWN"),
+                "trades": crypto_result.get("trades", []),
+                "duration_seconds": round(time.time() - start, 2),
+            }
+        # Altrimenti: continuiamo per processare gli equity ticker
+        focus_tickers = equity_focus
+
+    # ─── ROUTE 2: equity ticker — richiede mercato aperto ───
     if not market_open:
         if _should_emit_block_log("market_closed"):
-            logger.info("[%s][ORCHESTRATOR] Mercato chiuso — Decision normale skip "
-                        "(Decision Crypto opera in autonomia ogni ora).", run_id)
+            logger.info("[%s][ORCHESTRATOR] Mercato chiuso — Decision standard skip "
+                        "(focus equity: %s)", run_id, equity_focus or focus_tickers)
             try:
                 database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
                     "event": "decision_skipped_market_closed",
                     "urgency": urgency,
                     "reason": reason,
+                    "equity_focus": equity_focus or focus_tickers,
                 }))
             except Exception:
                 pass
@@ -119,7 +165,7 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
         }
 
     # Trigger! Avvia pipeline completa
-    logger.info("[%s][WATCHDOG] TRIGGER urgency=%d: %s — avvio Technical+Decision",
+    logger.info("[%s][WATCHDOG] TRIGGER equity urgency=%d: %s — avvio Decision standard",
                 run_id, urgency, reason)
 
     database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({

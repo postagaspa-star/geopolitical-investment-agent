@@ -1219,6 +1219,101 @@ async def sim_run_step(run_id: str, req: SimStepReq):
         )
 
 
+# ════════════════════════════════════════════════════════════════════════
+# Simulator V2 — Stateless engine con prezzi reali Polygon
+# ════════════════════════════════════════════════════════════════════════
+class SimV2StartReq(BaseModel):
+    category: str = "geopolitico"
+    num_steps: int = 4              # 3-5
+    scenario_id: str | None = None  # opzionale, se None scelta random
+    initial_capital: float = 100000.0
+
+
+@app.post("/api/simulator/v2/start")
+async def sim_v2_start(req: SimV2StartReq):
+    """
+    Inizializza una nuova partita simulator V2 (stateless).
+    Ritorna scenario + portfolio iniziale + step_dates.
+    Il browser tiene tutto e lo rimanda alla /step.
+    """
+    from simulator import v2_engine
+    try:
+        return await v2_engine.start_run(
+            category=req.category,
+            num_steps=req.num_steps,
+            scenario_id=req.scenario_id,
+            initial_capital=req.initial_capital,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        logger.error("[SIM-V2] start crash: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class SimV2StepReq(BaseModel):
+    scenario: dict
+    portfolio: dict
+    history: list[dict] = []
+    step_index: int
+
+
+@app.post("/api/simulator/v2/step")
+async def sim_v2_step(req: SimV2StepReq):
+    """
+    Esegue uno step. Stateless: il browser fornisce tutto il contesto.
+    """
+    from simulator import v2_engine
+    try:
+        return await v2_engine.execute_step(
+            scenario=req.scenario,
+            portfolio=req.portfolio,
+            history=req.history,
+            step_index=req.step_index,
+        )
+    except ValueError as e:
+        msg = str(e)
+        is_transient = any(x in msg.lower() for x in ["429", "timeout", "503", "502", "504"])
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": msg,
+                "type": "transient" if is_transient else "fatal",
+                "hint": ("Modello sovraccarico, riprova tra qualche secondo"
+                         if is_transient
+                         else "Errore inaspettato. Controlla i log."),
+            },
+        )
+    except Exception as e:
+        logger.error("[SIM-V2] step %d crash: %s", req.step_index, e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class SimV2FinalizeReq(BaseModel):
+    scenario: dict
+    portfolio: dict
+    history: list[dict]
+    persist: bool = True
+
+
+@app.post("/api/simulator/v2/finalize")
+async def sim_v2_finalize(req: SimV2FinalizeReq):
+    """
+    Chiude la partita: P&L finale, debrief, salvataggio nel DB.
+    """
+    from simulator import v2_engine
+    try:
+        return await v2_engine.finalize_run(
+            scenario=req.scenario,
+            portfolio=req.portfolio,
+            history=req.history,
+            persist=req.persist,
+        )
+    except Exception as e:
+        logger.error("[SIM-V2] finalize crash: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/simulator/auto-mode")
 async def sim_get_auto_mode():
     from simulator import db as sim_db

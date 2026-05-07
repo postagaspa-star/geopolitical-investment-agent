@@ -593,6 +593,107 @@ async def _fetch_provider_ohlcv_async(
                 "error": f"{provider}: {str(exc)[:200]}", "source": provider}
 
 
+async def fetch_historical_range_async(
+    ticker: str, from_date: str, to_date: str
+) -> Dict[str, Any]:
+    """
+    Fetch OHLCV bars per un range di date specifico (formato ISO 'YYYY-MM-DD').
+    Usato dal Simulator per ottenere prezzi reali durante lo scenario.
+
+    Cascade: Polygon → Massive (entrambi Polygon-compatible API).
+    Returns: {ticker, data: [{date, open, high, low, close, volume}], error, source}
+
+    NOTA: per crypto usa formato yfinance "BTC-USD" che è incompatibile con
+    Polygon. Polygon vuole "X:BTCUSD". Conversione gestita automaticamente.
+    """
+    # Conversione formato crypto: yfinance ("BTC-USD") → Polygon ("X:BTCUSD")
+    polygon_ticker = ticker
+    if "-USD" in ticker and not ticker.startswith("X:"):
+        polygon_ticker = f"X:{ticker.replace('-USD', 'USD')}"
+
+    polygon_key = _get_polygon_key()
+    massive_key = _get_massive_key_ohlcv()
+
+    async def _try_provider(base_url: str, api_key: str, provider: str):
+        if not api_key:
+            return None
+        url = (
+            f"{base_url}/v2/aggs/ticker/{polygon_ticker}/range/1/day/"
+            f"{from_date}/{to_date}"
+        )
+        params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": api_key}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, params=params,
+                    timeout=aiohttp.ClientTimeout(total=PROVIDER_OHLCV_TIMEOUT)
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    payload = await resp.json()
+                    results = payload.get("results") or []
+                    records = []
+                    for bar in results:
+                        ts_ms = bar.get("t", 0)
+                        if not ts_ms:
+                            continue
+                        date_str = datetime.fromtimestamp(
+                            ts_ms / 1000,
+                            tz=__import__("datetime").timezone.utc
+                        ).date().isoformat()
+                        records.append({
+                            "date": date_str,
+                            "open": float(bar.get("o") or 0),
+                            "high": float(bar.get("h") or 0),
+                            "low": float(bar.get("l") or 0),
+                            "close": float(bar.get("c") or 0),
+                            "volume": int(bar.get("v") or 0),
+                        })
+                    if records:
+                        return {
+                            "ticker": ticker, "data": records,
+                            "fetched_at": datetime.utcnow().isoformat(),
+                            "error": None, "source": provider,
+                        }
+        except Exception:
+            pass
+        return None
+
+    # Polygon primario
+    result = await _try_provider(POLYGON_BASE_URL, polygon_key, "polygon")
+    if result:
+        return result
+    # Massive fallback
+    result = await _try_provider(MASSIVE_BASE_URL_OHLCV, massive_key, "massive")
+    if result:
+        return result
+    # Nessun provider disponibile o tutti falliti
+    return {
+        "ticker": ticker, "data": [],
+        "error": "no historical data available (polygon/massive failed)",
+        "source": "none",
+    }
+
+
+def fetch_historical_range_sync(
+    ticker: str, from_date: str, to_date: str
+) -> Dict[str, Any]:
+    """Wrapper sincrono per fetch_historical_range_async."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(
+                lambda: asyncio.run(
+                    fetch_historical_range_async(ticker, from_date, to_date)
+                )
+            ).result(timeout=PROVIDER_OHLCV_TIMEOUT + 5)
+    return asyncio.run(fetch_historical_range_async(ticker, from_date, to_date))
+
+
 def _fetch_provider_ohlcv_sync(base_url: str, ticker: str, period_days: int,
                                api_key: str, provider: str) -> Dict[str, Any]:
     """

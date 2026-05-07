@@ -136,6 +136,46 @@ def _tools_for_openai():
         for t in DECISION_TOOLS
     ]
 
+
+def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
+    """
+    Compone un testo narrativo del ragionamento dal workflow state per la dashboard.
+
+    Bug precedente: il backend salvava 'situation_overview', 'thesis',
+    'final_text' nel log DECISION_REASONING, ma il frontend leggeva
+    'reasoning_text' (mai scritto) → Card "Ragionamento" sempre vuota.
+
+    Soluzione: sintetizza un testo unico leggibile dai campi strutturati.
+    """
+    sections = []
+    sit = (ia.get("situation_overview") or "").strip()
+    if sit:
+        sections.append(f"📍 SITUAZIONE\n{sit}")
+    candidates = ia.get("asset_candidates") or []
+    if candidates:
+        if isinstance(candidates, list):
+            cand_str = ", ".join(str(c) for c in candidates[:6])
+        else:
+            cand_str = str(candidates)[:300]
+        sections.append(f"🎯 ASSET VALUTATI: {cand_str}")
+    thesis = (ft.get("thesis") or "").strip()
+    if thesis:
+        sections.append(f"💡 TESI\n{thesis}")
+    action_plan = (ft.get("action_plan") or "").strip()
+    if action_plan:
+        sections.append(f"📋 PIANO D'AZIONE\n{action_plan}")
+    primary_risk = (ft.get("primary_risk") or "").strip()
+    if primary_risk:
+        sections.append(f"⚠️ RISCHIO PRINCIPALE\n{primary_risk}")
+    final = (final_text or "").strip()
+    if final:
+        sections.append(f"✅ CONCLUSIONE\n{final[:500]}")
+
+    if not sections:
+        # Fallback: nessuna fase del workflow è stata committed
+        return final or "(workflow non completato — nessun ragionamento registrato)"
+    return "\n\n".join(sections)
+
 # ============================================================
 # System Prompts
 # ============================================================
@@ -1271,9 +1311,11 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         ws = workflow_state.to_dict() if 'workflow_state' in locals() else {}
         ia = (workflow_state.initial_assessment or {}) if 'workflow_state' in locals() else {}
         ft = (workflow_state.final_thesis or {}) if 'workflow_state' in locals() else {}
+        reasoning_text = _build_reasoning_text(ia, ft, final_text)
         reasoning_summary = {
             "model": used_model,
             "phase_state": ws.get("phase"),
+            "reasoning_text": reasoning_text,   # campo letto dal frontend
             "situation_overview": (ia.get("situation_overview") or "")[:1500],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],
@@ -1474,6 +1516,7 @@ async def _run_deepseek_decision_loop(
         database.insert_agent_log(run_id, "DECISION_REASONING", json.dumps({
             "model": DEEPSEEK_R1_MODEL,
             "phase_state": workflow_state.phase,
+            "reasoning_text": _build_reasoning_text(ia, ft, final_text),
             "situation_overview": (ia.get("situation_overview") or "")[:1500],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],
