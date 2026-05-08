@@ -140,6 +140,30 @@ def _ensure_cs_mirror_columns():
         ALTER TABLE positions ADD COLUMN IF NOT EXISTS auto_exit_set_at TIMESTAMPTZ;
         ALTER TABLE positions ADD COLUMN IF NOT EXISTS auto_exit_set_by TEXT;
 
+        -- v11: quantity NUMERIC invece di INTEGER.
+        -- Bug: 50% di 199 NVDA shares = 99.5 → INTEGER rifiuta con
+        -- "invalid input syntax for type integer". Inoltre crypto frazionali
+        -- (0.05 BTC) venivano truncati a 0. NUMERIC(20,8) supporta entrambi.
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='trades' AND column_name='quantity'
+                  AND data_type='integer'
+            ) THEN
+                ALTER TABLE trades ALTER COLUMN quantity TYPE NUMERIC(20,8)
+                    USING quantity::NUMERIC(20,8);
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='positions' AND column_name='quantity'
+                  AND data_type='integer'
+            ) THEN
+                ALTER TABLE positions ALTER COLUMN quantity TYPE NUMERIC(20,8)
+                    USING quantity::NUMERIC(20,8);
+            END IF;
+        END$$;
+
         -- v9: chat assistant (conversazioni con AI DeepSeek-R1).
         -- Mini-memoria delle ultime 10 conversazioni dell'utente.
         CREATE TABLE IF NOT EXISTS chat_conversations (

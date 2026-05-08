@@ -2333,6 +2333,101 @@ async def reset_portfolio(payload: ResetPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/api/portfolio/history/cleanup")
+async def cleanup_portfolio_history(threshold_pct: float = Query(default=25.0, ge=10.0, le=100.0)):
+    """
+    Pulisce portfolio_snapshots rimuovendo righe con total_value anomalo.
+
+    Strategia: calcola la median di tutti gli snapshot degli ultimi 90 giorni,
+    poi DELETE le righe il cui total_value devia di oltre threshold_pct%
+    dalla median. Operazione IRREVERSIBILE — usa solo se vedi spike persistenti
+    sul grafico equity (es. +47% di colpo che non sparisce).
+
+    Default threshold 25% — abbastanza largo da preservare gain reali del 20%
+    in qualche giorno, abbastanza stretto da catturare uno scalino +47% di
+    pricing transient.
+    """
+    try:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+        # 1. Carica tutti gli snapshot recenti (90 giorni) per calcolare median
+        history = database.get_portfolio_history(days=90)
+        if not history or len(history) < 5:
+            return {"status": "skipped", "reason": "history vuoto o troppo piccolo",
+                    "samples": len(history or [])}
+
+        values = sorted([float(h["total_value"]) for h in history
+                         if h.get("total_value") is not None
+                         and float(h["total_value"]) > 0])
+        if not values:
+            return {"status": "skipped", "reason": "nessun valore valido"}
+        m = len(values) // 2
+        median_val = values[m] if len(values) % 2 else (values[m - 1] + values[m]) / 2.0
+        upper = median_val * (1 + threshold_pct / 100.0)
+        lower = median_val * (1 - threshold_pct / 100.0)
+
+        # 2. DELETE diretto su Supabase (filtro by range total_value)
+        # La tabella reale è `portfolio_snapshots` (non portfolio_history).
+        deleted_total = 0
+        backend = "unknown"
+        try:
+            from db_supabase import _get_client
+            client = _get_client()
+            if client is None:
+                raise RuntimeError("Supabase client non disponibile")
+            since_iso = (_dt.now(_tz.utc) - _td(days=90)).isoformat()
+            # Cancella valori sopra l'upper
+            r1 = (client.table("portfolio_snapshots")
+                  .delete()
+                  .gt("total_value", upper)
+                  .gte("timestamp", since_iso)
+                  .execute())
+            deleted_total += len(r1.data or [])
+            # Cancella valori sotto il lower
+            r2 = (client.table("portfolio_snapshots")
+                  .delete()
+                  .lt("total_value", lower)
+                  .gte("timestamp", since_iso)
+                  .execute())
+            deleted_total += len(r2.data or [])
+            backend = "supabase"
+        except Exception as ex_sb:
+            # Fallback SQLite
+            try:
+                import db_sqlite
+                with db_sqlite.get_db() as conn:
+                    cur = conn.execute(
+                        "DELETE FROM portfolio_snapshots "
+                        "WHERE total_value > ? OR total_value < ?",
+                        (upper, lower),
+                    )
+                    deleted_total = cur.rowcount or 0
+                    conn.commit()
+                backend = "sqlite"
+            except Exception as ex_sql:
+                logger.error("cleanup error (Supabase: %s, SQLite: %s)", ex_sb, ex_sql)
+                return JSONResponse(status_code=500,
+                    content={"status": "error", "error": f"supabase={ex_sb}; sqlite={ex_sql}"})
+
+        logger.info("Portfolio history cleanup: rimossi %d outlier (backend=%s, "
+                    "median=%.2f, range=[%.2f, %.2f])",
+                    deleted_total, backend, median_val, lower, upper)
+
+        return {
+            "status": "ok",
+            "deleted": deleted_total,
+            "backend": backend,
+            "median": round(median_val, 2),
+            "upper_bound": round(upper, 2),
+            "lower_bound": round(lower, 2),
+            "threshold_pct": threshold_pct,
+            "message": f"Rimossi {deleted_total} snapshot anomali. Ricarica il grafico Analytics.",
+        }
+    except Exception as e:
+        logger.error("cleanup_portfolio_history error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
 # --- Endpoint chiusura manuale posizione ---
 
 

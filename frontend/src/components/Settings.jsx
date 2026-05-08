@@ -262,6 +262,40 @@ function Settings({ onBack, onDataRefresh }) {
 
   // === Trigger manuale yfinance / Massive poll ===
   const [pollStatus, setPollStatus] = useState({ running: false, result: null });
+
+  // === Cleanup portfolio_history outlier ===
+  const [cleanupStatus, setCleanupStatus] = useState({ running: false, result: null });
+  const handleHistoryCleanup = async () => {
+    if (cleanupStatus.running) return;
+    if (!window.confirm(
+      "Conferma pulizia storico equity.\n\n" +
+      "Questa operazione cancella PERMANENTEMENTE gli snapshot del portafoglio " +
+      "il cui valore devia di oltre il 25% dalla median storica (es. spike di " +
+      "+47% causati da pricing transient).\n\n" +
+      "Procedere?"
+    )) return;
+    setCleanupStatus({ running: true, result: null });
+    try {
+      const r = await fetch(`${API}/api/portfolio/history/cleanup?threshold_pct=25`, {
+        method: "POST",
+      });
+      const data = await r.json();
+      setCleanupStatus({
+        running: false,
+        result: {
+          ok: r.ok && data.status === "ok",
+          summary: data.message || data.error || `Status: ${data.status}`,
+          deleted: data.deleted,
+          median: data.median,
+        },
+      });
+    } catch (e) {
+      setCleanupStatus({
+        running: false,
+        result: { ok: false, summary: `Errore di rete: ${e}` },
+      });
+    }
+  };
   const handleManualPoll = async () => {
     if (pollStatus.running) return;
     setPollStatus({ running: true, result: null });
@@ -565,6 +599,52 @@ function Settings({ onBack, onDataRefresh }) {
                 border: `1px solid ${pollStatus.result.ok ? "#a7f3d0" : "#fecaca"}`,
               }}>
                 {pollStatus.result.summary}
+              </div>
+            )}
+          </div>
+
+          {/* Cleanup storico equity (rimuove spike permanenti) */}
+          <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid #f3f4f6" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: 600, color: "#111827" }}>
+                  Pulisci storico equity
+                </div>
+                <div style={{ fontSize: "12px", color: "#6b7280", marginTop: "2px" }}>
+                  Rimuove dal grafico Analytics gli snapshot del portafoglio con valore
+                  anomalo (deviazione &gt;25% dalla median). Usa solo se vedi spike
+                  persistenti tipo "+47% di colpo" che non spariscono. Operazione irreversibile.
+                </div>
+              </div>
+              <button
+                style={{
+                  ...btnSecondary,
+                  background: cleanupStatus.running ? "#e5e7eb" : "#f59e0b",
+                  color: cleanupStatus.running ? "#6b7280" : "#fff",
+                  borderColor: cleanupStatus.running ? "#d1d5db" : "#f59e0b",
+                  cursor: cleanupStatus.running ? "not-allowed" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+                onClick={handleHistoryCleanup}
+                disabled={cleanupStatus.running}
+              >
+                {cleanupStatus.running ? "Pulizia..." : "Pulisci storico"}
+              </button>
+            </div>
+            {cleanupStatus.result && (
+              <div style={{
+                marginTop: "8px", padding: "8px 12px", borderRadius: "6px",
+                fontSize: "12px",
+                background: cleanupStatus.result.ok ? "#ecfdf5" : "#fef2f2",
+                color: cleanupStatus.result.ok ? "#065f46" : "#991b1b",
+                border: `1px solid ${cleanupStatus.result.ok ? "#a7f3d0" : "#fecaca"}`,
+              }}>
+                {cleanupStatus.result.summary}
+                {cleanupStatus.result.deleted != null && (
+                  <span style={{ marginLeft: 6, fontFamily: "monospace" }}>
+                    (deleted={cleanupStatus.result.deleted}, median=${cleanupStatus.result.median})
+                  </span>
+                )}
               </div>
             )}
           </div>
