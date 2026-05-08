@@ -203,6 +203,29 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
     L'AI decide autonomamente quando e quanto vendere.
     Restituisce un dizionario con l'esito dell'operazione.
     """
+    # Validazione quantity > 0 (asimmetria con execute_buy che validava già):
+    # bug precedente accettava quantity=0 silenziosamente, scriveva un trade
+    # fantasma a $0 e lasciava la position invariata.
+    try:
+        quantity_f = float(quantity or 0)
+    except (TypeError, ValueError):
+        return {"success": False, "reason": f"quantity non valida: {quantity!r}"}
+    if quantity_f <= 0:
+        return {
+            "success": False,
+            "reason": f"quantity deve essere > 0 (ricevuto: {quantity_f})",
+        }
+    quantity = quantity_f
+
+    # Validazione price > 0 (stessa logica)
+    try:
+        price_f = float(price or 0)
+    except (TypeError, ValueError):
+        return {"success": False, "reason": f"price non valido: {price!r}"}
+    if price_f <= 0:
+        return {"success": False, "reason": f"price deve essere > 0 (ricevuto: {price_f})"}
+    price = price_f
+
     # Verifica che la posizione esista
     existing = get_position(ticker)
     if existing is None:
@@ -274,13 +297,44 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
 # ═══════════════════════════════════════════════════════════════════════
 
 # Soglie di sanita' per i livelli SL/TP. Ratio = level / current_price.
-# Un livello "ragionevole" e' tra 0.5 e 1.5 (cioe' entro ±50%).
-_SLTP_MIN_RATIO = 0.50
-_SLTP_MAX_RATIO = 1.50
+# Equity: range ±50% (un livello "ragionevole" è entro 0.5x – 1.5x del current).
+# Crypto: range ±70% (più volatile: SL larghi su asset come SOL/AVAX a -55% sono
+#   tecnicamente legittimi su selloff). Bug precedente: range stretto rifiutava
+#   tutti i SL su crypto durante drawdown reali.
+_SLTP_MIN_RATIO_EQUITY = 0.50
+_SLTP_MAX_RATIO_EQUITY = 1.50
+_SLTP_MIN_RATIO_CRYPTO = 0.30
+_SLTP_MAX_RATIO_CRYPTO = 2.00
+
+
+def _is_crypto_ticker_for_sltp(ticker: str) -> bool:
+    """True se il ticker è crypto (ClawStreet 14-set)."""
+    if not ticker:
+        return False
+    t = ticker.upper().strip()
+    return t.startswith("X:") or (t.endswith("-USD") and len(t) > 4)
+
+
+def _refresh_current_price(ticker: str, fallback: float) -> float:
+    """
+    Tenta di leggere il prezzo corrente dalla cache price_polling
+    (aggiornata ogni 60s). Fallback al prezzo passato se cache vuota.
+    Bug precedente: validate_sltp usava current_price dalla position
+    che poteva essere None o stale → rifiutava tutti i SL.
+    """
+    try:
+        from price_polling import get_cached_prices_bulk
+        cached = get_cached_prices_bulk([ticker], max_age_seconds=600)
+        if ticker in cached and cached[ticker].get("price"):
+            return float(cached[ticker]["price"])
+    except Exception:
+        pass
+    return float(fallback) if fallback else 0.0
 
 
 def _validate_sltp_level(level_price: float, current_price: float,
-                          kind: str, is_long: bool = True
+                          kind: str, is_long: bool = True,
+                          ticker: str = ""
                           ) -> tuple[bool, str]:
     """
     Verifica che un livello SL/TP sia plausibile rispetto al prezzo corrente.
@@ -290,22 +344,28 @@ def _validate_sltp_level(level_price: float, current_price: float,
       current_price: prezzo corrente dell'asset
       kind:  'SL' o 'TP' per messaggi di errore
       is_long: True se LONG (BUY), False se SHORT (SELL)
+      ticker: opzionale, usato per scegliere il range crypto vs equity
 
     Ritorna (ok, reason).
     """
     if not isinstance(level_price, (int, float)) or level_price <= 0:
         return False, f"{kind} non valido (deve essere > 0)"
     if not isinstance(current_price, (int, float)) or current_price <= 0:
-        return False, f"current_price non valido per validare {kind}"
+        return False, f"current_price non valido per validare {kind} (forse cache prezzi vuota?)"
+
+    is_crypto = _is_crypto_ticker_for_sltp(ticker)
+    min_ratio = _SLTP_MIN_RATIO_CRYPTO if is_crypto else _SLTP_MIN_RATIO_EQUITY
+    max_ratio = _SLTP_MAX_RATIO_CRYPTO if is_crypto else _SLTP_MAX_RATIO_EQUITY
 
     ratio = float(level_price) / float(current_price)
-    if ratio < _SLTP_MIN_RATIO or ratio > _SLTP_MAX_RATIO:
+    if ratio < min_ratio or ratio > max_ratio:
+        asset_class = "crypto" if is_crypto else "equity"
         return False, (
             f"{kind} ({level_price}) si discosta {abs(1 - ratio) * 100:.0f}% "
-            f"dal prezzo corrente ({current_price}). Range accettato: "
-            f"{current_price * _SLTP_MIN_RATIO:.2f} - "
-            f"{current_price * _SLTP_MAX_RATIO:.2f}. "
-            f"Probabile errore (forse hai confuso quantita' con prezzo?)."
+            f"dal prezzo corrente ({current_price}) — fuori dal range {asset_class} "
+            f"({min_ratio:.2f}x – {max_ratio:.2f}x = "
+            f"{current_price * min_ratio:.2f} – {current_price * max_ratio:.2f}). "
+            f"Probabile errore (hai confuso quantità con prezzo?)."
         )
 
     # Verifica direzione corretta vs current_price
@@ -348,11 +408,16 @@ def set_stop_loss(ticker: str, stop_price: float, run_id: str = "") -> dict:
         return {"success": False, "reason": "stop_price deve essere >= 0"}
 
     if float(stop_price) > 0:
-        cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
+        # Refresh current_price dalla cache price_polling (aggiornata ogni 60s)
+        # invece di affidarsi al campo nella position record che può essere
+        # stale o None per posizioni appena aperte.
+        pos_cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
+        cur = _refresh_current_price(ticker, pos_cur)
         # Per il sistema attuale tutte le posizioni sono LONG (BUY); il
         # validatore copre comunque il caso SHORT futuro.
         ok, reason = _validate_sltp_level(
             float(stop_price), float(cur), kind="SL", is_long=True,
+            ticker=ticker,
         )
         if not ok:
             try:
@@ -391,9 +456,11 @@ def set_take_profit(ticker: str, target_price: float, run_id: str = "") -> dict:
         return {"success": False, "reason": "target_price deve essere >= 0"}
 
     if float(target_price) > 0:
-        cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
+        pos_cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
+        cur = _refresh_current_price(ticker, pos_cur)
         ok, reason = _validate_sltp_level(
             float(target_price), float(cur), kind="TP", is_long=True,
+            ticker=ticker,
         )
         if not ok:
             try:

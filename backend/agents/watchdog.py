@@ -89,13 +89,24 @@ def _get_deepseek_key() -> str:
 
 
 def _get_last_decision_time(database) -> datetime | None:
-    """Recupera il timestamp dell'ultimo run del Decision Agent."""
+    """Recupera il timestamp dell'ultimo run di QUALSIASI Decision Agent
+    (standard Sonnet, R1, oppure Decision Crypto).
+
+    Bug precedente: la query filtrava solo `agent_name='decision'` (standard),
+    quindi DOPO un run del Decision Crypto a 13:00 il throttle 60-min NON
+    si attivava per Sonnet. Risultato: watchdog alle 13:18 triggerava
+    crypto pipeline (mixed focus_tickers), poi alle 13:19 triggerava
+    Decision standard sulle stesse news → due decisional in 1 minuto.
+
+    Fix: query include sia 'decision' che 'decision_crypto' nel checkpoint,
+    e include `DECISION_CRYPTO_*` nel fallback agent_logs.
+    """
     try:
         client = database.get_client()
         if client:
             result = client.table("agent_checkpoints") \
                 .select("updated_at") \
-                .eq("agent_name", "decision") \
+                .in_("agent_name", ["decision", "decision_crypto"]) \
                 .eq("status", "COMPLETED") \
                 .order("updated_at", desc=True) \
                 .limit(1) \
@@ -106,22 +117,17 @@ def _get_last_decision_time(database) -> datetime | None:
     except Exception:
         pass
 
-    # Fallback: controlla agent_logs — qualunque tentativo (success o crash)
-    # IMPORTANTE: il throttle DEVE attivarsi anche se il Decision è crashato.
-    # Prima guardavamo solo DECISION_COMPLETE: se Sonnet falliva (es. quota
-    # API esaurita), il flag non si scriveva → throttle non scattava → loop
-    # infinito di retry ogni 1 min × 8h = $$$. Ora throttiamo su QUALSIASI
-    # log che indichi un tentativo recente:
-    #   - DECISION_COMPLETE (run riuscito)
-    #   - DECISION_ERROR (run crashato — già abbastanza per non riprovare subito)
-    #   - DECISION_CONTEXT (context loaded → tentativo iniziato)
-    #   - watchdog_triggered nell'ORCHESTRATOR (Watchdog ha già triggerato)
+    # Fallback: agent_logs — sia standard che crypto vengono throttled insieme.
     try:
         client = database.get_client()
         if client:
             result = client.table("agent_logs") \
                 .select("timestamp,phase") \
-                .in_("phase", ["DECISION_COMPLETE", "DECISION_ERROR", "DECISION_CONTEXT"]) \
+                .in_("phase", [
+                    "DECISION_COMPLETE", "DECISION_ERROR", "DECISION_CONTEXT",
+                    "DECISION_CRYPTO_COMPLETE", "DECISION_CRYPTO_ERROR",
+                    "DECISION_CRYPTO_CONTEXT",
+                ]) \
                 .order("timestamp", desc=True) \
                 .limit(1) \
                 .execute()
@@ -385,6 +391,26 @@ async def run_watchdog(run_id: str) -> dict:
         }))
         return {"should_trigger": False, "reason": "throttled", "urgency": 0}
 
+    # 1a. COST GUARD: se il mercato è chiuso E il buffer intelligence non
+    # contiene news rilevanti recenti (ultimi 15 min), skip la chiamata
+    # DeepSeek. Bug precedente: 1440 chiamate/giorno anche con mercato chiuso
+    # e buffer vuoto. Il Decision Crypto su scheduler 1h gestisce l'overnight
+    # crypto baseline.
+    try:
+        from scheduler import is_market_open
+        market_open = is_market_open()
+    except Exception:
+        market_open = True
+    if not market_open:
+        recent = _get_recent_headlines(database, minutes=15)
+        if not recent:
+            # Niente news + mercato chiuso = niente da analizzare. Skip.
+            return {
+                "should_trigger": False,
+                "reason": "market_closed_no_recent_news",
+                "urgency": 0,
+            }
+
     # 1b. Counter globale: ogni 3 giri attiviamo il deep-check sul portafoglio
     #     (prezzi specifici delle posizioni + headlines che le menzionano).
     #     Tra un deep-check e l'altro, il watchdog usa solo i ticker base
@@ -542,9 +568,15 @@ async def run_watchdog(run_id: str) -> dict:
 def _trigger_signature(reason: str, focus_tickers: list) -> str:
     """
     Computa una signature stabile del trigger per dedup.
-    - reason normalizzata: lowercase, no punctuation, prime 8 parole significative
-    - focus_tickers: sorted, uppercase
-    - hash SHA1 dei primi 80 chars canonici
+    Bug precedente: includeva i `focus_tickers` nella signature, quindi
+    se la stessa news in due cycle consecutivi del watchdog produceva
+    una mix-list diversa (es. T1: ["BTC-USD","NVDA"], T2: ["NVDA","MSFT"]),
+    le signature differivano e nessun dedup scattava → due decisional
+    triggherati a 1 min di distanza.
+
+    Fix: signature SOLO sulla reason normalizzata. La reason cattura il
+    catalyst macro/news che è stabile tra cycle ravvicinati, anche se
+    la composizione esatta dei focus_tickers fluttua.
     """
     import hashlib
     import re as _re
@@ -553,7 +585,9 @@ def _trigger_signature(reason: str, focus_tickers: list) -> str:
     txt = reason.lower()
     txt = _re.sub(r"[^\w\s]", " ", txt)
     txt = _re.sub(r"\s+", " ", txt).strip()
-    words = [w for w in txt.split() if len(w) > 2][:8]
-    tickers = sorted({(t or "").upper().strip() for t in (focus_tickers or [])})
-    canonical = (" ".join(words) + "|" + ",".join(tickers))[:80]
+    # Prendiamo le prime 12 parole significative (>2 char) per garantire
+    # robustezza: due reason che dicono "NVDA exceeds 1.5% threshold + news X"
+    # collidono anche se il watchdog cambia ordine o aggiunge un ticker.
+    words = [w for w in txt.split() if len(w) > 2][:12]
+    canonical = " ".join(words)[:120]
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]

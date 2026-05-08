@@ -269,9 +269,6 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
             {**p} for p in (portfolio.get("positions") or [])
         ],
     }
-    valuation = compute_portfolio_value(new_portfolio, prices)
-    total_value_now = valuation["total_value"]
-
     applied_trades = []
     for trade in trades or []:
         action = (trade.get("action") or "").upper()
@@ -285,6 +282,12 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                                    "reason": f"no price for {asset}"})
             continue
 
+        # FIX: total_value ricalcolato per OGNI trade (non una sola volta a inizio
+        # loop). Bug precedente: il primo trade chiudeva uno short con P&L grosso
+        # ma il secondo trade calcolava dollar_amount sul total_value PRE-chiusura.
+        valuation = compute_portfolio_value(new_portfolio, prices)
+        total_value_now = valuation["total_value"]
+
         # Calcola dollar amount = % del valore totale corrente
         dollar_amount = total_value_now * (alloc_pct / 100.0)
         quantity = round(dollar_amount / price, 4)
@@ -296,6 +299,21 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
         # Trova posizione esistente per questo asset
         existing = next((p for p in new_portfolio["positions"]
                          if p["asset"] == asset), None)
+
+        # Trade-record builder che riflette gli effettivi valori eseguiti
+        # (FIX: prima si scriveva l'allocation_pct ORIGINALE anche dopo
+        # scaling per cash insufficient → confondeva la diagnostica).
+        def _record(executed_qty: float, status: str, **extra) -> dict:
+            ev = executed_qty * price
+            actual_pct = (ev / total_value_now * 100) if total_value_now else 0
+            return {
+                **trade, "status": status,
+                "executed_qty": round(executed_qty, 4),
+                "executed_price": round(price, 4),
+                "executed_value": round(ev, 2),
+                "actual_allocation_pct": round(actual_pct, 2),
+                **extra,
+            }
 
         if action == "BUY":
             cost = quantity * price
@@ -309,21 +327,45 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                     continue
             new_portfolio["cash"] -= cost
             if existing and existing.get("side") == "long":
-                # Aumenta long, ricalcola avg
                 new_qty = existing["quantity"] + quantity
                 new_avg = (existing["avg_entry_price"] * existing["quantity"]
                            + price * quantity) / new_qty
                 existing["quantity"] = round(new_qty, 4)
                 existing["avg_entry_price"] = round(new_avg, 4)
+                applied_trades.append(_record(quantity, "executed_add_long"))
             elif existing and existing.get("side") == "short":
-                # BUY su short = chiude lo short (riacquista)
+                # BUY su SHORT = riacquista (chiude). FIX accounting:
+                # all'apertura dello short avevamo INCASSATO avg*qty nel cash.
+                # Ora paghiamo `cost = quantity*price` (già scalato sopra).
+                # Il P&L sul close è IMPLICITO nel cash flow netto:
+                #   net = -close_qty*price (paid now) + close_qty*avg (received past) = (avg-price)*close_qty
+                # NON va aggiunto manualmente — sarebbe doppio conteggio.
                 close_qty = min(quantity, existing["quantity"])
-                # Realizza P&L
-                pnl = (existing["avg_entry_price"] - price) * close_qty
-                new_portfolio["cash"] += pnl  # P&L cash
+                pnl_realized = (existing["avg_entry_price"] - price) * close_qty
                 existing["quantity"] -= close_qty
                 if existing["quantity"] <= 0.0001:
                     new_portfolio["positions"].remove(existing)
+                # Residuo → apre LONG netto sul prezzo corrente.
+                # Cost del residuo già scalato nel `cost = quantity*price` iniziale.
+                residual = quantity - close_qty
+                if residual > 0:
+                    new_portfolio["positions"].append({
+                        "asset": asset, "quantity": round(residual, 4),
+                        "avg_entry_price": round(price, 4), "side": "long",
+                        "thesis": trade.get("thesis", "")[:300],
+                        "conviction": trade.get("conviction", "MEDIA"),
+                    })
+                    applied_trades.append(_record(quantity, "executed_flip_short_to_long",
+                                                   close_qty=round(close_qty, 4),
+                                                   pnl_realized=round(pnl_realized, 2),
+                                                   long_residual=round(residual, 4)))
+                else:
+                    # Solo close: il cost incluso per close_qty è > di quanto serviva.
+                    # Restituisci la differenza (= cost - close_qty*price). Nota:
+                    # se quantity == close_qty (no residual), cost = close_qty*price
+                    # quindi differenza = 0. Niente da restituire.
+                    applied_trades.append(_record(close_qty, "executed_close_short",
+                                                   pnl_realized=round(pnl_realized, 2)))
             else:
                 new_portfolio["positions"].append({
                     "asset": asset, "quantity": quantity,
@@ -331,35 +373,44 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                     "thesis": trade.get("thesis", "")[:300],
                     "conviction": trade.get("conviction", "MEDIA"),
                 })
-            applied_trades.append({**trade, "status": "executed",
-                                   "executed_qty": quantity,
-                                   "executed_price": price,
-                                   "executed_value": round(quantity * price, 2)})
+                applied_trades.append(_record(quantity, "executed_open_long"))
 
         else:  # SELL
             if existing and existing.get("side") == "long":
-                # Chiude/riduce long
+                # Chiude/riduce long. FIX: se qty supera il long, il residuo
+                # apre uno SHORT netto (prima si scartava il residuo).
                 close_qty = min(quantity, existing["quantity"])
                 proceeds = close_qty * price
                 new_portfolio["cash"] += proceeds
                 existing["quantity"] -= close_qty
                 if existing["quantity"] <= 0.0001:
                     new_portfolio["positions"].remove(existing)
-                applied_trades.append({**trade, "status": "executed_close_long",
-                                       "executed_qty": close_qty,
-                                       "executed_price": price,
-                                       "proceeds": round(proceeds, 2)})
+                residual = quantity - close_qty
+                if residual > 0:
+                    short_proceeds = residual * price
+                    new_portfolio["cash"] += short_proceeds
+                    new_portfolio["positions"].append({
+                        "asset": asset, "quantity": round(residual, 4),
+                        "avg_entry_price": round(price, 4), "side": "short",
+                        "thesis": trade.get("thesis", "")[:300],
+                        "conviction": trade.get("conviction", "MEDIA"),
+                    })
+                    applied_trades.append(_record(quantity, "executed_flip_long_to_short",
+                                                   close_qty=round(close_qty, 4),
+                                                   short_residual=round(residual, 4)))
+                else:
+                    applied_trades.append(_record(close_qty, "executed_close_long",
+                                                   proceeds=round(proceeds, 2)))
             elif existing and existing.get("side") == "short":
-                # Aumenta short
                 new_qty = existing["quantity"] + quantity
                 new_avg = (existing["avg_entry_price"] * existing["quantity"]
                            + price * quantity) / new_qty
                 existing["quantity"] = round(new_qty, 4)
                 existing["avg_entry_price"] = round(new_avg, 4)
-                applied_trades.append({**trade, "status": "executed_add_short",
-                                       "executed_qty": quantity})
+                # Incassa il proceeds anche sull'aumento short
+                new_portfolio["cash"] += quantity * price
+                applied_trades.append(_record(quantity, "executed_add_short"))
             else:
-                # Apre short: incassa il valore (sarà rimborsato a chiusura)
                 proceeds = quantity * price
                 new_portfolio["cash"] += proceeds
                 new_portfolio["positions"].append({
@@ -368,10 +419,8 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                     "thesis": trade.get("thesis", "")[:300],
                     "conviction": trade.get("conviction", "MEDIA"),
                 })
-                applied_trades.append({**trade, "status": "executed_open_short",
-                                       "executed_qty": quantity,
-                                       "executed_price": price,
-                                       "proceeds": round(proceeds, 2)})
+                applied_trades.append(_record(quantity, "executed_open_short",
+                                               proceeds=round(proceeds, 2)))
 
     return {"portfolio": new_portfolio, "applied_trades": applied_trades}
 

@@ -62,10 +62,24 @@ def can_call_tool(state: WorkflowState, tool_name: str) -> tuple[bool, str]:
     Verifica se la chiamata al tool e' consentita nello stato corrente.
     Ritorna (allowed, error_message_if_not).
 
-    Tool sempre consentiti (read-only): get_portfolio_state, request_extra_analysis.
+    Tool TRULY read-only (no overhead, no API call esterna): get_portfolio_state.
+    Bug precedente: `request_extra_analysis` era nei READ_ONLY_TOOLS quindi
+    permetteva al modello di saltare FASE 1 e fare extra-analysis su 5 ticker
+    bypassando il workflow obbligatorio. Inoltre extra_analysis fa una vera
+    chiamata yfinance che ha costo/latenza non trascurabile.
     """
-    READ_ONLY_TOOLS = {"get_portfolio_state", "request_extra_analysis"}
+    READ_ONLY_TOOLS = {"get_portfolio_state"}
     if tool_name in READ_ONLY_TOOLS:
+        return True, ""
+
+    # request_extra_analysis: solo dopo FASE 1 completata, come per
+    # request_technical_analysis. Concettualmente fa la stessa cosa.
+    if tool_name == "request_extra_analysis":
+        if state.phase == PHASE_NONE:
+            return False, (
+                "Devi PRIMA chiamare commit_initial_assessment "
+                "(FASE 1) prima di richiedere extra analysis su altri ticker."
+            )
         return True, ""
 
     if tool_name == "commit_initial_assessment":

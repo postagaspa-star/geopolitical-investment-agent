@@ -600,7 +600,10 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             result = portfolio.set_stop_loss(ticker, stop_price, run_id=run_id)
             database.insert_agent_log(run_id, "DECISION_CRYPTO_SET_SL", json.dumps({
                 "ticker": ticker, "stop_price": stop_price,
-                "success": result.get("success"), "reason": reason[:300],
+                "success": result.get("success"),
+                "ai_motivation": reason[:300],
+                "failure_reason": (result.get("reason", "")[:400]
+                                   if not result.get("success") else None),
             }))
             return json.dumps(result, default=str)
 
@@ -611,7 +614,10 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             result = portfolio.set_take_profit(ticker, target_price, run_id=run_id)
             database.insert_agent_log(run_id, "DECISION_CRYPTO_SET_TP", json.dumps({
                 "ticker": ticker, "target_price": target_price,
-                "success": result.get("success"), "reason": reason[:300],
+                "success": result.get("success"),
+                "ai_motivation": reason[:300],
+                "failure_reason": (result.get("reason", "")[:400]
+                                   if not result.get("success") else None),
             }))
             return json.dumps(result, default=str)
 
