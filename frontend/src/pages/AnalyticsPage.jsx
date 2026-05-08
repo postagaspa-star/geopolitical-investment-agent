@@ -5,6 +5,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   AreaChart, Area, LineChart, Line,
   ComposedChart, ReferenceArea,
+  ScatterChart, Scatter, ZAxis, ReferenceLine,
 } from 'recharts';
 
 const API = window.location.origin;
@@ -432,120 +433,6 @@ function EquityCurveCard({ history, hasCrypto = false }) {
   );
 }
 
-// Cumulative P&L sui trade chiusi
-function CumulativePnlCard({ closedTrades }) {
-  if (!closedTrades?.length) {
-    return <div className="empty-state">Nessun trade chiuso</div>;
-  }
-
-  let cum = 0;
-  const data = closedTrades.map((c, i) => {
-    cum += c.pnl;
-    return {
-      idx: i + 1,
-      cum,
-      ticker: c.ticker,
-      pnl: c.pnl,
-    };
-  });
-
-  const finalCum = data[data.length - 1].cum;
-  const lineColor = finalCum >= 0 ? '#10b981' : '#ef4444';
-
-  return (
-    <ResponsiveContainer width="100%" height={240}>
-      <AreaChart data={data} margin={{ top: 5, right: 8, left: -8, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-        <XAxis
-          dataKey="idx"
-          tick={{ fill: '#64748b', fontSize: 10 }}
-          label={{ value: 'Trade #', position: 'insideBottom', offset: -2, fill: '#64748b', fontSize: 10 }}
-        />
-        <YAxis
-          tick={{ fill: '#64748b', fontSize: 10 }}
-          tickFormatter={(v) => `$${v.toFixed(0)}`}
-        />
-        <Tooltip content={({ active, payload }) => {
-          if (!active || !payload?.length) return null;
-          const d = payload[0]?.payload;
-          return (
-            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
-              <div style={{ color: '#94a3b8' }}>Trade #{d?.idx} · {d?.ticker}</div>
-              <div>Cumulativo: <strong>{fmtUsd(d?.cum)}</strong></div>
-              <div>P&L: <strong style={{ color: d?.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d?.pnl)}</strong></div>
-            </div>
-          );
-        }} />
-        <Area
-          type="monotone"
-          dataKey="cum"
-          stroke={lineColor}
-          fill={lineColor}
-          fillOpacity={0.15}
-          strokeWidth={2}
-          isAnimationActive={false}
-        />
-      </AreaChart>
-    </ResponsiveContainer>
-  );
-}
-
-// Distribuzione P&L (istogramma)
-function PnlDistributionCard({ closedTrades }) {
-  if (!closedTrades?.length) {
-    return <div className="empty-state">Nessun trade chiuso</div>;
-  }
-
-  // Crea bucket dinamici. FIX: filtra valori non finiti per evitare
-  // bucket label "NaN%" e istogramma vuoto.
-  const returns = closedTrades.map((c) => c.pnlPct).filter(Number.isFinite);
-  if (returns.length === 0) {
-    return <div className="empty-state">Nessun dato valido</div>;
-  }
-  const min = Math.min(...returns);
-  const max = Math.max(...returns);
-  const bucketCount = 10;
-  const range = max - min || 1;
-  const step = range / bucketCount;
-
-  const buckets = Array.from({ length: bucketCount }, (_, i) => ({
-    label: `${(min + i * step).toFixed(1)}%`,
-    range: [min + i * step, min + (i + 1) * step],
-    count: 0,
-    isPositive: (min + (i + 0.5) * step) >= 0,
-  }));
-
-  for (const r of returns) {
-    let idx = Math.min(bucketCount - 1, Math.max(0, Math.floor((r - min) / step)));
-    buckets[idx].count += 1;
-  }
-
-  return (
-    <ResponsiveContainer width="100%" height={240}>
-      <BarChart data={buckets} margin={{ top: 5, right: 8, left: -16, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-        <XAxis dataKey="label" tick={{ fill: '#64748b', fontSize: 9 }} angle={-30} textAnchor="end" height={50} />
-        <YAxis tick={{ fill: '#64748b', fontSize: 10 }} allowDecimals={false} />
-        <Tooltip content={({ active, payload }) => {
-          if (!active || !payload?.length) return null;
-          const d = payload[0]?.payload;
-          return (
-            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
-              <div style={{ color: '#94a3b8' }}>Range: {d.range[0].toFixed(1)}% – {d.range[1].toFixed(1)}%</div>
-              <div>Trade: <strong>{d.count}</strong></div>
-            </div>
-          );
-        }} />
-        <Bar dataKey="count" radius={[3, 3, 0, 0]}>
-          {buckets.map((b, i) => (
-            <Cell key={i} fill={b.isPositive ? '#10b981' : '#ef4444'} fillOpacity={0.85} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
-  );
-}
-
 // Top performers / Worst performers
 function PnlByTickerCard({ closedTrades }) {
   if (!closedTrades?.length) {
@@ -648,42 +535,6 @@ function ExposurePieCard({ positions }) {
   );
 }
 
-// Activity heatmap: trade per giorno della settimana
-function TradesPerWeekdayCard({ trades }) {
-  if (!trades?.length) {
-    return <div className="empty-state">Nessun trade</div>;
-  }
-
-  const days = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'];
-  const counts = days.map((d) => ({ day: d, Buy: 0, Sell: 0 }));
-
-  for (const t of trades) {
-    const ts = t.timestamp ? new Date(t.timestamp) : null;
-    if (!ts || isNaN(ts)) continue;
-    // getDay: 0=Sun, 1=Mon, ..., 6=Sat. Converto a 0=Mon...6=Sun
-    const idx = (ts.getDay() + 6) % 7;
-    const action = (t.action ?? '').toUpperCase();
-    if (action === 'BUY') counts[idx].Buy += 1;
-    else if (action === 'SELL') counts[idx].Sell += 1;
-  }
-
-  return (
-    <ResponsiveContainer width="100%" height={240}>
-      <BarChart data={counts} margin={{ top: 5, right: 8, left: -16, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-        <XAxis dataKey="day" tick={{ fill: '#64748b', fontSize: 11 }} />
-        <YAxis tick={{ fill: '#64748b', fontSize: 10 }} allowDecimals={false} />
-        <Tooltip content={({ active, payload, label }) => (
-          <DarkTooltip active={active} payload={payload} label={label} />
-        )} />
-        <Legend wrapperStyle={{ fontSize: '0.75rem', color: '#94a3b8' }} iconType="circle" iconSize={8} />
-        <Bar dataKey="Buy" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]} />
-        <Bar dataKey="Sell" stackId="a" fill="#ef4444" radius={[3, 3, 0, 0]} />
-      </BarChart>
-    </ResponsiveContainer>
-  );
-}
-
 // Win rate per ticker (almeno 3 trade chiusi)
 function WinRateByTickerCard({ closedTrades }) {
   if (!closedTrades?.length) {
@@ -737,6 +588,351 @@ function WinRateByTickerCard({ closedTrades }) {
         <Bar dataKey="winRate" radius={[0, 3, 3, 0]}>
           {data.map((d, i) => (
             <Cell key={i} fill={d.winRate >= 50 ? '#10b981' : '#ef4444'} fillOpacity={0.85} />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ============================================================
+// NUOVE METRICHE INTROSPETTIVE
+// ============================================================
+
+// 1) Confidence vs Outcome — scatter del confidence_score (X) vs P&L% (Y).
+// Risponde alla domanda: "il confidence dell'AI è calibrato?".
+// Dot grandi se trade > $5k, piccoli sotto.
+function ConfidenceVsOutcomeCard({ closedTrades }) {
+  if (!closedTrades?.length) {
+    return <div className="empty-state">Nessun trade chiuso</div>;
+  }
+
+  // Filtra solo trade con confidence definito
+  const data = closedTrades
+    .filter((c) => Number.isFinite(c.confidence) && c.confidence > 0)
+    .map((c) => ({
+      // Normalizza confidence: alcuni sono 0-1, altri 0-100. Forziamo 0-100.
+      confidence: c.confidence > 1 ? c.confidence : c.confidence * 100,
+      pnlPct: c.pnlPct,
+      ticker: c.ticker,
+      pnl: c.pnl,
+      size: Math.min(120, Math.max(20, Math.abs(c.pnl) / 50)),
+    }));
+
+  if (!data.length) {
+    return <div className="empty-state">Nessun trade chiuso ha confidence_score registrato</div>;
+  }
+
+  // Punti vincenti vs perdenti separati per dare colori diversi
+  const winners = data.filter((d) => d.pnlPct >= 0);
+  const losers = data.filter((d) => d.pnlPct < 0);
+
+  return (
+    <ResponsiveContainer width="100%" height={260}>
+      <ScatterChart margin={{ top: 5, right: 12, left: -8, bottom: 5 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+        <XAxis
+          type="number"
+          dataKey="confidence"
+          name="Confidence"
+          domain={[0, 100]}
+          tick={{ fill: '#64748b', fontSize: 10 }}
+          tickFormatter={(v) => `${v}%`}
+          label={{ value: 'Confidence dell\'AI al BUY', position: 'insideBottom',
+                   offset: -2, fill: '#64748b', fontSize: 10 }}
+        />
+        <YAxis
+          type="number"
+          dataKey="pnlPct"
+          name="P&L %"
+          tick={{ fill: '#64748b', fontSize: 10 }}
+          tickFormatter={(v) => `${v.toFixed(0)}%`}
+        />
+        <ZAxis type="number" dataKey="size" range={[20, 120]} />
+        <ReferenceLine y={0} stroke="#64748b" strokeDasharray="3 3" />
+        <Tooltip content={({ active, payload }) => {
+          if (!active || !payload?.length) return null;
+          const d = payload[0]?.payload;
+          return (
+            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
+              <div style={{ color: '#94a3b8', marginBottom: 2 }}>{d?.ticker}</div>
+              <div>Confidence: <strong>{d?.confidence?.toFixed(0)}%</strong></div>
+              <div>Outcome: <strong style={{ color: d?.pnlPct >= 0 ? '#10b981' : '#ef4444' }}>{fmtPct(d?.pnlPct)}</strong></div>
+              <div>P&L: <strong>{fmtUsd(d?.pnl)}</strong></div>
+            </div>
+          );
+        }} />
+        <Scatter name="Vincenti" data={winners} fill="#10b981" fillOpacity={0.7} />
+        <Scatter name="Perdenti" data={losers} fill="#ef4444" fillOpacity={0.7} />
+      </ScatterChart>
+    </ResponsiveContainer>
+  );
+}
+
+// 2) Rolling win rate (finestra mobile su N trade) — mostra se la
+// performance dell'AI sta migliorando, peggiorando, o oscillando.
+function RollingWinRateCard({ closedTrades, windowSize = 10 }) {
+  if (!closedTrades?.length || closedTrades.length < windowSize) {
+    return <div className="empty-state">
+      Servono almeno {windowSize} trade chiusi (attuali: {closedTrades?.length ?? 0})
+    </div>;
+  }
+
+  // closedTrades è già ordinato per sellTimestamp ASC (computeClosedTrades)
+  const data = [];
+  for (let i = windowSize - 1; i < closedTrades.length; i++) {
+    const window = closedTrades.slice(i - windowSize + 1, i + 1);
+    const wins = window.filter((c) => c.pnl > 0).length;
+    const winRate = (wins / window.length) * 100;
+    data.push({
+      idx: i + 1,
+      winRate,
+      timestamp: closedTrades[i].sellTimestamp,
+      ticker: closedTrades[i].ticker,
+    });
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height={240}>
+      <LineChart data={data} margin={{ top: 5, right: 12, left: -8, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+        <XAxis
+          dataKey="idx"
+          tick={{ fill: '#64748b', fontSize: 10 }}
+          label={{ value: `Trade # (rolling ${windowSize})`, position: 'insideBottom',
+                   offset: -2, fill: '#64748b', fontSize: 10 }}
+        />
+        <YAxis
+          domain={[0, 100]}
+          tick={{ fill: '#64748b', fontSize: 10 }}
+          tickFormatter={(v) => `${v}%`}
+        />
+        <ReferenceLine y={50} stroke="#64748b" strokeDasharray="3 3"
+                       label={{ value: '50%', position: 'right', fill: '#64748b', fontSize: 10 }} />
+        <Tooltip content={({ active, payload }) => {
+          if (!active || !payload?.length) return null;
+          const d = payload[0]?.payload;
+          return (
+            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
+              <div style={{ color: '#94a3b8' }}>Trade #{d?.idx}</div>
+              <div>Win rate (rolling {windowSize}): <strong>{d?.winRate.toFixed(1)}%</strong></div>
+              {d?.timestamp && <div style={{ color: '#64748b', fontSize: '0.7rem' }}>{new Date(d.timestamp).toLocaleDateString('it-IT')}</div>}
+            </div>
+          );
+        }} />
+        <Line
+          type="monotone"
+          dataKey="winRate"
+          stroke="#3b82f6"
+          strokeWidth={2}
+          dot={false}
+          isAnimationActive={false}
+        />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+// 3) Equity vs Crypto P&L separati — mostra quale "gamba" del bot regge.
+// Aggregato per giorno: somma P&L realizzato per asset class.
+function EquityVsCryptoPnlCard({ closedTrades }) {
+  if (!closedTrades?.length) {
+    return <div className="empty-state">Nessun trade chiuso</div>;
+  }
+
+  const isCrypto = (t) => t.endsWith('-USD') || t.startsWith('X:') || t.endsWith('USD');
+
+  // Group by giorno + asset class
+  const byDay = {};
+  for (const c of closedTrades) {
+    if (!c.sellTimestamp) continue;
+    const day = new Date(c.sellTimestamp).toISOString().slice(0, 10);
+    const ac = isCrypto(c.ticker) ? 'crypto' : 'equity';
+    if (!byDay[day]) byDay[day] = { day, equity: 0, crypto: 0 };
+    byDay[day][ac] += c.pnl;
+  }
+
+  // Sort + cumulative
+  const sortedDays = Object.values(byDay).sort((a, b) => a.day.localeCompare(b.day));
+  let eqCum = 0, crCum = 0;
+  const data = sortedDays.map((d) => {
+    eqCum += d.equity;
+    crCum += d.crypto;
+    return { day: d.day, equityCum: eqCum, cryptoCum: crCum };
+  });
+
+  return (
+    <ResponsiveContainer width="100%" height={240}>
+      <LineChart data={data} margin={{ top: 5, right: 12, left: -8, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+        <XAxis
+          dataKey="day"
+          tick={{ fill: '#64748b', fontSize: 10 }}
+          tickFormatter={(t) => {
+            const d = new Date(t);
+            return isNaN(d) ? t : d.toLocaleDateString('it-IT', { month: 'short', day: 'numeric' });
+          }}
+          minTickGap={30}
+        />
+        <YAxis
+          tick={{ fill: '#64748b', fontSize: 10 }}
+          tickFormatter={(v) => `$${v.toFixed(0)}`}
+        />
+        <ReferenceLine y={0} stroke="#64748b" strokeDasharray="3 3" />
+        <Tooltip content={({ active, payload, label }) => {
+          if (!active || !payload?.length) return null;
+          return (
+            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
+              <div style={{ color: '#94a3b8', marginBottom: 2 }}>{label}</div>
+              {payload.map((e, i) => (
+                <div key={i} style={{ color: e.color }}>
+                  {e.name}: <strong>{fmtUsd(e.value)}</strong>
+                </div>
+              ))}
+            </div>
+          );
+        }} />
+        <Legend wrapperStyle={{ fontSize: '0.75rem', color: '#94a3b8' }} iconType="circle" iconSize={8} />
+        <Line type="monotone" dataKey="equityCum" name="Equity (cumulato)"
+              stroke="#3b82f6" strokeWidth={2} dot={false} isAnimationActive={false} />
+        <Line type="monotone" dataKey="cryptoCum" name="Crypto (cumulato)"
+              stroke="#f59e0b" strokeWidth={2} dot={false} isAnimationActive={false} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+// 4) Underwater chart — % distanza dal precedente high (sempre <= 0).
+// Mostra DURATA del drawdown, non solo profondità.
+function UnderwaterChart({ history }) {
+  if (!history?.length) {
+    return <div className="empty-state">Nessuno snapshot di portafoglio</div>;
+  }
+
+  const cleaned = sanitizeOutliers(history);
+  const sampled = downsampleHistory(cleaned, 150);
+
+  let runningMax = -Infinity;
+  const data = sampled.map((p) => {
+    const v = Number(p.total_value ?? 0);
+    if (Number.isFinite(v) && v > 0) {
+      runningMax = Math.max(runningMax, v);
+    }
+    let underwater = 0;
+    if (Number.isFinite(runningMax) && runningMax > 0 && Number.isFinite(v) && v > 0) {
+      underwater = ((v - runningMax) / runningMax) * 100;
+    }
+    return { timestamp: p.timestamp, underwater };
+  });
+
+  // Calcola % di tempo speso underwater
+  const underwaterCount = data.filter((d) => d.underwater < -0.5).length;
+  const pctTimeUnder = data.length > 0 ? (underwaterCount / data.length) * 100 : 0;
+
+  return (
+    <div>
+      <div style={{ marginBottom: '0.5rem', fontSize: '0.78rem', color: '#94a3b8' }}>
+        Tempo sotto il massimo: <strong style={{ color: pctTimeUnder > 50 ? '#ef4444' : '#10b981' }}>
+          {pctTimeUnder.toFixed(0)}%
+        </strong> del periodo
+      </div>
+      <ResponsiveContainer width="100%" height={210}>
+        <AreaChart data={data} margin={{ top: 5, right: 12, left: -8, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <XAxis
+            dataKey="timestamp"
+            tick={{ fill: '#64748b', fontSize: 10 }}
+            tickFormatter={(t) => t ? new Date(t).toLocaleDateString('it-IT', { month: 'short', day: 'numeric' }) : ''}
+            minTickGap={30}
+          />
+          <YAxis
+            tick={{ fill: '#64748b', fontSize: 10 }}
+            tickFormatter={(v) => `${v.toFixed(0)}%`}
+            domain={['dataMin', 0]}
+          />
+          <Tooltip content={({ active, payload, label }) => {
+            if (!active || !payload?.length) return null;
+            const v = payload[0]?.value;
+            return (
+              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
+                <div style={{ color: '#94a3b8' }}>{label ? new Date(label).toLocaleString('it-IT') : ''}</div>
+                <div>Underwater: <strong style={{ color: v < -1 ? '#ef4444' : '#10b981' }}>{fmtPct(v)}</strong></div>
+              </div>
+            );
+          }} />
+          <Area
+            type="monotone"
+            dataKey="underwater"
+            stroke="#ef4444"
+            fill="#ef4444"
+            fillOpacity={0.25}
+            strokeWidth={1.5}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// 5) P&L medio per ora del giorno (UTC) — rivela bias temporali.
+function PnlByHourCard({ closedTrades }) {
+  if (!closedTrades?.length) {
+    return <div className="empty-state">Nessun trade chiuso</div>;
+  }
+
+  // Aggrega P&L per ora del BUY (entry timing).
+  const byHour = Array.from({ length: 24 }, (_, h) => ({
+    hour: h, pnl: 0, count: 0,
+  }));
+
+  for (const c of closedTrades) {
+    const ts = c.buyTimestamp ? new Date(c.buyTimestamp) : null;
+    if (!ts || isNaN(ts)) continue;
+    const h = ts.getUTCHours();
+    byHour[h].pnl += c.pnl;
+    byHour[h].count += 1;
+  }
+
+  const data = byHour.map((b) => ({
+    hour: `${String(b.hour).padStart(2, '0')}:00`,
+    avgPnl: b.count > 0 ? b.pnl / b.count : 0,
+    count: b.count,
+    totalPnl: b.pnl,
+  }));
+
+  return (
+    <ResponsiveContainer width="100%" height={240}>
+      <BarChart data={data} margin={{ top: 5, right: 12, left: -8, bottom: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+        <XAxis
+          dataKey="hour"
+          tick={{ fill: '#64748b', fontSize: 9 }}
+          interval={1}
+          label={{ value: 'Ora UTC del BUY', position: 'insideBottom', offset: -2,
+                   fill: '#64748b', fontSize: 10 }}
+        />
+        <YAxis
+          tick={{ fill: '#64748b', fontSize: 10 }}
+          tickFormatter={(v) => `$${v.toFixed(0)}`}
+        />
+        <ReferenceLine y={0} stroke="#64748b" strokeDasharray="3 3" />
+        <Tooltip content={({ active, payload }) => {
+          if (!active || !payload?.length) return null;
+          const d = payload[0]?.payload;
+          return (
+            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
+              <div style={{ color: '#94a3b8' }}>Ora: {d.hour} UTC</div>
+              <div>P&L medio per trade: <strong style={{ color: d.avgPnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d.avgPnl)}</strong></div>
+              <div>P&L totale: <strong>{fmtUsd(d.totalPnl)}</strong></div>
+              <div>Trade chiusi: <strong>{d.count}</strong></div>
+            </div>
+          );
+        }} />
+        <Bar dataKey="avgPnl" radius={[3, 3, 0, 0]}>
+          {data.map((d, i) => (
+            <Cell key={i} fill={d.count === 0 ? '#1f2937' : (d.avgPnl >= 0 ? '#10b981' : '#ef4444')}
+                  fillOpacity={0.85} />
           ))}
         </Bar>
       </BarChart>
@@ -953,16 +1149,34 @@ export default function AnalyticsPage() {
           />
         </ChartCard>
 
-        <ChartCard title="P&L Cumulativo"
-                   description="Somma progressiva dei profitti realizzati su trade chiusi (BUY → SELL). Linea che sale = guadagni, scende = perdite. Asse X = numero del trade."
-                   subtitle={`${closedTrades.length} trade chiusi`}>
-          <CumulativePnlCard closedTrades={closedTrades} />
+        <ChartCard title="Confidence vs Outcome"
+                   description="Per ogni trade chiuso: la confidence dichiarata dall'AI al momento del BUY (asse X) vs il rendimento effettivo % alla chiusura (asse Y). Se i punti ad alta confidence sono prevalentemente sopra lo zero, il modello è ben calibrato. Se non c'è correlazione, la confidence è rumore."
+                   subtitle={`${closedTrades.length} trade`}>
+          <ConfidenceVsOutcomeCard closedTrades={closedTrades} />
         </ChartCard>
 
-        <ChartCard title="Distribuzione Rendimenti"
-                   description="Quanti trade chiusi cadono in ogni fascia di rendimento %. Idealmente più barre verdi (positive) che rosse, e poche barre estreme. Mostra se l'AI fa molti trade con piccoli guadagni e poche grandi perdite (o viceversa)."
-                   subtitle={`Bucket: 10`}>
-          <PnlDistributionCard closedTrades={closedTrades} />
+        <ChartCard title="Rolling Win Rate"
+                   description="Win rate calcolato su una finestra mobile degli ultimi 10 trade. Risponde a 'la performance sta migliorando o peggiorando?'. Una media globale (60%) può nascondere un trend che parte da 80% e cala al 30%."
+                   subtitle="Window 10">
+          <RollingWinRateCard closedTrades={closedTrades} windowSize={10} />
+        </ChartCard>
+
+        <ChartCard title="Equity vs Crypto (P&L cumulato)"
+                   description="P&L realizzato cumulato separato per asset class. Il bot trada due universi diversi (mercato regolamentato vs 24/7) — è importante vedere quale gamba regge il sistema."
+                   subtitle="Per giorno">
+          <EquityVsCryptoPnlCard closedTrades={closedTrades} />
+        </ChartCard>
+
+        <ChartCard title="Tempo in Drawdown (Underwater)"
+                   description="Distanza in % dal precedente massimo del portafoglio (sempre ≤ 0). Mostra non solo quanto è profondo il drawdown, ma soprattutto QUANTO TEMPO il bot ci sta dentro. Un bot che passa il 70% del tempo underwater è da rivedere anche se la profondità è contenuta."
+                   subtitle={`Periodo: ${PERIOD_OPTIONS.find(o => o.key === period)?.label}`}>
+          <UnderwaterChart history={history} />
+        </ChartCard>
+
+        <ChartCard title="P&L Medio per Ora del Giorno (UTC)"
+                   description="Per ciascuna ora UTC in cui il bot ha aperto un BUY, P&L medio dei trade chiusi. Rivela bias temporali: es. trade aperti alle 14:30 UTC (apertura NYSE) sono mediamente peggiori per via dell'alta volatilità → utile per aggiustare il cron schedule."
+                   subtitle="Entry hour">
+          <PnlByHourCard closedTrades={closedTrades} />
         </ChartCard>
 
         <ChartCard title="P&L per Ticker"
@@ -971,22 +1185,16 @@ export default function AnalyticsPage() {
           <PnlByTickerCard closedTrades={closedTrades} />
         </ChartCard>
 
-        <ChartCard title="Esposizione Attuale"
-                   description="Quanto del portafoglio è investito in ogni asset (in % del valore totale delle posizioni aperte). Aiuta a vedere se sei concentrato o diversificato."
-                   subtitle={`${positions.length} posizioni aperte`}>
-          <ExposurePieCard positions={positions} />
-        </ChartCard>
-
         <ChartCard title="Win Rate per Ticker"
                    description="Per ogni asset: % di trade chiusi in profitto. Verde >= 50% (più vincenti che perdenti), rosso < 50%."
                    subtitle="Top 10">
           <WinRateByTickerCard closedTrades={closedTrades} />
         </ChartCard>
 
-        <ChartCard title="Attività Giorno della Settimana"
-                   description="Numero di operazioni (BUY in verde, SELL in rosso) per giorno della settimana. Utile per vedere se l'AI è più attiva certi giorni."
-                   subtitle="Aggregato">
-          <TradesPerWeekdayCard trades={trades} />
+        <ChartCard title="Esposizione Attuale"
+                   description="Quanto del portafoglio è investito in ogni asset (in % del valore totale delle posizioni aperte). Aiuta a vedere se sei concentrato o diversificato."
+                   subtitle={`${positions.length} posizioni aperte`}>
+          <ExposurePieCard positions={positions} />
         </ChartCard>
       </div>
     </div>

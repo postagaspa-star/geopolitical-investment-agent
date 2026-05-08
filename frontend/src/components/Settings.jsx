@@ -263,22 +263,66 @@ function Settings({ onBack, onDataRefresh }) {
   // === Trigger manuale yfinance / Massive poll ===
   const [pollStatus, setPollStatus] = useState({ running: false, result: null });
 
+  // === Audit & rebuild portfolio (forensic reconciliation) ===
+  const [auditStatus, setAuditStatus] = useState({ running: false, result: null });
+  const [rebuildStatus, setRebuildStatus] = useState({ running: false, result: null });
+
+  const handleAudit = async () => {
+    if (auditStatus.running) return;
+    setAuditStatus({ running: true, result: null });
+    try {
+      const r = await fetch(`${API}/api/portfolio/audit`);
+      const data = await r.json();
+      setAuditStatus({ running: false, result: { ok: r.ok, data } });
+    } catch (e) {
+      setAuditStatus({ running: false, result: { ok: false, data: { error: String(e) } } });
+    }
+  };
+
+  const handleRebuild = async () => {
+    if (rebuildStatus.running) return;
+    if (!window.confirm(
+      "REBUILD portafoglio.\n\n" +
+      "Ricostruisce cash + posizioni replicando tutti i trade dall'inizio. " +
+      "Lo stato attuale verrà SOSTITUITO. Trade malformati (qty/price≤0) o " +
+      "impossibili (BUY > cash, SELL > posseduti) verranno scartati.\n\n" +
+      "Operazione IRREVERSIBILE. Procedere?"
+    )) return;
+    setRebuildStatus({ running: true, result: null });
+    try {
+      const r = await fetch(`${API}/api/portfolio/rebuild?confirm=true`, { method: "POST" });
+      const data = await r.json();
+      setRebuildStatus({ running: false, result: { ok: r.ok && data.status === "ok", data } });
+      // Re-run audit per mostrare stato post-rebuild
+      handleAudit();
+    } catch (e) {
+      setRebuildStatus({ running: false, result: { ok: false, data: { error: String(e) } } });
+    }
+  };
+
   // === Cleanup portfolio_history outlier ===
   const [cleanupStatus, setCleanupStatus] = useState({ running: false, result: null });
-  const handleHistoryCleanup = async () => {
+  const handleHistoryCleanup = async (mode = "median") => {
     if (cleanupStatus.running) return;
-    if (!window.confirm(
-      "Conferma pulizia storico equity.\n\n" +
-      "Questa operazione cancella PERMANENTEMENTE gli snapshot del portafoglio " +
-      "il cui valore devia di oltre il 25% dalla median storica (es. spike di " +
-      "+47% causati da pricing transient).\n\n" +
-      "Procedere?"
-    )) return;
+    const confirmMsg = mode === "wipe"
+      ? "Conferma WIPE COMPLETO storico equity.\n\n" +
+        "Questa operazione cancella TUTTI gli snapshot del portafoglio. " +
+        "Il grafico equity sparirà finché il polling non scriverà nuovi snapshot " +
+        "(qualche minuto).\n\n" +
+        "Usalo solo se il chart è completamente compromesso (più step-jump che il " +
+        "filtro mediano non riesce a recuperare).\n\n" +
+        "Procedere?"
+      : "Conferma pulizia storico equity.\n\n" +
+        "Questa operazione cancella PERMANENTEMENTE gli snapshot del portafoglio " +
+        "il cui valore devia di oltre il 25% dalla median storica.\n\n" +
+        "Procedere?";
+    if (!window.confirm(confirmMsg)) return;
     setCleanupStatus({ running: true, result: null });
     try {
-      const r = await fetch(`${API}/api/portfolio/history/cleanup?threshold_pct=25`, {
-        method: "POST",
-      });
+      const url = mode === "wipe"
+        ? `${API}/api/portfolio/history/cleanup?mode=wipe`
+        : `${API}/api/portfolio/history/cleanup?threshold_pct=25`;
+      const r = await fetch(url, { method: "POST" });
       const data = await r.json();
       setCleanupStatus({
         running: false,
@@ -616,20 +660,37 @@ function Settings({ onBack, onDataRefresh }) {
                   persistenti tipo "+47% di colpo" che non spariscono. Operazione irreversibile.
                 </div>
               </div>
-              <button
-                style={{
-                  ...btnSecondary,
-                  background: cleanupStatus.running ? "#e5e7eb" : "#f59e0b",
-                  color: cleanupStatus.running ? "#6b7280" : "#fff",
-                  borderColor: cleanupStatus.running ? "#d1d5db" : "#f59e0b",
-                  cursor: cleanupStatus.running ? "not-allowed" : "pointer",
-                  whiteSpace: "nowrap",
-                }}
-                onClick={handleHistoryCleanup}
-                disabled={cleanupStatus.running}
-              >
-                {cleanupStatus.running ? "Pulizia..." : "Pulisci storico"}
-              </button>
+              <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+                <button
+                  style={{
+                    ...btnSecondary,
+                    background: cleanupStatus.running ? "#e5e7eb" : "#f59e0b",
+                    color: cleanupStatus.running ? "#6b7280" : "#fff",
+                    borderColor: cleanupStatus.running ? "#d1d5db" : "#f59e0b",
+                    cursor: cleanupStatus.running ? "not-allowed" : "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                  onClick={() => handleHistoryCleanup("median")}
+                  disabled={cleanupStatus.running}
+                >
+                  {cleanupStatus.running ? "Pulizia..." : "Pulisci outlier"}
+                </button>
+                <button
+                  style={{
+                    ...btnSecondary,
+                    background: cleanupStatus.running ? "#e5e7eb" : "#dc2626",
+                    color: cleanupStatus.running ? "#6b7280" : "#fff",
+                    borderColor: cleanupStatus.running ? "#d1d5db" : "#dc2626",
+                    cursor: cleanupStatus.running ? "not-allowed" : "pointer",
+                    whiteSpace: "nowrap",
+                  }}
+                  onClick={() => handleHistoryCleanup("wipe")}
+                  disabled={cleanupStatus.running}
+                  title="Cancella TUTTI gli snapshot. Usalo se il chart è completamente compromesso."
+                >
+                  Wipe completo
+                </button>
+              </div>
             </div>
             {cleanupStatus.result && (
               <div style={{
@@ -643,6 +704,179 @@ function Settings({ onBack, onDataRefresh }) {
                 {cleanupStatus.result.deleted != null && (
                   <span style={{ marginLeft: 6, fontFamily: "monospace" }}>
                     (deleted={cleanupStatus.result.deleted}, median=${cleanupStatus.result.median})
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Audit forensico portfolio: cash+positions vs replay dei trade */}
+          <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid #f3f4f6" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: 600, color: "#111827" }}>
+                  Audit forensico portafoglio
+                </div>
+                <div style={{ fontSize: "12px", color: "#6b7280", marginTop: "2px" }}>
+                  Ricostruisce lo stato del portafoglio (cash + posizioni) replicando tutti
+                  i trade storici dall'inizio. Confronta con lo stato attuale per scoprire
+                  se il valore corrente (es. <code>$169k</code>) è giustificato dai trade
+                  o se c'è uno scostamento causato da un bug. <strong>Read-only.</strong>
+                </div>
+              </div>
+              <button
+                style={{
+                  ...btnSecondary,
+                  background: auditStatus.running ? "#e5e7eb" : "#3b82f6",
+                  color: auditStatus.running ? "#6b7280" : "#fff",
+                  borderColor: auditStatus.running ? "#d1d5db" : "#3b82f6",
+                  cursor: auditStatus.running ? "not-allowed" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+                onClick={handleAudit}
+                disabled={auditStatus.running}
+              >
+                {auditStatus.running ? "Audit..." : "Esegui audit"}
+              </button>
+            </div>
+
+            {auditStatus.result && auditStatus.result.data && !auditStatus.result.data.error && (
+              <div style={{
+                marginTop: "10px",
+                padding: "12px 14px",
+                borderRadius: "6px",
+                fontSize: "12px",
+                background:
+                  auditStatus.result.data.verdict === "CLEAN" ? "#ecfdf5" :
+                  auditStatus.result.data.verdict === "DIVERGENT" ? "#fef2f2" : "#fffbeb",
+                color:
+                  auditStatus.result.data.verdict === "CLEAN" ? "#065f46" :
+                  auditStatus.result.data.verdict === "DIVERGENT" ? "#991b1b" : "#92400e",
+                border: `1px solid ${
+                  auditStatus.result.data.verdict === "CLEAN" ? "#a7f3d0" :
+                  auditStatus.result.data.verdict === "DIVERGENT" ? "#fecaca" : "#fde68a"
+                }`,
+                fontFamily: "monospace",
+                lineHeight: 1.6,
+              }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, fontSize: "13px" }}>
+                  {auditStatus.result.data.verdict === "CLEAN" ? "✓ " :
+                   auditStatus.result.data.verdict === "DIVERGENT" ? "✗ " : "⚠ "}
+                  {auditStatus.result.data.verdict}
+                </div>
+                <div style={{ marginBottom: 10, fontFamily: "system-ui", fontWeight: 500 }}>
+                  {auditStatus.result.data.verdict_message}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                  <div>
+                    <div style={{ fontWeight: 700, marginBottom: 4 }}>STATO ATTUALE</div>
+                    <div>Cash: ${auditStatus.result.data.current?.cash?.toLocaleString()}</div>
+                    <div>Total: ${auditStatus.result.data.current?.total_value?.toLocaleString()}</div>
+                    <div>Posizioni: {auditStatus.result.data.current?.positions_count}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 700, marginBottom: 4 }}>RICOSTRUITO DAI TRADE</div>
+                    <div>Cash: ${auditStatus.result.data.reconstructed?.cash?.toLocaleString()}</div>
+                    <div>Total: ${auditStatus.result.data.reconstructed?.total_value?.toLocaleString()}</div>
+                    <div>Posizioni: {auditStatus.result.data.reconstructed?.positions_count}</div>
+                  </div>
+                </div>
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(0,0,0,0.08)" }}>
+                  <div>Δ Cash: <strong>{auditStatus.result.data.deltas?.cash >= 0 ? "+" : ""}${auditStatus.result.data.deltas?.cash?.toLocaleString()}</strong></div>
+                  <div>Δ Total: <strong style={{ color: Math.abs(auditStatus.result.data.deltas?.total_value || 0) > 100 ? "#dc2626" : "inherit" }}>
+                    {auditStatus.result.data.deltas?.total_value >= 0 ? "+" : ""}${auditStatus.result.data.deltas?.total_value?.toLocaleString()}
+                  </strong></div>
+                  <div>Trade analizzati: {auditStatus.result.data.trades_count} · Anomalie: {auditStatus.result.data.anomalies_count}</div>
+                </div>
+
+                {auditStatus.result.data.position_diffs?.length > 0 && (
+                  <details style={{ marginTop: 10 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                      Posizioni divergenti ({auditStatus.result.data.position_diffs.length})
+                    </summary>
+                    <div style={{ marginTop: 6, fontSize: "11px" }}>
+                      {auditStatus.result.data.position_diffs.map((p, i) => (
+                        <div key={i} style={{ padding: "4px 0", borderBottom: "1px dashed rgba(0,0,0,0.06)" }}>
+                          <strong>{p.ticker}</strong>: qty {p.current_quantity} (DB) vs {p.reconstructed_quantity} (replay)
+                          {Math.abs(p.quantity_delta) > 1e-6 && (
+                            <span> · Δqty={p.quantity_delta >= 0 ? "+" : ""}{p.quantity_delta}</span>
+                          )}
+                          {Math.abs(p.avg_price_delta) > 0.01 && (
+                            <span> · Δavg=${p.avg_price_delta.toFixed(2)}</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
+                {auditStatus.result.data.anomalies?.length > 0 && (
+                  <details style={{ marginTop: 8 }}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                      Trade anomali ({auditStatus.result.data.anomalies.length})
+                    </summary>
+                    <div style={{ marginTop: 6, fontSize: "11px", maxHeight: 240, overflow: "auto" }}>
+                      {auditStatus.result.data.anomalies.map((a, i) => (
+                        <div key={i} style={{ padding: "4px 0", borderBottom: "1px dashed rgba(0,0,0,0.06)" }}>
+                          <strong>#{a.trade_id} {a.ticker} {a.action}</strong>
+                          {a.timestamp && <span style={{ color: "#6b7280" }}> · {new Date(a.timestamp).toLocaleString("it-IT")}</span>}
+                          <div style={{ color: a.skipped ? "#dc2626" : "#92400e" }}>{a.reason}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
+                {auditStatus.result.data.verdict === "DIVERGENT" && (
+                  <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid rgba(0,0,0,0.08)" }}>
+                    <button
+                      style={{
+                        ...btnSecondary,
+                        background: rebuildStatus.running ? "#e5e7eb" : "#dc2626",
+                        color: rebuildStatus.running ? "#6b7280" : "#fff",
+                        borderColor: rebuildStatus.running ? "#d1d5db" : "#dc2626",
+                        cursor: rebuildStatus.running ? "not-allowed" : "pointer",
+                        fontFamily: "system-ui",
+                      }}
+                      onClick={handleRebuild}
+                      disabled={rebuildStatus.running}
+                      title="Sostituisce lo stato attuale con quello ricostruito dai trade"
+                    >
+                      {rebuildStatus.running ? "Rebuild..." : "Rebuild dal trade history"}
+                    </button>
+                    <div style={{ fontFamily: "system-ui", fontSize: "11px", color: "#6b7280", marginTop: 4 }}>
+                      Sostituisce cash + posizioni con il valore ricostruito.
+                      Trade malformati o impossibili vengono scartati nel replay.
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {auditStatus.result && auditStatus.result.data?.error && (
+              <div style={{
+                marginTop: "8px", padding: "8px 12px", borderRadius: "6px",
+                fontSize: "12px", background: "#fef2f2", color: "#991b1b",
+                border: "1px solid #fecaca",
+              }}>
+                Errore: {auditStatus.result.data.error}
+              </div>
+            )}
+
+            {rebuildStatus.result && (
+              <div style={{
+                marginTop: "8px", padding: "8px 12px", borderRadius: "6px",
+                fontSize: "12px",
+                background: rebuildStatus.result.ok ? "#ecfdf5" : "#fef2f2",
+                color: rebuildStatus.result.ok ? "#065f46" : "#991b1b",
+                border: `1px solid ${rebuildStatus.result.ok ? "#a7f3d0" : "#fecaca"}`,
+              }}>
+                {rebuildStatus.result.data?.message || rebuildStatus.result.data?.error || "Stato sconosciuto"}
+                {rebuildStatus.result.ok && rebuildStatus.result.data?.cash != null && (
+                  <span style={{ marginLeft: 6, fontFamily: "monospace" }}>
+                    (cash=${rebuildStatus.result.data.cash}, total=${rebuildStatus.result.data.total_value},
+                    {" "}upserted={rebuildStatus.result.data.positions_upserted},
+                    deleted={rebuildStatus.result.data.positions_deleted})
                   </span>
                 )}
               </div>

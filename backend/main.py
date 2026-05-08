@@ -2334,19 +2334,50 @@ async def reset_portfolio(payload: ResetPayload):
 
 
 @app.post("/api/portfolio/history/cleanup")
-async def cleanup_portfolio_history(threshold_pct: float = Query(default=25.0, ge=10.0, le=100.0)):
+async def cleanup_portfolio_history(
+    threshold_pct: float = Query(default=25.0, ge=10.0, le=100.0),
+    mode: str = Query(default="median", regex="^(median|wipe)$"),
+):
     """
     Pulisce portfolio_snapshots rimuovendo righe con total_value anomalo.
 
-    Strategia: calcola la median di tutti gli snapshot degli ultimi 90 giorni,
-    poi DELETE le righe il cui total_value devia di oltre threshold_pct%
-    dalla median. Operazione IRREVERSIBILE — usa solo se vedi spike persistenti
-    sul grafico equity (es. +47% di colpo che non sparisce).
+    Modalità:
+    - mode=median (default): calcola la median degli ultimi 90 giorni e
+      cancella righe che deviano oltre threshold_pct%. Conservativo.
+    - mode=wipe: cancella TUTTI gli snapshot. Usalo se il chart è completamente
+      compromesso (più step-jump consecutivi che il filtro mediano non riesce
+      a recuperare). Ricostruzione automatica dal prossimo polling.
 
-    Default threshold 25% — abbastanza largo da preservare gain reali del 20%
-    in qualche giorno, abbastanza stretto da catturare uno scalino +47% di
-    pricing transient.
+    Operazione IRREVERSIBILE.
     """
+    # Wipe mode: tabula rasa, ricostruzione dal prossimo snapshot
+    if mode == "wipe":
+        try:
+            try:
+                from db_supabase import _get_client
+                client = _get_client()
+                if client is None:
+                    raise RuntimeError("Supabase client non disponibile")
+                # Supabase non supporta DELETE senza filtro: usiamo neq("id", 0)
+                # che matcha tutto (id è sempre > 0 con autoincrement).
+                r = client.table("portfolio_snapshots").delete().neq("id", 0).execute()
+                deleted = len(r.data or [])
+                logger.info("Portfolio history WIPE: rimossi %d snapshot (Supabase)", deleted)
+                return {"status": "ok", "mode": "wipe", "deleted": deleted, "backend": "supabase",
+                        "message": f"Wipe completato: {deleted} snapshot rimossi. Il grafico si ricostruirà dal prossimo polling."}
+            except Exception as ex_sb:
+                import db_sqlite
+                with db_sqlite.get_db() as conn:
+                    cur = conn.execute("DELETE FROM portfolio_snapshots")
+                    deleted = cur.rowcount or 0
+                    conn.commit()
+                logger.info("Portfolio history WIPE: rimossi %d snapshot (SQLite, supabase err=%s)",
+                            deleted, ex_sb)
+                return {"status": "ok", "mode": "wipe", "deleted": deleted, "backend": "sqlite",
+                        "message": f"Wipe completato: {deleted} snapshot rimossi."}
+        except Exception as e:
+            logger.error("cleanup wipe error: %s", e, exc_info=True)
+            return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
     try:
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
@@ -2425,6 +2456,330 @@ async def cleanup_portfolio_history(threshold_pct: float = Query(default=25.0, g
         }
     except Exception as e:
         logger.error("cleanup_portfolio_history error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
+# ============================================================
+# Portfolio Audit & Rebuild
+# ============================================================
+# Quando lo stato del portfolio (cash + positions) diverge da quello
+# che ci si aspetterebbe ricostruendo dai trade in `trades`, questi
+# endpoint diagnosticano e riparano. Usati per il bug "+69k$ phantom"
+# dove total_value mostra valori più alti del giustificabile dai trade.
+
+def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dict:
+    """
+    Ricostruisce lo stato del portafoglio replicando i trade in ordine cronologico.
+    Stessa logica di portfolio.execute_buy / execute_sell ma in-memory.
+
+    Returns:
+        {
+            "cash": float,
+            "positions": {ticker: {"quantity": float, "avg_buy_price": float}},
+            "anomalies": [{trade_id, reason, ...}]
+        }
+    """
+    cash = float(initial_balance)
+    positions: dict = {}
+    anomalies: list = []
+
+    for t in trades_asc:
+        try:
+            ticker = (t.get("ticker") or "").upper()
+            action = (t.get("action") or t.get("side") or "").upper()
+            qty = float(t.get("quantity") or 0)
+            price = float(t.get("price") or 0)
+            tid = t.get("id") or t.get("trade_id")
+
+            if not ticker or qty <= 0 or price <= 0:
+                anomalies.append({
+                    "trade_id": tid, "ticker": ticker, "action": action,
+                    "quantity": qty, "price": price,
+                    "reason": "Trade malformato (qty/price <= 0 o ticker mancante)",
+                    "timestamp": t.get("timestamp"),
+                })
+                continue
+
+            value = qty * price
+
+            if action == "BUY":
+                # Sanity check: BUY > 90% del cash al momento è sospetto
+                if cash > 0 and value > cash * 0.9:
+                    anomalies.append({
+                        "trade_id": tid, "ticker": ticker, "action": action,
+                        "quantity": qty, "price": price, "value": round(value, 2),
+                        "cash_before": round(cash, 2),
+                        "reason": f"BUY anomalo: {value:.0f}$ con cash {cash:.0f}$ "
+                                  f"({100*value/cash:.0f}% del cash)",
+                        "timestamp": t.get("timestamp"),
+                    })
+
+                if value > cash:
+                    # Trade impossibile: avrebbe portato cash negativo
+                    anomalies.append({
+                        "trade_id": tid, "ticker": ticker, "action": action,
+                        "quantity": qty, "price": price, "value": round(value, 2),
+                        "cash_before": round(cash, 2),
+                        "reason": f"IMPOSSIBILE: BUY {value:.2f}$ con cash {cash:.2f}$ "
+                                  f"(cash negativo a {cash - value:.2f}$). Trade ignorato nel replay.",
+                        "timestamp": t.get("timestamp"),
+                        "skipped": True,
+                    })
+                    continue
+
+                cash -= value
+                if ticker in positions:
+                    p = positions[ticker]
+                    old_total = p["avg_buy_price"] * p["quantity"]
+                    new_qty = p["quantity"] + qty
+                    p["avg_buy_price"] = (old_total + value) / new_qty if new_qty > 0 else price
+                    p["quantity"] = new_qty
+                else:
+                    positions[ticker] = {"quantity": qty, "avg_buy_price": price}
+
+            elif action == "SELL":
+                p = positions.get(ticker)
+                if p is None or p["quantity"] < qty - 1e-9:
+                    anomalies.append({
+                        "trade_id": tid, "ticker": ticker, "action": action,
+                        "quantity": qty, "price": price,
+                        "reason": f"SELL impossibile: posseduti "
+                                  f"{p['quantity'] if p else 0} {ticker}, venduti {qty}",
+                        "timestamp": t.get("timestamp"),
+                        "skipped": True,
+                    })
+                    continue
+
+                cash += value
+                p["quantity"] -= qty
+                if p["quantity"] <= 1e-9:
+                    del positions[ticker]
+            else:
+                anomalies.append({
+                    "trade_id": tid, "ticker": ticker, "action": action,
+                    "reason": f"Action sconosciuta: {action!r}",
+                    "timestamp": t.get("timestamp"),
+                })
+        except Exception as ex:
+            anomalies.append({
+                "trade_id": t.get("id"), "reason": f"Errore replay: {ex}",
+                "timestamp": t.get("timestamp"),
+            })
+
+    return {"cash": cash, "positions": positions, "anomalies": anomalies}
+
+
+@app.get("/api/portfolio/audit")
+async def portfolio_audit():
+    """
+    Audit forensico del portafoglio: ricostruisce lo stato (cash + positions)
+    dai trade storici e lo confronta con lo stato attuale del DB.
+
+    Risponde alla domanda: "I $169k attuali sono giustificati dai trade
+    eseguiti, o c'è uno scostamento (bug)?"
+
+    Read-only — non modifica nulla.
+    """
+    try:
+        # 1. Carica tutto: trades, current portfolio, current positions
+        trades_desc = database.get_trades(limit=10000) or []
+        # get_trades ritorna DESC, ribaltiamo a ASC per il replay cronologico
+        trades_asc = list(reversed(trades_desc))
+
+        portfolio = database.get_portfolio() or {}
+        current_cash = float(portfolio.get("cash_balance") or 0)
+        current_total = float(portfolio.get("total_value") or 0)
+
+        ib_str = database.get_setting("initial_balance", "100000") or "100000"
+        try:
+            initial_balance = float(ib_str)
+        except (ValueError, TypeError):
+            initial_balance = 100000.0
+
+        positions = database.get_positions() or []
+
+        # 2. Replay cronologico
+        replay = _replay_trades_from_history(initial_balance, trades_asc)
+        reconstructed_cash = replay["cash"]
+        reconstructed_positions = replay["positions"]
+        anomalies = replay["anomalies"]
+
+        # 3. Compute reconstructed total_value usando current_price delle position attuali
+        current_prices = {p["ticker"]: float(p.get("current_price") or 0) for p in positions}
+        reconstructed_position_value = 0.0
+        for tk, rp in reconstructed_positions.items():
+            cp = current_prices.get(tk, rp["avg_buy_price"])
+            reconstructed_position_value += cp * rp["quantity"]
+        reconstructed_total = reconstructed_cash + reconstructed_position_value
+
+        # 4. Diff position-by-position
+        position_diffs = []
+        current_pos_map = {p["ticker"]: p for p in positions}
+        all_tickers = set(current_pos_map.keys()) | set(reconstructed_positions.keys())
+        for tk in sorted(all_tickers):
+            cur = current_pos_map.get(tk)
+            rec = reconstructed_positions.get(tk)
+            cur_qty = float(cur.get("quantity") or 0) if cur else 0.0
+            rec_qty = rec["quantity"] if rec else 0.0
+            cur_avg = float(cur.get("avg_buy_price") or 0) if cur else 0.0
+            rec_avg = rec["avg_buy_price"] if rec else 0.0
+            qty_delta = cur_qty - rec_qty
+            avg_delta = cur_avg - rec_avg
+            if abs(qty_delta) > 1e-6 or abs(avg_delta) > 0.01:
+                position_diffs.append({
+                    "ticker": tk,
+                    "current_quantity": round(cur_qty, 8),
+                    "reconstructed_quantity": round(rec_qty, 8),
+                    "quantity_delta": round(qty_delta, 8),
+                    "current_avg_price": round(cur_avg, 2),
+                    "reconstructed_avg_price": round(rec_avg, 2),
+                    "avg_price_delta": round(avg_delta, 2),
+                })
+
+        cash_delta = current_cash - reconstructed_cash
+        total_delta = current_total - reconstructed_total
+
+        # 5. Verdetto
+        if abs(cash_delta) < 1.0 and abs(total_delta) < 1.0 and not position_diffs:
+            verdict = "CLEAN"
+            verdict_message = ("Portafoglio coerente: cash + posizioni attuali "
+                               "matchano la replica dai trade.")
+        elif abs(total_delta) > 100:
+            verdict = "DIVERGENT"
+            verdict_message = (
+                f"DIVERGENZA RILEVATA: total_value attuale ${current_total:,.2f} vs "
+                f"ricostruito ${reconstructed_total:,.2f} "
+                f"(delta {'+' if total_delta >= 0 else ''}{total_delta:,.2f}$). "
+                f"I {'+' if total_delta >= 0 else ''}{total_delta:,.0f}$ NON sono giustificati "
+                f"dai trade nel DB."
+            )
+        else:
+            verdict = "MINOR_DRIFT"
+            verdict_message = (
+                f"Lieve drift: delta {total_delta:,.2f}$. "
+                "Probabile arrotondamento o trade pendente."
+            )
+
+        return {
+            "verdict": verdict,
+            "verdict_message": verdict_message,
+            "initial_balance": round(initial_balance, 2),
+            "trades_count": len(trades_asc),
+            "anomalies_count": len(anomalies),
+            "current": {
+                "cash": round(current_cash, 2),
+                "total_value": round(current_total, 2),
+                "positions_count": len(positions),
+            },
+            "reconstructed": {
+                "cash": round(reconstructed_cash, 2),
+                "position_value": round(reconstructed_position_value, 2),
+                "total_value": round(reconstructed_total, 2),
+                "positions_count": len(reconstructed_positions),
+            },
+            "deltas": {
+                "cash": round(cash_delta, 2),
+                "total_value": round(total_delta, 2),
+            },
+            "position_diffs": position_diffs,
+            "anomalies": anomalies[:50],  # limit per response size
+        }
+    except Exception as e:
+        logger.error("portfolio_audit error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
+@app.post("/api/portfolio/rebuild")
+async def portfolio_rebuild(confirm: bool = Query(default=False)):
+    """
+    Ricostruisce lo stato del portfolio (cash + positions) replicando i trade
+    dall'inizio. SOSTITUISCE lo stato attuale.
+
+    OPERAZIONE IRREVERSIBILE — richiede confirm=true esplicito.
+
+    Trade malformati (qty/price ≤ 0) o impossibili (BUY > cash, SELL > posseduti)
+    vengono SCARTATI nel replay → la ricostruzione potrebbe risultare diversa
+    dallo stato attuale anche se quello attuale era "intenzionalmente" buggy.
+
+    I current_price delle posizioni attuali vengono PRESERVATI dove possibile.
+    """
+    if not confirm:
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "error": "Richiede confirm=true. Operazione irreversibile.",
+        })
+
+    try:
+        trades_desc = database.get_trades(limit=10000) or []
+        trades_asc = list(reversed(trades_desc))
+
+        ib_str = database.get_setting("initial_balance", "100000") or "100000"
+        try:
+            initial_balance = float(ib_str)
+        except (ValueError, TypeError):
+            initial_balance = 100000.0
+
+        positions = database.get_positions() or []
+        current_prices = {p["ticker"]: float(p.get("current_price") or 0) for p in positions}
+
+        replay = _replay_trades_from_history(initial_balance, trades_asc)
+        rec_cash = replay["cash"]
+        rec_positions = replay["positions"]
+
+        # 1. Sostituisci tutte le positions
+        # 1a. Elimina le positions correnti che non esistono nella ricostruzione
+        existing_tickers = {p["ticker"] for p in positions}
+        rec_tickers = set(rec_positions.keys())
+
+        deleted = 0
+        for tk in existing_tickers - rec_tickers:
+            try:
+                database.delete_position(tk)
+                deleted += 1
+            except Exception as ex:
+                logger.warning("rebuild: delete_position(%s) fallito: %s", tk, ex)
+
+        # 1b. Upsert delle position ricostruite
+        upserted = 0
+        for tk, rp in rec_positions.items():
+            try:
+                cp = current_prices.get(tk, rp["avg_buy_price"])
+                database.upsert_position(tk, rp["quantity"], rp["avg_buy_price"], cp)
+                upserted += 1
+            except Exception as ex:
+                logger.warning("rebuild: upsert_position(%s) fallito: %s", tk, ex)
+
+        # 2. Compute reconstructed total_value e aggiorna portfolio
+        rec_position_value = sum(
+            current_prices.get(tk, rp["avg_buy_price"]) * rp["quantity"]
+            for tk, rp in rec_positions.items()
+        )
+        rec_total = rec_cash + rec_position_value
+        try:
+            database.update_portfolio(round(rec_cash, 2), round(rec_total, 2))
+        except Exception as ex:
+            logger.error("rebuild: update_portfolio fallito: %s", ex)
+            return JSONResponse(status_code=500, content={
+                "status": "error", "error": f"update_portfolio: {ex}"})
+
+        logger.info(
+            "Portfolio REBUILD completato: cash %.2f, %d position upserted, %d delete, "
+            "anomalies=%d",
+            rec_cash, upserted, deleted, len(replay["anomalies"]),
+        )
+
+        return {
+            "status": "ok",
+            "message": "Portfolio ricostruito dai trade. Lo stato è ora coerente con lo storico.",
+            "cash": round(rec_cash, 2),
+            "total_value": round(rec_total, 2),
+            "positions_upserted": upserted,
+            "positions_deleted": deleted,
+            "anomalies_skipped": sum(1 for a in replay["anomalies"] if a.get("skipped")),
+            "anomalies_total": len(replay["anomalies"]),
+        }
+    except Exception as e:
+        logger.error("portfolio_rebuild error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 

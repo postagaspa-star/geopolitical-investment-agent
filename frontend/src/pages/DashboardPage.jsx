@@ -32,6 +32,55 @@ const PERIOD_OPTIONS = [
 const INTRADAY_PERIODS = new Set(["1h", "4h", "1d"]);
 const INTRADAY_HOURS = { "1h": 1, "4h": 4, "1d": 24 };
 
+// Filtro outlier MAD-based: rimuove step-jump anomali nell'equity curve
+// causati da bad price snapshot persistiti (es. salto +43k → +26k in pochi
+// minuti). Strategia: per ogni punto guarda finestra ±3 vicini, se il punto
+// devia >MAX_MAD * MAD dalla median locale E lo scostamento è > MIN_PCT, lo
+// sostituisce con la median. Robusto anche su jump piatti (più punti consecutivi
+// allo stesso valore corrotto): finché la maggioranza della finestra è "sana",
+// il punto viene corretto.
+function sanitizeOutliers(history) {
+  if (!history || history.length < 5) return history || [];
+  const arr = history.map((p) => ({ ...p }));
+  const N = arr.length;
+  const WINDOW = 7;
+  const MAX_MAD = 6;
+  const MIN_PCT_DEV = 0.10; // 10% di scostamento minimo
+
+  const median = (xs) => {
+    if (!xs.length) return 0;
+    const s = [...xs].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+
+  for (let i = 0; i < N; i++) {
+    const cur = Number(arr[i].total_value);
+    if (!Number.isFinite(cur) || cur <= 0) continue;
+
+    const lo = Math.max(0, i - Math.floor(WINDOW / 2));
+    const hi = Math.min(N, i + Math.floor(WINDOW / 2) + 1);
+    const window = [];
+    for (let j = lo; j < hi; j++) {
+      if (j === i) continue;
+      const v = Number(arr[j].total_value);
+      if (Number.isFinite(v) && v > 0) window.push(v);
+    }
+    if (window.length < 3) continue;
+
+    const med = median(window);
+    if (med <= 0) continue;
+    const mad = median(window.map((v) => Math.abs(v - med))) || 1e-6;
+
+    const dev = Math.abs(cur - med);
+    const devPct = dev / med;
+    if (dev > MAX_MAD * mad && devPct > MIN_PCT_DEV) {
+      arr[i].total_value = med;
+    }
+  }
+  return arr;
+}
+
 export default function DashboardPage({ portfolio, positions, trades, logs }) {
   const [period, setPeriod] = useState("1d");
   const [showTradeModal, setShowTradeModal] = useState(false);
@@ -59,6 +108,8 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
           const cutoff = Date.now() - hrs * 3600 * 1000;
           arr = arr.filter((p) => new Date(p.timestamp).getTime() >= cutoff);
         }
+        // Filtra outlier (step-jump anomali da snapshot corrotti)
+        arr = sanitizeOutliers(arr);
         setHistoryData(arr);
       })
       .catch(() => setHistoryData([]));
