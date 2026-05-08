@@ -80,6 +80,12 @@ function Settings({ onBack, onDataRefresh }) {
   const [directivesTextSaved, setDirectivesTextSaved] = useState("");
   const [directivesSaving, setDirectivesSaving] = useState(false);
 
+  // === Risk Profile (vincoli numerici hard) ===
+  const [riskActiveKey, setRiskActiveKey] = useState("moderate");
+  const [riskActiveSaved, setRiskActiveSaved] = useState("moderate");
+  const [riskProfiles, setRiskProfiles] = useState(null);   // {conservative:{...}, moderate:{...}, aggressive:{...}}
+  const [riskSaving, setRiskSaving] = useState(false);
+
   // === UI ===
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
@@ -182,6 +188,19 @@ function Settings({ onBack, onDataRefresh }) {
           const t = (dirData && typeof dirData.text === "string") ? dirData.text : "";
           setDirectivesText(t);
           setDirectivesTextSaved(t);
+        }
+      } catch {}
+
+      // Risk profile (preset numerici)
+      try {
+        const rpRes = await fetch(`${API}/api/settings/risk-profile`);
+        if (rpRes.ok) {
+          const rpData = await rpRes.json();
+          if (rpData.profiles) setRiskProfiles(rpData.profiles);
+          if (rpData.active_key) {
+            setRiskActiveKey(rpData.active_key);
+            setRiskActiveSaved(rpData.active_key);
+          }
         }
       } catch {}
 
@@ -413,6 +432,14 @@ function Settings({ onBack, onDataRefresh }) {
     border: "1px solid #d1d5db", borderRadius: "8px", cursor: "pointer",
     fontSize: "13px", fontWeight: 500,
   };
+  const thStyle = {
+    padding: "10px 12px", textAlign: "left", fontSize: "0.78rem",
+    fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em",
+    color: "#374151", borderBottom: "1px solid #e5e7eb",
+  };
+  const tdStyle = {
+    padding: "10px 12px", verticalAlign: "top",
+  };
   const removeBtn = {
     background: "none", border: "none", color: "#9ca3af",
     cursor: "pointer", fontSize: "11px", padding: "0 2px", lineHeight: 1,
@@ -633,6 +660,217 @@ function Settings({ onBack, onDataRefresh }) {
                 }}
               >
                 {directivesSaving ? "Salvo..." : "Salva direttive"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* === RISK PROFILE (HARD CONSTRAINTS) === */}
+        <div style={{ ...cardStyle, borderLeft: "4px solid #f59e0b" }}>
+          <div style={{ ...sectionTitle, color: "#b45309" }}>
+            ⚖️  Profilo di Rischio (Vincoli Numerici Hard)
+          </div>
+          <p style={{ color: "#374151", fontSize: "0.9rem", margin: "0 0 16px 0", lineHeight: 1.6 }}>
+            Definisce i <strong>vincoli numerici hard</strong> applicati al
+            Decision Agent (sia equity sia crypto) <em>prima</em> di eseguire
+            qualsiasi trade. Sono soglie che il sistema rifiuta automaticamente
+            se violate (max allocazione, confidence minima, range Stop Loss,
+            ecc). Cambia profilo per influenzare quanto rischio si prende.
+          </p>
+
+          {/* Selettore profilo */}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
+            {["conservative", "moderate", "aggressive"].map((key) => {
+              const prof = riskProfiles?.[key];
+              if (!prof) return null;
+              const active = riskActiveKey === key;
+              return (
+                <button
+                  key={key}
+                  onClick={() => setRiskActiveKey(key)}
+                  style={{
+                    flex: "1 1 220px",
+                    padding: "14px 16px",
+                    background: active ? "#fef3c7" : "#fff",
+                    border: active ? "2px solid #f59e0b" : "1px solid #d1d5db",
+                    borderRadius: 8,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    transition: "all 0.15s",
+                  }}
+                >
+                  <div style={{ fontSize: "1rem", fontWeight: 700, color: "#111827" }}>
+                    {prof.icon} {prof.label}
+                  </div>
+                  <div style={{ fontSize: "0.78rem", color: "#6b7280", marginTop: 4, lineHeight: 1.4 }}>
+                    {prof.summary}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Tabella comparativa */}
+          {riskProfiles && (
+            <div style={{
+              overflowX: "auto", marginBottom: 14,
+              border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff",
+            }}>
+              <table style={{
+                width: "100%", borderCollapse: "collapse", fontSize: "0.83rem",
+                fontFamily: "system-ui, sans-serif",
+              }}>
+                <thead>
+                  <tr style={{ background: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
+                    <th style={thStyle}>Parametro</th>
+                    {["conservative", "moderate", "aggressive"].map((k) => (
+                      <th
+                        key={k}
+                        style={{
+                          ...thStyle,
+                          background: riskActiveKey === k ? "#fef3c7" : "transparent",
+                          color: riskActiveKey === k ? "#92400e" : "#374151",
+                        }}
+                      >
+                        {riskProfiles[k]?.icon} {riskProfiles[k]?.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    {
+                      label: "Max % per trade — Equity/ETF",
+                      get: (p) => `${p.max_position_pct_equity?.toFixed(1)}%`,
+                      hint: "Cap allocazione su singola posizione azionaria/ETF (rispetto al cash disponibile)",
+                    },
+                    {
+                      label: "Max % per trade — Crypto",
+                      get: (p) => `${p.max_position_pct_crypto?.toFixed(1)}%`,
+                      hint: "Cap allocazione su singola posizione crypto (volatilità più alta → cap più stretto)",
+                    },
+                    {
+                      label: "Confidence minima per eseguire",
+                      get: (p) => p.min_confidence?.toFixed(2),
+                      hint: "Sotto questa soglia (0–1), il trade viene rifiutato automaticamente. Forza l'AI ad aspettare setup chiari",
+                    },
+                    {
+                      label: "Stop Loss range — Equity",
+                      get: (p) => `${p.sl_min_pct_equity}%–${p.sl_max_pct_equity}%`,
+                      hint: "Distanza % obbligatoria del SL dall'entry, fuori da questo range → trade rifiutato",
+                    },
+                    {
+                      label: "Stop Loss range — Crypto",
+                      get: (p) => `${p.sl_min_pct_crypto}%–${p.sl_max_pct_crypto}%`,
+                      hint: "Range più ampio per la volatilità crypto",
+                    },
+                    {
+                      label: "Posizioni aperte simultanee (max)",
+                      get: (p) => `${p.max_open_positions}`,
+                      hint: "Numero massimo di posizioni aperte sul portafoglio. Più alto = più diversificazione, ma anche più rumore",
+                    },
+                    {
+                      label: "Stop portfolio (drawdown max)",
+                      get: (p) => `${p.max_portfolio_drawdown_pct}%`,
+                      hint: "Sopra questa perdita dal capitale iniziale, il sistema blocca nuove APERTURE (chiusure restano permesse)",
+                    },
+                    {
+                      label: "News max age (catalyst)",
+                      get: (p) => `${p.news_freshness_min_hours}h`,
+                      hint: "Le notizie più vecchie di questo limite NON sono considerate catalyst valido",
+                    },
+                  ].map((row, i) => (
+                    <tr
+                      key={i}
+                      style={{ borderTop: i > 0 ? "1px solid #f3f4f6" : "none" }}
+                    >
+                      <td style={{ ...tdStyle, color: "#374151", fontWeight: 500 }}>
+                        <div>{row.label}</div>
+                        <div style={{ fontSize: "0.72rem", color: "#9ca3af",
+                                      marginTop: 2, lineHeight: 1.3, fontWeight: 400 }}>
+                          {row.hint}
+                        </div>
+                      </td>
+                      {["conservative", "moderate", "aggressive"].map((k) => (
+                        <td
+                          key={k}
+                          style={{
+                            ...tdStyle,
+                            textAlign: "center",
+                            background: riskActiveKey === k ? "#fffbeb" : "transparent",
+                            color: riskActiveKey === k ? "#92400e" : "#1f2937",
+                            fontWeight: riskActiveKey === k ? 700 : 500,
+                            fontFamily: "monospace",
+                          }}
+                        >
+                          {riskProfiles[k] ? row.get(riskProfiles[k]) : "—"}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Bottoni salva/annulla */}
+          <div style={{ display: "flex", justifyContent: "space-between",
+                        alignItems: "center", marginTop: 12 }}>
+            <div style={{ fontSize: "0.78rem", color: "#6b7280" }}>
+              Profilo attivo: <strong>{riskProfiles?.[riskActiveSaved]?.label || riskActiveSaved}</strong>
+              {riskActiveKey !== riskActiveSaved && (
+                <span style={{ color: "#dc2626", marginLeft: 8 }}>
+                  · modifica non salvata
+                </span>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {riskActiveKey !== riskActiveSaved && (
+                <button
+                  onClick={() => setRiskActiveKey(riskActiveSaved)}
+                  disabled={riskSaving}
+                  style={{
+                    padding: "8px 14px", background: "#f3f4f6", color: "#374151",
+                    border: "1px solid #d1d5db", borderRadius: 6, fontSize: "0.85rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  Annulla
+                </button>
+              )}
+              <button
+                onClick={async () => {
+                  setRiskSaving(true);
+                  try {
+                    const r = await fetch(`${API}/api/settings/risk-profile`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ profile: riskActiveKey }),
+                    });
+                    if (r.ok) {
+                      const data = await r.json();
+                      const k = data.active_key || riskActiveKey;
+                      setRiskActiveKey(k);
+                      setRiskActiveSaved(k);
+                      showMessage(`Profilo "${riskProfiles?.[k]?.label || k}" salvato. Verrà applicato ai prossimi run.`);
+                    } else {
+                      showMessage("Errore salvataggio profilo.", true);
+                    }
+                  } catch {
+                    showMessage("Errore di rete.", true);
+                  } finally {
+                    setRiskSaving(false);
+                  }
+                }}
+                disabled={riskSaving || riskActiveKey === riskActiveSaved}
+                style={{
+                  padding: "8px 18px", background: "#f59e0b", color: "#fff",
+                  border: "none", borderRadius: 6, fontWeight: 600, fontSize: "0.85rem",
+                  cursor: (riskSaving || riskActiveKey === riskActiveSaved) ? "not-allowed" : "pointer",
+                  opacity: (riskSaving || riskActiveKey === riskActiveSaved) ? 0.5 : 1,
+                }}
+              >
+                {riskSaving ? "Salvo..." : "Applica profilo"}
               </button>
             </div>
           </div>

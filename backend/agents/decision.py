@@ -452,6 +452,21 @@ def _build_directives_block() -> str:
     )
 
 
+def _build_risk_block(asset_class: str = "equity") -> str:
+    """
+    Risk Profile attivo (conservativo/moderato/aggressivo) → blocco con i
+    vincoli numerici hard. Va sotto le User Directives e sopra il prompt base.
+
+    Stringa vuota se modulo risk_profile non disponibile (graceful fallback).
+    """
+    try:
+        import risk_profile as rp
+        return rp.build_risk_block(asset_class=asset_class)
+    except Exception as e:
+        logger.warning("_build_risk_block fallback empty: %s", e)
+        return ""
+
+
 def _get_decision_prompt(engine: str | None = None) -> str:
     """
     Carica il system prompt del Decision Agent.
@@ -484,13 +499,16 @@ def _get_decision_prompt(engine: str | None = None) -> str:
     # 1. Direttive utente (in cima, max priority)
     directives_block = _build_directives_block()
 
-    # 2. Shared principles (in coda)
+    # 2. Risk profile (subito sotto le direttive, hard constraints)
+    risk_block = _build_risk_block(asset_class="equity")
+
+    # 3. Shared principles (in coda)
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        return directives_block + base_prompt + "\n\n" + "═" * 60 + "\n" + shared
+        return directives_block + risk_block + base_prompt + "\n\n" + "═" * 60 + "\n" + shared
     except Exception:
-        return directives_block + base_prompt
+        return directives_block + risk_block + base_prompt
 
 
 def _get_client() -> Anthropic:
@@ -829,6 +847,64 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                 return json.dumps({"error": f"Impossibile ottenere prezzo per {ticker}"})
 
             current_price = price_data["data"][-1]["close"]
+
+            # ── Risk Profile validation (HARD CONSTRAINTS) ─────────────────
+            # Solo per BUY (SELL = chiusura, non vincolato dal cap allocation).
+            # Confidence è 0..100 nel tool schema → normalizza a 0..1.
+            if action == "BUY":
+                try:
+                    import risk_profile as _rp
+                    pstate = portfolio.get_portfolio_state()
+                    cash = float(pstate.get("cash", 0) or 0)
+                    open_count = int(pstate.get("open_positions_count",
+                                                len(pstate.get("positions") or [])) or 0)
+                    trade_value = float(quantity) * float(current_price)
+                    alloc_pct = (trade_value / cash * 100.0) if cash > 0 else 999.0
+                    conf_norm = float(confidence) / 100.0 if confidence and confidence > 1 else float(confidence or 0)
+
+                    # Drawdown proxy: pnl_pct negativo dal capitale iniziale.
+                    # Non è il peak-to-trough vero, ma è un soft-stop ragionevole
+                    # per il portfolio cap: se sei -X% dall'inizio, freezeing
+                    # nuovi BUY è prudente.
+                    dd_pct = None
+                    try:
+                        pnl_pct = float(pstate.get("pnl_pct", 0) or 0)
+                        if pnl_pct < 0:
+                            dd_pct = abs(pnl_pct)
+                    except Exception:
+                        pass
+
+                    ok, reason = _rp.validate_trade(
+                        asset_class="equity",
+                        confidence=conf_norm,
+                        allocation_pct=alloc_pct,
+                        open_positions_count=open_count,
+                        portfolio_drawdown_pct=dd_pct,
+                    )
+                    if not ok:
+                        logger.warning("[%s][DECISION] RISK_PROFILE rejected: %s",
+                                       run_id, reason)
+                        database.insert_agent_log(run_id, "DECISION_RISK_REJECTED",
+                            json.dumps({
+                                "ticker": ticker, "action": action,
+                                "qty": quantity, "price": current_price,
+                                "alloc_pct": round(alloc_pct, 2),
+                                "confidence": conf_norm,
+                                "open_positions": open_count,
+                                "drawdown_pct": dd_pct,
+                                "reason": reason,
+                            }, default=str))
+                        return json.dumps({
+                            "executed": False, "rejected": True,
+                            "ticker": ticker, "action": action,
+                            "reason": f"RISK_PROFILE: {reason}",
+                            "at": timestamp,
+                        })
+                except ImportError:
+                    pass   # risk_profile non disponibile → degrade graceful
+                except Exception as rp_err:
+                    logger.warning("[%s][DECISION] risk validation error (non-fatal): %s",
+                                   run_id, rp_err)
 
             # Esegui trade
             geo_part = logic_chain[:500] if logic_chain else ""

@@ -2299,6 +2299,44 @@ async def set_directives(req: DirectivesUpdateReq):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/settings/risk-profile")
+async def get_risk_profile():
+    """
+    Restituisce il profilo di rischio attivo + tutti i preset disponibili
+    per la UI Settings (mostrare la tabella comparativa).
+    """
+    try:
+        import risk_profile as rp
+        return rp.list_profiles()
+    except Exception as e:
+        logger.error("get_risk_profile error: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class RiskProfileUpdateReq(BaseModel):
+    profile: str   # "conservative" | "moderate" | "aggressive"
+
+
+@app.post("/api/settings/risk-profile")
+async def set_risk_profile(req: RiskProfileUpdateReq):
+    """
+    Cambia il profilo di rischio attivo. Verrà applicato ai prossimi run del
+    Decision Agent (equity + crypto) come hard-constraint nel system prompt
+    e in execute_trade per la validazione.
+    """
+    try:
+        import risk_profile as rp
+        saved_key = rp.set_active_profile_key(req.profile)
+        return {
+            "status": "ok",
+            "active_key": saved_key,
+            "profile": rp.get_active_profile(),
+        }
+    except Exception as e:
+        logger.error("set_risk_profile error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/settings/prompt-defaults")
 async def get_prompt_defaults():
     """

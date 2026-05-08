@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell, Tooltip, Legend,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   AreaChart, Area, LineChart, Line,
-  ComposedChart,
+  ComposedChart, ReferenceArea,
 } from 'recharts';
 
 const API = window.location.origin;
@@ -202,14 +202,91 @@ function downsampleHistory(history, targetPoints = 100) {
   return out;
 }
 
+// Filtra outlier: snapshot con total_value che fa uno spike improvviso (>15%
+// in una direzione e poi torna entro il +/-3% del valore precedente al picco)
+// è quasi sempre un errore di pricing transitorio (es. yfinance/Polygon ha
+// restituito un prezzo sballato per 1 minuto). Lo sostituisce con
+// l'interpolazione lineare tra prev e next.
+//
+// Bug osservato: il grafico equity mostrava un +47% di colpo che poi spariva
+// → singolo data point corrotto da una fonte prezzo che ha sbagliato.
+function sanitizeOutliers(history) {
+  if (!history || history.length < 3) return history || [];
+  const arr = history.map((p) => ({ ...p }));
+  const SPIKE_THRESHOLD = 0.15;     // 15% in 1 step = sospetto
+  const REVERT_TOLERANCE = 0.03;    // se prev e next sono entro 3% l'uno dall'altro è un picco isolato
+  let fixed = 0;
+  for (let i = 1; i < arr.length - 1; i++) {
+    const prev = Number(arr[i - 1].total_value);
+    const cur  = Number(arr[i].total_value);
+    const next = Number(arr[i + 1].total_value);
+    if (!Number.isFinite(prev) || !Number.isFinite(cur) || !Number.isFinite(next)) continue;
+    if (prev <= 0 || cur <= 0 || next <= 0) continue;
+    const jump1 = Math.abs((cur - prev) / prev);
+    const jump2 = Math.abs((next - cur) / cur);
+    const drift = Math.abs((next - prev) / prev);
+    if (jump1 > SPIKE_THRESHOLD && jump2 > SPIKE_THRESHOLD && drift < REVERT_TOLERANCE) {
+      // È uno spike isolato che si autocorregge: sostituisci con la media
+      arr[i].total_value = (prev + next) / 2;
+      arr[i]._outlier_fixed = true;
+      fixed += 1;
+    }
+  }
+  if (fixed > 0 && typeof window !== "undefined" && window.console) {
+    console.log(`[AnalyticsPage] sanitizeOutliers: ${fixed} spike isolati riallineati`);
+  }
+  return arr;
+}
+
+// Determina se un timestamp ricade nelle "ore di mercato" (NYSE: 14:30–21:00
+// UTC, lun-ven). I crypto sono 24/7, quindi se l'utente ha posizioni crypto
+// attive il grafico non si "spegne" mai.
+function isMarketHours(date) {
+  const d = (date instanceof Date) ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return true;
+  const dow = d.getUTCDay();   // 0=Sun, 6=Sat
+  if (dow === 0 || dow === 6) return false;
+  const utcMin = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const open = 14 * 60 + 30;   // 14:30 UTC = 9:30 ET
+  const close = 21 * 60;       // 21:00 UTC = 16:00 ET (semplificato, ignora DST)
+  return utcMin >= open && utcMin < close;
+}
+
+// Calcola gli intervalli "off-market" da renderizzare come ReferenceArea
+// scure sul chart (stile Scalable Capital: grafico "spento" fuori orario).
+// Restituisce array [{x1, x2}].
+function computeOffHoursBands(data) {
+  if (!data || data.length < 2) return [];
+  const bands = [];
+  let bandStart = null;
+  for (let i = 0; i < data.length; i++) {
+    const ts = data[i].timestamp;
+    const open = isMarketHours(ts);
+    if (!open && bandStart === null) {
+      // Inizio banda off-hours: comincia dal punto precedente per coprire la transizione
+      bandStart = i > 0 ? data[i - 1].timestamp : ts;
+    } else if (open && bandStart !== null) {
+      bands.push({ x1: bandStart, x2: ts });
+      bandStart = null;
+    }
+  }
+  if (bandStart !== null) {
+    bands.push({ x1: bandStart, x2: data[data.length - 1].timestamp });
+  }
+  return bands;
+}
+
 // Equity curve con drawdown
-function EquityCurveCard({ history }) {
+function EquityCurveCard({ history, hasCrypto = false }) {
   if (!history?.length) {
     return <div className="empty-state">Nessuno snapshot di portafoglio nel periodo selezionato</div>;
   }
 
-  // Downsample per leggibilità (max ~100 punti)
-  const sampled = downsampleHistory(history, 100);
+  // 1. Sanitizza outlier (spike isolati >15% che si autocorreggono = bad data)
+  const cleaned = sanitizeOutliers(history);
+
+  // 2. Downsample per leggibilità (max ~100 punti)
+  const sampled = downsampleHistory(cleaned, 100);
 
   // Calcola drawdown rispetto al massimo precedente.
   // FIX: scarta snapshot con value <= 0 dal calcolo del runningMax (altrimenti
@@ -234,17 +311,50 @@ function EquityCurveCard({ history }) {
   });
 
   const maxDrawdown = data.reduce((min, p) => Math.min(min, p.drawdown), 0);
+  const outlierCount = sampled.filter((p) => p._outlier_fixed).length;
+
+  // Off-hours bands: solo se l'utente NON ha posizioni crypto attive
+  // (le crypto sono 24/7 → il grafico deve restare "vivo" sempre).
+  const offBands = hasCrypto ? [] : computeOffHoursBands(data);
 
   return (
     <div>
-      <div style={{ marginBottom: '0.5rem', fontSize: '0.78rem', color: '#94a3b8' }}>
-        Max Drawdown: <strong style={{ color: maxDrawdown < -5 ? '#ef4444' : '#10b981' }}>
-          {fmtPct(maxDrawdown, 2)}
-        </strong>
+      <div style={{ marginBottom: '0.5rem', fontSize: '0.78rem', color: '#94a3b8',
+                    display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+        <span>
+          Max Drawdown: <strong style={{ color: maxDrawdown < -5 ? '#ef4444' : '#10b981' }}>
+            {fmtPct(maxDrawdown, 2)}
+          </strong>
+        </span>
+        <span style={{ display: 'flex', gap: 12 }}>
+          {outlierCount > 0 && (
+            <span title="Punti anomali (spike isolati che si autocorreggono) sono stati riallineati per leggibilità">
+              ⚠ {outlierCount} outlier filtrato{outlierCount > 1 ? 'i' : ''}
+            </span>
+          )}
+          {!hasCrypto && offBands.length > 0 && (
+            <span title="Bande grigie: ore in cui i mercati USA sono chiusi (NYSE 9:30–16:00 ET, lun–ven). Non hai posizioni crypto attive 24/7.">
+              🌙 {offBands.length} fasce off-market
+            </span>
+          )}
+        </span>
       </div>
       <ResponsiveContainer width="100%" height={240}>
         <ComposedChart data={data} margin={{ top: 5, right: 8, left: -8, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          {/* Off-market bands (rendering "spento" stile Scalable Capital) */}
+          {offBands.map((b, idx) => (
+            <ReferenceArea
+              key={`off-${idx}`}
+              yAxisId="left"
+              x1={b.x1}
+              x2={b.x2}
+              fill="#0b1220"
+              fillOpacity={0.55}
+              stroke="none"
+              ifOverflow="extendDomain"
+            />
+          ))}
           <XAxis
             dataKey="timestamp"
             tick={{ fill: '#64748b', fontSize: 10 }}
@@ -812,7 +922,13 @@ export default function AnalyticsPage() {
         <ChartCard title="Equity Curve & Drawdown"
                    description="Valore del portafoglio nel tempo (linea blu, asse sx) e perdita rispetto al massimo storico (rosso, asse dx). Un drawdown -10% significa che ora vali il 10% in meno del tuo picco."
                    subtitle={`Periodo: ${PERIOD_OPTIONS.find(o => o.key === period)?.label}`}>
-          <EquityCurveCard history={history} />
+          <EquityCurveCard
+            history={history}
+            hasCrypto={positions.some((p) => {
+              const t = (p.ticker || p.symbol || '').toUpperCase();
+              return t.endsWith('-USD') || t.startsWith('X:');
+            })}
+          />
         </ChartCard>
 
         <ChartCard title="P&L Cumulativo"

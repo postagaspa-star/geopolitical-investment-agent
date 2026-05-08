@@ -181,13 +181,20 @@ def _get_crypto_decision_prompt() -> str:
     except Exception:
         directives_block = ""
 
-    # 2. Shared principles in coda
+    # 2. Risk profile (asset_class=crypto, soglie diverse rispetto equity)
+    try:
+        from agents.decision import _build_risk_block
+        risk_block = _build_risk_block(asset_class="crypto")
+    except Exception:
+        risk_block = ""
+
+    # 3. Shared principles in coda
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        return directives_block + base + "\n\n" + "═" * 60 + "\n" + shared
+        return directives_block + risk_block + base + "\n\n" + "═" * 60 + "\n" + shared
     except Exception:
-        return directives_block + base
+        return directives_block + risk_block + base
 
 
 def is_cooldown_active() -> tuple[bool, int]:
@@ -487,6 +494,58 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
 
             if not current_price or current_price <= 0:
                 return json.dumps({"error": f"Prezzo non disponibile per {ticker}"})
+
+            # ── Risk Profile validation (HARD CONSTRAINTS, asset_class=crypto) ─
+            if action == "BUY":
+                try:
+                    import risk_profile as _rp
+                    pstate = portfolio.get_portfolio_state()
+                    cash = float(pstate.get("cash", 0) or 0)
+                    open_count = int(pstate.get("open_positions_count",
+                                                len(pstate.get("positions") or [])) or 0)
+                    trade_value = float(quantity) * float(current_price)
+                    alloc_pct = (trade_value / cash * 100.0) if cash > 0 else 999.0
+                    conf_norm = float(confidence) / 100.0 if confidence and confidence > 1 else float(confidence or 0)
+
+                    dd_pct = None
+                    try:
+                        pnl_pct = float(pstate.get("pnl_pct", 0) or 0)
+                        if pnl_pct < 0:
+                            dd_pct = abs(pnl_pct)
+                    except Exception:
+                        pass
+
+                    ok, reason = _rp.validate_trade(
+                        asset_class="crypto",
+                        confidence=conf_norm,
+                        allocation_pct=alloc_pct,
+                        open_positions_count=open_count,
+                        portfolio_drawdown_pct=dd_pct,
+                    )
+                    if not ok:
+                        logger.warning("[%s][DEC-CRYPTO] RISK_PROFILE rejected: %s",
+                                       run_id, reason)
+                        database.insert_agent_log(run_id, "DECISION_CRYPTO_RISK_REJECTED",
+                            json.dumps({
+                                "ticker": ticker, "action": action,
+                                "qty": quantity, "price": current_price,
+                                "alloc_pct": round(alloc_pct, 2),
+                                "confidence": conf_norm,
+                                "open_positions": open_count,
+                                "drawdown_pct": dd_pct,
+                                "reason": reason,
+                            }, default=str))
+                        return json.dumps({
+                            "executed": False, "rejected": True,
+                            "ticker": ticker, "action": action,
+                            "reason": f"RISK_PROFILE: {reason}",
+                            "at": timestamp,
+                        })
+                except ImportError:
+                    pass
+                except Exception as rp_err:
+                    logger.warning("[%s][DEC-CRYPTO] risk validation error (non-fatal): %s",
+                                   run_id, rp_err)
 
             if action == "BUY":
                 result = portfolio.execute_buy(
