@@ -294,6 +294,33 @@ function Settings({ onBack, onDataRefresh }) {
     }
   };
 
+  // === Set target total (forza patrimonio a un valore noto) ===
+  const [targetTotalStatus, setTargetTotalStatus] = useState({ running: false, result: null });
+  const [targetTotalInput, setTargetTotalInput] = useState("104200");
+  const handleSetTargetTotal = async () => {
+    if (targetTotalStatus.running) return;
+    const target = parseFloat(targetTotalInput);
+    if (!Number.isFinite(target) || target <= 0) {
+      setTargetTotalStatus({ running: false, result: { ok: false, data: { error: "Inserisci un valore numerico positivo" } } });
+      return;
+    }
+    if (!window.confirm(
+      `Forza patrimonio totale a $${target.toLocaleString()}.\n\n` +
+      "Calcola: nuovo cash_balance = target - somma(qty × current_price).\n" +
+      "Le posizioni NON vengono toccate, solo cash_balance.\n\n" +
+      "Operazione IRREVERSIBILE. Procedere?"
+    )) return;
+    setTargetTotalStatus({ running: true, result: null });
+    try {
+      const r = await fetch(`${API}/api/portfolio/set-target-total?target_total=${target}&confirm=true`, { method: "POST" });
+      const data = await r.json();
+      setTargetTotalStatus({ running: false, result: { ok: r.ok && data.status === "ok", data } });
+      handleAudit();
+    } catch (e) {
+      setTargetTotalStatus({ running: false, result: { ok: false, data: { error: String(e) } } });
+    }
+  };
+
   const handleRebuild = async () => {
     if (rebuildStatus.running) return;
     if (!window.confirm(
@@ -720,6 +747,74 @@ function Settings({ onBack, onDataRefresh }) {
                   <span style={{ marginLeft: 6, fontFamily: "monospace" }}>
                     (deleted={cleanupStatus.result.deleted}, median=${cleanupStatus.result.median})
                   </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Forza patrimonio totale a un valore noto (fixa cash buggato) */}
+          <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid #f3f4f6" }}>
+            <div style={{ marginBottom: "10px" }}>
+              <div style={{ fontSize: "14px", fontWeight: 600, color: "#111827" }}>
+                Forza patrimonio totale (riallinea cash_balance)
+              </div>
+              <div style={{ fontSize: "12px", color: "#6b7280", marginTop: "2px" }}>
+                Quando la liquidità si "bugga" (es. cash_balance scritto male da
+                un trade glitch) e il totale calcolato non corrisponde al patrimonio
+                reale, inserisci qui il valore corretto del patrimonio. L'endpoint
+                calcola: <code>nuovo cash = target − Σ(qty×current_price)</code> e
+                aggiorna solo il cash_balance. Le posizioni non vengono toccate.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center", marginBottom: "8px" }}>
+              <span style={{ fontSize: "13px", color: "#374151" }}>Patrimonio target:</span>
+              <span style={{ fontSize: "13px", color: "#6b7280" }}>$</span>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={targetTotalInput}
+                onChange={(e) => setTargetTotalInput(e.target.value)}
+                disabled={targetTotalStatus.running}
+                style={{
+                  padding: "6px 10px",
+                  border: "1px solid #d1d5db",
+                  borderRadius: "6px",
+                  fontSize: "13px",
+                  width: "140px",
+                  fontFamily: "monospace",
+                }}
+              />
+              <button
+                style={{
+                  ...btnSecondary,
+                  background: targetTotalStatus.running ? "#e5e7eb" : "#10b981",
+                  color: targetTotalStatus.running ? "#6b7280" : "#fff",
+                  borderColor: targetTotalStatus.running ? "#d1d5db" : "#10b981",
+                  cursor: targetTotalStatus.running ? "not-allowed" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+                onClick={handleSetTargetTotal}
+                disabled={targetTotalStatus.running}
+              >
+                {targetTotalStatus.running ? "..." : "Applica"}
+              </button>
+            </div>
+            {targetTotalStatus.result && (
+              <div style={{
+                marginTop: "8px", padding: "10px 12px", borderRadius: "6px",
+                fontSize: "12px",
+                background: targetTotalStatus.result.ok ? "#ecfdf5" : "#fef2f2",
+                color: targetTotalStatus.result.ok ? "#065f46" : "#991b1b",
+                border: `1px solid ${targetTotalStatus.result.ok ? "#a7f3d0" : "#fecaca"}`,
+              }}>
+                <div>{targetTotalStatus.result.data?.message || targetTotalStatus.result.data?.error || "Stato sconosciuto"}</div>
+                {targetTotalStatus.result.ok && targetTotalStatus.result.data?.breakdown && (
+                  <div style={{ marginTop: 8, fontFamily: "monospace", fontSize: "11px" }}>
+                    <div>Cash: ${targetTotalStatus.result.data.old_cash?.toLocaleString()} → ${targetTotalStatus.result.data.new_cash?.toLocaleString()}</div>
+                    <div>Posizioni totali: ${targetTotalStatus.result.data.positions_value?.toLocaleString()} ({targetTotalStatus.result.data.positions_count} aperte)</div>
+                    <div>Total: ${targetTotalStatus.result.data.old_total?.toLocaleString()} → ${targetTotalStatus.result.data.new_total?.toLocaleString()}</div>
+                  </div>
                 )}
               </div>
             )}

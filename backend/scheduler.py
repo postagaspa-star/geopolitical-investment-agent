@@ -38,7 +38,7 @@ current_mode: str = "idle"  # idle | weekend | pre_market | full
 # In questi giorni la borsa USA è CHIUSA anche se è un giorno feriale.
 # Aggiornare ogni anno (NYSE pubblica il calendario ufficiale ~12 mesi prima).
 # Senza questo controllo, is_market_open() restituiva True nei festivi USA,
-# il bot apriva trade su S&P 500 con ClawStreet che li rifiutava → divergenza.
+# il bot apriva trade su S&P 500 nei giorni di chiusura → divergenza.
 NYSE_HOLIDAYS = {
     # 2025
     "2025-01-01", "2025-01-09",  # New Year, Day of mourning Carter
@@ -54,7 +54,7 @@ NYSE_HOLIDAYS = {
     "2027-07-05",  # 4 luglio cade di domenica → osservato il 5
     "2027-09-06", "2027-11-25", "2027-12-24",  # 25 dic cade di sabato → 24
     # 2028 (estensione: bug precedente scadeva nel 2027 → bot apriva trade
-    # equity nei festivi US 2028 con conseguente rifiuto ClawStreet)
+    # equity nei festivi US 2028)
     "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29",
     "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25",
     # 2029
@@ -359,7 +359,7 @@ async def _crypto_pipeline_job():
     """
     Crypto pipeline — cron ogni ora a :00, 24/7.
 
-    Pipeline focalizzata SOLO su crypto ClawStreet-supported:
+    Pipeline focalizzata SOLO su crypto:
       1. Technical Crypto (DeepSeek-V3) su top-6 crypto liquidità
       2. Decision Crypto (DeepSeek-R1 reasoning) con context crypto-only
 
@@ -425,64 +425,6 @@ async def _standard_pipeline_job():
                     len(result.get("trades", [])))
     except Exception as e:
         logger.error("Errore standard pipeline: %s", e, exc_info=True)
-
-
-async def _clawstreet_mirror_retry_job():
-    """
-    Retry trade falliti — ogni 15 min, 24/7.
-
-    Cerca tutti i trade con cs_mirror_status in (pending, failed) nelle ultime
-    24h e li riprova. Marca come 'ok'/'failed'/'skipped' a seconda dell'esito.
-    Limita a 5 tentativi per trade per evitare loop infiniti su trade
-    permanentemente non specchiabili (simbolo non supportato, ecc.).
-
-    Funziona 24/7 (non solo market hours): le crypto possono essere mirrored
-    a qualunque ora; i trade equity falliti restano in coda fino al prossimo
-    market open.
-    """
-    try:
-        cs_bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
-        cs_api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
-        if not cs_bot_id or not cs_api_key or cs_bot_id == "GEO":
-            return  # credenziali non configurate
-
-        from clawstreet_mirror import retry_pending_mirrors
-        result = await retry_pending_mirrors(window_hours=24, limit=20)
-        if result.get("retried", 0) > 0:
-            logger.info("ClawStreet mirror retry: %s", result)
-    except Exception as e:
-        logger.warning("Errore retry mirror ClawStreet: %s", e)
-
-
-async def _clawstreet_reconcile_job():
-    """
-    Riconciliazione completa ClawStreet — ogni 6 ore, 24/7.
-
-    Variante più "pesante" del retry job: confronta TUTTI i trade locali
-    delle ultime 48h con quelli effettivamente presenti su ClawStreet via
-    GET /bots/{id}/trades. Recupera trade locali che, per qualche motivo,
-    non hanno la riga cs_mirror_status correttamente popolata (es. legacy
-    trade pre-migration, o se la tabella ha avuto problemi).
-    """
-    try:
-        cs_bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
-        cs_api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
-        if not cs_bot_id or not cs_api_key or cs_bot_id == "GEO":
-            return
-
-        # Self-call all'endpoint /api/clawstreet/reconcile (già implementato)
-        import aiohttp
-        url = f"https://geopolitical-investment-agent.onrender.com/api/clawstreet/reconcile?since_hours=48"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    sent = data.get("sent", 0)
-                    failed = data.get("failed", 0)
-                    if sent > 0 or failed > 0:
-                        logger.info("ClawStreet 6h reconcile: sent=%d failed=%d", sent, failed)
-    except Exception as e:
-        logger.warning("Errore reconcile ClawStreet 6h: %s", e)
 
 
 async def _coach_cards_weekly_job():
@@ -659,35 +601,6 @@ def start_scheduler() -> AsyncIOScheduler:
                             day_of_week="mon-fri"),
         id="standard_pipeline_job",
         name="Standard pipeline (cron 14/16/18/20 UTC L-V, V3+Sonnet, NYSE-only)",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # ── ClawStreet mirror retry: ogni 15 min, 24/7 ──
-    # Riprova i trade con cs_mirror_status='failed' o 'pending'. Velocissimo
-    # (~1s) se non ci sono pending. Garantisce che le mirror failures
-    # transitorie (network, 500, timeout) vengano sistemate entro 15 min.
-    _scheduler.add_job(
-        _clawstreet_mirror_retry_job,
-        trigger="interval",
-        minutes=15,
-        id="clawstreet_mirror_retry",
-        name="ClawStreet mirror retry (15 min, 24/7)",
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        next_run_time=datetime.now(pytz.utc) + timedelta(minutes=2),
-    )
-
-    # ── ClawStreet reconcile: ogni 6 ore (deep check via GET /trades) ──
-    # Questo è il "safety net" — confronta lo storico effettivo CS vs locale.
-    _scheduler.add_job(
-        _clawstreet_reconcile_job,
-        trigger="interval",
-        hours=6,
-        id="clawstreet_reconcile",
-        name="ClawStreet deep reconcile (6h, fetch CS trades)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
@@ -876,7 +789,7 @@ def get_scheduler_info() -> dict:
             "model": "claude-sonnet-4-5",
         },
         "technical_crypto": {
-            "schedule": "ogni 1h, 24/7 (DeepSeek-V3, solo crypto ClawStreet)",
+            "schedule": "ogni 1h, 24/7 (DeepSeek-V3, solo crypto)",
             "next_run": crypto_pipeline_next,
             "last_run": _last_log_for_phases(["TECH_CRYPTO"]),
             "active": running,

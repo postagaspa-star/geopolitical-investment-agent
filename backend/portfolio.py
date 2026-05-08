@@ -37,7 +37,19 @@ except ImportError:
 
 
 def calculate_total_value():
-    """Ricalcola il valore totale del portafoglio (liquidita' + posizioni aperte)."""
+    """
+    Ricalcola il valore totale del portafoglio (liquidita' + posizioni aperte).
+
+    Sanity check anti-bug: se il valore raw (cash + sum(qty*current_price))
+    devia di oltre il 30% dalla mediana degli ultimi 50 snapshot reali del
+    portafoglio_snapshots, c'e' quasi certamente un current_price gonfiato
+    in una position. In quel caso usiamo la mediana dello storico come
+    valore di display (allineato al grafico Equity Curve) e LOGGHIAMO
+    rumorosamente per investigare.
+
+    Questo evita il caso "portfolio segna $169k mentre il chart
+    correttamente mostra $103k" senza richiedere intervento manuale.
+    """
     portfolio = get_portfolio()
     if portfolio is None:
         return 0.0
@@ -45,17 +57,46 @@ def calculate_total_value():
     cash = portfolio["cash_balance"]
     positions = get_positions()
 
-    # Somma il valore di mercato di ogni posizione
+    # Somma il valore di mercato di ogni posizione (raw)
     positions_value = sum(
         pos["current_price"] * pos["quantity"]
         for pos in positions
         if pos["current_price"] > 0
     )
+    raw_total = cash + positions_value
 
-    total = cash + positions_value
-    # Aggiorna il valore totale nel database
-    update_portfolio(cash, total)
-    return total
+    # Sanity check vs mediana storica degli snapshot recenti
+    safe_total = raw_total
+    try:
+        from database import get_portfolio_history
+        recent = get_portfolio_history(days=2) or []
+        # Tieni solo gli ultimi 50 snapshot validi (>0)
+        recent_vals = sorted(
+            float(r["total_value"]) for r in recent
+            if r.get("total_value") and float(r["total_value"]) > 0
+        )[-50:]
+        if len(recent_vals) >= 5:
+            mid = len(recent_vals) // 2
+            median_val = (
+                recent_vals[mid] if len(recent_vals) % 2 == 1
+                else (recent_vals[mid - 1] + recent_vals[mid]) / 2.0
+            )
+            if median_val > 0:
+                drift = abs(raw_total - median_val) / median_val
+                if drift > 0.30:
+                    logger.warning(
+                        "calculate_total_value: raw=%.2f devia %.0f%% dalla mediana "
+                        "recente %.2f (probabile current_price gonfiato in una posizione). "
+                        "Uso mediana storica come display value. Esegui audit per dettagli.",
+                        raw_total, drift * 100, median_val,
+                    )
+                    safe_total = median_val
+    except Exception as ex:
+        logger.debug("calculate_total_value sanity check skipped: %s", ex)
+
+    # Persist sempre il safe_total in DB
+    update_portfolio(cash, safe_total)
+    return safe_total
 
 
 def get_portfolio_state():
@@ -311,7 +352,7 @@ _SLTP_MAX_RATIO_CRYPTO = 2.00
 
 
 def _is_crypto_ticker_for_sltp(ticker: str) -> bool:
-    """True se il ticker è crypto (ClawStreet 14-set)."""
+    """True se il ticker è crypto."""
     if not ticker:
         return False
     t = ticker.upper().strip()

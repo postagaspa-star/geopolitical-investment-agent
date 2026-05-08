@@ -467,7 +467,7 @@ async def get_scout_buffer(
     """
     Restituisce il contenuto recente di intelligence_buffer (micro-schede Scout)
     per la visualizzazione nel frontend. Include tutti i find dello Scout:
-    GDELT, NewsAPI, yFinance News, Reddit (sentiment retail), X, ClawStreet,
+    GDELT, NewsAPI, yFinance News, Reddit (sentiment retail), X,
     Congressional.
     """
     try:
@@ -2790,6 +2790,95 @@ async def portfolio_refresh_prices():
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
+@app.post("/api/portfolio/set-target-total")
+async def portfolio_set_target_total(
+    target_total: float = Query(..., gt=0, description="Valore target in $ del patrimonio totale"),
+    confirm: bool = Query(default=False),
+):
+    """
+    Aggiusta il cash_balance per ottenere un total_value pari a `target_total`.
+
+    Calcola: cash_balance = target_total - sum(qty * current_price) per ogni posizione.
+
+    Use case: la liquidita' si e' "buggata" e adesso il calcolo
+    cash + sum(positions) = X non corrisponde al patrimonio reale Y.
+    Tu sai che dovrebbe essere Y → questo endpoint forza cash al delta giusto.
+
+    Le posizioni (quantity, avg_buy_price, current_price) NON vengono toccate.
+    Solo cash_balance viene aggiornato.
+
+    Richiede confirm=true. IRREVERSIBILE.
+    """
+    if not confirm:
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "error": "Richiede confirm=true. Operazione irreversibile.",
+        })
+
+    try:
+        positions = database.get_positions() or []
+        portfolio_now = database.get_portfolio() or {}
+        old_cash = float(portfolio_now.get("cash_balance") or 0)
+        old_total = float(portfolio_now.get("total_value") or 0)
+
+        # Somma valore di mercato delle posizioni
+        positions_value = 0.0
+        breakdown = []
+        for p in positions:
+            qty = float(p.get("quantity") or 0)
+            cp = float(p.get("current_price") or 0)
+            if qty <= 0 or cp <= 0:
+                continue
+            mv = qty * cp
+            positions_value += mv
+            breakdown.append({
+                "ticker": p.get("ticker"),
+                "quantity": round(qty, 8),
+                "current_price": round(cp, 2),
+                "market_value": round(mv, 2),
+            })
+
+        new_cash = target_total - positions_value
+        if new_cash < 0:
+            return JSONResponse(status_code=400, content={
+                "status": "error",
+                "error": (
+                    f"Target ${target_total:,.2f} impossibile: somma posizioni "
+                    f"${positions_value:,.2f} > target. cash_balance risulterebbe "
+                    f"negativo (${new_cash:,.2f}). Riduci posizioni o alza il target."
+                ),
+                "positions_value": round(positions_value, 2),
+                "would_be_cash": round(new_cash, 2),
+            })
+
+        # Aggiorna portfolio
+        database.update_portfolio(round(new_cash, 2), round(target_total, 2))
+
+        logger.info(
+            "Portfolio target_total set: target=%.2f, cash %.2f→%.2f, total %.2f→%.2f, "
+            "positions_value=%.2f",
+            target_total, old_cash, new_cash, old_total, target_total, positions_value,
+        )
+
+        return {
+            "status": "ok",
+            "message": (
+                f"Cash bilanciato: ${old_cash:,.2f} → ${new_cash:,.2f}. "
+                f"Total value: ${old_total:,.2f} → ${target_total:,.2f}."
+            ),
+            "old_cash": round(old_cash, 2),
+            "new_cash": round(new_cash, 2),
+            "old_total": round(old_total, 2),
+            "new_total": round(target_total, 2),
+            "positions_value": round(positions_value, 2),
+            "positions_count": len(breakdown),
+            "breakdown": breakdown,
+        }
+    except Exception as e:
+        logger.error("portfolio_set_target_total error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
 @app.post("/api/portfolio/rebuild")
 async def portfolio_rebuild(confirm: bool = Query(default=False)):
     """
@@ -2917,27 +3006,6 @@ async def close_position(payload: ClosePositionPayload):
             tech_reasoning="Chiusura manuale da interfaccia",
             confidence=100,
         )
-
-        # FIX CRITICO: mirror su ClawStreet anche per chiusura manuale.
-        # Bug precedente: il portfolio locale chiudeva la posizione ma
-        # ClawStreet rimaneva long → divergenza permanente del portfolio
-        # pubblico (leaderboard mostra ancora la posizione aperta).
-        if isinstance(result, dict) and result.get("success"):
-            try:
-                from clawstreet_mirror import mirror_trade as _mirror
-                trade_id = result.get("trade_id")
-                await _mirror(
-                    trade_id=trade_id,
-                    ticker=payload.ticker, action="SELL",
-                    quantity=pos["quantity"],
-                    reasoning="manual_close_ui",
-                    run_id="manual_close",
-                )
-            except Exception as mirror_exc:
-                logger.error("Mirror chiusura manuale fallito %s: %s",
-                             payload.ticker, mirror_exc, exc_info=True)
-                # Non blocchiamo la chiusura locale; il retry job riproverà
-                result["mirror_error"] = str(mirror_exc)[:200]
 
         return result
     except Exception as e:

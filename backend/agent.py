@@ -64,7 +64,6 @@ Segui questa procedura rigorosa ad ogni ciclo:
 
 Criteri di decisione:
 - Peso dell'analisi: 50% geopolitica, 50% tecnica
-- Integra i dati ClawStreet (sentiment, economia, screener) nelle tue decisioni
 - Fornisci SEMPRE motivazioni dettagliate per ogni decisione
 - Sii conservativo: preferisci la qualita' alla quantita' delle operazioni
 - Non operare se le condizioni non sono chiaramente favorevoli

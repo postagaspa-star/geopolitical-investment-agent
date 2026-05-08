@@ -81,14 +81,13 @@ async def run_geo_worker(run_id: str) -> dict:
         data_fetchers.fetch_gdelt_data(),
         data_fetchers.fetch_newsapi_data(),
         data_fetchers.fetch_congressional_trades(),
-        data_fetchers.fetch_clawstreet_market_context(),
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     gdelt_data = results[0] if not isinstance(results[0], Exception) else {"error": str(results[0])}
     newsapi_data = results[1] if not isinstance(results[1], Exception) else {"error": str(results[1])}
     congressional = results[2] if not isinstance(results[2], Exception) else {"error": str(results[2])}
-    market_ctx = results[3] if not isinstance(results[3], Exception) else {"error": str(results[3])}
+    market_ctx = {}
 
     # Salva snapshot geopolitici
     try:
@@ -470,19 +469,6 @@ async def _handle_manager_tool(tool_name: str, tool_input: dict, run_id: str) ->
 
             database.insert_agent_log(run_id, "MANAGER_DECISION",
                 f"{action} {quantity} {ticker} @ {current_price:.2f} (conf: {confidence})")
-
-            # ClawStreet mirror via wrapper centralizzato (aggiorna cs_mirror_status)
-            try:
-                from clawstreet_mirror import mirror_trade as _mirror
-                trade_id = result.get("trade_id") if isinstance(result, dict) else None
-                await _mirror(
-                    trade_id=trade_id,
-                    ticker=ticker, action=action, quantity=quantity,
-                    reasoning=f"{geo_reasoning} | {tech_reasoning}",
-                    run_id=run_id,
-                )
-            except Exception as exc:
-                logger.warning("[%s] Mirror failed (legacy multi_agent): %s", run_id, exc)
 
             return json.dumps({
                 "trade_executed": True, "ticker": ticker, "action": action,

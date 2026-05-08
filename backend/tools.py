@@ -197,34 +197,6 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "get_market_intelligence",
-        "description": (
-            "Recupera dati di mercato avanzati da ClawStreet: sentiment per ticker, "
-            "contesto macro (SPY, settori), segnali obbligazionari (yield curve), "
-            "e screener di asset in ipervenduto. Usare questo tool all'inizio di ogni "
-            "ciclo di analisi per avere un quadro completo del mercato."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "tickers_for_sentiment": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Lista di ticker per cui recuperare sentiment e dati quant (max 5)",
-                },
-                "include_economy": {
-                    "type": "boolean",
-                    "description": "Se true, include segnali yield curve e obbligazionari",
-                },
-                "screener_rsi_threshold": {
-                    "type": "integer",
-                    "description": "Soglia RSI per screener (default 35 per ipervenduto)",
-                },
-            },
-            "required": [],
-        },
-    },
-    {
         # Strumento per quando l'agente decide di non operare
         "name": "do_nothing",
         "description": (
@@ -351,28 +323,6 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
                 run_id, action, quantity, ticker, confidence_score,
             )
 
-            # ── Pre-validazione universo ClawStreet ────────────────────────
-            # Stesso check di agents/decision.py: BUY su ticker fuori
-            # dall'universo ClawStreet (498 simboli) viene rifiutato per
-            # evitare che il portfolio interno diverga da quello pubblico.
-            try:
-                from clawstreet_universe import is_supported, to_clawstreet_format
-                if action == "BUY" and not is_supported(ticker):
-                    cs_format = to_clawstreet_format(ticker)
-                    error_msg = (
-                        f"REJECTED: '{ticker}' (CS: '{cs_format}') non è "
-                        f"tradabile su ClawStreet. Sostituisci con un ticker "
-                        f"S&P 500 / commodity ETF (GLD/SLV/USO) / crypto "
-                        f"supportata, oppure rinuncia al trade."
-                    )
-                    logger.warning(
-                        "[%s] BUY rejected: %s non supportato su ClawStreet",
-                        run_id, ticker,
-                    )
-                    return json.dumps({"error": error_msg, "rejected": True})
-            except ImportError:
-                pass
-
             # Ottieni il prezzo corrente del titolo (in executor per non bloccare)
             loop = asyncio.get_event_loop()
             price_data = await loop.run_in_executor(
@@ -400,22 +350,6 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
                 )
             database.insert_agent_log(run_id=run_id, phase="DECISION",
                 content=f"{action} {quantity} {ticker} @ {current_price:.2f} (conf: {confidence_score})")
-
-            # --- ClawStreet mirror via wrapper centralizzato ---
-            # Aggiorna cs_mirror_status sulla riga trades; il retry job
-            # di scheduler.py rilancia eventuali fallimenti.
-            try:
-                from clawstreet_mirror import mirror_trade as _mirror
-                tid = trade_result.get("trade_id") if isinstance(trade_result, dict) else None
-                reasoning_text = f"{geopolitical_reasoning} | {technical_reasoning}"
-                await _mirror(
-                    trade_id=tid,
-                    ticker=ticker, action=action, quantity=quantity,
-                    reasoning=reasoning_text,
-                    run_id=run_id,
-                )
-            except Exception as cs_err:
-                logger.warning("[%s] ClawStreet mirror exception (legacy tools.py): %s", run_id, cs_err)
 
             result = {
                 "trade_executed": True,
@@ -499,54 +433,6 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
 
             result = {
                 "congressional_trades": congressional_data,
-                "fetched_at": timestamp,
-            }
-
-        elif tool_name == "get_market_intelligence":
-            logger.info("[%s] Recupero market intelligence da ClawStreet...", run_id)
-            import asyncio as _aio
-
-            # 1. Sempre: contesto macro
-            market_ctx = await data_fetchers.fetch_clawstreet_market_context()
-
-            # 2. Economy (yield curve) se richiesto
-            economy_data = None
-            if tool_input.get("include_economy", False):
-                economy_data = await data_fetchers.fetch_clawstreet_economy()
-
-            # 3. Sentiment per ogni ticker (max 5)
-            tickers = (tool_input.get("tickers_for_sentiment") or [])[:5]
-            sentiment_results = {}
-            if tickers:
-                sentiment_tasks = [
-                    data_fetchers.fetch_clawstreet_sentiment(t) for t in tickers
-                ]
-                raw = await _aio.gather(*sentiment_tasks, return_exceptions=True)
-                for i, r in enumerate(raw):
-                    if isinstance(r, Exception):
-                        sentiment_results[tickers[i]] = {"error": str(r)}
-                    else:
-                        sentiment_results[tickers[i]] = r
-
-            # 4. Screener RSI
-            rsi_threshold = tool_input.get("screener_rsi_threshold", 35)
-            screener_data = await data_fetchers.fetch_clawstreet_screener(
-                indicator="rsi", below=rsi_threshold
-            )
-
-            database.insert_agent_log(
-                run_id=run_id,
-                phase="MARKET_INTELLIGENCE",
-                content=f"ClawStreet data: market_ctx={'ok' if not market_ctx.get('error') else 'err'}, "
-                        f"sentiment={len(tickers)} tickers, economy={'yes' if economy_data else 'no'}, "
-                        f"screener_rsi<{rsi_threshold}",
-            )
-
-            result = {
-                "market_context": market_ctx,
-                "economy": economy_data,
-                "sentiment": sentiment_results,
-                "screener": screener_data,
                 "fetched_at": timestamp,
             }
 

@@ -549,23 +549,15 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     # Normalizza ticker UPPERCASE (yfinance è case-sensitive su crypto: btc-usd ≠ BTC-USD)
     tickers = [t.upper().strip() for t in tickers if t]
 
-    # Pre-validation ClawStreet: il Technical normale è dedicato ai mercati
-    # tradizionali (equity + ETF commodity GLD/SLV/USO). Le crypto sono dominio
-    # esclusivo del Technical Crypto. Filtra fuori le crypto e i ticker non
-    # ClawStreet-supported per non sprecare token.
-    try:
-        from clawstreet_universe import is_supported
-        original = list(tickers)
-        # Rimuovi crypto (dominio del Technical Crypto)
-        tickers = [t for t in tickers if not (t.endswith("-USD") or t.startswith("X:"))]
-        # Tieni solo ticker supportati su ClawStreet
-        tickers = [t for t in tickers if is_supported(t)]
-        skipped = [t for t in original if t not in tickers]
-        if skipped:
-            logger.info("[%s][TECH] Skipped %d ticker non-equity/non-CS: %s",
-                        run_id, len(skipped), skipped)
-    except ImportError:
-        pass  # degrade graceful
+    # Il Technical normale è dedicato ai mercati tradizionali (equity + ETF).
+    # Le crypto sono dominio esclusivo del Technical Crypto: filtra crypto
+    # in modo che non sprechino token sull'engine equity.
+    original = list(tickers)
+    tickers = [t for t in tickers if not (t.endswith("-USD") or t.startswith("X:"))]
+    skipped = [t for t in original if t not in tickers]
+    if skipped:
+        logger.info("[%s][TECH] Skipped %d ticker crypto (delegati a Technical Crypto): %s",
+                    run_id, len(skipped), skipped)
     # Limita a 10 tickers
     tickers = tickers[:10]
 

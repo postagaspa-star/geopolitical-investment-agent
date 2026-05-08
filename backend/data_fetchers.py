@@ -1,7 +1,7 @@
 # ============================================================
 # data_fetchers.py
 # Modulo per il recupero di dati geopolitici e di mercato.
-# Fonti: GDELT API, NewsAPI, yfinance, ClawStreet.
+# Fonti: GDELT API, NewsAPI, yfinance.
 # ============================================================
 
 import os
@@ -355,141 +355,6 @@ async def fetch_newsapi_data() -> Dict[str, Any]:
         }
 
 
-# ------------------------------------------------------------
-# ClawStreet price fallback — usato quando yfinance fallisce
-# ------------------------------------------------------------
-async def fetch_clawstreet_price(ticker: str) -> Dict[str, Any]:
-    """
-    Recupera dati di prezzo per un singolo ticker da ClawStreet sentiment API.
-    Usato come fallback quando yfinance non è disponibile (429, dati vuoti, eccezioni).
-
-    Restituisce un dizionario con:
-        - ticker: simbolo del titolo
-        - price: prezzo corrente (se disponibile)
-        - data: dati grezzi dalla risposta ClawStreet
-        - error: eventuale messaggio di errore
-    """
-    url = f"{CLAWSTREET_BASE}/data/sentiment?symbol={ticker}&quant=1"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
-                if resp.status != 200:
-                    # Distinguere 4xx (errore client, no retry sensato) da
-                    # 5xx (server, retry potrebbe avere senso). 404 = ticker
-                    # non supportato → retryable=False per non bombardare.
-                    is_4xx = 400 <= resp.status < 500
-                    return {
-                        "ticker": ticker, "price": None, "data": None,
-                        "error": f"HTTP {resp.status}",
-                        "retryable": not is_4xx,
-                        "permanent_error": is_4xx,
-                    }
-                data = await resp.json(content_type=None)
-                # Estrai prezzo dalla risposta ClawStreet
-                price = None
-                if isinstance(data, dict):
-                    # ClawStreet può restituire il prezzo in vari campi
-                    price = (
-                        data.get("price")
-                        or data.get("currentPrice")
-                        or data.get("last_price")
-                        or data.get("close")
-                    )
-                    # Cerca anche dentro un eventuale sotto-oggetto "quote" o "data"
-                    if price is None and isinstance(data.get("data"), dict):
-                        inner = data["data"]
-                        price = (
-                            inner.get("price")
-                            or inner.get("currentPrice")
-                            or inner.get("last_price")
-                            or inner.get("close")
-                        )
-                return {"ticker": ticker, "price": price, "data": data, "error": None}
-    except Exception as exc:
-        logger.warning("ClawStreet price fallback error for %s: %s", ticker, exc)
-        return {"ticker": ticker, "price": None, "data": None, "error": str(exc)}
-
-
-async def fetch_clawstreet_price_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
-    """
-    Recupera dati OHLCV-like da ClawStreet per un singolo ticker.
-    Drop-in fallback per fetch_market_data — restituisce lo stesso formato.
-
-    Parametri:
-        ticker: simbolo del titolo (es. "XOM")
-        period_days: ignorato (ClawStreet restituisce solo dati correnti)
-
-    Restituisce un dizionario con:
-        - ticker: simbolo del titolo
-        - data: lista di record OHLCV (un solo record con dati correnti)
-        - fetched_at: timestamp del recupero
-        - error: eventuale messaggio di errore
-        - source: "clawstreet"
-    """
-    price_result = await fetch_clawstreet_price(ticker)
-
-    if price_result.get("error") or price_result.get("price") is None:
-        # Prova a estrarre almeno qualcosa dai dati grezzi
-        raw_data = price_result.get("data")
-        if raw_data and isinstance(raw_data, dict):
-            # Costruisci un record parziale se ci sono dati utili
-            inner = raw_data.get("data", raw_data)
-            if isinstance(inner, dict):
-                price = inner.get("price") or inner.get("close") or inner.get("currentPrice")
-                if price is not None:
-                    try:
-                        price = float(price)
-                        record = {
-                            "date": datetime.utcnow().strftime("%Y-%m-%d"),
-                            "open": price,
-                            "high": price,
-                            "low": price,
-                            "close": price,
-                            "volume": int(inner.get("volume", 0) or 0),
-                        }
-                        return {
-                            "ticker": ticker,
-                            "data": [record],
-                            "fetched_at": datetime.utcnow().isoformat(),
-                            "error": None,
-                            "source": "clawstreet",
-                        }
-                    except (ValueError, TypeError):
-                        pass
-
-        return {
-            "ticker": ticker,
-            "data": [],
-            "fetched_at": datetime.utcnow().isoformat(),
-            "error": price_result.get("error") or "Nessun dato di prezzo da ClawStreet",
-            "source": "clawstreet",
-        }
-
-    # Costruisci un record OHLCV dal prezzo corrente
-    price = float(price_result["price"])
-    raw_data = price_result.get("data", {})
-    inner = raw_data.get("data", raw_data) if isinstance(raw_data, dict) else {}
-    if not isinstance(inner, dict):
-        inner = {}
-
-    record = {
-        "date": datetime.utcnow().strftime("%Y-%m-%d"),
-        "open": float(inner.get("open", price)),
-        "high": float(inner.get("high", price)),
-        "low": float(inner.get("low", price)),
-        "close": price,
-        "volume": int(inner.get("volume", 0) or 0),
-    }
-
-    return {
-        "ticker": ticker,
-        "data": [record],
-        "fetched_at": datetime.utcnow().isoformat(),
-        "error": None,
-        "source": "clawstreet",
-    }
-
-
 # ============================================================
 # OHLCV via Polygon-compatible API (Polygon.io e Massive.com)
 # Usato come PRIMARIO da fetch_market_data (yfinance è solo fallback).
@@ -737,12 +602,12 @@ def _is_ohlcv_corrupted(records: List[Dict[str, Any]]) -> bool:
 
 
 # ------------------------------------------------------------
-# Recupero dati di mercato (cascade Polygon → Massive → yfinance → ClawStreet)
+# Recupero dati di mercato (cascade Polygon → Massive → yfinance)
 # ------------------------------------------------------------
 def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
     """
     Scarica i dati OHLCV per un singolo ticker.
-    Cascade: Polygon.io → Massive → yfinance (con corruption check) → ClawStreet.
+    Cascade: Polygon.io → Massive → yfinance (con corruption check).
 
     Cache in-memory (5 min TTL) condivisa tra tutte le fonti.
 
@@ -819,7 +684,7 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
         )
 
         if df.empty:
-            logger.warning("yfinance vuoto per %s — provo ClawStreet fallback", ticker)
+            logger.warning("yfinance vuoto per %s", ticker)
             yfinance_error = "Nessun dato disponibile da yfinance"
         else:
             # yfinance >= 0.2.31 restituisce colonne multi-index (Price, Ticker).
@@ -844,8 +709,7 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
             # sono identici, scartiamo i dati e passiamo al fallback successivo.
             if _is_ohlcv_corrupted(records):
                 logger.warning(
-                    "⚠ yfinance OHLCV CORROTTO per %s: ≥90%% close identici — "
-                    "scarto e provo ClawStreet", ticker
+                    "⚠ yfinance OHLCV CORROTTO per %s: ≥90%% close identici — scarto", ticker
                 )
                 yfinance_error = "yfinance OHLCV corruption (identical closes)"
             else:
@@ -861,48 +725,15 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
                 return result
 
     except Exception as exc:
-        logger.error("Errore yfinance per '%s': %s — provo ClawStreet fallback", ticker, exc)
+        logger.error("Errore yfinance per '%s': %s", ticker, exc)
         yfinance_error = str(exc)
 
-    # ---- Fallback a ClawStreet ----
-    logger.info("Tentativo fallback ClawStreet per %s", ticker)
-    try:
-        # Esegui la funzione async in modo sincrono
-        loop = None
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # Siamo già in un event loop — crea un task con future
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                clawstreet_result = pool.submit(
-                    lambda: asyncio.run(fetch_clawstreet_price_data(ticker, period_days))
-                ).result(timeout=20)
-        else:
-            clawstreet_result = asyncio.run(fetch_clawstreet_price_data(ticker, period_days))
-
-        if clawstreet_result.get("data") and not clawstreet_result.get("error"):
-            logger.info("ClawStreet fallback riuscito per %s", ticker)
-            # Aggiungi nota che i dati vengono da ClawStreet
-            clawstreet_result["source"] = "clawstreet"
-            clawstreet_result["yfinance_error"] = yfinance_error
-            # Cache il risultato ClawStreet (TTL ridotto a 60s)
-            _yfinance_cache[cache_key] = (now - _YFINANCE_CACHE_TTL + 60, clawstreet_result)
-            return clawstreet_result
-        else:
-            logger.warning("Anche ClawStreet fallback ha fallito per %s: %s", ticker, clawstreet_result.get("error"))
-    except Exception as cs_exc:
-        logger.error("Errore nel fallback ClawStreet per '%s': %s", ticker, cs_exc)
-
-    # Entrambe le fonti hanno fallito
+    # Tutte le fonti hanno fallito
     result = {
         "ticker": ticker,
         "data": [],
         "fetched_at": datetime.utcnow().isoformat(),
-        "error": f"yfinance: {yfinance_error}; ClawStreet fallback anche fallito",
+        "error": f"yfinance: {yfinance_error}",
     }
     # Cache anche gli errori per 60 secondi (evita spam di retry)
     _yfinance_cache[cache_key] = (now - _YFINANCE_CACHE_TTL + 60, result)
@@ -922,228 +753,20 @@ def get_all_watchlist_tickers() -> List[str]:
 
 
 # ============================================================
-# ClawStreet API — dati di mercato gratuiti (no auth)
+# Trade mirror (no-op stub — ClawStreet integration removed)
 # ============================================================
-
-CLAWSTREET_BASE = "https://www.clawstreet.io/api"
-CLAWSTREET_TIMEOUT = aiohttp.ClientTimeout(total=15)  # Aumentato da 5s a 15s — API può essere lenta
-
-
-async def fetch_clawstreet_sentiment(ticker: str) -> Dict[str, Any]:
-    """
-    Sentiment news per singolo ticker (-1 a +1) più dati quantitativi:
-    put/call ratio, implied volatility, short interest.
-    """
-    url = f"{CLAWSTREET_BASE}/data/sentiment?symbol={ticker}&quant=1"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return {"ticker": ticker, "error": f"HTTP {resp.status}"}
-                data = await resp.json(content_type=None)
-                return {"ticker": ticker, "data": data, "error": None}
-    except Exception as exc:
-        logger.warning("ClawStreet sentiment error for %s: %s", ticker, exc)
-        return {"ticker": ticker, "error": str(exc)}
-
-
-async def fetch_clawstreet_market_context() -> Dict[str, Any]:
-    """
-    Contesto macro generale: SPY return, sentiment di mercato,
-    performance per settore.
-    """
-    url = f"{CLAWSTREET_BASE}/data/market"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return {"error": f"HTTP {resp.status}"}
-                data = await resp.json(content_type=None)
-                return {"data": data, "error": None}
-    except Exception as exc:
-        logger.warning("ClawStreet market context error: %s", exc)
-        return {"error": str(exc)}
-
-
-async def fetch_clawstreet_economy() -> Dict[str, Any]:
-    """
-    Segnali obbligazionari: TLT, SHY, direzione della yield curve.
-    Indica risk-on vs risk-off del mercato.
-    """
-    url = f"{CLAWSTREET_BASE}/data/economy"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return {"error": f"HTTP {resp.status}"}
-                data = await resp.json(content_type=None)
-                return {"data": data, "error": None}
-    except Exception as exc:
-        logger.warning("ClawStreet economy error: %s", exc)
-        return {"error": str(exc)}
-
-
-async def fetch_clawstreet_screener(indicator: str = "rsi", below: int = 35) -> Dict[str, Any]:
-    """
-    Screener bulk: tutti i simboli con RSI sotto una soglia.
-    Utile per trovare asset in ipervenduto.
-    """
-    url = f"{CLAWSTREET_BASE}/data/scan?indicator={indicator}&below={below}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return {"error": f"HTTP {resp.status}"}
-                data = await resp.json(content_type=None)
-                return {"data": data, "error": None}
-    except Exception as exc:
-        logger.warning("ClawStreet screener error: %s", exc)
-        return {"error": str(exc)}
-
-
-async def fetch_clawstreet_fundamentals(ticker: str) -> Dict[str, Any]:
-    """
-    Fondamentali trimestrali: revenue, EPS, P/E, debt/equity, cash flow.
-    """
-    url = f"{CLAWSTREET_BASE}/data/fundamentals?symbol={ticker}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return {"ticker": ticker, "error": f"HTTP {resp.status}"}
-                data = await resp.json(content_type=None)
-                return {"ticker": ticker, "data": data, "error": None}
-    except Exception as exc:
-        logger.warning("ClawStreet fundamentals error for %s: %s", ticker, exc)
-        return {"ticker": ticker, "error": str(exc)}
-
-
-async def check_clawstreet_market_status() -> Dict[str, Any]:
-    """Controlla se i mercati USA sono aperti secondo ClawStreet."""
-    url = f"{CLAWSTREET_BASE}/market-status"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=CLAWSTREET_TIMEOUT) as resp:
-                if resp.status != 200:
-                    return {"open": False, "error": f"HTTP {resp.status}"}
-                data = await resp.json(content_type=None)
-                return {"data": data, "error": None}
-    except Exception as exc:
-        logger.warning("ClawStreet market-status error: %s", exc)
-        return {"open": False, "error": str(exc)}
 
 
 async def mirror_trade_to_clawstreet(
-    bot_id: str, api_key: str, symbol: str, action: str,
-    qty: int, reasoning: str
+    bot_id: str = "", api_key: str = "", symbol: str = "", action: str = "",
+    qty: int = 0, reasoning: str = ""
 ) -> Dict[str, Any]:
     """
-    Invia un trade mirror a ClawStreet. SEMPRE — anche se il mercato e' chiuso,
-    perche' ClawStreet e' una vetrina pubblica che mostra TUTTI i trade del bot
-    (non un broker). La feature "market check" precedente bloccava il mirror dopo
-    le 16:00 ET introducendo silenziosi fallimenti.
+    No-op stub. ClawStreet integration was removed; this function
+    preserves the call signature so existing callers in execute_buy/sell
+    do not break.
     """
-    # Conversione formato simbolo (yfinance → ClawStreet) tramite il modulo
-    # canonico. Questo evita duplicazioni di logica e garantisce che
-    # is_supported() e mirror_trade usino la STESSA normalizzazione.
-    #   yfinance "BTC-USD" → ClawStreet "X:BTCUSD"
-    #   yfinance "AAPL"     → ClawStreet "AAPL"
-    try:
-        from clawstreet_universe import to_clawstreet_format, is_supported
-        original_symbol = symbol
-        symbol = to_clawstreet_format(symbol)
-        # Pre-validazione: se il simbolo non è nel universo ClawStreet, evita
-        # del tutto la chiamata HTTP (saving 1 round-trip) e logga un warning
-        # esplicito. Nota: questo intercetta anche residui che il pre-check di
-        # decision.py non ha catturato (es. mirror invocato da reconcile o da
-        # legacy paths).
-        if not is_supported(symbol):
-            logger.warning(
-                "ClawStreet mirror SKIP %s %d %s: '%s' (canon='%s') non è "
-                "nell'universo tradabile ClawStreet — il portfolio interno e "
-                "quello pubblico divergeranno per questo trade.",
-                action, qty, original_symbol, original_symbol, symbol,
-            )
-            return {
-                "mirrored": False, "skipped": True,
-                "reason": "NOT_IN_CLAWSTREET_UNIVERSE",
-                "original_symbol": original_symbol,
-                "canonical_symbol": symbol,
-            }
-    except ImportError:
-        # Fallback: conversione inline come prima (degrade graceful)
-        if not symbol.startswith("X:"):
-            if "-USD" in symbol and len(symbol) > 5:
-                clean = symbol.replace("-USD", "USD")
-                symbol = f"X:{clean}"
-            elif symbol.endswith("USD") and len(symbol) > 5 and "-" not in symbol:
-                symbol = f"X:{symbol}"
-
-    # Endpoint corretto: /trades (plurale), non /trade
-    url = f"{CLAWSTREET_BASE}/bots/{bot_id}/trades"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "symbol": symbol,
-        "action": action.lower(),
-        "qty": qty,
-        "reasoning": reasoning[:280],
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=CLAWSTREET_TIMEOUT) as resp:
-                body = await resp.text()
-                if resp.status in (200, 201):
-                    logger.info("ClawStreet mirror OK: %s %d %s -> HTTP %d", action, qty, symbol, resp.status)
-                    return {"mirrored": True, "status": resp.status, "response": body[:500]}
-
-                # Identifica errori "expected" (non-fatali) per skipparli senza spam
-                error_code = ""
-                try:
-                    err_obj = __import__("json").loads(body)
-                    error_code = (err_obj.get("error", {}) or {}).get("code", "") if isinstance(err_obj.get("error"), dict) else ""
-                except Exception:
-                    pass
-
-                if error_code in ("INVALID_SYMBOL", "INSUFFICIENT_BUYING_POWER", "INSUFFICIENT_POSITION"):
-                    logger.info("ClawStreet skip %s %d %s: %s",
-                                action, qty, symbol, error_code)
-                    return {"mirrored": False, "skipped": True, "reason": error_code,
-                            "status": resp.status, "response": body[:500]}
-
-                logger.warning("ClawStreet mirror FAIL: %s %d %s -> HTTP %d body=%s",
-                               action, qty, symbol, resp.status, body[:200])
-                return {"mirrored": False, "status": resp.status, "response": body[:500]}
-    except Exception as exc:
-        logger.warning("ClawStreet trade mirror error: %s", exc)
-        return {"mirrored": False, "error": str(exc)}
-
-
-async def register_clawstreet_bot(
-    name: str, ticker: str, strategy: str, personality: str, bio: str
-) -> Dict[str, Any]:
-    """Registra un nuovo bot su ClawStreet."""
-    url = f"{CLAWSTREET_BASE}/bots/register"
-    payload = {
-        "name": name,
-        "ticker": ticker,
-        "strategy": strategy,
-        "personality": personality,
-        "bio": bio,
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=CLAWSTREET_TIMEOUT) as resp:
-                body = await resp.json(content_type=None)
-                if resp.status in (200, 201):
-                    return {"success": True, "data": body}
-                else:
-                    return {"success": False, "status": resp.status, "data": body}
-    except Exception as exc:
-        logger.error("ClawStreet registration error: %s", exc)
-        return {"success": False, "error": str(exc)}
+    return {"mirrored": False, "reason": "ClawStreet integration removed"}
 
 
 # ============================================================
