@@ -113,7 +113,9 @@ function computeClosedTrades(trades) {
     const ts = t.timestamp;
     const confidence = Number(t.confidence_score ?? t.confidence ?? NaN);
 
-    if (!ticker || !price || !qty) continue;
+    // FIX: skip trade con price/qty non validi o non finiti.
+    if (!ticker || !Number.isFinite(price) || price <= 0 ||
+        !Number.isFinite(qty) || qty <= 0) continue;
 
     if (action === 'BUY') {
       if (!buyQueue[ticker]) buyQueue[ticker] = [];
@@ -122,6 +124,11 @@ function computeClosedTrades(trades) {
       let remaining = qty;
       while (remaining > 0 && buyQueue[ticker]?.length) {
         const buy = buyQueue[ticker][0];
+        // Guard contro buy.price=0 (avrebbe dato NaN su pnlPct)
+        if (!buy.price || buy.price <= 0) {
+          buyQueue[ticker].shift();
+          continue;
+        }
         const matched = Math.min(remaining, buy.qty);
         const pnl = (price - buy.price) * matched;
         const pnlPct = ((price - buy.price) / buy.price) * 100;
@@ -204,16 +211,25 @@ function EquityCurveCard({ history }) {
   // Downsample per leggibilità (max ~100 punti)
   const sampled = downsampleHistory(history, 100);
 
-  // Calcola drawdown rispetto al massimo precedente
+  // Calcola drawdown rispetto al massimo precedente.
+  // FIX: scarta snapshot con value <= 0 dal calcolo del runningMax (altrimenti
+  // un singolo zero porta runningMax=0 e drawdown=NaN/Infinity per tutti i
+  // punti successivi, rompendo il chart).
   let runningMax = -Infinity;
   const data = sampled.map((p) => {
     const v = Number(p.total_value ?? 0);
-    runningMax = Math.max(runningMax, v);
-    const drawdown = runningMax > 0 ? ((v - runningMax) / runningMax) * 100 : 0;
+    if (Number.isFinite(v) && v > 0) {
+      runningMax = Math.max(runningMax, v);
+    }
+    let drawdown = 0;
+    if (Number.isFinite(runningMax) && runningMax > 0
+        && Number.isFinite(v) && v > 0) {
+      drawdown = ((v - runningMax) / runningMax) * 100;
+    }
     return {
       timestamp: p.timestamp,
-      value: v,
-      drawdown,
+      value: Number.isFinite(v) ? v : 0,
+      drawdown: Number.isFinite(drawdown) ? drawdown : 0,
     };
   });
 
@@ -348,8 +364,12 @@ function PnlDistributionCard({ closedTrades }) {
     return <div className="empty-state">Nessun trade chiuso</div>;
   }
 
-  // Crea bucket dinamici
-  const returns = closedTrades.map((c) => c.pnlPct);
+  // Crea bucket dinamici. FIX: filtra valori non finiti per evitare
+  // bucket label "NaN%" e istogramma vuoto.
+  const returns = closedTrades.map((c) => c.pnlPct).filter(Number.isFinite);
+  if (returns.length === 0) {
+    return <div className="empty-state">Nessun dato valido</div>;
+  }
   const min = Math.min(...returns);
   const max = Math.max(...returns);
   const bucketCount = 10;

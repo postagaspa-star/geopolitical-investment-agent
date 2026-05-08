@@ -590,12 +590,21 @@ async def update_price_cache() -> dict:
         market_state = "UNKNOWN"
 
     # ── Cascade: Polygon (primario) → Massive (fallback) → yFinance (ultima spiaggia)
+    # FIX CRITICO: corruption detection ora applicata a TUTTI i provider, non
+    # solo yfinance. Bug precedente: se Polygon free tier sotto carico
+    # restituiva lo stesso prezzo cached per N ticker (corruzione silenziosa
+    # documentata), il bot lo accettava come golden source senza degradare.
     # 1. Provider primario: Polygon.io (se key configurata)
     polygon_quotes = {}
     polygon_key = _get_polygon_key()
     if polygon_key:
         try:
             polygon_quotes = await _fetch_polygon_quotes(tickers, polygon_key)
+            # Apply corruption guard
+            corrupted, msg = _detect_yfinance_corruption(polygon_quotes)
+            if corrupted:
+                logger.error("[POLLING] POLYGON corruzione rilevata, scartato: %s", msg)
+                polygon_quotes = {}
         except Exception as e:
             logger.warning("Polygon provider failed: %s", e)
 
@@ -607,6 +616,10 @@ async def update_price_cache() -> dict:
         if massive_key:
             try:
                 massive_quotes = await _fetch_massive_quotes(missing_after_polygon, massive_key)
+                corrupted, msg = _detect_yfinance_corruption(massive_quotes)
+                if corrupted:
+                    logger.error("[POLLING] MASSIVE corruzione rilevata, scartato: %s", msg)
+                    massive_quotes = {}
             except Exception as e:
                 logger.warning("Massive provider failed: %s", e)
 
@@ -779,7 +792,35 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
             total_position_value += cp * qty
             logger.debug("[POLLING] %s: nessun quote, mantengo current_price=%.2f", ticker, cp)
 
-    # 2. Salva snapshot del portfolio totale (cash + valore posizioni)
+    # 2. AUTO-EXIT TRIGGER (CRITICAL FIX): controlla SL/TP e chiude le
+    # posizioni che hanno toccato i livelli. Bug precedente:
+    # `check_and_execute_auto_exits` non era mai chiamato → tutti gli SL/TP
+    # impostati dal Decision Agent erano DEAD letters (mai eseguiti).
+    # L'utente pensava di essere protetto e in realtà non lo era.
+    try:
+        import portfolio as _portfolio
+        # Costruisce dict {ticker: price} dagli aggiornamenti appena fatti
+        prices_for_exit: dict[str, float] = {}
+        for ticker, q in (all_quotes or {}).items():
+            try:
+                px = float(q.get("price") or 0)
+                if px > 0:
+                    prices_for_exit[ticker] = px
+            except Exception:
+                continue
+        if prices_for_exit:
+            executed = _portfolio.check_and_execute_auto_exits(prices_for_exit)
+            if executed:
+                triggered = [e for e in executed if e.get("trigger")]
+                if triggered:
+                    logger.info("[POLLING] AUTO-EXIT triggherati: %d (%s)",
+                                len(triggered),
+                                ", ".join(f"{e['ticker']}={e['trigger']}"
+                                          for e in triggered[:5]))
+    except Exception as e:
+        logger.warning("[POLLING] check_and_execute_auto_exits failed: %s", e)
+
+    # 3. Salva snapshot del portfolio totale (cash + valore posizioni)
     try:
         import database
         portfolio = database.get_portfolio()

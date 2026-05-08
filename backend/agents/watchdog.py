@@ -236,9 +236,10 @@ async def _get_price_snapshot(extra_tickers: list[str] | None = None) -> dict:
                 if t and t not in seen:
                     tickers.append(t)
                     seen.add(t)
-        # Cache age max 15 min (polling è ogni 10 min, lascio 5 min di margine
-        # per evitare buchi se un ciclo di polling tarda).
-        cached = await asyncio.to_thread(get_cached_prices_bulk, tickers, 900)
+        # Cache age allineato al polling rate (600s = 10 min) + 100s margine.
+        # Bug precedente: TTL 900s permetteva trade su prezzi di 15 min fa
+        # in fast-moving crypto/equity → decisioni su dati stale.
+        cached = await asyncio.to_thread(get_cached_prices_bulk, tickers, 700)
         for t, q in cached.items():
             snapshot[t] = {
                 "price": round(q["price"], 2),

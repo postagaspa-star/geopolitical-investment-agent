@@ -811,7 +811,10 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
             # per evitare hit a yfinance ogni volta
             try:
                 from price_polling import get_cached_prices_bulk
-                cached = get_cached_prices_bulk([ticker], max_age_seconds=120)
+                # TTL 700s = polling rate (600s) + margine. Bug precedente:
+                # 120s → cache miss garantito 4/5 volte → fallback yfinance
+                # bloccante in thread. 700s allinea al ciclo di polling.
+                cached = get_cached_prices_bulk([ticker], max_age_seconds=700)
                 if cached.get(ticker):
                     price_data = {"data": [{"close": cached[ticker]["price"]}]}
                 else:
@@ -841,6 +844,24 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     ticker, quantity, current_price,
                     geo_part, tech_part, confidence
                 )
+
+            # FIX CRITICO: se l'execute è fallito (cash insufficiente,
+            # no-position, qty<=0...) NON fare il mirror su ClawStreet.
+            # Bug precedente: il mirror veniva eseguito sempre →
+            # ClawStreet apriva il trade mentre localmente non esisteva
+            # → divergenza permanente del portfolio pubblico.
+            if not (isinstance(result, dict) and result.get("success")):
+                fail_reason = (result or {}).get("reason", "unknown") if isinstance(result, dict) else str(result)
+                logger.warning("[%s][DECISION] execute_%s fallito su %s qty=%s: %s — skip mirror",
+                               run_id, action.lower(), ticker, quantity, fail_reason)
+                database.insert_agent_log(run_id, "DECISION_TRADE_FAILED", json.dumps({
+                    "ticker": ticker, "action": action, "qty": quantity,
+                    "price": current_price, "reason": fail_reason[:300],
+                }, default=str))
+                return json.dumps({
+                    "executed": False, "ticker": ticker, "action": action,
+                    "reason": fail_reason, "at": timestamp,
+                }, default=str)
 
             # Se BUY con SL/TP specificati nel tool: registra anche sui livelli
             # automatici della posizione (cosi' price_polling li triggera).

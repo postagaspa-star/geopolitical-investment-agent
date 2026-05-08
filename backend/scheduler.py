@@ -53,7 +53,32 @@ NYSE_HOLIDAYS = {
     "2027-06-18",  # 19 giugno cade di sabato → osservato il 18
     "2027-07-05",  # 4 luglio cade di domenica → osservato il 5
     "2027-09-06", "2027-11-25", "2027-12-24",  # 25 dic cade di sabato → 24
+    # 2028 (estensione: bug precedente scadeva nel 2027 → bot apriva trade
+    # equity nei festivi US 2028 con conseguente rifiuto ClawStreet)
+    "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29",
+    "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25",
+    # 2029
+    "2029-01-01", "2029-01-15", "2029-02-19", "2029-03-30", "2029-05-28",
+    "2029-06-19", "2029-07-04", "2029-09-03", "2029-11-22", "2029-12-25",
 }
+
+# Warning automatico: se siamo a meno di 6 mesi dalla scadenza dei festivi
+# definiti, logga un warning all'avvio per ricordare di aggiornarli.
+def _check_holiday_calendar_freshness():
+    """Logga warning se il calendario festivi sta scadendo."""
+    from datetime import datetime as _dt
+    try:
+        max_year = max(int(d.split("-")[0]) for d in NYSE_HOLIDAYS)
+        # 6 mesi prima dell'ultimo anno coperto → warning
+        warning_cutoff = _dt(max_year, 7, 1)
+        if _dt.now() > warning_cutoff:
+            logger = __import__("logging").getLogger(__name__)
+            logger.warning(
+                "NYSE_HOLIDAYS coperti solo fino al %d. AGGIORNARE in scheduler.py "
+                "(stesso pattern per LSE_HOLIDAYS e XETRA_HOLIDAYS).", max_year
+            )
+    except Exception:
+        pass
 
 # ── Festività LSE (UK Bank Holidays) — 2025-2027 ──────────────────────────
 LSE_HOLIDAYS = {

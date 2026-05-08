@@ -116,12 +116,15 @@ def can_buy(ticker, quantity, price):
     if p is None:
         return False, "Portafoglio non inizializzato"
 
-    # Sanity check: quantity > 0 e price > 0
+    # Sanity check: quantity > 0 e price > 0.
+    # FIX CRITICO: float (non int) per supportare crypto frazionarie.
+    # Bug precedente: int(quantity) troncava 0.5 BTC a 0 e rifiutava il trade,
+    # OPPURE costringeva l'AI a comprare interi BTC ($100k+ posizione).
     try:
-        q_int = int(quantity)
+        q_float = float(quantity)
     except (TypeError, ValueError):
         return False, f"Quantity non numerica: {quantity}"
-    if q_int <= 0:
+    if q_float <= 0:
         return False, f"Quantity deve essere > 0 (ricevuto {quantity})"
     try:
         p_float = float(price)
@@ -130,7 +133,7 @@ def can_buy(ticker, quantity, price):
     if p_float <= 0:
         return False, f"Price deve essere > 0 (ricevuto {price})"
 
-    cost = q_int * p_float
+    cost = q_float * p_float
 
     if cost > p["cash_balance"]:
         return False, (
@@ -522,7 +525,8 @@ def check_and_execute_auto_exits(prices: dict | None = None) -> list:
 
         sl = float(p.get("stop_loss_price") or 0)
         tp = float(p.get("take_profit_price") or 0)
-        qty = int(p.get("quantity") or 0)
+        # FIX: float (non int) per supportare crypto frazionarie (BTC 0.5 unità).
+        qty = float(p.get("quantity") or 0)
         avg = float(p.get("avg_buy_price") or 0)
         if qty <= 0:
             continue

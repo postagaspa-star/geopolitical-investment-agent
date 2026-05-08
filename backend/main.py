@@ -172,7 +172,7 @@ async def get_positions():
         try:
             from price_polling import get_cached_prices_bulk
             tickers = [p.get("ticker") for p in positions if p.get("ticker")]
-            cached = get_cached_prices_bulk(tickers, max_age_seconds=120)
+            cached = get_cached_prices_bulk(tickers, max_age_seconds=700)
 
             for p in positions:
                 t = p.get("ticker")
@@ -310,7 +310,7 @@ async def get_price_quotes(tickers: str = Query(default="")):
         from price_polling import get_cached_prices_bulk
         if tickers:
             ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-            return get_cached_prices_bulk(ticker_list, max_age_seconds=300)
+            return get_cached_prices_bulk(ticker_list, max_age_seconds=700)
         else:
             client = database.get_client()
             if not client:
@@ -2408,6 +2408,28 @@ async def close_position(payload: ClosePositionPayload):
             tech_reasoning="Chiusura manuale da interfaccia",
             confidence=100,
         )
+
+        # FIX CRITICO: mirror su ClawStreet anche per chiusura manuale.
+        # Bug precedente: il portfolio locale chiudeva la posizione ma
+        # ClawStreet rimaneva long → divergenza permanente del portfolio
+        # pubblico (leaderboard mostra ancora la posizione aperta).
+        if isinstance(result, dict) and result.get("success"):
+            try:
+                from clawstreet_mirror import mirror_trade as _mirror
+                trade_id = result.get("trade_id")
+                await _mirror(
+                    trade_id=trade_id,
+                    ticker=payload.ticker, action="SELL",
+                    quantity=pos["quantity"],
+                    reasoning="manual_close_ui",
+                    run_id="manual_close",
+                )
+            except Exception as mirror_exc:
+                logger.error("Mirror chiusura manuale fallito %s: %s",
+                             payload.ticker, mirror_exc, exc_info=True)
+                # Non blocchiamo la chiusura locale; il retry job riproverà
+                result["mirror_error"] = str(mirror_exc)[:200]
+
         return result
     except Exception as e:
         logger.error(f"Errore nella chiusura della posizione: {e}", exc_info=True)

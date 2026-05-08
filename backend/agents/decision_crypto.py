@@ -468,7 +468,7 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             current_price = None
             try:
                 from price_polling import get_cached_prices_bulk
-                cached = get_cached_prices_bulk([ticker], max_age_seconds=180)
+                cached = get_cached_prices_bulk([ticker], max_age_seconds=700)
                 if cached.get(ticker):
                     current_price = float(cached[ticker]["price"])
             except Exception:
@@ -500,6 +500,21 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                     geo_reasoning="(crypto-only run)", tech_reasoning=logic_chain,
                     confidence=confidence,
                 )
+
+            # FIX CRITICO: skip mirror se l'execute è fallito (no-position,
+            # cash insufficiente, qty<=0). Stesso bug del Decision standard.
+            if not (isinstance(result, dict) and result.get("success")):
+                fail_reason = (result or {}).get("reason", "unknown") if isinstance(result, dict) else str(result)
+                logger.warning("[%s][DEC-CRYPTO] execute_%s fallito su %s qty=%s: %s — skip mirror",
+                               run_id, action.lower(), ticker, quantity, fail_reason)
+                database.insert_agent_log(run_id, "DECISION_CRYPTO_TRADE_FAILED", json.dumps({
+                    "ticker": ticker, "action": action, "qty": quantity,
+                    "price": current_price, "reason": fail_reason[:300],
+                }, default=str))
+                return json.dumps({
+                    "executed": False, "ticker": ticker, "action": action,
+                    "reason": fail_reason, "at": timestamp,
+                }, default=str)
 
             # Salva SL/TP automatici sulla posizione se BUY con livelli
             if action == "BUY" and (stop_loss or take_profit):
