@@ -2922,88 +2922,9 @@ async def get_clawstreet_status():
 
 # --- Endpoint storico portafoglio ---
 
-def _sanitize_portfolio_history(history: list[dict]) -> list[dict]:
-    """
-    Filtra snapshot con total_value evidentemente corrotti (es. price feed
-    transitorio sballato → snapshot con 47% di plus che svanisce).
-
-    Strategia robusta:
-      1. Calcola la median degli ultimi N snapshot validi (ignora None/zero)
-      2. Drop OGNI snapshot con |v - median| / median > 0.30 (>30% di scarto)
-         se rappresenta meno del 5% del totale dei punti (sono outlier).
-      3. Cap soft: clamp i valori restanti a max 3×initial_balance, min
-         0.1×initial_balance (sanity check globale, copre dati legacy).
-
-    Lavora at-source così il client non vede mai i picchi.
-    """
-    if not history:
-        return history
-
-    initial = 100000.0
-    try:
-        ib = database.get_setting("initial_balance", None)
-        if ib is not None:
-            initial = float(ib)
-    except Exception:
-        pass
-
-    # Cap globale: total_value > 3×initial o < 10%×initial = corrotto
-    # (anche se hai fatto 200%, la rolling median lo cattura comunque)
-    HARD_MAX = initial * 3.0
-    HARD_MIN = initial * 0.10
-
-    # 1) Pulizia hard-cap: drop valori palesemente fuori scala
-    cleaned = []
-    for s in history:
-        try:
-            v = float(s.get("total_value", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if v <= 0 or v > HARD_MAX or v < HARD_MIN:
-            continue
-        cleaned.append(s)
-
-    if len(cleaned) < 5:
-        return cleaned
-
-    # 2) MAD-based: per ogni punto, confronta con la median rolling
-    values = [float(s["total_value"]) for s in cleaned]
-    n = len(values)
-
-    def median(xs):
-        s = sorted(xs)
-        m = len(s) // 2
-        return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2.0
-
-    out = []
-    WIN = 7
-    for i, snap in enumerate(cleaned):
-        lo = max(0, i - WIN // 2)
-        hi = min(n, i + WIN // 2 + 1)
-        win = [values[j] for j in range(lo, hi) if j != i]
-        if len(win) < 3:
-            out.append(snap)
-            continue
-        med = median(win)
-        if med <= 0:
-            out.append(snap)
-            continue
-        dev_pct = abs(values[i] - med) / med
-        if dev_pct > 0.20:        # 20% scarto dalla median locale = outlier
-            # Sostituisci con la median (più robusto del drop: preserva
-            # la forma temporale, evita gap visivi)
-            new_snap = dict(snap)
-            new_snap["total_value"] = med
-            new_snap["_sanitized"] = True
-            out.append(new_snap)
-        else:
-            out.append(snap)
-    return out
-
-
 @app.get("/api/portfolio/history")
 async def get_portfolio_history(period: str = Query(default="30d")):
-    """Restituisce lo storico del valore del portafoglio (con outlier filter).
+    """Restituisce lo storico del valore del portafoglio.
 
     Periodi supportati:
       1h, 4h, 1d  -> intraday (ultimo giorno, snapshot ogni minuto via price polling)
@@ -3025,14 +2946,8 @@ async def get_portfolio_history(period: str = Query(default="30d")):
             cash = p["cash_balance"] if p else 100000
             from datetime import datetime, timezone
             history = [{"total_value": val, "cash_balance": cash, "timestamp": datetime.now(timezone.utc).isoformat()}]
-            return history
-
-        # Filtro outlier al volo (server-side): elimina snapshot corrotti
-        # da price feed transient. Defense-in-depth: il client ha anche il
-        # suo MAD filter, ma questo evita che il dato corrotto arrivi.
-        return _sanitize_portfolio_history(history)
+        return history
     except Exception as e:
-        logger.error("get_portfolio_history error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

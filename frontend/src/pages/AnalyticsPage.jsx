@@ -189,169 +189,182 @@ function computeKpis(positions, trades, closedTrades) {
 // Section components
 // ============================================================
 
-// ════════════════════════════════════════════════════════════════════════
-// Equity Curve — REWRITE pulito
-// ════════════════════════════════════════════════════════════════════════
-// Pipeline dati:
-//   1. dropExtremes()  → drop snapshot con total_value clearly broken
-//                        (>3× initial_balance, <10% di esso, NaN, ≤0)
-//   2. clipToPercentile() → cap a P98/P02 i valori restanti.
-//                           Garantisce che NESSUN picco esca anche se la
-//                           strategia MAD avesse un edge case.
-//   3. downsample()    → max 200 punti per leggibilità
-//   4. computeDrawdown() → drawdown vs running max
-//
-// Render: ComposedChart con due Area (equity + drawdown), ReferenceArea
-// scure per le ore off-market (solo se non ci sono posizioni crypto).
-
-const INITIAL_BALANCE_FALLBACK = 100000;
-
-// 1) Drop hard-cap: snapshot con valori palesemente impossibili
-function dropExtremes(history, initial = INITIAL_BALANCE_FALLBACK) {
-  if (!history?.length) return [];
-  const HARD_MAX = initial * 3.0;     // >300% in pochi giorni = bad data
-  const HARD_MIN = initial * 0.10;    // <10% del capitale iniziale = bad data
-  return history.filter((p) => {
-    const v = Number(p?.total_value);
-    return Number.isFinite(v) && v >= HARD_MIN && v <= HARD_MAX;
-  });
-}
-
-// 2) Clip a percentile (P02/P98): rinforzo finale, anche se un valore
-// "scappa" alla pulizia precedente, viene fisicamente cappato qui.
-function clipToPercentile(history, lo = 0.02, hi = 0.98) {
-  if (!history?.length) return history;
-  const values = history.map((p) => Number(p.total_value)).filter((v) => Number.isFinite(v));
-  if (values.length < 5) return history;
-  const sorted = [...values].sort((a, b) => a - b);
-  const pIdx = (p) => Math.max(0, Math.min(sorted.length - 1, Math.floor(p * (sorted.length - 1))));
-  const minOk = sorted[pIdx(lo)];
-  const maxOk = sorted[pIdx(hi)];
-  let clipped = 0;
-  const out = history.map((p) => {
-    const v = Number(p.total_value);
-    if (!Number.isFinite(v)) return p;
-    if (v > maxOk) { clipped++; return { ...p, total_value: maxOk, _clipped: true }; }
-    if (v < minOk) { clipped++; return { ...p, total_value: minOk, _clipped: true }; }
-    return p;
-  });
-  if (clipped > 0 && typeof console !== "undefined") {
-    console.log(`[EquityCurve] ${clipped} valori clip-pati a P${(lo*100).toFixed(0)}/P${(hi*100).toFixed(0)}`);
-  }
-  return out;
-}
-
-// 3) Downsampling: media dei valori in N bucket → max targetPoints
-function downsampleHistory(history, targetPoints = 200) {
+// Downsampling: aggrega N record in 1 (riduce rumore visivo dell'equity curve
+// quando ci sono molti snapshot al minuto).
+function downsampleHistory(history, targetPoints = 100) {
   if (!history?.length || history.length <= targetPoints) return history;
   const step = Math.ceil(history.length / targetPoints);
   const out = [];
   for (let i = 0; i < history.length; i += step) {
+    // Prendi l'ultimo punto del bucket (il più recente in ordine ASC)
     out.push(history[Math.min(i + step - 1, history.length - 1)]);
   }
   return out;
 }
 
-// 4) Drawdown rispetto al peak rolling
-function computeDrawdown(history) {
-  let peak = -Infinity;
-  return history.map((p) => {
-    const v = Number(p.total_value ?? 0);
-    if (Number.isFinite(v) && v > 0) peak = Math.max(peak, v);
-    const drawdown = (Number.isFinite(peak) && peak > 0 && v > 0)
-      ? ((v - peak) / peak) * 100 : 0;
-    return {
-      timestamp: p.timestamp,
-      value: Number.isFinite(v) && v > 0 ? v : null,
-      drawdown: Number.isFinite(drawdown) ? drawdown : 0,
-      _clipped: !!p._clipped,
-    };
-  });
-}
+// Filtra outlier: snapshot con total_value che si discosta troppo dal
+// rolling median (MAD-based). Sostituisce il valore corrotto con la mediana
+// locale così il grafico non mostra picchi anomali (+47% di colpo, ecc).
+//
+// Strategia: per ogni punto, calcola median + MAD su una finestra di
+// ±WINDOW snapshot. Se |valore - median| > MAX_MAD * MAD → outlier.
+// Robusto sia su spike transienti (1 punto) sia su run consecutivi corti
+// di dati corrotti (es. 2-3 punti dovuti a un fetch sbagliato di Polygon).
+function sanitizeOutliers(history) {
+  if (!history || history.length < 5) return history || [];
+  const arr = history.map((p) => ({ ...p }));
+  const N = arr.length;
+  const WINDOW = 7;       // 3 prima + corrente + 3 dopo
+  const MAX_MAD = 6;      // punto > 6×MAD dalla median = outlier (soglia conservativa)
+  const MIN_PCT_DEV = 0.10;  // serve almeno 10% di scostamento per chiamarlo outlier (evita falsi positivi quando MAD≈0)
 
-// ── Off-hours detection (Scalable Capital style) ──
-function isMarketHours(date) {
-  const d = date instanceof Date ? date : new Date(date);
-  if (Number.isNaN(d.getTime())) return true;
-  const dow = d.getUTCDay();
-  if (dow === 0 || dow === 6) return false;
-  const m = d.getUTCHours() * 60 + d.getUTCMinutes();
-  return m >= 14 * 60 + 30 && m < 21 * 60;   // NYSE 9:30-16:00 ET ≈ 14:30-21:00 UTC
-}
+  // Mediana di un array
+  const median = (xs) => {
+    if (!xs.length) return 0;
+    const s = [...xs].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
 
-function computeOffHoursBands(data) {
-  if (!data?.length || data.length < 2) return [];
-  const bands = [];
-  let start = null;
-  for (let i = 0; i < data.length; i++) {
-    const open = isMarketHours(data[i].timestamp);
-    if (!open && start === null) {
-      start = i > 0 ? data[i - 1].timestamp : data[i].timestamp;
-    } else if (open && start !== null) {
-      bands.push({ x1: start, x2: data[i].timestamp });
-      start = null;
+  let fixed = 0;
+  for (let i = 0; i < N; i++) {
+    const cur = Number(arr[i].total_value);
+    if (!Number.isFinite(cur) || cur <= 0) continue;
+
+    // Finestra escludendo il punto corrente
+    const lo = Math.max(0, i - Math.floor(WINDOW / 2));
+    const hi = Math.min(N, i + Math.floor(WINDOW / 2) + 1);
+    const window = [];
+    for (let j = lo; j < hi; j++) {
+      if (j === i) continue;
+      const v = Number(arr[j].total_value);
+      if (Number.isFinite(v) && v > 0) window.push(v);
+    }
+    if (window.length < 3) continue;
+
+    const med = median(window);
+    if (med <= 0) continue;
+    const mad = median(window.map((v) => Math.abs(v - med))) || 1e-6;
+
+    const dev = Math.abs(cur - med);
+    const devPct = dev / med;
+    if (dev > MAX_MAD * mad && devPct > MIN_PCT_DEV) {
+      arr[i].total_value = med;
+      arr[i]._outlier_fixed = true;
+      fixed += 1;
     }
   }
-  if (start !== null) bands.push({ x1: start, x2: data[data.length - 1].timestamp });
+  if (fixed > 0 && typeof window !== "undefined" && window.console) {
+    console.log(`[AnalyticsPage] sanitizeOutliers: ${fixed} outlier riallineati (MAD-based)`);
+  }
+  return arr;
+}
+
+// Determina se un timestamp ricade nelle "ore di mercato" (NYSE: 14:30–21:00
+// UTC, lun-ven). I crypto sono 24/7, quindi se l'utente ha posizioni crypto
+// attive il grafico non si "spegne" mai.
+function isMarketHours(date) {
+  const d = (date instanceof Date) ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return true;
+  const dow = d.getUTCDay();   // 0=Sun, 6=Sat
+  if (dow === 0 || dow === 6) return false;
+  const utcMin = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const open = 14 * 60 + 30;   // 14:30 UTC = 9:30 ET
+  const close = 21 * 60;       // 21:00 UTC = 16:00 ET (semplificato, ignora DST)
+  return utcMin >= open && utcMin < close;
+}
+
+// Calcola gli intervalli "off-market" da renderizzare come ReferenceArea
+// scure sul chart (stile Scalable Capital: grafico "spento" fuori orario).
+// Restituisce array [{x1, x2}].
+function computeOffHoursBands(data) {
+  if (!data || data.length < 2) return [];
+  const bands = [];
+  let bandStart = null;
+  for (let i = 0; i < data.length; i++) {
+    const ts = data[i].timestamp;
+    const open = isMarketHours(ts);
+    if (!open && bandStart === null) {
+      // Inizio banda off-hours: comincia dal punto precedente per coprire la transizione
+      bandStart = i > 0 ? data[i - 1].timestamp : ts;
+    } else if (open && bandStart !== null) {
+      bands.push({ x1: bandStart, x2: ts });
+      bandStart = null;
+    }
+  }
+  if (bandStart !== null) {
+    bands.push({ x1: bandStart, x2: data[data.length - 1].timestamp });
+  }
   return bands;
 }
 
-// ════════════════════════════════════════════════════════════════════════
-// EquityCurveCard
-// ════════════════════════════════════════════════════════════════════════
+// Equity curve con drawdown
 function EquityCurveCard({ history, hasCrypto = false }) {
   if (!history?.length) {
     return <div className="empty-state">Nessuno snapshot di portafoglio nel periodo selezionato</div>;
   }
 
-  // Pipeline pulizia: drop estremi → clip percentile → downsample → drawdown
-  const stage1 = dropExtremes(history);
-  if (!stage1.length) {
-    return <div className="empty-state">Tutti gli snapshot sono fuori range (capitale 10K–300K). Probabile corruzione dati.</div>;
-  }
-  const stage2 = clipToPercentile(stage1, 0.02, 0.98);
-  const stage3 = downsampleHistory(stage2, 200);
-  const data   = computeDrawdown(stage3);
+  // 1. Sanitizza outlier (spike isolati >15% che si autocorreggono = bad data)
+  const cleaned = sanitizeOutliers(history);
+
+  // 2. Downsample per leggibilità (max ~100 punti)
+  const sampled = downsampleHistory(cleaned, 100);
+
+  // Calcola drawdown rispetto al massimo precedente.
+  // FIX: scarta snapshot con value <= 0 dal calcolo del runningMax (altrimenti
+  // un singolo zero porta runningMax=0 e drawdown=NaN/Infinity per tutti i
+  // punti successivi, rompendo il chart).
+  let runningMax = -Infinity;
+  const data = sampled.map((p) => {
+    const v = Number(p.total_value ?? 0);
+    if (Number.isFinite(v) && v > 0) {
+      runningMax = Math.max(runningMax, v);
+    }
+    let drawdown = 0;
+    if (Number.isFinite(runningMax) && runningMax > 0
+        && Number.isFinite(v) && v > 0) {
+      drawdown = ((v - runningMax) / runningMax) * 100;
+    }
+    return {
+      timestamp: p.timestamp,
+      value: Number.isFinite(v) ? v : 0,
+      drawdown: Number.isFinite(drawdown) ? drawdown : 0,
+    };
+  });
 
   const maxDrawdown = data.reduce((min, p) => Math.min(min, p.drawdown), 0);
-  const clippedCount = data.filter((p) => p._clipped).length;
-  const offBands = hasCrypto ? [] : computeOffHoursBands(data);
+  const outlierCount = sampled.filter((p) => p._outlier_fixed).length;
 
-  // Header info row
-  const header = (
-    <div style={{ marginBottom: '0.5rem', fontSize: '0.78rem', color: '#94a3b8',
-                  display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-      <span>
-        Max Drawdown:{' '}
-        <strong style={{ color: maxDrawdown < -5 ? '#ef4444' : '#10b981' }}>
-          {fmtPct(maxDrawdown, 2)}
-        </strong>
-        {' · '}
-        <span style={{ color: '#64748b' }}>
-          {data.length} punti · da {history.length - stage1.length} drop
-        </span>
-      </span>
-      <span style={{ display: 'flex', gap: 12 }}>
-        {clippedCount > 0 && (
-          <span title="Valori anomali cappati al percentile P02/P98 della finestra. Garantisce la leggibilità senza perdere la forma temporale.">
-            ⚠ {clippedCount} valore{clippedCount > 1 ? ' i' : ''} cappat{clippedCount > 1 ? 'i' : 'o'}
-          </span>
-        )}
-        {!hasCrypto && offBands.length > 0 && (
-          <span title="Bande grigie: ore in cui i mercati USA sono chiusi (NYSE 9:30–16:00 ET, lun–ven). Crypto-only: passa a un periodo intraday e apri una posizione crypto per disattivarle.">
-            🌙 {offBands.length} fasce off-market
-          </span>
-        )}
-      </span>
-    </div>
-  );
+  // Off-hours bands: solo se l'utente NON ha posizioni crypto attive
+  // (le crypto sono 24/7 → il grafico deve restare "vivo" sempre).
+  const offBands = hasCrypto ? [] : computeOffHoursBands(data);
 
   return (
     <div>
-      {header}
+      <div style={{ marginBottom: '0.5rem', fontSize: '0.78rem', color: '#94a3b8',
+                    display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+        <span>
+          Max Drawdown: <strong style={{ color: maxDrawdown < -5 ? '#ef4444' : '#10b981' }}>
+            {fmtPct(maxDrawdown, 2)}
+          </strong>
+        </span>
+        <span style={{ display: 'flex', gap: 12 }}>
+          {outlierCount > 0 && (
+            <span title="Punti anomali (spike isolati che si autocorreggono) sono stati riallineati per leggibilità">
+              ⚠ {outlierCount} outlier filtrato{outlierCount > 1 ? 'i' : ''}
+            </span>
+          )}
+          {!hasCrypto && offBands.length > 0 && (
+            <span title="Bande grigie: ore in cui i mercati USA sono chiusi (NYSE 9:30–16:00 ET, lun–ven). Non hai posizioni crypto attive 24/7.">
+              🌙 {offBands.length} fasce off-market
+            </span>
+          )}
+        </span>
+      </div>
       <ResponsiveContainer width="100%" height={240}>
         <ComposedChart data={data} margin={{ top: 5, right: 8, left: -8, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          {/* Off-market bands (rendering "spento" stile Scalable Capital) */}
           {offBands.map((b, idx) => (
             <ReferenceArea
               key={`off-${idx}`}
@@ -374,8 +387,6 @@ function EquityCurveCard({ history, hasCrypto = false }) {
             yAxisId="left"
             tick={{ fill: '#64748b', fontSize: 10 }}
             tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
-            domain={['auto', 'auto']}
-            allowDataOverflow={false}
           />
           <YAxis
             yAxisId="right"
@@ -402,7 +413,6 @@ function EquityCurveCard({ history, hasCrypto = false }) {
             fill="#3b82f6"
             fillOpacity={0.15}
             strokeWidth={2}
-            connectNulls
             isAnimationActive={false}
           />
           <Area
