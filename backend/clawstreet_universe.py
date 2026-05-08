@@ -58,6 +58,12 @@ _FALLBACK_STOCKS = {
     "DUK", "BSX", "SO", "SCHW", "TFC", "ZTS", "EOG", "MDLZ", "GS", "ETN",
     "WFC", "EMR", "AON", "PGR", "MMC", "VRTX", "SPGI", "FDX", "BX", "F",
     "GLD", "SLV", "USO",   # commodity ETF supportati
+    # Index/sector ETF molto tradati (QQQ/SPY/IWM/DIA sono i 4 ETF più
+    # liquidi al mondo, IL FALLBACK NE ERA SPROVVISTO → Technical scartava
+    # i trigger watchdog su QQQ e SPY).
+    "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "VEA", "VWO",
+    "XLF", "XLK", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLB",
+    "XLRE", "XLC", "TLT", "HYG", "LQD", "EFA", "EEM", "GDX", "ARKK",
 }
 _FALLBACK_UNIVERSE = _FALLBACK_CRYPTO | _FALLBACK_STOCKS
 

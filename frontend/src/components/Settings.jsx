@@ -279,6 +279,21 @@ function Settings({ onBack, onDataRefresh }) {
     }
   };
 
+  const [refreshPricesStatus, setRefreshPricesStatus] = useState({ running: false, result: null });
+  const handleRefreshPrices = async () => {
+    if (refreshPricesStatus.running) return;
+    setRefreshPricesStatus({ running: true, result: null });
+    try {
+      const r = await fetch(`${API}/api/portfolio/refresh-prices`, { method: "POST" });
+      const data = await r.json();
+      setRefreshPricesStatus({ running: false, result: { ok: r.ok && data.status === "ok", data } });
+      // Re-run audit per mostrare il nuovo total_value
+      handleAudit();
+    } catch (e) {
+      setRefreshPricesStatus({ running: false, result: { ok: false, data: { error: String(e) } } });
+    }
+  };
+
   const handleRebuild = async () => {
     if (rebuildStatus.running) return;
     if (!window.confirm(
@@ -789,6 +804,86 @@ function Settings({ onBack, onDataRefresh }) {
                   <div>Trade analizzati: {auditStatus.result.data.trades_count} · Anomalie: {auditStatus.result.data.anomalies_count}</div>
                 </div>
 
+                {auditStatus.result.data.position_breakdown?.length > 0 && (
+                  <details style={{ marginTop: 10 }} open={auditStatus.result.data.position_breakdown.some(p => p.suspicious)}>
+                    <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                      Breakdown per posizione ({auditStatus.result.data.position_breakdown.length})
+                      {auditStatus.result.data.position_breakdown.some(p => p.suspicious) && (
+                        <span style={{ color: "#dc2626", marginLeft: 6 }}>
+                          ⚠ {auditStatus.result.data.position_breakdown.filter(p => p.suspicious).length} sospette
+                        </span>
+                      )}
+                    </summary>
+                    <div style={{ marginTop: 6, fontSize: "11px", overflow: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr style={{ borderBottom: "1px solid rgba(0,0,0,0.15)", textAlign: "left" }}>
+                            <th style={{ padding: "4px 6px" }}>Ticker</th>
+                            <th style={{ padding: "4px 6px", textAlign: "right" }}>Qty</th>
+                            <th style={{ padding: "4px 6px", textAlign: "right" }}>Avg buy</th>
+                            <th style={{ padding: "4px 6px", textAlign: "right" }}>Current</th>
+                            <th style={{ padding: "4px 6px", textAlign: "right" }}>Drift %</th>
+                            <th style={{ padding: "4px 6px", textAlign: "right" }}>Mkt value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {auditStatus.result.data.position_breakdown.map((p, i) => (
+                            <tr key={i} style={{
+                              borderBottom: "1px dashed rgba(0,0,0,0.06)",
+                              background: p.suspicious ? "rgba(220, 38, 38, 0.08)" : "transparent",
+                            }}>
+                              <td style={{ padding: "3px 6px", fontWeight: 600 }}>
+                                {p.suspicious && "⚠ "}{p.ticker}
+                              </td>
+                              <td style={{ padding: "3px 6px", textAlign: "right" }}>{p.quantity}</td>
+                              <td style={{ padding: "3px 6px", textAlign: "right" }}>${p.avg_buy_price}</td>
+                              <td style={{ padding: "3px 6px", textAlign: "right" }}>${p.current_price}</td>
+                              <td style={{ padding: "3px 6px", textAlign: "right",
+                                           color: Math.abs(p.price_drift_pct) > 50 ? "#dc2626" : "inherit" }}>
+                                {p.price_drift_pct >= 0 ? "+" : ""}{p.price_drift_pct}%
+                              </td>
+                              <td style={{ padding: "3px 6px", textAlign: "right", fontWeight: 600 }}>
+                                ${p.market_value.toLocaleString()}
+                              </td>
+                            </tr>
+                          ))}
+                          <tr style={{ borderTop: "2px solid rgba(0,0,0,0.2)" }}>
+                            <td colSpan={5} style={{ padding: "6px", fontWeight: 700, textAlign: "right" }}>
+                              Sum positions:
+                            </td>
+                            <td style={{ padding: "6px", textAlign: "right", fontWeight: 700 }}>
+                              ${auditStatus.result.data.position_breakdown.reduce((s, p) => s + p.market_value, 0).toLocaleString()}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    {auditStatus.result.data.position_breakdown.some(p => p.suspicious) && (
+                      <div style={{ marginTop: 10, padding: "8px 10px", background: "rgba(220, 38, 38, 0.1)", borderRadius: 4, fontFamily: "system-ui" }}>
+                        Le posizioni con drift &gt;50% tra avg buy e current price sono sospette
+                        (current_price probabilmente stale o sbagliato nel DB).
+                        Premi <strong>Refresh prezzi</strong> per ri-pollare yfinance/Polygon
+                        e ricalcolare total_value.
+                        <div style={{ marginTop: 8 }}>
+                          <button
+                            style={{
+                              ...btnSecondary,
+                              background: refreshPricesStatus.running ? "#e5e7eb" : "#3b82f6",
+                              color: refreshPricesStatus.running ? "#6b7280" : "#fff",
+                              borderColor: refreshPricesStatus.running ? "#d1d5db" : "#3b82f6",
+                              cursor: refreshPricesStatus.running ? "not-allowed" : "pointer",
+                            }}
+                            onClick={handleRefreshPrices}
+                            disabled={refreshPricesStatus.running}
+                          >
+                            {refreshPricesStatus.running ? "Refresh..." : "Refresh prezzi posizioni"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </details>
+                )}
+
                 {auditStatus.result.data.position_diffs?.length > 0 && (
                   <details style={{ marginTop: 10 }}>
                     <summary style={{ cursor: "pointer", fontWeight: 600 }}>
@@ -878,6 +973,37 @@ function Settings({ onBack, onDataRefresh }) {
                     {" "}upserted={rebuildStatus.result.data.positions_upserted},
                     deleted={rebuildStatus.result.data.positions_deleted})
                   </span>
+                )}
+              </div>
+            )}
+
+            {refreshPricesStatus.result && (
+              <div style={{
+                marginTop: "8px", padding: "8px 12px", borderRadius: "6px",
+                fontSize: "12px",
+                background: refreshPricesStatus.result.ok ? "#ecfdf5" : "#fef2f2",
+                color: refreshPricesStatus.result.ok ? "#065f46" : "#991b1b",
+                border: `1px solid ${refreshPricesStatus.result.ok ? "#a7f3d0" : "#fecaca"}`,
+              }}>
+                {refreshPricesStatus.result.data?.message || refreshPricesStatus.result.data?.error || "Stato sconosciuto"}
+                {refreshPricesStatus.result.ok && refreshPricesStatus.result.data?.new_total_value != null && (
+                  <div style={{ marginTop: 4, fontFamily: "monospace" }}>
+                    Nuovo total_value: <strong>${refreshPricesStatus.result.data.new_total_value.toLocaleString()}</strong>
+                  </div>
+                )}
+                {refreshPricesStatus.result.data?.suspicious?.length > 0 && (
+                  <details style={{ marginTop: 6 }}>
+                    <summary style={{ cursor: "pointer" }}>
+                      Prezzi sospetti rifiutati: {refreshPricesStatus.result.data.suspicious.length}
+                    </summary>
+                    <div style={{ marginTop: 4, fontSize: "11px", fontFamily: "monospace" }}>
+                      {refreshPricesStatus.result.data.suspicious.map((s, i) => (
+                        <div key={i}>
+                          {s.ticker}: ${s.old_price} → ${s.new_price} (ratio {s.ratio})
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 )}
               </div>
             )}

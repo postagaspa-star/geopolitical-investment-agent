@@ -2636,6 +2636,31 @@ async def portfolio_audit():
                     "avg_price_delta": round(avg_delta, 2),
                 })
 
+        # 4b. Per-position breakdown — chi contribuisce di più al total_value?
+        # Utile per beccare positions con current_price gonfiato che inflano
+        # il calcolo cash + sum(qty*current_price).
+        position_breakdown = []
+        for p in positions:
+            qty = float(p.get("quantity") or 0)
+            cp = float(p.get("current_price") or 0)
+            avg = float(p.get("avg_buy_price") or 0)
+            mkt_value = cp * qty
+            cost_basis = avg * qty
+            # Flag se current_price devia >50% dall'avg_buy_price (sospetto)
+            price_drift_pct = ((cp - avg) / avg * 100) if avg > 0 else 0
+            position_breakdown.append({
+                "ticker": p.get("ticker"),
+                "quantity": round(qty, 8),
+                "avg_buy_price": round(avg, 2),
+                "current_price": round(cp, 2),
+                "market_value": round(mkt_value, 2),
+                "cost_basis": round(cost_basis, 2),
+                "unrealized_pnl": round(mkt_value - cost_basis, 2),
+                "price_drift_pct": round(price_drift_pct, 1),
+                "suspicious": abs(price_drift_pct) > 50,  # >50% drift = sospetto
+            })
+        position_breakdown.sort(key=lambda x: -x["market_value"])
+
         cash_delta = current_cash - reconstructed_cash
         total_delta = current_total - reconstructed_total
 
@@ -2682,10 +2707,86 @@ async def portfolio_audit():
                 "total_value": round(total_delta, 2),
             },
             "position_diffs": position_diffs,
+            "position_breakdown": position_breakdown,
             "anomalies": anomalies[:50],  # limit per response size
         }
     except Exception as e:
         logger.error("portfolio_audit error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
+@app.post("/api/portfolio/refresh-prices")
+async def portfolio_refresh_prices():
+    """
+    Forza refresh dei current_price di TUTTE le posizioni aperte chiamando
+    direttamente il data fetcher (yfinance/Polygon). Usa il sanity check
+    standard (rifiuta variazioni >40% vs prev_close).
+
+    Risolve il caso in cui calculate_total_value() restituisce un valore
+    gonfiato perché qualche posizione ha un current_price stale/sbagliato
+    nel DB.
+
+    Dopo il refresh, ricalcola portfolio.total_value.
+    """
+    try:
+        import data_fetchers
+        positions = database.get_positions() or []
+        if not positions:
+            return {"status": "ok", "message": "Nessuna posizione da aggiornare", "updated": 0}
+
+        updated, failed, suspicious = 0, [], []
+        for p in positions:
+            ticker = p.get("ticker")
+            if not ticker:
+                continue
+            old_price = float(p.get("current_price") or 0)
+            try:
+                quote = data_fetchers.fetch_market_data(ticker, period_days=2) or {}
+                data = quote.get("data") or []
+                # data_fetchers ritorna lista di candele OHLC con campo "close"
+                new_price = 0.0
+                if data:
+                    last = data[-1]
+                    new_price = float(last.get("close") or last.get("c") or 0)
+                if new_price <= 0:
+                    failed.append({"ticker": ticker, "reason": "no price returned"})
+                    continue
+
+                # Sanity check: rifiuta variazione >40% vs old price (probabile bad data)
+                if old_price > 0:
+                    ratio = new_price / old_price
+                    if ratio < 0.6 or ratio > 1.4:
+                        suspicious.append({
+                            "ticker": ticker,
+                            "old_price": round(old_price, 2),
+                            "new_price": round(new_price, 2),
+                            "ratio": round(ratio, 2),
+                            "action": "rejected_kept_old",
+                        })
+                        continue
+
+                database.update_position_price(ticker, new_price)
+                updated += 1
+            except Exception as ex:
+                failed.append({"ticker": ticker, "reason": str(ex)[:100]})
+
+        # Forza ricalcolo portfolio.total_value (calculate_total_value scrive il valore in DB)
+        import portfolio
+        new_total = portfolio.calculate_total_value()
+        new_portfolio = database.get_portfolio() or {}
+
+        return {
+            "status": "ok",
+            "message": f"Refresh completato: {updated} posizioni aggiornate, "
+                       f"{len(failed)} fallite, {len(suspicious)} sospette (rifiutate).",
+            "updated": updated,
+            "failed": failed,
+            "suspicious": suspicious,
+            "new_total_value": round(new_total, 2),
+            "new_cash": round(float(new_portfolio.get("cash_balance") or 0), 2),
+        }
+    except Exception as e:
+        logger.error("portfolio_refresh_prices error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
