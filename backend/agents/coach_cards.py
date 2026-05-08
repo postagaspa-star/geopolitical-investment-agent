@@ -275,7 +275,14 @@ async def run_weekly_synthesis() -> dict:
 
         total = sum(len(v) for v in advice_groups.values())
         if total == 0:
-            return _synth_finalize(False, 0, "Memoria advice vuota — nessuna card prodotta")
+            # NON è un errore tecnico: è "nessun input disponibile". Bug
+            # precedente: status="error" mostrava un alert rosso quando in
+            # realtà è solo un caso normale (l'utente non ha ancora
+            # accumulato consigli sul Simulator).
+            return _synth_finalize(False, 0,
+                "Memoria advice vuota — l'utente non ha ancora salvato consigli "
+                "dal Simulator. Esegui qualche partita e salva i debrief.",
+                status_override="no_data")
 
         # 2. Chiama DeepSeek-V3
         api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
@@ -370,11 +377,24 @@ async def run_weekly_synthesis() -> dict:
 
 
 def _synth_finalize(success: bool, cards_created: int, error: str | None,
-                     ids: list | None = None) -> dict:
-    _settings_set(KEY_SYNTH_STATUS, "ok" if success else "error")
+                     ids: list | None = None,
+                     status_override: str | None = None) -> dict:
+    """Salva lo status di sintesi.
+
+    status_override permette di distinguere "no_data" (caso normale: nessun
+    input disponibile, NON è un errore tecnico) da "error" (failure reale).
+    """
+    if status_override:
+        status = status_override
+    elif success:
+        status = "ok"
+    else:
+        status = "error"
+    _settings_set(KEY_SYNTH_STATUS, status)
     _settings_set(KEY_LAST_SYNTH, _now_iso())
     return {
         "success": success,
+        "status": status,
         "cards_created": cards_created,
         "card_ids": ids or [],
         "error": error,

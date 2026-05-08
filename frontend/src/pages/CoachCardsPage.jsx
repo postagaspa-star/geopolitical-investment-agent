@@ -129,23 +129,31 @@ export default function CoachCardsPage() {
       </div>
 
       {/* Status info */}
-      {status.last_synth_at && (
-        <div style={S.statusBar}>
-          Ultima synthesis: <strong>{formatDate(status.last_synth_at)}</strong>
-          {" · "}
-          Stato: <span style={{
-            color: status.synth_status === "ok" ? "#10b981"
-                 : status.synth_status === "running" ? "#fbbf24"
-                 : "#ef4444",
-          }}>
-            {status.synth_status || "—"}
-          </span>
-          {" · "}
-          Cards attive: <strong>{status.active_cards ?? 0}</strong>
-          {" · "}
-          <span style={{ color: "#94a3b8" }}>Auto-rigenerate ogni Lunedì 06:00 UTC</span>
-        </div>
-      )}
+      {status.last_synth_at && (() => {
+        const statusLabel = {
+          "ok": "✓ ok",
+          "running": "⏳ in corso",
+          "no_data": "ⓘ niente input dal Simulator",
+          "error": "✗ errore",
+        }[status.synth_status] || status.synth_status || "—";
+        const statusColor = {
+          "ok": "#10b981",
+          "running": "#fbbf24",
+          "no_data": "#94a3b8",
+          "error": "#ef4444",
+        }[status.synth_status] || "#94a3b8";
+        return (
+          <div style={S.statusBar}>
+            Ultima synthesis: <strong>{formatDate(status.last_synth_at)}</strong>
+            {" · "}
+            Stato: <span style={{ color: statusColor }}>{statusLabel}</span>
+            {" · "}
+            Cards attive: <strong>{status.active_cards ?? 0}</strong>
+            {" · "}
+            <span style={{ color: "#94a3b8" }}>Auto-rigenerate ogni Lunedì 06:00 UTC</span>
+          </div>
+        );
+      })()}
 
       {error && (
         <div style={S.error}>
@@ -176,13 +184,39 @@ export default function CoachCardsPage() {
   );
 }
 
+// Sanitizza markdown residuo nel title (es. "## Foo" → "Foo", table syntax →
+// space). Bug precedente: card create dalla chat avevano titoli grezzi tipo
+// "## Analisi ultime 5 operazioni... | # | Ora | Ticker |".
+function cleanMarkdownTitle(t) {
+  if (!t) return "(senza titolo)";
+  return String(t)
+    .replace(/^[#\s>*-]+/, "")          // header markdown
+    .replace(/[|`*_]+/g, " ")           // chars markdown
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+// Sanitize body (DO/DON'T): tabelle markdown enormi sono inutili sulla card.
+// Tronchiamo a 280 char + rimuoviamo righe di tabelle (------ e |...|).
+function cleanCardBody(t) {
+  if (!t) return "";
+  const lines = String(t).split(/\n/)
+    .map(l => l.replace(/[|`*]/g, "").trim())
+    .filter(l => l && !/^[-=]+$/.test(l) && !/^_+$/.test(l));
+  return lines.join(" ").replace(/\s+/g, " ").trim().slice(0, 280);
+}
+
 function CoachCard({ card, onDelete }) {
+  const cleanTitle = cleanMarkdownTitle(card.title);
+  const cleanDo = cleanCardBody(card.do);
+  const cleanDont = cleanCardBody(card.dont);
   return (
     <div style={S.card}>
       <div style={S.cardHeader}>
         <div style={S.cardTitleRow}>
           <Sparkles size={14} style={{ color: "#fbbf24", flexShrink: 0 }} />
-          <h3 style={S.cardTitle}>{card.title}</h3>
+          <h3 style={S.cardTitle}>{cleanTitle}</h3>
         </div>
         <button style={S.deleteBtn} onClick={onDelete} title="Elimina card">
           <Trash2 size={12} />
@@ -203,14 +237,14 @@ function CoachCard({ card, onDelete }) {
         <div style={{ ...S.sectionLabel, color: "#10b981" }}>
           <Check size={12} style={{ marginRight: 4 }} /> DO
         </div>
-        <div style={S.sectionText}>{card.do}</div>
+        <div style={S.sectionText}>{cleanDo}</div>
       </div>
 
       <div style={S.section}>
         <div style={{ ...S.sectionLabel, color: "#ef4444" }}>
           <X size={12} style={{ marginRight: 4 }} /> DON'T
         </div>
-        <div style={S.sectionText}>{card.dont}</div>
+        <div style={S.sectionText}>{cleanDont}</div>
       </div>
 
       {card.rationale && (

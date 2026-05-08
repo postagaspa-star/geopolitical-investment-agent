@@ -1720,13 +1720,15 @@ class ChatToCardReq(BaseModel):
 @app.post("/api/coach-cards/from-chat")
 async def coach_cards_from_chat(req: ChatToCardReq):
     """
-    Crea una Coach Card direttamente dal contenuto di un messaggio della chat
-    Live. Permette all'utente di salvare insight della chat come consiglio
-    operativo che il Decision Agent legge nei run successivi.
+    Crea una Coach Card dal contenuto di un messaggio chat Live.
 
-    Il content del messaggio viene messo nel campo 'rationale' della card +
-    tentativo di estrazione di "DO" / "DON'T" euristica (cerca pattern
-    "fai X", "non fare Y" nel testo).
+    Bug precedente: il `title` (default = primi 80 char del messaggio)
+    era spesso markdown grezzo (es. "## Analisi ultime 5 operazioni..."),
+    e l'euristica regex "DO/DON'T" non trovava nulla → l'intero content
+    finiva nel campo `do` mentre `dont` era "(non specificato)".
+
+    Fix: chiamata DeepSeek-V3 per ESTRARRE titolo + DO + DON'T strutturati
+    dal messaggio. ~$0.0001 per save, output pulito.
     """
     try:
         from agents import coach_cards
@@ -1735,47 +1737,115 @@ async def coach_cards_from_chat(req: ChatToCardReq):
 
     title = (req.title or "").strip()
     content = (req.content or "").strip()
-    if not title or not content:
-        return JSONResponse(status_code=400, content={"error": "title/content mancanti"})
+    if not content:
+        return JSONResponse(status_code=400, content={"error": "content mancante"})
 
-    # Heuristic: estrazione DO/DON'T dal contenuto. Se non trovati, mette
-    # il content intero come 'do' (l'utente ha scelto questo messaggio
-    # come consiglio operativo, presumibile sia un suggerimento).
-    do_text = ""
-    dont_text = ""
+    # Helper per sanitizzare un titolo da residui markdown
     import re as _re
-    # Pattern "DO: ... DON'T: ..." espliciti
-    m_do = _re.search(r"(?:^|\n)\s*(?:DO|FARE|DA FARE|✓)\s*[:\-]\s*([^\n]{10,400})",
-                       content, _re.IGNORECASE)
-    m_dont = _re.search(r"(?:^|\n)\s*(?:DON'T|NON FARE|DA EVITARE|✗)\s*[:\-]\s*([^\n]{10,400})",
-                         content, _re.IGNORECASE)
-    if m_do:
-        do_text = m_do.group(1).strip()
-    if m_dont:
-        dont_text = m_dont.group(1).strip()
-    # Se non estratti, usa l'intero content come DO (l'utente ha selezionato
-    # questo messaggio quindi lo considera un suggerimento positivo)
-    if not do_text and not dont_text:
-        do_text = content[:600]
-        dont_text = "(non specificato — vedi rationale)"
+    def _clean_title(t: str) -> str:
+        t = _re.sub(r"^[#\s]+", "", t).strip()       # ## headers
+        t = _re.sub(r"[\|`*_]+", " ", t)             # markdown chars
+        t = _re.sub(r"\s+", " ", t).strip()
+        return t[:120]
 
+    # ── Estrazione strutturata via DeepSeek-V3 ─────────────────────────
+    extracted = None
+    try:
+        api_key = (os.environ.get("DEEPSEEK_API_KEY", "")
+                   or database.get_setting("deepseek_api_key", "")).strip()
+        if api_key:
+            import aiohttp as _aiohttp
+            extract_prompt = (
+                "Sei un estrattore di consigli operativi. Ricevi un messaggio "
+                "(spesso markdown con tabelle / liste) e devi produrre SOLO JSON:\n"
+                '{"title": "...", "do": "...", "dont": "...", '
+                '"category_focus": "...", "scenarios_signature": "..."}\n\n'
+                "Regole:\n"
+                "- title: max 80 char, una frase azionabile (NO markdown headers)\n"
+                "- do: 1-2 frasi su cosa FARE in scenari simili\n"
+                "- dont: 1-2 frasi su cosa NON FARE\n"
+                "- category_focus: macro|geopolitico|crypto|equity|risk_management|generale\n"
+                "- scenarios_signature: tag breve tipo 'crypto_volatile' / 'equity_bear' / 'general'\n"
+                "Solo JSON, niente preambolo o markdown."
+            )
+            payload = {
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": extract_prompt},
+                    {"role": "user", "content": (
+                        f"Titolo (suggerito dall'utente, può essere ignorato se vuoto): "
+                        f"{title or '(nessun titolo)'}\n\n"
+                        f"Contenuto del messaggio chat:\n{content[:3500]}"
+                    )},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 600,
+                "response_format": {"type": "json_object"},
+            }
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {api_key}",
+                             "Content-Type": "application/json"},
+                    timeout=_aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        raw = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                        try:
+                            extracted = json.loads(raw)
+                        except Exception:
+                            m = _re.search(r"\{[\s\S]*\}", raw)
+                            if m:
+                                try:
+                                    extracted = json.loads(m.group(0))
+                                except Exception:
+                                    extracted = None
+    except Exception as exc:
+        logger.warning("coach card from-chat AI extract failed: %s", exc)
+        extracted = None
+
+    # ── Fallback se l'AI fallisce: heuristic + sanitize del titolo ─────
+    if not isinstance(extracted, dict):
+        # Sanitize title (rimuove markdown). Se vuoto, prima riga di testo.
+        clean_title = _clean_title(title) if title else ""
+        if not clean_title:
+            for line in content.splitlines():
+                line = _clean_title(line)
+                if line and len(line) > 5:
+                    clean_title = line[:80]
+                    break
+        if not clean_title:
+            clean_title = "Consiglio dall'utente"
+        extracted = {
+            "title": clean_title,
+            "do": content[:500],
+            "dont": "(da specificare — l'utente non ha chiarito)",
+            "category_focus": "generale",
+            "scenarios_signature": "user_advice",
+        }
+
+    # Build & save
     card = {
         "week_of": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "category_focus": "user_chat",
-        "title": title[:200],
-        "do": (do_text or "(vuoto)")[:600],
-        "dont": (dont_text or "(vuoto)")[:600],
+        "category_focus": str(extracted.get("category_focus") or "generale")[:32],
+        "title": _clean_title(str(extracted.get("title") or "Consiglio utente"))[:200],
+        "do": str(extracted.get("do") or "(vuoto)")[:600],
+        "dont": str(extracted.get("dont") or "(non specificato)")[:600],
         "rationale": (
-            f"Consiglio aggiunto dall'utente via chat Live. "
-            f"Contenuto originale: {content[:400]}"
+            f"Consiglio salvato dall'utente dalla chat Live. "
+            f"Estrazione AI: {'OK' if extracted else 'fallback'}. "
+            f"Riferimento originale (primi 200 char): {content[:200]}"
         )[:600],
-        "scenarios_signature": "user_advice",
+        "scenarios_signature": str(extracted.get("scenarios_signature") or "user_advice")[:48],
         "source_advice_count": 1,
     }
 
     try:
         cid = coach_cards.save_card(card)
-        return {"saved": True, "id": cid, "card": card}
+        return {"saved": True, "id": cid, "card": card,
+                "extraction_method": "ai" if extracted else "fallback"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 

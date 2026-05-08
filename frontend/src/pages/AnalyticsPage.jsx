@@ -680,7 +680,9 @@ export default function AnalyticsPage() {
       try {
         const [posRes, tradeRes, histRes] = await Promise.all([
           fetch(`${API}/api/positions`),
-          fetch(`${API}/api/trades`),
+          // FIX: limit alto per non troncare le statistiche. Bug precedente:
+          // default 50 → 80+ trade reali → KPI calcolati solo sugli ultimi 50.
+          fetch(`${API}/api/trades?limit=1000`),
           fetch(`${API}/api/portfolio/history?period=${period}`),
         ]);
 
