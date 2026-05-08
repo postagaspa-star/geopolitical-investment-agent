@@ -13,6 +13,10 @@ env/
 *.db-wal
 *.db-shm
 
+# Local sim/runtime caches
+backend/sim_runs_cache.json
+backend/*.cache.json
+
 # Uploaded documents (user data)
 backend/documents/
 

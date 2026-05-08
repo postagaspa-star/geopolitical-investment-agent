@@ -194,28 +194,6 @@ async def get_positions():
         return {"error": str(e)}
 
 
-@app.get("/api/debug/massive-key-check")
-async def debug_massive_key():
-    """Diagnostica: verifica come viene letta la key da price_polling._get_massive_key()."""
-    from price_polling import _get_massive_key
-    key = _get_massive_key()
-    env_key = os.environ.get("MASSIVE_API_KEY", "")
-    db_key = ""
-    try:
-        db_key = database.get_setting("massive_api_key", "") or ""
-    except Exception as e:
-        db_key = f"ERROR: {e}"
-    return {
-        "key_found_via_helper": bool(key),
-        "key_helper_length": len(key) if key else 0,
-        "key_helper_prefix": key[:6] if key else "",
-        "key_in_env": bool(env_key),
-        "key_in_db": bool(db_key) and not str(db_key).startswith("ERROR"),
-        "key_db_prefix": db_key[:6] if db_key and not str(db_key).startswith("ERROR") else "",
-        "db_error": str(db_key) if str(db_key).startswith("ERROR") else None,
-    }
-
-
 @app.post("/api/prices/trigger-poll")
 async def trigger_price_poll():
     """Forza un ciclo di Price Polling (debug/test)."""
@@ -383,11 +361,8 @@ async def get_geopolitical():
 async def trigger_agent_run(background_tasks: BackgroundTasks):
     """
     Avvia manualmente un'esecuzione singola del pipeline multi-agente.
-    PRIMA: chiamava il vecchio agent.run_agent() (single-agent legacy → log
-    confondenti tipo "mode: weekend, architecture: single-agent" anche con
-    la nuova architettura).
-    ORA: chiama run_full_pipeline (Watchdog → Technical → Decision) o
-    direttamente run_scheduled_24h_pipeline (R1) se mercati chiusi.
+    Mercati aperti → run_full_pipeline (Watchdog → Technical → Decision Sonnet).
+    Mercati chiusi → run_crypto_pipeline (Technical Crypto → Decision R1).
     """
     run_id = str(uuid.uuid4())
     mode = scheduler.get_current_mode()
@@ -396,16 +371,11 @@ async def trigger_agent_run(background_tasks: BackgroundTasks):
     async def _run():
         try:
             logger.info(f"Esecuzione manuale pipeline avviata (run_id: {run_id}, mode: {mode}).")
-            from agents.orchestrator import (
-                run_full_pipeline,
-                run_scheduled_24h_pipeline,
-            )
+            from agents.orchestrator import run_full_pipeline, run_crypto_pipeline
             if market_open:
-                # Orari di mercato → pipeline completa con Sonnet 4.5
                 result = await run_full_pipeline(run_id=run_id)
             else:
-                # Mercati chiusi → R1 scheduled (crypto only)
-                result = await run_scheduled_24h_pipeline(run_id=run_id)
+                result = await run_crypto_pipeline(run_id=run_id)
             logger.info(f"Esecuzione manuale completata (run_id: {run_id}, result: {result.get('decision', '?')}).")
         except Exception as e:
             logger.error(
@@ -654,51 +624,6 @@ async def chat_init_tables():
         import traceback
         return JSONResponse(status_code=500, content={
             "ok": False,
-            "error": str(e), "type": type(e).__name__,
-            "traceback": traceback.format_exc()[-1500:],
-        })
-
-
-@app.post("/api/chat/test-deepseek")
-async def chat_test_deepseek():
-    """
-    Diagnostica DIRETTA su DeepSeek: invia una richiesta minima ('Ciao')
-    e ritorna esito + dettagli. Bypassa tabelle e contesto live, per
-    isolare problemi di API key / rete / quota.
-    """
-    try:
-        from agents import chat_assistant
-        api_key = chat_assistant._get_api_key()
-        if not api_key:
-            return {"ok": False, "stage": "api_key", "error": "DEEPSEEK_API_KEY non configurata"}
-
-        import aiohttp
-        payload = {
-            "model": chat_assistant.DEEPSEEK_R1_MODEL,
-            "messages": [
-                {"role": "system", "content": "Rispondi in 1 parola."},
-                {"role": "user", "content": "Ciao"},
-            ],
-            "max_tokens": 10,
-        }
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(
-                chat_assistant.DEEPSEEK_API_URL, json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                body = await resp.text()
-                return {
-                    "ok": resp.status == 200,
-                    "status_code": resp.status,
-                    "body_preview": body[:800],
-                    "stage": "http_response",
-                }
-    except Exception as e:
-        import traceback
-        return JSONResponse(status_code=500, content={
-            "ok": False, "stage": "exception",
             "error": str(e), "type": type(e).__name__,
             "traceback": traceback.format_exc()[-1500:],
         })
@@ -1045,57 +970,6 @@ async def sim_get_result(run_id: str):
             status_code=500,
             content={"error": str(e), "type": type(e).__name__},
         )
-
-
-@app.post("/api/simulator/init-tables")
-async def sim_init_tables():
-    """
-    Forza la creazione delle tabelle sim_* su Supabase via psycopg2.
-    Utile se la migration auto all'avvio non e' passata. Verifica con un
-    INSERT/DELETE di test che il client Supabase possa effettivamente leggere.
-    """
-    try:
-        from simulator import db as sim_db
-        sim_db.ensure_schema()
-
-        # Verifica con probe diretto
-        client = sim_db._get_client()
-        if client:
-            try:
-                r = client.table("sim_runs").select("id").limit(1).execute()
-                return {
-                    "ok": True, "tables_ready": True,
-                    "client": "supabase",
-                    "current_runs_count_sample": len(r.data or []),
-                }
-            except Exception as e:
-                return {
-                    "ok": False, "tables_ready": False,
-                    "client": "supabase",
-                    "probe_error": str(e),
-                    "hint": (
-                        "Migration psycopg2 ha girato ma la tabella non e' "
-                        "leggibile dal client Supabase. Verifica DATABASE_URL "
-                        "e SUPABASE_DB_PASSWORD su Render."
-                    ),
-                }
-        else:
-            # SQLite path
-            import db_sqlite
-            try:
-                with db_sqlite.get_db() as conn:
-                    n = conn.execute("SELECT COUNT(*) as c FROM sim_runs").fetchone()
-                    return {"ok": True, "tables_ready": True, "client": "sqlite",
-                            "current_runs_count": n["c"] if n else 0}
-            except Exception as e:
-                return {"ok": False, "tables_ready": False, "client": "sqlite",
-                        "probe_error": str(e)}
-    except Exception as e:
-        import traceback
-        return JSONResponse(status_code=500, content={
-            "ok": False, "error": str(e), "type": type(e).__name__,
-            "traceback": traceback.format_exc()[-1500:],
-        })
 
 
 @app.get("/api/simulator/health")
@@ -2242,30 +2116,6 @@ async def sim_advisor_chat_delete(run_id: str):
 # Direttive Utente — istruzioni a priorità massima per gli agenti AI
 # ════════════════════════════════════════════════════════════════════════
 
-@app.get("/api/_debug/sim-settings-raw")
-async def debug_sim_settings(prefix: str = ""):
-    """DEBUG: dump raw delle entry sim_settings (filter opzionale by prefix)."""
-    try:
-        from simulator import db as sim_db
-        client = sim_db._get_client()
-        if not client:
-            return {"error": "no client"}
-        q = client.table("sim_settings").select("key,value").limit(200)
-        if prefix:
-            q = q.like("key", f"{prefix}%")
-        res = q.execute()
-        rows = res.data or []
-        return {
-            "count": len(rows),
-            "keys": [r["key"] for r in rows],
-            "samples": [{"key": r["key"], "value_len": len(r.get("value") or ""),
-                         "value_preview": (r.get("value") or "")[:200]}
-                        for r in rows[:30]],
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
 @app.get("/api/settings/directives")
 async def get_directives():
     """Direttive utente correnti (testo libero a priorità massima)."""
@@ -2930,23 +2780,6 @@ async def clawstreet_diagnostics():
     }
 
 
-@app.post("/api/admin/apply-cs-mirror-migration")
-async def apply_cs_mirror_migration():
-    """
-    Trigger manuale della migrazione cs_mirror_* su Supabase.
-    Idempotente. Utile se DATABASE_URL/SUPABASE_DB_PASSWORD vengono aggiunti
-    DOPO il primo deploy → senza riavviare l'app, hit questo endpoint.
-    """
-    try:
-        # Forza il reload del modulo db_supabase per ri-eseguire la migration
-        import db_supabase
-        db_supabase._ensure_cs_mirror_columns()
-        return {"status": "ok", "message": "Migrazione applicata (vedi log Render per esito)"}
-    except Exception as e:
-        logger.error("Errore migration: %s", e, exc_info=True)
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
-
-
 @app.post("/api/clawstreet/retry-mirrors")
 async def retry_failed_mirrors(window_hours: int = Query(default=24, ge=1, le=168)):
     """
@@ -3085,61 +2918,6 @@ async def get_clawstreet_status():
     except Exception as e:
         logger.error(f"Errore nello stato ClawStreet: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-# --- Endpoint test connessione API ---
-
-
-@app.post("/api/test-connection")
-async def test_api_connection():
-    """Testa la connessione alle API esterne (Anthropic e NewsAPI)."""
-    results = {}
-    # Test Anthropic
-    api_key = database.get_setting("anthropic_api_key", os.environ.get("ANTHROPIC_API_KEY", ""))
-    if api_key:
-        try:
-            from anthropic import Anthropic
-            client = Anthropic(api_key=api_key)
-            # Chiamata minima per verificare la chiave
-            models_to_try = [
-                database.get_setting("model_name", "claude-3-5-haiku-20241022"),
-                "claude-3-5-haiku-20241022",
-                "claude-sonnet-4-20250514",
-                "claude-3-haiku-20240307",
-            ]
-            connected = False
-            for m in models_to_try:
-                try:
-                    client.messages.create(model=m, max_tokens=10,
-                                           messages=[{"role": "user", "content": "ping"}])
-                    connected = True
-                    break
-                except Exception:
-                    continue
-            results["anthropic"] = {"status": "ok"} if connected else {"status": "error", "message": "Nessun modello disponibile"}
-        except Exception as e:
-            results["anthropic"] = {"status": "error", "message": str(e)}
-    else:
-        results["anthropic"] = {"status": "error", "message": "Chiave API non configurata"}
-
-    # Test NewsAPI
-    news_key = database.get_setting("news_api_key", os.environ.get("NEWS_API_KEY", ""))
-    if news_key:
-        try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                url = f"https://newsapi.org/v2/top-headlines?country=us&pageSize=1&apiKey={news_key}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 200:
-                        results["newsapi"] = {"status": "ok"}
-                    else:
-                        results["newsapi"] = {"status": "error", "message": f"HTTP {resp.status}"}
-        except Exception as e:
-            results["newsapi"] = {"status": "error", "message": str(e)}
-    else:
-        results["newsapi"] = {"status": "error", "message": "Chiave API non configurata"}
-
-    return results
 
 
 # --- Endpoint storico portafoglio ---
@@ -3384,54 +3162,6 @@ async def test_gdelt():
                 return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "message": str(e)[:200]}
-
-
-@app.post("/api/migrate/v4")
-async def run_v4_migration():
-    """
-    Esegue la migrazione v4 creando le nuove tabelle per il sistema multi-agent.
-    Sicuro da rieseguire (usa IF NOT EXISTS).
-    """
-    try:
-        migration_path = os.path.join(os.path.dirname(__file__), "migrations", "init_v4.sql")
-        if not os.path.exists(migration_path):
-            return {"status": "error", "message": "init_v4.sql non trovato"}
-
-        with open(migration_path) as f:
-            sql = f.read()
-
-        # Usa la connessione diretta PostgreSQL via Supabase
-        from db_supabase import _get_client
-        client = _get_client()
-
-        # Esegui ogni statement separatamente via rpc
-        # Supabase non supporta SQL diretto, usiamo postgrest rpc
-        # Alternativa: controlla se le tabelle esistono gia'
-        v4_tables = [
-            "intelligence_buffer", "daily_snapshots", "weekly_matrix",
-            "trades_high_risk", "agent_checkpoints",
-        ]
-        existing = []
-        missing = []
-        for table in v4_tables:
-            try:
-                client.table(table).select("*").limit(1).execute()
-                existing.append(table)
-            except Exception:
-                missing.append(table)
-
-        return {
-            "status": "ok",
-            "existing_tables": existing,
-            "missing_tables": missing,
-            "message": (
-                "Tutte le tabelle v4 presenti!" if not missing
-                else f"Tabelle mancanti: {missing}. Esegui init_v4.sql nel SQL Editor di Supabase dashboard."
-            ),
-            "sql_file": "backend/migrations/init_v4.sql",
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 
 # --- Montaggio dei file statici del frontend React ---

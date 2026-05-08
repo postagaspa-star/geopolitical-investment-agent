@@ -202,38 +202,60 @@ function downsampleHistory(history, targetPoints = 100) {
   return out;
 }
 
-// Filtra outlier: snapshot con total_value che fa uno spike improvviso (>15%
-// in una direzione e poi torna entro il +/-3% del valore precedente al picco)
-// è quasi sempre un errore di pricing transitorio (es. yfinance/Polygon ha
-// restituito un prezzo sballato per 1 minuto). Lo sostituisce con
-// l'interpolazione lineare tra prev e next.
+// Filtra outlier: snapshot con total_value che si discosta troppo dal
+// rolling median (MAD-based). Sostituisce il valore corrotto con la mediana
+// locale così il grafico non mostra picchi anomali (+47% di colpo, ecc).
 //
-// Bug osservato: il grafico equity mostrava un +47% di colpo che poi spariva
-// → singolo data point corrotto da una fonte prezzo che ha sbagliato.
+// Strategia: per ogni punto, calcola median + MAD su una finestra di
+// ±WINDOW snapshot. Se |valore - median| > MAX_MAD * MAD → outlier.
+// Robusto sia su spike transienti (1 punto) sia su run consecutivi corti
+// di dati corrotti (es. 2-3 punti dovuti a un fetch sbagliato di Polygon).
 function sanitizeOutliers(history) {
-  if (!history || history.length < 3) return history || [];
+  if (!history || history.length < 5) return history || [];
   const arr = history.map((p) => ({ ...p }));
-  const SPIKE_THRESHOLD = 0.15;     // 15% in 1 step = sospetto
-  const REVERT_TOLERANCE = 0.03;    // se prev e next sono entro 3% l'uno dall'altro è un picco isolato
+  const N = arr.length;
+  const WINDOW = 7;       // 3 prima + corrente + 3 dopo
+  const MAX_MAD = 6;      // punto > 6×MAD dalla median = outlier (soglia conservativa)
+  const MIN_PCT_DEV = 0.10;  // serve almeno 10% di scostamento per chiamarlo outlier (evita falsi positivi quando MAD≈0)
+
+  // Mediana di un array
+  const median = (xs) => {
+    if (!xs.length) return 0;
+    const s = [...xs].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+
   let fixed = 0;
-  for (let i = 1; i < arr.length - 1; i++) {
-    const prev = Number(arr[i - 1].total_value);
-    const cur  = Number(arr[i].total_value);
-    const next = Number(arr[i + 1].total_value);
-    if (!Number.isFinite(prev) || !Number.isFinite(cur) || !Number.isFinite(next)) continue;
-    if (prev <= 0 || cur <= 0 || next <= 0) continue;
-    const jump1 = Math.abs((cur - prev) / prev);
-    const jump2 = Math.abs((next - cur) / cur);
-    const drift = Math.abs((next - prev) / prev);
-    if (jump1 > SPIKE_THRESHOLD && jump2 > SPIKE_THRESHOLD && drift < REVERT_TOLERANCE) {
-      // È uno spike isolato che si autocorregge: sostituisci con la media
-      arr[i].total_value = (prev + next) / 2;
+  for (let i = 0; i < N; i++) {
+    const cur = Number(arr[i].total_value);
+    if (!Number.isFinite(cur) || cur <= 0) continue;
+
+    // Finestra escludendo il punto corrente
+    const lo = Math.max(0, i - Math.floor(WINDOW / 2));
+    const hi = Math.min(N, i + Math.floor(WINDOW / 2) + 1);
+    const window = [];
+    for (let j = lo; j < hi; j++) {
+      if (j === i) continue;
+      const v = Number(arr[j].total_value);
+      if (Number.isFinite(v) && v > 0) window.push(v);
+    }
+    if (window.length < 3) continue;
+
+    const med = median(window);
+    if (med <= 0) continue;
+    const mad = median(window.map((v) => Math.abs(v - med))) || 1e-6;
+
+    const dev = Math.abs(cur - med);
+    const devPct = dev / med;
+    if (dev > MAX_MAD * mad && devPct > MIN_PCT_DEV) {
+      arr[i].total_value = med;
       arr[i]._outlier_fixed = true;
       fixed += 1;
     }
   }
   if (fixed > 0 && typeof window !== "undefined" && window.console) {
-    console.log(`[AnalyticsPage] sanitizeOutliers: ${fixed} spike isolati riallineati`);
+    console.log(`[AnalyticsPage] sanitizeOutliers: ${fixed} outlier riallineati (MAD-based)`);
   }
   return arr;
 }

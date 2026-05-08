@@ -25,11 +25,6 @@ import database
 logger = logging.getLogger(__name__)
 
 
-# Crypto di fallback quando il Watchdog focalizza su equity ma i mercati
-# equity sono chiusi: invece di bloccare, sostituiamo con queste 3 e lasciamo
-# che R1 valuti se vale la pena operare. Top liquidity + volatilità garantita.
-_DEFAULT_OVERNIGHT_CRYPTO = ["BTC-USD", "ETH-USD", "SOL-USD"]
-
 # Log throttling: gli stessi eventi "blocked" vengono loggati al massimo
 # ogni N secondi per non riempire la dashboard con righe identiche.
 _BLOCK_LOG_THROTTLE_SECONDS = 600   # 10 minuti
@@ -319,125 +314,6 @@ async def run_crypto_pipeline(run_id: str | None = None) -> dict:
 
     return {
         "run_id": run_id,
-        "tech_engine": (tech_report or {}).get("engine", "deferred_to_decision"),
-        "decision": decision_result.get("decision", "UNKNOWN"),
-        "trades": decision_result.get("trades", []),
-        "duration_seconds": duration,
-    }
-
-
-# ============================================================
-# Pipeline Decision 24h (DEPRECATED - sostituita da run_crypto_pipeline)
-# ============================================================
-
-async def run_scheduled_24h_pipeline(run_id: str | None = None) -> dict:
-    """
-    Pipeline SCHEDULED Decision 24h — bypassa il Watchdog.
-
-    Eseguita dallo scheduler ogni 2h30 quando i mercati equity sono chiusi.
-    Va dritta a Technical + Decision R1 con focus su crypto top-liquidity
-    (BTC/ETH/SOL/AVAX/SOL/...). Logica:
-
-      1. Se il mercato è APERTO → skip silenzioso (Sonnet gestisce orario).
-      2. Se il cooldown R1 è ancora attivo → skip (ancora troppo presto).
-      3. Altrimenti → Technical (DeepSeek-V3) → Decision (DeepSeek-R1).
-         Decision R1 valuta autonomamente se operare o do_nothing.
-
-    Differenza vs run_watchdog_pipeline:
-      - NON dipende dal Watchdog (gira a tempo, non a evento)
-      - Force engine: DECISION_ENGINE=deepseek-r1 (env override temporanea)
-      - Default crypto top-3 se non c'è altra indicazione
-
-    Costo per run: ~$0.001 V3 (Technical) + ~$0.006 R1 (Decision) = ~$0.007.
-    Frequenza: 2h30 → ~10 run/giorno overnight × $0.007 = ~$0.07/giorno
-    durante weekend/festività ($0.50/mese in modalità always-closed).
-    """
-    import os as _os
-
-    if not run_id:
-        run_id = str(uuid4())
-
-    start = time.time()
-    logger.info("[%s][ORCHESTRATOR] Decision 24h SCHEDULED pipeline avviata", run_id)
-
-    # 1) Skip se mercato aperto (Sonnet gestisce questa fascia)
-    try:
-        from scheduler import is_market_open
-        if is_market_open():
-            logger.debug("[%s][ORCHESTRATOR] Mercati aperti — Decision 24h skipped (Sonnet attivo)", run_id)
-            return {"run_id": run_id, "skipped": "market_open", "duration_seconds": round(time.time() - start, 2)}
-    except Exception:
-        pass  # se non riesco a verificare, procedo (fail-open)
-
-    # 2) Soft anti-double-run: skip SOLO se R1 ha girato negli ultimi 60 min.
-    # Il job stesso gira a 2h30 quindi non c'è bisogno del cooldown completo
-    # — usiamo solo una finestra breve per evitare doppio run quando il
-    # watchdog ha triggerato R1 pochi minuti prima del nostro scheduled fire.
-    # PRIMA c'era un check del cooldown completo 2h30: race condition con la
-    # schedule a 2h30 → il job fire 22 secondi PRIMA della scadenza, skippa,
-    # e poi attende altri 2h30 = blackout di ~5h tra un R1 e l'altro.
-    try:
-        from agents.decision import R1_LAST_RUN_KEY
-        last_iso = database.get_setting(R1_LAST_RUN_KEY, "") or ""
-        if last_iso:
-            last_dt = datetime.fromisoformat(last_iso)
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=timezone.utc)
-            elapsed_min = (datetime.now(timezone.utc) - last_dt).total_seconds() / 60.0
-            if elapsed_min < 60:
-                logger.info("[%s][ORCHESTRATOR] R1 ha girato %.1f min fa — skip scheduled (soft 60min)",
-                            run_id, elapsed_min)
-                return {
-                    "run_id": run_id, "skipped": "recent_r1_run",
-                    "elapsed_minutes": round(elapsed_min, 1),
-                    "duration_seconds": round(time.time() - start, 2),
-                }
-    except Exception:
-        pass  # fail-open: meglio runnare due volte che mai
-
-    # 3) Tickers di default per il run scheduled crypto-only
-    hot_tickers = list(_DEFAULT_OVERNIGHT_CRYPTO)
-
-    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
-        "event": "decision_24h_scheduled_start",
-        "focus_tickers": hot_tickers,
-        "trigger_source": "scheduler_2h30",
-    }))
-
-    # ── WORKFLOW A 4 FASI: Technical NON eseguito a priori (24h scheduled) ──
-    # Il Decision Agent (R1) chiede i dati tecnici durante FASE 2.
-    tech_report = None
-
-    # ── Decision Agent — FORZA engine R1 via env override temporanea ──
-    # Salva il valore corrente, lo setta su deepseek-r1 SOLO per questo run,
-    # poi lo ripristina (così durante orari di mercato torna a Sonnet).
-    saved_engine = _os.environ.get("DECISION_ENGINE", "")
-    _os.environ["DECISION_ENGINE"] = "deepseek-r1"
-    try:
-        from agents.decision import run_decision_agent
-        decision_result = await run_decision_agent(run_id, tech_report)
-    except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Decision fallito (scheduled 24h): %s", run_id, e)
-        decision_result = {"decision": "ERROR", "trades": [], "error": str(e)}
-    finally:
-        if saved_engine:
-            _os.environ["DECISION_ENGINE"] = saved_engine
-        else:
-            _os.environ.pop("DECISION_ENGINE", None)
-
-    duration = round(time.time() - start, 1)
-
-    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
-        "event": "decision_24h_scheduled_complete",
-        "decision": decision_result.get("decision", "UNKNOWN"),
-        "trades": len(decision_result.get("trades", [])),
-        "engine": decision_result.get("model", "deepseek-r1"),
-        "duration_seconds": duration,
-    }))
-
-    return {
-        "run_id": run_id,
-        "scheduled": True,
         "tech_engine": (tech_report or {}).get("engine", "deferred_to_decision"),
         "decision": decision_result.get("decision", "UNKNOWN"),
         "trades": decision_result.get("trades", []),
