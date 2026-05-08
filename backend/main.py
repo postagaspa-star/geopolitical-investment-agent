@@ -2790,6 +2790,119 @@ async def portfolio_refresh_prices():
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
+@app.get("/api/portfolio/cash-history")
+async def portfolio_cash_history(days: int = Query(default=3, ge=1, le=30)):
+    """
+    Ritorna lo storico di cash_balance dai portfolio_snapshots con timestamp.
+    Utile per identificare il valore del cash PRIMA che si "buggasse" e
+    decidere a quale punto restorare.
+
+    Read-only.
+    """
+    try:
+        history = database.get_portfolio_history(days=days) or []
+        # Downsample a max 200 punti per leggibilità
+        if len(history) > 200:
+            step = max(1, len(history) // 200)
+            history = history[::step]
+
+        rows = []
+        cash_values = []
+        for r in history:
+            cash = float(r.get("cash_balance") or 0)
+            tv = float(r.get("total_value") or 0)
+            ts = r.get("timestamp")
+            rows.append({
+                "timestamp": ts,
+                "cash_balance": round(cash, 2),
+                "total_value": round(tv, 2),
+            })
+            if cash > 0:
+                cash_values.append(cash)
+
+        # Suggerimento automatico: cash più frequente nelle prime 75% dello storico
+        # (assumendo che il bug sia recente, escludiamo l'ultimo quarto).
+        suggested_cash = None
+        if len(cash_values) >= 5:
+            cutoff = max(1, int(len(cash_values) * 0.75))
+            stable_segment = sorted(cash_values[:cutoff])
+            mid = len(stable_segment) // 2
+            suggested_cash = round(
+                stable_segment[mid] if len(stable_segment) % 2 == 1
+                else (stable_segment[mid - 1] + stable_segment[mid]) / 2.0,
+                2,
+            )
+
+        return {
+            "status": "ok",
+            "days": days,
+            "samples": len(rows),
+            "history": rows,
+            "suggested_cash_pre_bug": suggested_cash,
+            "current_cash": round(float((database.get_portfolio() or {}).get("cash_balance") or 0), 2),
+        }
+    except Exception as e:
+        logger.error("portfolio_cash_history error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
+@app.post("/api/portfolio/restore-cash")
+async def portfolio_restore_cash(
+    cash: float = Query(..., gt=0, description="Valore cash_balance da ripristinare"),
+    confirm: bool = Query(default=False),
+):
+    """
+    Ripristina cash_balance a un valore noto (preso da portfolio_snapshots
+    pre-bug). Le posizioni non vengono toccate. total_value viene ricalcolato
+    da calculate_total_value() = nuovo cash + sum(qty * current_price).
+
+    Richiede confirm=true. IRREVERSIBILE.
+    """
+    if not confirm:
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "error": "Richiede confirm=true. Operazione irreversibile.",
+        })
+
+    try:
+        portfolio_now = database.get_portfolio() or {}
+        old_cash = float(portfolio_now.get("cash_balance") or 0)
+        old_total = float(portfolio_now.get("total_value") or 0)
+
+        # Calcola nuovo total: cash ripristinato + sum posizioni
+        positions = database.get_positions() or []
+        positions_value = sum(
+            float(p.get("current_price") or 0) * float(p.get("quantity") or 0)
+            for p in positions
+            if float(p.get("current_price") or 0) > 0
+        )
+        new_total = cash + positions_value
+
+        database.update_portfolio(round(cash, 2), round(new_total, 2))
+
+        logger.info(
+            "Portfolio cash RESTORE: cash %.2f→%.2f, total %.2f→%.2f, positions_value=%.2f",
+            old_cash, cash, old_total, new_total, positions_value,
+        )
+
+        return {
+            "status": "ok",
+            "message": (
+                f"Cash ripristinato: ${old_cash:,.2f} → ${cash:,.2f}. "
+                f"Total: ${old_total:,.2f} → ${new_total:,.2f}."
+            ),
+            "old_cash": round(old_cash, 2),
+            "new_cash": round(cash, 2),
+            "old_total": round(old_total, 2),
+            "new_total": round(new_total, 2),
+            "positions_value": round(positions_value, 2),
+            "positions_count": len(positions),
+        }
+    except Exception as e:
+        logger.error("portfolio_restore_cash error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
 @app.post("/api/portfolio/set-target-total")
 async def portfolio_set_target_total(
     target_total: float = Query(..., gt=0, description="Valore target in $ del patrimonio totale"),

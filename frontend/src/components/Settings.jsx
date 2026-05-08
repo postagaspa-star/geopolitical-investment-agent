@@ -294,6 +294,50 @@ function Settings({ onBack, onDataRefresh }) {
     }
   };
 
+  // === Ripristina cash da snapshot pre-bug ===
+  const [cashHistoryStatus, setCashHistoryStatus] = useState({ running: false, data: null });
+  const [restoreCashStatus, setRestoreCashStatus] = useState({ running: false, result: null });
+  const [selectedCash, setSelectedCash] = useState(null);
+
+  const handleLoadCashHistory = async () => {
+    if (cashHistoryStatus.running) return;
+    setCashHistoryStatus({ running: true, data: null });
+    try {
+      const r = await fetch(`${API}/api/portfolio/cash-history?days=3`);
+      const data = await r.json();
+      setCashHistoryStatus({ running: false, data });
+      if (data?.suggested_cash_pre_bug != null) {
+        setSelectedCash(data.suggested_cash_pre_bug);
+      }
+    } catch (e) {
+      setCashHistoryStatus({ running: false, data: { error: String(e) } });
+    }
+  };
+
+  const handleRestoreCash = async (cashValue) => {
+    if (restoreCashStatus.running) return;
+    const v = parseFloat(cashValue);
+    if (!Number.isFinite(v) || v <= 0) {
+      alert("Valore cash non valido");
+      return;
+    }
+    if (!window.confirm(
+      `Ripristina cash_balance a $${v.toLocaleString()}.\n\n` +
+      "Le posizioni non vengono toccate. Il total_value sarà ricalcolato come " +
+      "cash + sum(qty × current_price).\n\n" +
+      "Operazione IRREVERSIBILE. Procedere?"
+    )) return;
+    setRestoreCashStatus({ running: true, result: null });
+    try {
+      const r = await fetch(`${API}/api/portfolio/restore-cash?cash=${v}&confirm=true`, { method: "POST" });
+      const data = await r.json();
+      setRestoreCashStatus({ running: false, result: { ok: r.ok && data.status === "ok", data } });
+      handleAudit();
+    } catch (e) {
+      setRestoreCashStatus({ running: false, result: { ok: false, data: { error: String(e) } } });
+    }
+  };
+
   // === Set target total (forza patrimonio a un valore noto) ===
   const [targetTotalStatus, setTargetTotalStatus] = useState({ running: false, result: null });
   const [targetTotalInput, setTargetTotalInput] = useState("104200");
@@ -747,6 +791,151 @@ function Settings({ onBack, onDataRefresh }) {
                   <span style={{ marginLeft: 6, fontFamily: "monospace" }}>
                     (deleted={cleanupStatus.result.deleted}, median=${cleanupStatus.result.median})
                   </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Ripristina cash da snapshot pre-bug (approccio consigliato) */}
+          <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid #f3f4f6" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: 600, color: "#111827" }}>
+                  Ripristina cash da snapshot pre-bug
+                </div>
+                <div style={{ fontSize: "12px", color: "#6b7280", marginTop: "2px" }}>
+                  Recupera dal <code>portfolio_snapshots</code> il valore di
+                  <code> cash_balance</code> precedente al bug e lo ripristina.
+                  Le posizioni non vengono toccate.
+                </div>
+              </div>
+              <button
+                style={{
+                  ...btnSecondary,
+                  background: cashHistoryStatus.running ? "#e5e7eb" : "#6366f1",
+                  color: cashHistoryStatus.running ? "#6b7280" : "#fff",
+                  borderColor: cashHistoryStatus.running ? "#d1d5db" : "#6366f1",
+                  cursor: cashHistoryStatus.running ? "not-allowed" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+                onClick={handleLoadCashHistory}
+                disabled={cashHistoryStatus.running}
+              >
+                {cashHistoryStatus.running ? "Caricamento..." : "Carica storico"}
+              </button>
+            </div>
+
+            {cashHistoryStatus.data && !cashHistoryStatus.data.error && (
+              <div style={{
+                marginTop: "10px", padding: "10px 12px", borderRadius: "6px",
+                background: "#f9fafb", border: "1px solid #e5e7eb",
+              }}>
+                <div style={{ fontSize: "12px", color: "#374151", marginBottom: 8 }}>
+                  Storico ultimi 3 giorni: <strong>{cashHistoryStatus.data.samples}</strong> snapshot ·
+                  Cash attuale: <strong style={{ fontFamily: "monospace" }}>${cashHistoryStatus.data.current_cash?.toLocaleString()}</strong>
+                </div>
+
+                {cashHistoryStatus.data.suggested_cash_pre_bug != null && (
+                  <div style={{
+                    padding: "8px 10px", marginBottom: 10,
+                    background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 4,
+                    fontSize: "12px", color: "#065f46",
+                  }}>
+                    <strong>Cash pre-bug stimato:</strong>{" "}
+                    <span style={{ fontFamily: "monospace", fontSize: "13px" }}>
+                      ${cashHistoryStatus.data.suggested_cash_pre_bug.toLocaleString()}
+                    </span>
+                    <span style={{ marginLeft: 6, color: "#6b7280" }}>
+                      (mediana del primo 75% dello storico, escludendo l'ultimo quarto dove e' verosimile il bug)
+                    </span>
+                    <div style={{ marginTop: 8 }}>
+                      <button
+                        style={{
+                          ...btnSecondary,
+                          background: restoreCashStatus.running ? "#e5e7eb" : "#10b981",
+                          color: restoreCashStatus.running ? "#6b7280" : "#fff",
+                          borderColor: restoreCashStatus.running ? "#d1d5db" : "#10b981",
+                          cursor: restoreCashStatus.running ? "not-allowed" : "pointer",
+                        }}
+                        onClick={() => handleRestoreCash(cashHistoryStatus.data.suggested_cash_pre_bug)}
+                        disabled={restoreCashStatus.running}
+                      >
+                        {restoreCashStatus.running ? "..." : "Ripristina questo valore"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <details>
+                  <summary style={{ cursor: "pointer", fontSize: "12px", fontWeight: 600, color: "#374151" }}>
+                    Vedi tutti gli snapshot ({cashHistoryStatus.data.samples}) e scegli manualmente
+                  </summary>
+                  <div style={{
+                    marginTop: 8, maxHeight: 300, overflow: "auto",
+                    fontSize: "11px", fontFamily: "monospace",
+                  }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead>
+                        <tr style={{ background: "#f3f4f6", borderBottom: "1px solid #d1d5db" }}>
+                          <th style={{ padding: "4px 8px", textAlign: "left" }}>Timestamp</th>
+                          <th style={{ padding: "4px 8px", textAlign: "right" }}>Cash</th>
+                          <th style={{ padding: "4px 8px", textAlign: "right" }}>Total</th>
+                          <th style={{ padding: "4px 8px", textAlign: "center" }}>Azione</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cashHistoryStatus.data.history.map((s, i) => (
+                          <tr key={i} style={{
+                            borderBottom: "1px dashed #e5e7eb",
+                            background: selectedCash === s.cash_balance ? "#dbeafe" : "transparent",
+                          }}>
+                            <td style={{ padding: "3px 8px" }}>
+                              {s.timestamp ? new Date(s.timestamp).toLocaleString("it-IT") : "—"}
+                            </td>
+                            <td style={{ padding: "3px 8px", textAlign: "right" }}>
+                              ${s.cash_balance.toLocaleString()}
+                            </td>
+                            <td style={{ padding: "3px 8px", textAlign: "right", color: "#6b7280" }}>
+                              ${s.total_value.toLocaleString()}
+                            </td>
+                            <td style={{ padding: "3px 8px", textAlign: "center" }}>
+                              <button
+                                style={{
+                                  padding: "2px 8px", fontSize: "10px",
+                                  background: "#fff", border: "1px solid #d1d5db",
+                                  borderRadius: 3, cursor: "pointer",
+                                }}
+                                onClick={() => handleRestoreCash(s.cash_balance)}
+                                disabled={restoreCashStatus.running}
+                                title={`Ripristina cash a $${s.cash_balance}`}
+                              >
+                                Usa
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              </div>
+            )}
+
+            {restoreCashStatus.result && (
+              <div style={{
+                marginTop: "8px", padding: "10px 12px", borderRadius: "6px",
+                fontSize: "12px",
+                background: restoreCashStatus.result.ok ? "#ecfdf5" : "#fef2f2",
+                color: restoreCashStatus.result.ok ? "#065f46" : "#991b1b",
+                border: `1px solid ${restoreCashStatus.result.ok ? "#a7f3d0" : "#fecaca"}`,
+              }}>
+                <div>{restoreCashStatus.result.data?.message || restoreCashStatus.result.data?.error}</div>
+                {restoreCashStatus.result.ok && (
+                  <div style={{ marginTop: 4, fontFamily: "monospace", fontSize: "11px" }}>
+                    Cash: ${restoreCashStatus.result.data.old_cash?.toLocaleString()} → ${restoreCashStatus.result.data.new_cash?.toLocaleString()}
+                    {" · "}
+                    Total: ${restoreCashStatus.result.data.old_total?.toLocaleString()} → ${restoreCashStatus.result.data.new_total?.toLocaleString()}
+                  </div>
                 )}
               </div>
             )}
