@@ -701,6 +701,30 @@ def _build_context(tech_report: dict, recent_buffer: list, portfolio_state: dict
                    crypto_docs: list) -> str:
     parts = []
     parts.append(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+
+    # === DIRETTIVE UTENTE RECENTI (chat decision crypto) ===
+    try:
+        import database as _db
+        if hasattr(_db, "get_recent_user_directives"):
+            directives = _db.get_recent_user_directives("crypto", hours=48, limit=5)
+            if directives:
+                parts.append("=" * 60)
+                parts.append("📋  DIRETTIVE UTENTE RECENTI (da chat crypto, ultime 48h)")
+                parts.append("=" * 60)
+                parts.append(
+                    "L'utente ha espresso queste preferenze nella chat decision crypto. "
+                    "Trattale come SOFT GUARDRAILS: rispettale salvo segnali tecnici "
+                    "fortemente contrari (in quel caso cita la direttiva e spiega "
+                    "perche' la stai contraddicendo)."
+                )
+                for d in directives:
+                    content = (d.get("content") or "").strip()
+                    when = str(d.get("created_at", ""))[:16]
+                    if content:
+                        parts.append(f"  • [{when}] {content[:300]}")
+    except Exception as _e:
+        logger.debug("decision_crypto: direttive utente non caricate: %s", _e)
+
     parts.append("=" * 60)
     # Workflow a 4 fasi: il tech_report NON e' iniettato a priori. Il
     # Decision Crypto Agent deve PRIMA fare commit_initial_assessment, poi

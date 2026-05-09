@@ -10,6 +10,7 @@ import {
   Zap,
   RefreshCw,
   BookOpen,
+  MessageSquare,
 } from 'lucide-react';
 
 const MODE_LABELS = {
@@ -314,10 +315,10 @@ export default function Sidebar({
             onClick={onCloseSidebar}>
             <BarChart3 /> Analytics
           </NavLink>
-          <NavLink to="/live/coach-cards"
+          <NavLink to="/live/chat"
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             onClick={onCloseSidebar}>
-            <BookOpen /> Coach Cards
+            <MessageSquare /> Chat con Agent
           </NavLink>
           <NavLink to="/live/settings"
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}

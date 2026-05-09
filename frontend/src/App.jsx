@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { Menu } from "lucide-react";
+import { BrowserRouter, Routes, Route, Navigate, NavLink } from "react-router-dom";
+import { Menu, BookOpen } from "lucide-react";
 
 import Sidebar from "./components/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import IntelligencePage from "./pages/IntelligencePage";
 import AnalyticsPage from "./pages/AnalyticsPage";
 import CoachCardsPage from "./pages/CoachCardsPage";
+import ChatDecisionPage from "./pages/ChatDecisionPage";
 import Settings from "./components/Settings";
 import ChatWidget from "./components/ChatWidget";
 
@@ -144,6 +145,32 @@ function LiveApp() {
         <div style={{width:24}} />
       </div>
 
+      {/* Floating Coach Cards button — sempre visibile in alto a destra,
+          sostituisce il vecchio link Coach Cards nella sidebar */}
+      <NavLink
+        to="/live/coach-cards"
+        title="Coach Cards (raccomandazioni operative)"
+        style={({ isActive }) => ({
+          position: "fixed",
+          top: "1rem",
+          right: "1rem",
+          zIndex: 100,
+          background: isActive ? "#fbbf24" : "#1e293b",
+          color: isActive ? "#0f172a" : "#fbbf24",
+          border: `1px solid ${isActive ? "#fbbf24" : "#334155"}`,
+          borderRadius: "50%",
+          width: "40px",
+          height: "40px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+          textDecoration: "none",
+          cursor: "pointer",
+        })}>
+        <BookOpen size={18} />
+      </NavLink>
+
       <Sidebar
         schedulerRunning={schedulerRunning}
         currentMode={currentMode}
@@ -169,6 +196,7 @@ function LiveApp() {
           <Route path="intelligence" element={<IntelligencePage />} />
           <Route path="analytics" element={<AnalyticsPage />} />
           <Route path="coach-cards" element={<CoachCardsPage />} />
+          <Route path="chat" element={<ChatDecisionPage />} />
           <Route path="settings" element={<Settings onDataRefresh={fetchAll} />} />
         </Routes>
       </main>

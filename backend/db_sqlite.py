@@ -132,6 +132,29 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_chat_messages_conv
                 ON chat_messages (conversation_id, created_at);
+
+            -- v12: decision chat (chat con i Decision Agent, separata)
+            CREATE TABLE IF NOT EXISTS decision_chat_conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_type TEXT NOT NULL DEFAULT 'standard'
+                    CHECK(agent_type IN ('standard','crypto')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS decision_chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+                content TEXT NOT NULL,
+                proposed_trade TEXT,
+                executed_trade_id INTEGER,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (conversation_id) REFERENCES decision_chat_conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_dec_chat_messages_conv
+                ON decision_chat_messages (conversation_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_dec_chat_conv_agent
+                ON decision_chat_conversations (agent_type, updated_at DESC);
         """)
         # Migrazione: ricreare agent_logs se ha il vecchio constraint
         # (SQLite non supporta ALTER TABLE per modificare CHECK constraint)
@@ -700,3 +723,128 @@ def trim_chat_conversations(keep_last: int = 10):
         for r in rows:
             conn.execute("DELETE FROM chat_messages WHERE conversation_id=?", (r["id"],))
             conn.execute("DELETE FROM chat_conversations WHERE id=?", (r["id"],))
+
+
+# ============================================================================
+# Decision Chat (chat con Decision Agent — Standard / Crypto, con esecuzione trade)
+# ============================================================================
+import json as _json
+
+
+def get_or_create_decision_chat_conversation(agent_type: str) -> int | None:
+    agent_type = (agent_type or "standard").lower()
+    if agent_type not in ("standard", "crypto"):
+        agent_type = "standard"
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM decision_chat_conversations WHERE agent_type=? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (agent_type,),
+        ).fetchone()
+        if row:
+            return row["id"]
+        cur = conn.execute(
+            "INSERT INTO decision_chat_conversations (agent_type) VALUES (?)",
+            (agent_type,),
+        )
+        return cur.lastrowid
+
+
+def insert_decision_chat_message(conversation_id: int, role: str, content: str,
+                                 proposed_trade: dict | None = None) -> int | None:
+    pt_json = _json.dumps(proposed_trade) if proposed_trade else None
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO decision_chat_messages "
+            "(conversation_id, role, content, proposed_trade) VALUES (?,?,?,?)",
+            (conversation_id, role, content, pt_json),
+        )
+        conn.execute(
+            "UPDATE decision_chat_conversations SET updated_at=datetime('now') WHERE id=?",
+            (conversation_id,),
+        )
+        return cur.lastrowid
+
+
+def get_decision_chat_messages(conversation_id: int, limit: int = 100) -> list:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, conversation_id, role, content, proposed_trade, "
+            "executed_trade_id, created_at "
+            "FROM decision_chat_messages WHERE conversation_id=? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (conversation_id, limit),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            pt = d.get("proposed_trade")
+            if pt:
+                try:
+                    d["proposed_trade"] = _json.loads(pt)
+                except Exception:
+                    d["proposed_trade"] = None
+            out.append(d)
+        return out
+
+
+def get_decision_chat_message(message_id: int) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM decision_chat_messages WHERE id=?",
+            (message_id,),
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        pt = d.get("proposed_trade")
+        if pt:
+            try:
+                d["proposed_trade"] = _json.loads(pt)
+            except Exception:
+                d["proposed_trade"] = None
+        return d
+
+
+def clear_decision_chat(agent_type: str) -> bool:
+    agent_type = (agent_type or "standard").lower()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM decision_chat_conversations WHERE agent_type=?",
+            (agent_type,),
+        ).fetchall()
+        for r in rows:
+            conn.execute("DELETE FROM decision_chat_messages WHERE conversation_id=?", (r["id"],))
+            conn.execute("DELETE FROM decision_chat_conversations WHERE id=?", (r["id"],))
+    return True
+
+
+def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5) -> list:
+    """Ultimi N messaggi UTENTE delle ultime `hours` ore per agent_type."""
+    agent_type = (agent_type or "standard").lower()
+    with get_db() as conn:
+        conv = conn.execute(
+            "SELECT id FROM decision_chat_conversations WHERE agent_type=? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (agent_type,),
+        ).fetchone()
+        if not conv:
+            return []
+        rows = conn.execute(
+            "SELECT content, created_at FROM decision_chat_messages "
+            "WHERE conversation_id=? AND role='user' "
+            "AND created_at >= datetime('now', ?) "
+            "ORDER BY created_at DESC LIMIT ?",
+            (conv["id"], f"-{hours} hours", limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_decision_chat_trade_executed(message_id: int, trade_id: int) -> bool:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE decision_chat_messages SET executed_trade_id=? WHERE id=?",
+            (trade_id, message_id),
+        )
+    return True
+

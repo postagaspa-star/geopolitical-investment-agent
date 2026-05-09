@@ -184,6 +184,30 @@ def _ensure_schema_migrations():
             ON chat_messages (conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_chat_conversations_updated
             ON chat_conversations (updated_at DESC);
+
+        -- v12: decision chat (chat con i Decision Agent, separata dal Coach analyst).
+        -- Supporta proposta + esecuzione trade con conferma utente.
+        CREATE TABLE IF NOT EXISTS decision_chat_conversations (
+            id BIGSERIAL PRIMARY KEY,
+            agent_type TEXT NOT NULL DEFAULT 'standard'
+                CHECK (agent_type IN ('standard','crypto')),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS decision_chat_messages (
+            id BIGSERIAL PRIMARY KEY,
+            conversation_id BIGINT NOT NULL
+                REFERENCES decision_chat_conversations(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+            content TEXT NOT NULL,
+            proposed_trade TEXT,           -- JSON string con {ticker,action,quantity,...}
+            executed_trade_id BIGINT,      -- FK a trades.id quando l'utente conferma l'esecuzione
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_dec_chat_messages_conv
+            ON decision_chat_messages (conversation_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_dec_chat_conv_agent
+            ON decision_chat_conversations (agent_type, updated_at DESC);
     """
 
     try:
@@ -1071,5 +1095,349 @@ def trim_chat_conversations(keep_last: int = 10):
         _chat_fallback_save_list(lst[:keep_last])
     except Exception as e:
         logger.warning("trim fallback fallita: %s", e)
+
+
+# ============================================================================
+# Decision Chat — chat con i Decision Agent (Standard + Crypto), con
+# capacita' di proporre ed eseguire trade. Tabelle SEPARATE da
+# chat_conversations/chat_messages (che restano per Coach Cards / analyst).
+#
+# Schema:
+#   decision_chat_conversations(id, agent_type TEXT, created_at, updated_at)
+#   decision_chat_messages(id, conversation_id, role, content, proposed_trade JSONB,
+#                          executed_trade_id BIGINT NULL, created_at)
+#
+# agent_type ∈ {"standard", "crypto"}. Una conversazione "attiva" per agent_type
+# (la piu' recente). Il frontend chiede "dammi la conversation per agent_type X"
+# e questo crea/recupera quella corrente.
+# ============================================================================
+
+# Flag globale fallback per le tabelle decision_chat_*
+_DECISION_CHAT_FALLBACK_MODE = False
+_DEC_CHAT_FALLBACK_KEY_LIST = "decision_chat_list_fallback"
+_DEC_CHAT_FALLBACK_KEY_CONV = "dec_chat_conv_{aid}"   # per agent_type
+_DEC_CHAT_FALLBACK_KEY_MSGS = "dec_chat_msgs_{cid}"
+
+
+def _dec_chat_should_fallback(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(s in msg for s in [
+        "does not exist", "no such table", "relation",
+        "schema cache", "could not find", "pgrst205",
+    ])
+
+
+def get_or_create_decision_chat_conversation(agent_type: str) -> int | None:
+    """
+    Ritorna l'ID della conversazione attiva per agent_type. Se non esiste,
+    ne crea una nuova. agent_type ∈ {"standard", "crypto"}.
+    """
+    global _DECISION_CHAT_FALLBACK_MODE
+    agent_type = (agent_type or "standard").lower()
+    if agent_type not in ("standard", "crypto"):
+        agent_type = "standard"
+
+    client = _get_client()
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            # Cerca la piu' recente per agent_type
+            result = (client.table("decision_chat_conversations")
+                      .select("id")
+                      .eq("agent_type", agent_type)
+                      .order("updated_at", desc=True)
+                      .limit(1)
+                      .execute())
+            if result.data and len(result.data) > 0:
+                return result.data[0]["id"]
+            # Non esiste: crea
+            payload = {"agent_type": agent_type}
+            result = client.table("decision_chat_conversations").insert(payload).execute()
+            if result.data and len(result.data) > 0:
+                return result.data[0].get("id")
+            return None
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                logger.warning("get_or_create_decision_chat: switch a fallback (%s)", e)
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("get_or_create_decision_chat fallita: %s", e)
+                return None
+
+    # Fallback su settings
+    try:
+        import time as _t
+        key = _DEC_CHAT_FALLBACK_KEY_CONV.format(aid=agent_type)
+        existing = get_setting(key, "")
+        if existing:
+            try:
+                return int(existing)
+            except Exception:
+                pass
+        new_id = int(_t.time() * 1000)
+        set_setting(key, str(new_id))
+        return new_id
+    except Exception as e:
+        logger.warning("get_or_create_decision_chat fallback fallita: %s", e)
+        return None
+
+
+def insert_decision_chat_message(
+    conversation_id: int, role: str, content: str,
+    proposed_trade: dict | None = None,
+) -> int | None:
+    """
+    Aggiunge un messaggio. proposed_trade e' un dict opzionale con i campi
+    {ticker, action, quantity, reasoning, confidence}. Se la risposta
+    dell'agente non propone un trade, lascia None.
+    """
+    global _DECISION_CHAT_FALLBACK_MODE
+    client = _get_client()
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            payload = {
+                "conversation_id": conversation_id,
+                "role": role,
+                "content": content,
+            }
+            if proposed_trade:
+                payload["proposed_trade"] = json.dumps(proposed_trade)
+            result = client.table("decision_chat_messages").insert(payload).execute()
+            client.table("decision_chat_conversations").update({
+                "updated_at": _now_iso(),
+            }).eq("id", conversation_id).execute()
+            if result.data and len(result.data) > 0:
+                return result.data[0].get("id")
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                logger.warning("insert_decision_chat_message: switch a fallback")
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("insert_decision_chat_message fallita: %s", e)
+                return None
+
+    # Fallback su settings
+    try:
+        import time as _t
+        msg_id = int(_t.time() * 1000)
+        key = _DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=conversation_id)
+        msgs_str = get_setting(key, "[]")
+        try:
+            msgs = json.loads(msgs_str) if msgs_str else []
+        except Exception:
+            msgs = []
+        msgs.append({
+            "id": msg_id, "role": role, "content": content,
+            "proposed_trade": proposed_trade,
+            "created_at": _now_iso(),
+        })
+        # Cap a 200 messaggi per conversazione
+        set_setting(key, json.dumps(msgs[-200:]))
+        return msg_id
+    except Exception as e:
+        logger.warning("insert_decision_chat_message fallback fallita: %s", e)
+        return None
+
+
+def get_decision_chat_messages(conversation_id: int, limit: int = 100) -> list:
+    """Ritorna i messaggi di una conversazione, ordine cronologico."""
+    global _DECISION_CHAT_FALLBACK_MODE
+    client = _get_client()
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            result = (client.table("decision_chat_messages")
+                      .select("*")
+                      .eq("conversation_id", conversation_id)
+                      .order("created_at", desc=False)
+                      .limit(limit)
+                      .execute())
+            rows = result.data or []
+            # Decode proposed_trade JSON string → dict
+            for r in rows:
+                pt = r.get("proposed_trade")
+                if pt and isinstance(pt, str):
+                    try:
+                        r["proposed_trade"] = json.loads(pt)
+                    except Exception:
+                        r["proposed_trade"] = None
+            return rows
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("get_decision_chat_messages fallita: %s", e)
+                return []
+
+    # Fallback
+    try:
+        key = _DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=conversation_id)
+        msgs_str = get_setting(key, "[]")
+        msgs = json.loads(msgs_str) if msgs_str else []
+        return msgs[-limit:]
+    except Exception:
+        return []
+
+
+def clear_decision_chat(agent_type: str) -> bool:
+    """Cancella la conversazione attiva per agent_type (e tutti i messaggi)."""
+    global _DECISION_CHAT_FALLBACK_MODE
+    agent_type = (agent_type or "standard").lower()
+    client = _get_client()
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            # Trova conv attiva
+            r = (client.table("decision_chat_conversations")
+                 .select("id")
+                 .eq("agent_type", agent_type)
+                 .execute())
+            for row in (r.data or []):
+                cid = row["id"]
+                client.table("decision_chat_messages").delete().eq("conversation_id", cid).execute()
+                client.table("decision_chat_conversations").delete().eq("id", cid).execute()
+            return True
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("clear_decision_chat fallita: %s", e)
+                return False
+
+    # Fallback
+    try:
+        key_conv = _DEC_CHAT_FALLBACK_KEY_CONV.format(aid=agent_type)
+        existing = get_setting(key_conv, "")
+        if existing:
+            try:
+                cid = int(existing)
+                set_setting(_DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=cid), "[]")
+            except Exception:
+                pass
+        set_setting(key_conv, "")
+        return True
+    except Exception:
+        return False
+
+
+def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5) -> list:
+    """
+    Ritorna gli ultimi N messaggi UTENTE (role='user') di una chat decision
+    per un certo agent_type, dalle ultime `hours` ore. Usato dal Decision
+    Agent autonomo per leggere le preferenze recenti dell'utente.
+
+    Returns: lista di dict con keys {content, created_at}.
+    """
+    global _DECISION_CHAT_FALLBACK_MODE
+    agent_type = (agent_type or "standard").lower()
+    client = _get_client()
+
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            # Trova la conversazione attiva
+            r = (client.table("decision_chat_conversations")
+                 .select("id")
+                 .eq("agent_type", agent_type)
+                 .order("updated_at", desc=True)
+                 .limit(1)
+                 .execute())
+            if not r.data:
+                return []
+            cid = r.data[0]["id"]
+            # Calcola cutoff timestamp
+            from datetime import datetime, timezone, timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            r2 = (client.table("decision_chat_messages")
+                  .select("content, created_at")
+                  .eq("conversation_id", cid)
+                  .eq("role", "user")
+                  .gte("created_at", cutoff)
+                  .order("created_at", desc=True)
+                  .limit(limit)
+                  .execute())
+            return r2.data or []
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("get_recent_user_directives fallita: %s", e)
+                return []
+
+    # Fallback
+    try:
+        from datetime import datetime, timezone, timedelta
+        key_conv = _DEC_CHAT_FALLBACK_KEY_CONV.format(aid=agent_type)
+        existing = get_setting(key_conv, "")
+        if not existing:
+            return []
+        cid = int(existing)
+        msgs_str = get_setting(_DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=cid), "[]")
+        msgs = json.loads(msgs_str) if msgs_str else []
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        user_msgs = [m for m in msgs if m.get("role") == "user"]
+        # Filter by time
+        filtered = []
+        for m in user_msgs:
+            try:
+                ts = datetime.fromisoformat(str(m.get("created_at", "")).replace("Z", "+00:00"))
+                if ts >= cutoff:
+                    filtered.append(m)
+            except Exception:
+                continue
+        return filtered[-limit:]
+    except Exception:
+        return []
+
+
+def mark_decision_chat_trade_executed(message_id: int, trade_id: int) -> bool:
+    """
+    Marca un messaggio chat come "trade eseguito" salvando il trade_id reale
+    nel campo executed_trade_id. Cosi' il frontend puo' mostrare
+    "✓ Eseguito" sulla card invece del bottone "Esegui".
+    """
+    global _DECISION_CHAT_FALLBACK_MODE
+    client = _get_client()
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            client.table("decision_chat_messages").update({
+                "executed_trade_id": trade_id,
+            }).eq("id", message_id).execute()
+            return True
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("mark_decision_chat_trade_executed fallita: %s", e)
+                return False
+    # Fallback: noop (i messaggi fallback non hanno executed_trade_id tracciato)
+    return True
+
+
+def get_decision_chat_message(message_id: int) -> dict | None:
+    """Ritorna un singolo messaggio per ID (usato da execute-trade endpoint)."""
+    global _DECISION_CHAT_FALLBACK_MODE
+    client = _get_client()
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            r = (client.table("decision_chat_messages")
+                 .select("*")
+                 .eq("id", message_id)
+                 .limit(1)
+                 .execute())
+            if r.data:
+                row = r.data[0]
+                pt = row.get("proposed_trade")
+                if pt and isinstance(pt, str):
+                    try:
+                        row["proposed_trade"] = json.loads(pt)
+                    except Exception:
+                        row["proposed_trade"] = None
+                return row
+            return None
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("get_decision_chat_message fallita: %s", e)
+                return None
+    # Fallback: scan settings (slow but rare)
+    return None
 
 

@@ -1649,6 +1649,35 @@ def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state,
     """
     parts = []
 
+    # === DIRETTIVE UTENTE RECENTI (chat decision) ===
+    # Iniettiamo gli ultimi messaggi dell'utente dalla chat-decision standard
+    # come "preferenze morbide" che il Decision Agent rispetta a meno che
+    # i segnali tecnici/fondamentali siano forti in senso contrario.
+    try:
+        import database as _db
+        if hasattr(_db, "get_recent_user_directives"):
+            directives = _db.get_recent_user_directives("standard", hours=48, limit=5)
+            if directives:
+                d_lines = ["=" * 60]
+                d_lines.append("📋  DIRETTIVE UTENTE RECENTI (da chat, ultime 48h)")
+                d_lines.append("=" * 60)
+                d_lines.append(
+                    "L'utente ha espresso queste preferenze nella chat decision standard. "
+                    "Trattale come SOFT GUARDRAILS: rispettale a meno che i segnali "
+                    "tecnici/fondamentali siano fortemente contrari. In quel caso, cita "
+                    "la direttiva e spiega perche' la contraddici."
+                )
+                d_lines.append("")
+                for d in directives:
+                    content = (d.get("content") or "").strip()
+                    when = str(d.get("created_at", ""))[:16]
+                    if content:
+                        d_lines.append(f"  • [{when}] {content[:300]}")
+                d_lines.append("")
+                parts.append("\n".join(d_lines))
+    except Exception as _e:
+        logger.debug("Non riesco a caricare direttive utente: %s", _e)
+
     # === WATCHDOG TRIGGER (in cima, alta priorita') ===
     if focus_tickers or watchdog_reason:
         wd_lines = ["=" * 60]

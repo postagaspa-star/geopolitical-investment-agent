@@ -869,6 +869,196 @@ async def chat_send(payload: ChatSendPayload):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# CHAT DECISION — chat conversazionale con i Decision Agent (Standard / Crypto)
+# Diverso dal /api/chat/* esistente (Coach Cards / analyst read-only): qui
+# l'agente puo' PROPORRE trade e l'utente li conferma per esecuzione.
+# ═══════════════════════════════════════════════════════════════════════
+
+class ChatDecisionSendPayload(BaseModel):
+    agent_type: str  # "standard" | "crypto"
+    message: str
+
+
+class ChatDecisionExecutePayload(BaseModel):
+    message_id: int
+
+
+@app.post("/api/chat-decision/send")
+async def chat_decision_send(payload: ChatDecisionSendPayload):
+    """
+    Invia un messaggio al Decision Agent (Standard o Crypto). Ritorna la
+    risposta + un eventuale proposed_trade che l'utente puo' confermare.
+    """
+    try:
+        from agents import chat_decision
+
+        agent_type = (payload.agent_type or "standard").lower()
+        if agent_type not in ("standard", "crypto"):
+            return JSONResponse(status_code=400, content={"error": "agent_type non valido"})
+
+        message = (payload.message or "").strip()
+        if not message:
+            return JSONResponse(status_code=400, content={"error": "messaggio vuoto"})
+
+        result = await chat_decision.chat_with_decision_agent(agent_type, message)
+        return result
+    except Exception as e:
+        logger.error("chat_decision_send: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__},
+        )
+
+
+@app.get("/api/chat-decision/history/{agent_type}")
+async def chat_decision_history(agent_type: str, limit: int = 100):
+    """Ritorna i messaggi della conversazione attiva per agent_type."""
+    try:
+        agent_type = (agent_type or "standard").lower()
+        if agent_type not in ("standard", "crypto"):
+            return JSONResponse(status_code=400, content={"error": "agent_type non valido"})
+
+        conv_id = database.get_or_create_decision_chat_conversation(agent_type)
+        if not conv_id:
+            return {"conversation_id": None, "messages": []}
+
+        messages = database.get_decision_chat_messages(conv_id, limit=limit)
+        return {"conversation_id": conv_id, "agent_type": agent_type, "messages": messages}
+    except Exception as e:
+        logger.error("chat_decision_history: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/api/chat-decision/clear/{agent_type}")
+async def chat_decision_clear(agent_type: str):
+    """Cancella la conversazione attiva per agent_type (cascade sui msg)."""
+    try:
+        agent_type = (agent_type or "standard").lower()
+        if agent_type not in ("standard", "crypto"):
+            return JSONResponse(status_code=400, content={"error": "agent_type non valido"})
+
+        ok = database.clear_decision_chat(agent_type)
+        return {"cleared": ok, "agent_type": agent_type}
+    except Exception as e:
+        logger.error("chat_decision_clear: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/chat-decision/execute-trade")
+async def chat_decision_execute_trade(payload: ChatDecisionExecutePayload):
+    """
+    Esegue il proposed_trade contenuto in un messaggio chat. Richiede
+    conferma esplicita dell'utente (chiamata triggerata dal click sul
+    bottone "Esegui" nella card del frontend).
+
+    Recupera il messaggio dal DB, valida il trade, esegue via portfolio.execute_*
+    e marca il messaggio con executed_trade_id.
+    """
+    try:
+        msg = database.get_decision_chat_message(payload.message_id)
+        if not msg:
+            return JSONResponse(status_code=404, content={"error": "messaggio non trovato"})
+
+        if msg.get("executed_trade_id"):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "trade gia' eseguito",
+                         "trade_id": msg.get("executed_trade_id")},
+            )
+
+        proposed = msg.get("proposed_trade")
+        if not proposed or not isinstance(proposed, dict):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "il messaggio non contiene un proposed_trade valido"},
+            )
+
+        ticker = (proposed.get("ticker") or "").upper().strip()
+        action = (proposed.get("action") or "").upper().strip()
+        try:
+            quantity = float(proposed.get("quantity", 0))
+        except (TypeError, ValueError):
+            quantity = 0
+        reasoning = proposed.get("reasoning") or "Trade proposto via chat decision agent"
+
+        if not ticker or action not in ("BUY", "SELL") or quantity <= 0:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "proposed_trade malformato",
+                         "details": {"ticker": ticker, "action": action, "quantity": quantity}},
+            )
+
+        # Recupera prezzo corrente: ultima candela daily (fetch_market_data
+        # ha cache 5 min in-memory, quindi il fetch e' praticamente gratis).
+        current_price = None
+        try:
+            import data_fetchers as _df
+            md = _df.fetch_market_data(ticker, period_days=2)
+            if md and md.get("data"):
+                current_price = md["data"][-1].get("close")
+        except Exception as e:
+            logger.warning("fetch price for chat trade %s: %s", ticker, e)
+
+        if not current_price or current_price <= 0:
+            return JSONResponse(
+                status_code=502,
+                content={"error": f"prezzo non disponibile per {ticker}"},
+            )
+
+        # Esegui il trade
+        import portfolio as _portfolio
+        geo_reasoning = f"[CHAT-USER-CONFIRMED] {reasoning}"
+        tech_reasoning = "(eseguito via chat decision agent)"
+
+        try:
+            if action == "BUY":
+                result = _portfolio.execute_buy(
+                    ticker, quantity, current_price,
+                    geo_reasoning, tech_reasoning, 80,
+                )
+            else:
+                result = _portfolio.execute_sell(
+                    ticker, quantity, current_price,
+                    geo_reasoning, tech_reasoning, 80,
+                )
+        except Exception as e:
+            logger.error("chat_decision execute_trade failed: %s", e, exc_info=True)
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"esecuzione fallita: {e}"},
+            )
+
+        if not result or not result.get("success"):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "trade non eseguito",
+                         "reason": (result or {}).get("reason", "unknown"),
+                         "details": result if isinstance(result, dict) else {}},
+            )
+
+        trade_id = result.get("trade_id") or 0
+        if trade_id:
+            database.mark_decision_chat_trade_executed(payload.message_id, trade_id)
+
+        return {
+            "executed": True,
+            "trade_id": trade_id,
+            "ticker": ticker,
+            "action": action,
+            "quantity": quantity,
+            "price": current_price,
+            "result": result,
+        }
+
+    except Exception as e:
+        logger.error("chat_decision_execute_trade top-level: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__},
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # SIMULATOR — endpoint
 # ═══════════════════════════════════════════════════════════════════════
 
