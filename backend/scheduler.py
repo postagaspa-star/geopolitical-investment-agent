@@ -259,32 +259,31 @@ _last_scout_run_ts: float = 0.0
 async def _scout_hourly_job():
     """
     Job Scout — ogni 20 minuti durante la settimana lavorativa (lun-ven),
-    ridotto a ogni 90 minuti su weekend e festivi.
+    ridotto a ogni 60 minuti (ogni ora) su weekend e festivi.
 
-    Razionale: ora che il bot opera anche su crypto 24/7 (Decision Crypto + R1),
-    serve intelligence anche nei weekend. Ma molte fonti (NewsAPI, GDELT su
-    geopolitica, Congressional trades) sono semi-quiescenti nei weekend → girare
-    ogni 20 min sprecherebbe token DeepSeek-V3. Cadenza 90min e' un buon
-    compromesso: 16 run/giorno (vs 72 weekday) = -78% di chiamate.
+    Razionale: il bot opera anche su crypto 24/7 (Decision Crypto + R1) e
+    serve intelligence costante anche nei weekend per le crypto. Cadenza 60min
+    nei weekend = 24 run/giorno (vs 72 weekday) = -67% di chiamate. Buon
+    compromesso tra costo token e copertura news.
 
     Implementazione: l'APScheduler fa partire il job ogni 20 min, ma se siamo
-    nel weekend/festivo e l'ultimo run e' < 90 min fa, esce subito (no-op).
+    nel weekend/festivo e l'ultimo run e' < 60 min fa, esce subito (no-op).
     """
     global current_mode, _last_scout_run_ts
 
     mode = get_current_mode()
     current_mode = mode
 
-    # Gate weekend/holiday: cadenza 90 min invece di 20 min
+    # Gate weekend/holiday: cadenza 60 min invece di 20 min
     now_ts = time.time()
     is_off_market = is_weekend() or is_market_holiday()
     if is_off_market:
         gap_seconds = now_ts - _last_scout_run_ts
-        if gap_seconds < 5400:  # 90 min in secondi
-            mins_remaining = (5400 - gap_seconds) / 60.0
+        if gap_seconds < 3600:  # 60 min in secondi
+            mins_remaining = (3600 - gap_seconds) / 60.0
             logger.info(
                 "Scout skip (weekend/holiday): ultimo run %.0f min fa, "
-                "cadenza 90min → ~%.0f min al prossimo run",
+                "cadenza 60min → ~%.0f min al prossimo run",
                 gap_seconds / 60.0, mins_remaining,
             )
             return
@@ -298,7 +297,7 @@ async def _scout_hourly_job():
         result = await run_scout_pipeline(run_id=run_id)
         logger.info(
             "Scout completato (mode=%s): %d micro-schede",
-            "weekend/holiday-90min" if is_off_market else "weekday-20min",
+            "weekend/holiday-60min" if is_off_market else "weekday-20min",
             result.get("cards", 0),
         )
 
@@ -544,7 +543,7 @@ def start_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # ── Scout: ogni 20 min lun-ven, ogni 90 min su weekend/festivi ──
+    # ── Scout: ogni 20 min lun-ven, ogni 60 min su weekend/festivi ──
     # APScheduler fa partire il job ogni 20 min; il job stesso ha un gate
     # interno (vedi _scout_hourly_job) che salta i run extra nei weekend.
     _scheduler.add_job(
@@ -552,7 +551,7 @@ def start_scheduler() -> AsyncIOScheduler:
         trigger="interval",
         minutes=20,
         id="scout_hourly_job",
-        name="Scout (20min weekday, 90min weekend/holiday)",
+        name="Scout (20min weekday, 60min weekend/holiday)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
