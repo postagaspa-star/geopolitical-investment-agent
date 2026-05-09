@@ -17,6 +17,7 @@ Schedule: ogni 1 ora, 24/7, indipendente da market hours.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -40,18 +41,30 @@ DEFAULT_CRYPTO_UNIVERSE = [
 
 CRYPTO_TECHNICAL_PROMPT_DEFAULT = """Sei un Technical Analyst ASSERTIVO specializzato ESCLUSIVAMENTE in crypto-asset top-cap (BTC, ETH, SOL, ecc.).
 
-Ricevi: indicatori pre-calcolati + signals_summary aggregato (bullish/bearish counts).
+Ricevi DATI ARRICCHITI per ogni ticker:
+- indicatori base (RSI, MACD, ATR, Bollinger) + signals_summary aggregato
+- candlestick_patterns: pattern rilevati nelle ultime 5 candele (hammer, engulfing, doji, ecc.)
+- fibonacci: livelli 0.236/0.382/0.5/0.618/0.786 + zona corrente + nearest S/R
+- volume_profile: POC (point of control), HVN (zone S/R forti), LVN (transit)
+- market_structure: HH/HL trend strutturale + BoS / CHoCH (rotture chiave)
+- multitimeframe: confluence 1h/4h/1d (trend allineato → segnale forte)
+- derivatives: funding rate + open interest Binance (sentiment leverage)
 
 Analisi richiesta per ogni ticker:
-1. Trend strutturale 4H/1D: bullish / bearish / range-bound (USA il campo trend pre-calcolato)
-2. Livelli chiave: support / resistance / next breakout target
-3. Momentum indicators: RSI 14, MACD, volume 24h vs 7d avg
-4. Anomalie crypto-specific:
+1. Trend strutturale: USA market_structure.structure (UPTREND/DOWNTREND/CONTRACTING/...)
+2. Livelli chiave: COMBINA fibonacci.nearest_support/resistance + volume_profile.hvn + market_structure swing levels
+3. Momentum: RSI 14, MACD, volume 24h
+4. CONFLUENCE: pattern candlestick + livello Fibonacci + HVN nelle vicinanze = SETUP AD ALTA CONFIDENCE
+5. MULTI-TIMEFRAME: se confluence == BULLISH (2/3 timeframe) e segnale 1h è bullish → BUY conf alto
+6. SENTIMENT DERIVATIVES:
+   - funding_signal == bullish_overcrowded → cautela su BUY (rischio long squeeze)
+   - funding_signal == bearish_overcrowded → favorire BUY (rischio short squeeze al rialzo)
+7. Anomalie crypto:
    - Volume spike >2× rispetto alla media 7d
    - Movimento >3% in 1h o >7% in 24h
-   - Test di livelli psicologici (BTC 100k, ETH 5k, ecc.)
-5. Bias retail vs institutional (se Reddit/X buffer fornisce indizi)
-6. Risk note: stop-loss tecnico suggerito (in % vs current price)
+   - Test di livelli psicologici (BTC 100k, ETH 5k)
+   - BoS/CHoCH appena formato (rottura strutturale)
+8. Risk note: stop-loss usando ATR + livello Fibonacci immediatamente sotto/sopra
 
 ═══════════════════════════════════════════════════════════════════════
 DECISION POLICY — NO CONSERVATIVE BIAS
@@ -85,13 +98,18 @@ OUTPUT JSON (nessun preambolo, solo JSON):
     {
       "ticker": "BTC-USD",
       "trend": "BULLISH|BEARISH|NEUTRAL",
+      "structure": "UPTREND|DOWNTREND|CONTRACTING|EXPANDING|MIXED",
       "rsi_14": 58.3,
       "support": 95000,
       "resistance": 102000,
+      "fib_zone": "between_0.618_and_0.786",
+      "candlestick_setup": "bullish_hammer at 0.618 fib + HVN nearby",
+      "mtf_confluence": "BULLISH|BEARISH|MIXED",
+      "funding_bias": "bullish_overcrowded|bearish_overcrowded|neutral",
       "stop_loss_pct": 3.5,
       "signal": "BUY|SELL|HOLD",
       "confidence": 0-100,
-      "reasoning": "Conta segnali (X bullish vs Y bearish) + driver chiave + livelli."
+      "reasoning": "Confluence: <pattern> + <fib level> + <volume zone> + <mtf> + <funding>. Conta segnali (X bullish vs Y bearish)."
     }
   ],
   "summary": "Sintesi 1-2 frasi del setup crypto complessivo."
@@ -114,27 +132,69 @@ def _get_crypto_technical_prompt() -> str:
     return CRYPTO_TECHNICAL_PROMPT_DEFAULT
 
 
+def _build_df_from_market_data(market_data: dict):
+    """Converte l'output di data_fetchers.fetch_market_data in DataFrame OHLCV
+    nel formato richiesto da technical_advanced (colonne capitalized)."""
+    import pandas as pd
+    if not market_data or not market_data.get("data"):
+        return None
+    df = pd.DataFrame(market_data["data"])
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df.set_index("date", inplace=True)
+    df.columns = [c.capitalize() for c in df.columns]
+    # Verifica che tutte le colonne richieste siano presenti
+    required = {"Open", "High", "Low", "Close", "Volume"}
+    if not required.issubset(set(df.columns)):
+        return None
+    return df
+
+
 async def _fetch_crypto_indicators(ticker: str) -> dict:
     """
     Recupera indicatori tecnici crypto. Riusa la stessa logica di technical.py
-    (_fetch_ticker_indicators) che è già testata e include yfinance + fallback
-    ClawStreet + cache price_quotes.
+    (_fetch_ticker_indicators) + arricchisce con candlestick patterns,
+    Fibonacci, volume profile, market structure, multi-timeframe e derivatives
+    Binance.
 
     Periodo 90 giorni (default del technical normale) per consistency.
     """
     try:
         from agents.technical import _fetch_ticker_indicators
         data = await _fetch_ticker_indicators(ticker, period_days=90)
-        if data and isinstance(data, dict):
-            # Considera success solo se c'è un current_price valido
-            if data.get("current_price"):
-                return data
+        if not (data and isinstance(data, dict)):
+            logger.warning("[TECH-CRYPTO] %s _fetch_ticker_indicators returned None/invalid", ticker)
+            return {"ticker": ticker, "error": "fetch returned None"}
+        if not data.get("current_price"):
             err = data.get("error", "no current_price")
             logger.warning("[TECH-CRYPTO] %s no data: %s (source=%s)",
                            ticker, err, data.get("source", "?"))
             return {"ticker": ticker, "error": err, "source": data.get("source", "?")}
-        logger.warning("[TECH-CRYPTO] %s _fetch_ticker_indicators returned None/invalid", ticker)
-        return {"ticker": ticker, "error": "fetch returned None"}
+
+        # ─── Advanced enrichment (candlestick + fib + volume + MTF + derivatives) ──
+        try:
+            import data_fetchers as _df_mod
+            from agents.technical_advanced import enrich_ticker_advanced
+            # Usa la cache: chiamata successiva è in-memory hit (5 min TTL)
+            md = await asyncio.get_running_loop().run_in_executor(
+                None, _df_mod.fetch_market_data, ticker, 90
+            )
+            df = _build_df_from_market_data(md)
+            if df is not None and len(df) >= 20:
+                advanced = await enrich_ticker_advanced(
+                    ticker, df,
+                    include_multitf=True,
+                    include_derivatives=True,
+                )
+                data["advanced"] = advanced
+            else:
+                logger.debug("[TECH-CRYPTO] %s no DF for advanced enrichment", ticker)
+                data["advanced"] = {"error": "df not available"}
+        except Exception as e:
+            logger.warning("[TECH-CRYPTO] %s advanced enrichment failed: %s", ticker, e)
+            data["advanced"] = {"error": str(e)[:120]}
+
+        return data
     except Exception as exc:
         logger.error("[TECH-CRYPTO] %s exception: %s", ticker, exc, exc_info=True)
         return {"ticker": ticker, "error": str(exc)[:200]}
@@ -337,7 +397,10 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
         context = crypto_docs_blob + "\n\n" + "=" * 60 + "\n\n" + context
 
     try:
-        response_text, engine = await _call_deepseek(context[:18000])
+        # Limite alzato a 32K perche' i dati advanced (candle/fib/MTF/deriv)
+        # aggiungono ~2K char per ticker. DeepSeek-V3 ha window 64K input quindi
+        # 32K ci sta abbondantemente.
+        response_text, engine = await _call_deepseek(context[:32000])
     except Exception as exc:
         logger.error("[%s][TECH-CRYPTO] DeepSeek-V3 fallito: %s", run_id, exc)
         try:
