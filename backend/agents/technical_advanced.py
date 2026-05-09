@@ -700,24 +700,49 @@ def _compact_indicators(df) -> dict:
         return {"error": f"compact indicators failed: {e}"}
 
 
-async def fetch_multitimeframe_summary(ticker: str) -> dict:
+# Mapping interval → (yfinance period suggerito, abilitato per resample)
+# yfinance limits:
+#   - 1m: max 7d, 5m: max 60d, 15m: max 60d, 30m: max 60d, 1h: max 730d
+#   - 1d: unlimited, 1wk: unlimited, 1mo: unlimited
+# Per i resample (es. 4h da 1h) usiamo direttamente 1h come base.
+_TF_FETCH_PLAN = {
+    # interval_label : (yfinance_period, yfinance_interval, resample_rule_or_None)
+    "15m": ("60d", "15m", None),
+    "30m": ("60d", "30m", None),
+    "1h":  ("30d", "1h",  None),
+    "4h":  ("60d", "1h",  "4h"),     # derivato da 1h via resample
+    "1d":  ("180d", "1d", None),
+    "1wk": ("2y",  "1wk", None),
+    "1mo": ("5y",  "1mo", None),
+}
+
+DEFAULT_INTERVALS_CRYPTO = ["1h", "4h", "1d"]
+DEFAULT_INTERVALS_EQUITY = ["15m", "1h", "1d", "1wk"]
+
+
+async def fetch_multitimeframe_summary(
+    ticker: str,
+    intervals: list[str] | None = None,
+) -> dict:
     """
-    Recupera 3 timeframe (1h / 4h / 1d) per il ticker e ritorna un summary
-    compatto per ognuno. Per crypto yfinance supporta interval='1h' e '1d';
-    il 4h viene risampled da 1h.
+    Recupera N timeframe per il ticker e ritorna un summary compatto per ognuno.
 
     Args:
-        ticker: yfinance ticker (es. "BTC-USD")
+        ticker: yfinance ticker (es. "BTC-USD" o "AAPL")
+        intervals: lista timeframe (es. ["15m", "1h", "1d", "1wk"]).
+                   Default crypto: 1h/4h/1d. Default equity: 15m/1h/1d/1wk.
 
     Returns:
         {
-          "1h": {"current_price": ..., "rsi_14": ..., "trend": ...},
-          "4h": {...},
-          "1d": {...},
-          "confluence": "BULLISH|BEARISH|MIXED",  # 2/3 timeframe d'accordo
+          "<tf>": {"current_price": ..., "rsi_14": ..., "trend": ...},
+          ...
+          "confluence": "BULLISH|BEARISH|MIXED",  # maggioranza dei timeframe
         }
     """
     import pandas as pd
+
+    if intervals is None:
+        intervals = DEFAULT_INTERVALS_CRYPTO
 
     def _sync_yf(t: str, period: str, interval: str):
         try:
@@ -729,7 +754,6 @@ async def fetch_multitimeframe_summary(ticker: str) -> dict:
             )
             if data is None or len(data) == 0:
                 return None
-            # Drop multi-level columns se presenti
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = [c[0] for c in data.columns]
             return data
@@ -738,49 +762,64 @@ async def fetch_multitimeframe_summary(ticker: str) -> dict:
             return None
 
     loop = asyncio.get_running_loop()
-    # 1h (max 60d), 1d (90d). 4h derivato da 1h.
-    try:
-        df_1h = await loop.run_in_executor(None, _sync_yf, ticker, "30d", "1h")
-        df_1d = await loop.run_in_executor(None, _sync_yf, ticker, "90d", "1d")
-    except Exception as e:
-        return {"error": f"fetch failed: {e}"}
-
     out: dict[str, Any] = {}
 
-    if df_1h is not None and len(df_1h) > 20:
-        out["1h"] = _compact_indicators(df_1h)
-        # Resample a 4h
+    # Cache base intervals fetched (per riusare la stessa fetch per resample)
+    fetched_cache: dict[str, Any] = {}
+
+    async def _get_df(period: str, yf_interval: str):
+        key = f"{period}/{yf_interval}"
+        if key in fetched_cache:
+            return fetched_cache[key]
+        df = await loop.run_in_executor(None, _sync_yf, ticker, period, yf_interval)
+        fetched_cache[key] = df
+        return df
+
+    for tf_label in intervals:
+        plan = _TF_FETCH_PLAN.get(tf_label)
+        if not plan:
+            logger.debug("[TECH-ADV] interval %s sconosciuto, skip", tf_label)
+            continue
+        period, yf_interval, resample_rule = plan
         try:
-            df_4h = df_1h.resample("4h").agg({
-                "Open": "first", "High": "max", "Low": "min",
-                "Close": "last", "Volume": "sum",
-            }).dropna()
-            if len(df_4h) > 20:
-                out["4h"] = _compact_indicators(df_4h)
+            base_df = await _get_df(period, yf_interval)
+            if base_df is None or len(base_df) < 20:
+                continue
+
+            if resample_rule:
+                df_tf = base_df.resample(resample_rule).agg({
+                    "Open": "first", "High": "max", "Low": "min",
+                    "Close": "last", "Volume": "sum",
+                }).dropna()
+            else:
+                df_tf = base_df
+
+            if len(df_tf) >= 20:
+                out[tf_label] = _compact_indicators(df_tf)
         except Exception as e:
-            logger.debug("[TECH-ADV] 4h resample failed: %s", e)
+            logger.debug("[TECH-ADV] %s %s failed: %s", ticker, tf_label, e)
+            continue
 
-    if df_1d is not None and len(df_1d) > 20:
-        out["1d"] = _compact_indicators(df_1d)
-
-    # Confluence: maggioranza dei trend
+    # Confluence: maggioranza dei trend tra i timeframe ottenuti
     trends = []
-    for tf in ("1h", "4h", "1d"):
-        t = (out.get(tf) or {}).get("trend")
+    for tf_label in intervals:
+        t = (out.get(tf_label) or {}).get("trend")
         if t in ("BULLISH", "BEARISH", "MIXED"):
             trends.append(t)
     if trends:
         bull = trends.count("BULLISH")
         bear = trends.count("BEARISH")
-        if bull >= 2:
+        total = len(trends)
+        # Confluence = direzione con maggioranza assoluta (>50%)
+        if bull > total / 2:
             out["confluence"] = "BULLISH"
-        elif bear >= 2:
+        elif bear > total / 2:
             out["confluence"] = "BEARISH"
         else:
             out["confluence"] = "MIXED"
         out["confluence_note"] = (
-            f"{bull} bullish / {bear} bearish / {len(trends)-bull-bear} mixed "
-            f"sui {len(trends)} timeframe analizzati"
+            f"{bull} bullish / {bear} bearish / {total-bull-bear} mixed "
+            f"sui {total} timeframe analizzati"
         )
 
     return _scrub(out)
@@ -788,17 +827,25 @@ async def fetch_multitimeframe_summary(ticker: str) -> dict:
 
 # ─── 7. Orchestrator: enrich_ticker(ticker, df) ───────────────────────────────
 
-async def enrich_ticker_advanced(ticker: str, df, include_multitf: bool = True,
-                                 include_derivatives: bool = True) -> dict:
+async def enrich_ticker_advanced(
+    ticker: str,
+    df,
+    include_multitf: bool = True,
+    include_derivatives: bool = True,
+    intervals: list[str] | None = None,
+) -> dict:
     """
     Pipeline completa di arricchimento per un ticker. Chiama tutti i moduli
     e ritorna un blocco unico pronto per essere allegato al ticker_data.
 
     Args:
-        ticker: simbolo (es. "BTC-USD")
+        ticker: simbolo (es. "BTC-USD" o "AAPL")
         df: DataFrame OHLCV principale (da _fetch_ticker_indicators, daily)
-        include_multitf: scarica anche 1h/4h da yfinance (costa ~2s)
-        include_derivatives: chiama Binance funding/OI (costa ~1s, solo crypto)
+        include_multitf: scarica timeframe aggiuntivi da yfinance
+        include_derivatives: chiama Binance funding/OI (solo crypto)
+        intervals: timeframes per multi-TF analysis. Se None usa default
+                   (crypto: 1h/4h/1d, equity passa esplicitamente
+                   ["15m","1h","1d","1wk"])
 
     Returns:
         dict con keys: candlestick_patterns, fibonacci, volume_profile,
@@ -833,7 +880,9 @@ async def enrich_ticker_advanced(ticker: str, df, include_multitf: bool = True,
     # 5. Multi-timeframe (async — yfinance)
     if include_multitf:
         try:
-            out["multitimeframe"] = await fetch_multitimeframe_summary(ticker)
+            out["multitimeframe"] = await fetch_multitimeframe_summary(
+                ticker, intervals=intervals,
+            )
         except Exception as e:
             out["multitimeframe"] = {"error": str(e)[:80]}
 

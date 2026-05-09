@@ -25,6 +25,13 @@ TECH_PROMPT_DEFAULT = """You are an ASSERTIVE quantitative technical analyst. Yo
 raw OHLCV data, pre-calculated indicators, AND a pre-interpreted "signals_summary"
 that already classifies each indicator as bullish/bearish/neutral.
 
+For each ticker you ALSO receive an "advanced" block with:
+- candlestick_patterns: pattern detected in last 5 candles (hammer, engulfing, doji, ...)
+- fibonacci: levels 0.236 → 1.618 + current_zone + nearest_support/resistance
+- volume_profile: POC (point of control), HVN (strong S/R nodes), LVN (transit)
+- market_structure: UPTREND/DOWNTREND/CONTRACTING/EXPANDING + BoS / CHoCH detection
+- multitimeframe: 15m / 1h / 1d / 1wk summary + confluence (BULLISH/BEARISH/MIXED)
+
 ═══════════════════════════════════════════════════════════════════════
 DECISION POLICY — DO NOT BE CONSERVATIVE BY DEFAULT
 ═══════════════════════════════════════════════════════════════════════
@@ -40,6 +47,14 @@ Counting rule (use this as floor, not ceiling):
 - Trend molto forte (TRENDING_UP) + 2-3 conferme → BUY conf 75-90
 - Pattern raro (golden cross, oversold bounce con RSI<30) → BUY conf 80-90
 
+CONFLUENCE BOOST (advanced data):
+- Pattern candlestick BULLISH + prezzo a livello Fibonacci di supporto +
+  HVN nelle vicinanze + multitimeframe.confluence == BULLISH → BUY conf 80-92
+- BoS bullish appena formato + market_structure UPTREND → conferma BUY ad alto conf
+- CHoCH detection → segnale di POSSIBILE INVERSIONE: usa con cautela ma nota in reasoning
+- Multi-TF mismatch (1d bullish, 1h bearish) → preferisci HOLD o BUY conf medio (55-65),
+  perche' segnali contrastanti riducono la convinzione
+
 CONFIDENCE FLOORS (rispettare rigorosamente):
 - BUY/SELL: confidence MAI sotto 50. Se non puoi dare ≥50 di confidence,
   preferisci HOLD ma con conf 45-55 (NON 35).
@@ -48,12 +63,12 @@ CONFIDENCE FLOORS (rispettare rigorosamente):
 - Vietato 35% piatto su tutti i ticker: se lo fai, stai sottoperformando.
 
 INSTRUCTIONS:
-- Leggi PRIMA il campo signals_summary (gia' interpretato), POI integra con i numeri raw
-  per calibrare la confidence
-- Calcola support/resistance dai livelli forniti in support_resistance
-- Suggerisci stop-loss usando ATR (typical: SL = current - 1.5×ATR per BUY)
-- Flag divergences (es. prezzo SMA200, RSI < 50 → bearish divergence)
-- Market regime determinato dal trend pre-calcolato
+- Leggi PRIMA signals_summary (gia' interpretato), POI integra con advanced
+  (fib + volume + structure + MTF) per calibrare la confidence
+- Calcola support/resistance combinando fibonacci.nearest_support/resistance + volume_profile.hvn
+- Suggerisci stop-loss usando MAX(ATR×1.5, livello fib immediatamente sotto/sopra)
+- Flag divergences (es. prezzo > SMA200, RSI < 50 → bearish divergence)
+- Market regime determinato dal market_structure.structure (preferito) o dal trend pre-calcolato
 
 ═══════════════════════════════════════════════════════════════════════
 OUTPUT — JSON valido (no preamble, solo JSON):
@@ -74,8 +89,12 @@ OUTPUT — JSON valido (no preamble, solo JSON):
       "sma_cross": {"signal": "GOLDEN_CROSS"},
       "volume_trend": "HIGH",
       "trend": "TRENDING_UP",
+      "structure": "UPTREND",
+      "fib_zone": "between_0.5_and_0.618",
+      "candlestick_setup": "bullish_engulfing on last candle",
+      "mtf_confluence": "BULLISH",
       "suggested_stop_loss": 102.30,
-      "reasoning": "4 segnali bullish (RSI oversold bounce, MACD bullish cross, golden cross SMA, volume HIGH) + trend up → BUY conf 72."
+      "reasoning": "4 segnali bullish + bullish_engulfing al 0.618 fib + HVN $103 + 1d/1wk BULLISH → BUY conf 78."
     }
   ],
   "market_regime": "RANGING",
@@ -368,6 +387,25 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
     cleaned, warnings = _validate_indicators(cleaned)
     if warnings:
         logger.warning("[TECH] %s data_quality=degraded: %s", ticker, warnings[:3])
+
+    # ─── Advanced enrichment per equity ─────────────────────────────────────
+    # Aggiunge candlestick patterns, Fibonacci, volume profile, market
+    # structure e multi-timeframe (15m/1h/1d/1wk). NO derivatives Binance
+    # (non applicabile a equity). Solo se data_quality e' ok.
+    if cleaned.get("data_quality") == "ok" and df is not None and len(df) >= 20:
+        try:
+            from agents.technical_advanced import enrich_ticker_advanced
+            advanced = await enrich_ticker_advanced(
+                ticker, df,
+                include_multitf=True,
+                include_derivatives=False,
+                intervals=["15m", "1h", "1d", "1wk"],
+            )
+            cleaned["advanced"] = advanced
+        except Exception as e:
+            logger.debug("[TECH] %s advanced enrichment failed: %s", ticker, e)
+            cleaned["advanced"] = {"error": str(e)[:120]}
+
     return cleaned
 
 
@@ -630,7 +668,10 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
         deepseek_key = _get_deepseek_key()
         if not deepseek_key:
             raise ValueError("DEEPSEEK_API_KEY non configurata")
-        response_text, engine = await _call_deepseek(context[:20000])
+        # Limite alzato a 40K perche' i dati advanced (candle/fib/volume/MTF)
+        # aggiungono ~2K char per ticker e qui possono esserci fino a 10 ticker.
+        # DeepSeek-V3 ha window 64K input quindi 40K e' ok.
+        response_text, engine = await _call_deepseek(context[:40000])
     except Exception as ds_err:
         logger.warning("[%s][TECH] DeepSeek-V3 fallito (%s) — Pure Macro mode (no Claude fallback)",
                        run_id, ds_err)

@@ -185,6 +185,7 @@ async def _fetch_crypto_indicators(ticker: str) -> dict:
                     ticker, df,
                     include_multitf=True,
                     include_derivatives=True,
+                    intervals=["1h", "4h", "1d"],  # crypto-specific
                 )
                 data["advanced"] = advanced
             else:
