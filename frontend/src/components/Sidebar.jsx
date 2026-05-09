@@ -108,48 +108,69 @@ function AgentRow({ agentKey, info, tick }) {
     statusColor = '#64748b';
   }
 
+  // Cadenza esposta dal backend (es. "ogni 20 min L-V, ogni 60 min weekend").
+  // La rendiamo come riga secondaria piccola sotto al nome dell'agent cosi'
+  // l'utente vede a colpo d'occhio "ogni quanto" gira ogni agent.
+  const scheduleText = info?.schedule || null;
+
   return (
     <div style={{
       display: 'flex',
-      alignItems: 'center',
-      gap: '0.5rem',
+      flexDirection: 'column',
+      gap: '0.1rem',
       padding: '0.35rem 0',
       fontSize: '0.75rem',
-    }}>
-      <span style={{
-        width: '6px',
-        height: '6px',
-        borderRadius: '50%',
-        background: active ? meta.tone : '#475569',
-        flexShrink: 0,
-      }} />
-      <span style={{
-        color: active ? '#e2e8f0' : '#94a3b8',
-        fontWeight: 500,
-        minWidth: '90px',
-      }}>
-        {meta.name}
-      </span>
-      <span style={{
-        color: statusColor,
-        fontSize: '0.7rem',
-        flexShrink: 1,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-      }}>
-        {statusText}
-      </span>
-      {attemptWarn && (
-        <span title={`Errore: ${formatTimeAgo(lastFailure)} fa`}
-              style={{
-                fontSize: '0.65rem',
-                color: '#ef4444',
-                fontWeight: 700,
-                marginLeft: 'auto',
-                whiteSpace: 'nowrap',
-              }}>
-          ⚠ FAIL {formatTimeAgo(lastFailure)}
+    }}
+         title={scheduleText || undefined}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <span style={{
+          width: '6px',
+          height: '6px',
+          borderRadius: '50%',
+          background: active ? meta.tone : '#475569',
+          flexShrink: 0,
+        }} />
+        <span style={{
+          color: active ? '#e2e8f0' : '#94a3b8',
+          fontWeight: 500,
+          minWidth: '90px',
+        }}>
+          {meta.name}
         </span>
+        <span style={{
+          color: statusColor,
+          fontSize: '0.7rem',
+          flexShrink: 1,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}>
+          {statusText}
+        </span>
+        {attemptWarn && (
+          <span title={`Errore: ${formatTimeAgo(lastFailure)} fa`}
+                style={{
+                  fontSize: '0.65rem',
+                  color: '#ef4444',
+                  fontWeight: 700,
+                  marginLeft: 'auto',
+                  whiteSpace: 'nowrap',
+                }}>
+            ⚠ FAIL {formatTimeAgo(lastFailure)}
+          </span>
+        )}
+      </div>
+      {scheduleText && (
+        <div style={{
+          color: '#64748b',
+          fontSize: '0.62rem',
+          marginLeft: 'calc(6px + 0.5rem)',  // allineato al pallino
+          fontStyle: 'italic',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}>
+          {scheduleText}
+        </div>
       )}
     </div>
   );

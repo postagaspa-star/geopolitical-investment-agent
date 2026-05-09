@@ -354,7 +354,18 @@ async def run_scout_pipeline(run_id: str | None = None) -> dict:
             "duration_seconds": duration,
         }
     except Exception as e:
-        logger.error("[%s][ORCHESTRATOR] Scout pipeline fallita: %s", run_id, e)
+        logger.error("[%s][ORCHESTRATOR] Scout pipeline fallita: %s", run_id, e, exc_info=True)
+        # Log dell'errore in DB cosi' e' visibile dalla sidebar/agent_logs
+        # del frontend invece di sparire silenziosamente nei log Render.
+        try:
+            database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+                "event": "scout_pipeline_failed",
+                "error": str(e)[:500],
+                "error_type": type(e).__name__,
+                "duration_seconds": round(time.time() - start, 1),
+            }))
+        except Exception:
+            pass
         return {
             "run_id": run_id,
             "architecture": "scout-only",

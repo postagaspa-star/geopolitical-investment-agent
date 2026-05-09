@@ -786,7 +786,7 @@ def get_scheduler_info() -> dict:
             "active": running,
         },
         "scout": {
-            "schedule": "ogni 20 min (24/7)",
+            "schedule": "ogni 20 min L-V, ogni 60 min weekend/festivi",
             "next_run": scout_next,
             "last_run": scout_last,
             "active": running,

@@ -49,8 +49,6 @@ MICRO_CARD_TYPES = [
     "YFINANCE_NEWS", "YFINANCE",          # alias yfinance news
     "REDDIT",
     "X", "TWITTER",                        # alias twitter/X
-    "CLAWSTREET_MARKET",
-    "CLAWSTREET_ECONOMY",
     "CONGRESSIONAL",
     "CRYPTO_MARKET",
     "SYSTEM",                              # error/diagnostic cards (vedi ROLE.txt § ERROR HANDLING)
@@ -75,7 +73,6 @@ Ricevi dati grezzi da multiple fonti:
   - YFINANCE_NEWS (news per ticker watchlist, equity + crypto BTC-USD/ETH-USD/...)
   - REDDIT (sentiment retail: wallstreetbets/stocks/investing/options + CryptoCurrency/Bitcoin/ethtrader/CryptoMarkets)
   - X (sentiment finance Twitter, anche crypto twitter)
-  - CLAWSTREET_MARKET / CLAWSTREET_ECONOMY (contesto mercati)
   - CONGRESSIONAL (insider trades USA)
   - COINGECKO (dati crypto: top 25 coin con prezzo/volume/change_1h/24h/7d, BTC dominance,
     Fear&Greed Index, trending coins del giorno. Usa questi dati per identificare
@@ -95,7 +92,7 @@ REGOLE FONDAMENTALI:
 OUTPUT (SOLO JSON, nessun altro testo):
 [
   {
-    "source_type": "GDELT|NEWSAPI|YFINANCE_NEWS|REDDIT|X|CLAWSTREET_MARKET|CLAWSTREET_ECONOMY|CONGRESSIONAL|CRYPTO_MARKET",
+    "source_type": "GDELT|NEWSAPI|YFINANCE_NEWS|REDDIT|X|CONGRESSIONAL|CRYPTO_MARKET",
     "micro_summary": "Sintesi azionabile in 2-3 frasi (max 280 char)",
     "sentiment_score": -1.0 to 1.0,
     "sentiment_type": "INSTITUTIONAL|RETAIL",
@@ -301,10 +298,15 @@ async def run_scout_20min(run_id: str) -> list[dict]:
     _save_checkpoint(run_id, "scout", "RUNNING", {"phase": "data_collection"})
 
     # 1. Raccogli dati in parallelo da TUTTE le fonti
+    # NB: le fonti CLAWSTREET_MARKET / CLAWSTREET_ECONOMY sono state rimosse
+    # quando ClawStreet stesso e' stato dismesso. Le funzioni di fetch non
+    # esistono piu' in data_fetchers.py — chiamarle qui causerebbe un
+    # AttributeError immediato (prima ancora del gather), facendo crashare
+    # tutto il pipeline Scout senza log visibili nel frontend.
     source_names = [
         "GDELT", "NEWSAPI", "YFINANCE_NEWS",
         "REDDIT", "X",
-        "CLAWSTREET_MARKET", "CONGRESSIONAL", "CLAWSTREET_ECONOMY",
+        "CONGRESSIONAL",
         "COINGECKO",
     ]
     tasks = [
@@ -313,9 +315,7 @@ async def run_scout_20min(run_id: str) -> list[dict]:
         data_fetchers.fetch_yfinance_news(),
         data_fetchers.fetch_reddit_sentiment(),
         data_fetchers.fetch_x_sentiment(),
-        data_fetchers.fetch_clawstreet_market_context(),
         data_fetchers.fetch_congressional_trades(),
-        data_fetchers.fetch_clawstreet_economy(),
         data_fetchers.fetch_coingecko_data(),
     ]
 
