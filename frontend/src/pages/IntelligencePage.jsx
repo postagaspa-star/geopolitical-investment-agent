@@ -18,7 +18,6 @@ const PHASE_COLORS = {
   SCOUT_WEEKLY: "#047857",
   SCOUT_BUFFER_GDELT: "#10b981",
   SCOUT_BUFFER_NEWSAPI: "#10b981",
-  SCOUT_BUFFER_CLAWSTREET: "#10b981",
   SCOUT_BUFFER_CONGRESSIONAL: "#10b981",
   TECH_WORKER: "#2563eb",
   DECISION: "#f59e0b",
@@ -48,7 +47,6 @@ const PHASE_COLORS = {
   MARKET_INTELLIGENCE: "#0891b2",
   GEOPOLITICAL: "#059669",
   TECHNICAL: "#6366f1",
-  CLAWSTREET_MIRROR: "#8b5cf6",
   INFO: "#64748b",
   ERROR: "#ef4444",
 };
@@ -62,7 +60,6 @@ const PHASE_LABELS = {
   SCOUT_WEEKLY: "Weekly Matrix (legacy)",
   SCOUT_BUFFER_GDELT: "Scout GDELT",
   SCOUT_BUFFER_NEWSAPI: "Scout NewsAPI",
-  SCOUT_BUFFER_CLAWSTREET: "Scout ClawStreet",
   SCOUT_BUFFER_CONGRESSIONAL: "Scout Congressional",
   TECH_WORKER: "Technical (DeepSeek)",
   DECISION: "Decision (Opus)",
@@ -92,7 +89,6 @@ const PHASE_LABELS = {
   MARKET_INTELLIGENCE: "Market Intel",
   GEOPOLITICAL: "Geopolitica",
   TECHNICAL: "Analisi Tecnica",
-  CLAWSTREET_MIRROR: "ClawStreet",
   INFO: "Info",
   ERROR: "Errore",
 };
@@ -402,17 +398,6 @@ function ScoutInfoModal({ open, onClose }) {
 
           <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
             <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
-              <span className="badge" style={{background:"#8b5cf6"}}>CLAWSTREET</span>
-              <strong>Contesto mercati real-time</strong>
-            </div>
-            <div style={{fontSize:"0.85rem", color:"#cbd5e1"}}>
-              Snapshot quotato dei principali indici (SPY, NASDAQ, DOW, BTC) +
-              sentiment aggregato + performance settoriale dell'ultima sessione.
-            </div>
-          </div>
-
-          <div style={{padding:"0.8rem", background:"#1e293b", borderRadius:"8px"}}>
-            <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginBottom:"0.4rem"}}>
               <span className="badge" style={{background:"#dc2626"}}>CONGRESSIONAL</span>
               <strong>Insider del Congresso USA</strong>
             </div>
@@ -436,7 +421,7 @@ function ScoutInfoModal({ open, onClose }) {
         <h3 style={{color:"#f1f5f9"}}>Sentiment_type</h3>
         <ul style={{color:"#cbd5e1", fontSize:"0.9rem"}}>
           <li><strong>INSTITUTIONAL</strong>: viene da news ufficiali (GDELT,
-            NewsAPI, yFinance, ClawStreet, Congressional). Riflette la posizione
+            NewsAPI, yFinance, Congressional). Riflette la posizione
             di analisti, fondi, governi.</li>
           <li><strong>RETAIL</strong>: viene da social (Reddit, X). Riflette
             cosa pensa la "folla" dei piccoli investitori. Spesso piu' rumoroso

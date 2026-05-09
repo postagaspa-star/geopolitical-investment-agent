@@ -442,32 +442,14 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                 if enriched_parts:
                     logic_chain = "\n\n".join(enriched_parts)
 
-            # Pre-validation HARD: solo crypto ClawStreet supportate
-            try:
-                from clawstreet_universe import is_supported, to_clawstreet_format
-                if not is_supported(ticker):
-                    cs_format = to_clawstreet_format(ticker)
-                    error_msg = (
-                        f"REJECTED: '{ticker}' (CS: '{cs_format}') non è una crypto "
-                        f"ClawStreet-supported. Universo crypto consentito: BTC-USD, "
-                        f"ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD, "
-                        f"LTC-USD, DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD."
-                    )
-                    database.insert_agent_log(run_id, "DECISION_CRYPTO_REJECTED", json.dumps({
-                        "ticker": ticker, "cs_format": cs_format, "action": action,
-                        "reason": "not_in_clawstreet_crypto_universe",
-                    }))
-                    return json.dumps({"error": error_msg, "rejected": True})
-                # Verifica anche che sia crypto (non equity erroneamente whitelisted)
-                t_up = ticker.upper()
-                is_crypto = t_up.endswith("-USD") or t_up.startswith("X:")
-                if not is_crypto:
-                    return json.dumps({
-                        "error": f"REJECTED: '{ticker}' non è crypto. Decision Crypto opera SOLO su crypto.",
-                        "rejected": True,
-                    })
-            except ImportError:
-                pass  # degrade graceful se modulo manca
+            # Pre-validation: solo ticker crypto. Decision Crypto opera SOLO su crypto.
+            t_up = (ticker or "").upper()
+            is_crypto = t_up.endswith("-USD") or t_up.startswith("X:")
+            if not is_crypto:
+                return json.dumps({
+                    "error": f"REJECTED: '{ticker}' non è crypto. Decision Crypto opera SOLO su crypto.",
+                    "rejected": True,
+                })
 
             # Ottieni current_price: prima la cache price_quotes (60-120s
             # fresh) per evitare hit yfinance ogni volta. Fallback a
@@ -592,19 +574,6 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                 "stop_loss": stop_loss, "take_profit": take_profit,
             }, default=str))
 
-            # ClawStreet mirror via wrapper centralizzato
-            try:
-                from clawstreet_mirror import mirror_trade as _mirror
-                trade_id = result.get("trade_id") if isinstance(result, dict) else None
-                await _mirror(
-                    trade_id=trade_id,
-                    ticker=ticker, action=action, quantity=quantity,
-                    reasoning=logic_chain[:280],
-                    run_id=run_id,
-                )
-            except Exception as exc:
-                logger.warning("[%s] Mirror crypto failed: %s", run_id, exc)
-
             return json.dumps({
                 "executed": True, "ticker": ticker, "action": action,
                 "quantity": quantity, "price": current_price,
@@ -698,16 +667,12 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
         elif tool_name == "get_portfolio_state":
             state = portfolio.get_portfolio_state()
             # Filtra a sole posizioni crypto per chiarezza
-            try:
-                from clawstreet_universe import to_clawstreet_format, is_supported
-                positions = state.get("positions", [])
-                state["positions_crypto"] = [
-                    p for p in positions
-                    if (p.get("ticker", "").upper().endswith("-USD")
-                        and is_supported(to_clawstreet_format(p.get("ticker", ""))))
-                ]
-            except ImportError:
-                pass
+            positions = state.get("positions", [])
+            state["positions_crypto"] = [
+                p for p in positions
+                if p.get("ticker", "").upper().endswith("-USD")
+                or p.get("ticker", "").upper().startswith("X:")
+            ]
             return json.dumps({"portfolio": state, "at": timestamp}, default=str)
 
         else:

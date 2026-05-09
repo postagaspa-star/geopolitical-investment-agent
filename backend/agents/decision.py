@@ -770,60 +770,21 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
             logger.info("[%s][DECISION] TRADE: %s %d %s (conf: %.0f%%, SL: %s)",
                         run_id, action, quantity, ticker, confidence, stop_loss)
 
-            # ── Pre-validazione universo ClawStreet ──────────────────────────
-            # I trade BUY su ticker non supportati da ClawStreet vengono
-            # rifiutati prima dell'esecuzione, così il portfolio interno NON
-            # diverge da quello pubblico ClawStreet (= leaderboard del torneo).
-            # I SELL sono permessi sempre (per chiusura di posizioni legacy
-            # eventualmente aperte prima di questo controllo).
-            try:
-                from clawstreet_universe import is_supported, to_clawstreet_format
-                # VETO CRYPTO: il Decision normale opera SOLO su mercati
-                # tradizionali (equity + ETF commodity). Le crypto sono
-                # dominio esclusivo del Decision Crypto agent (DeepSeek-R1
-                # ogni 1h, 24/7). Reject hard sia BUY sia SELL crypto qui.
-                t_up = (ticker or "").upper()
-                is_crypto = t_up.endswith("-USD") or t_up.startswith("X:")
-                if is_crypto:
-                    error_msg = (
-                        f"REJECTED: '{ticker}' è crypto. Il Decision normale opera "
-                        f"SOLO su equity/ETF tradizionali. Le crypto sono dominio "
-                        f"del Decision Crypto agent (gira ogni 1h con DeepSeek-R1)."
-                    )
-                    database.insert_agent_log(run_id, "DECISION_REJECTED", json.dumps({
-                        "ticker": ticker, "action": action,
-                        "reason": "crypto_outside_decision_domain",
-                    }))
-                    return json.dumps({"error": error_msg, "rejected": True})
-
-                if action == "BUY" and not is_supported(ticker):
-                    cs_format = to_clawstreet_format(ticker)
-                    error_msg = (
-                        f"REJECTED: '{ticker}' (formato ClawStreet: '{cs_format}') "
-                        f"non è nell'universo tradabile ClawStreet (~484 azioni "
-                        f"S&P 500 + GLD/SLV/USO). Eseguire questo BUY desincronizzerebbe "
-                        f"il portfolio interno dal portfolio ClawStreet pubblico → "
-                        f"leaderboard sballata. Sostituisci con un ticker supportato "
-                        f"dello stesso settore/tema, oppure usa do_nothing."
-                    )
-                    logger.warning(
-                        "[%s][DECISION] BUY rejected: %s non supportato su ClawStreet",
-                        run_id, ticker,
-                    )
-                    database.insert_agent_log(run_id, "DECISION_REJECTED", json.dumps({
-                        "ticker": ticker,
-                        "cs_format": cs_format,
-                        "action": action,
-                        "reason": "not_in_clawstreet_universe",
-                    }))
-                    return json.dumps({"error": error_msg, "ticker": ticker, "rejected": True})
-            except ImportError:
-                # Modulo non disponibile (es. test isolati): degrade graceful
-                logger.warning(
-                    "[%s][DECISION] clawstreet_universe non importabile, "
-                    "skip pre-validazione (potrebbero verificarsi divergenze)",
-                    run_id,
+            # ── Veto crypto: il Decision normale opera SOLO su equity/ETF.
+            # Le crypto sono dominio esclusivo del Decision Crypto agent.
+            t_up = (ticker or "").upper()
+            is_crypto = t_up.endswith("-USD") or t_up.startswith("X:")
+            if is_crypto:
+                error_msg = (
+                    f"REJECTED: '{ticker}' è crypto. Il Decision normale opera "
+                    f"SOLO su equity/ETF tradizionali. Le crypto sono dominio "
+                    f"del Decision Crypto agent."
                 )
+                database.insert_agent_log(run_id, "DECISION_REJECTED", json.dumps({
+                    "ticker": ticker, "action": action,
+                    "reason": "crypto_outside_decision_domain",
+                }))
+                return json.dumps({"error": error_msg, "rejected": True})
 
             # Ottieni prezzo corrente — preferisci la cache price_quotes (60s fresh)
             # per evitare hit a yfinance ogni volta
@@ -962,21 +923,6 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     "price": current_price, "confidence": confidence,
                     "stop_loss": stop_loss, "take_profit": take_profit,
                 }, default=str))
-
-            # ClawStreet mirror — usa il wrapper centralizzato che aggiorna
-            # automaticamente cs_mirror_status sulla riga trades. Se il mirror
-            # fallisce, il retry job di scheduler.py riproverà.
-            try:
-                from clawstreet_mirror import mirror_trade as _mirror
-                trade_id = result.get("trade_id") if isinstance(result, dict) else None
-                await _mirror(
-                    trade_id=trade_id,
-                    ticker=ticker, action=action, quantity=quantity,
-                    reasoning=logic_chain[:280],
-                    run_id=run_id,
-                )
-            except Exception as cs_exc:
-                logger.error("[%s][DECISION] ClawStreet mirror exception: %s", run_id, cs_exc, exc_info=True)
 
             return json.dumps({
                 "executed": True, "ticker": ticker, "action": action,

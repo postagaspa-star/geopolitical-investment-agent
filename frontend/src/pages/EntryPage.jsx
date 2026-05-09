@@ -3,7 +3,7 @@ import { TrendingUp, FlaskConical, ArrowRight } from "lucide-react";
 
 /**
  * Pagina iniziale: scelta tra GeoInvest AI Live e GeoInvest AI Simulator.
- * Live = bot reale che opera su ClawStreet (esistente).
+ * Live = bot reale che opera con paper trading su portafoglio interno.
  * Simulator = ambiente di scenari storici per testare il ragionamento dell'agente.
  */
 export default function EntryPage() {
@@ -29,12 +29,11 @@ export default function EntryPage() {
             <h2 style={styles.cardTitle}>Live</h2>
             <p style={styles.cardDesc}>
               Bot operativo in tempo reale. Pipeline multi-agente che analizza
-              mercati e crypto 24/7, esegue trade, mirror su ClawStreet.
+              mercati e crypto 24/7 ed esegue trade su portafoglio paper.
             </p>
             <ul style={styles.cardFeatures}>
               <li>Watchdog ogni 1 min</li>
               <li>Decision Sonnet 4.5 + Decision Crypto R1</li>
-              <li>Mirror su ClawStreet leaderboard</li>
               <li>Portafoglio paper trading reale</li>
             </ul>
             <span style={styles.cardCta}>

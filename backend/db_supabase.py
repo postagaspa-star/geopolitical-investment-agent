@@ -63,27 +63,33 @@ def init_db():
         # Auto-migrate v4 tables (safe: checks existence first)
         _ensure_v4_tables(client)
 
-        # Auto-migrate v6: colonne ClawStreet mirror tracking
-        # (idempotente, gira ad ogni avvio: ALTER TABLE IF NOT EXISTS)
-        _ensure_cs_mirror_columns()
+        # Auto-migrate schema (idempotente, gira ad ogni avvio: ALTER TABLE IF NOT EXISTS).
+        # Include v10 SL/TP, v11 quantity NUMERIC, v9 chat tables, etc.
+        _ensure_schema_migrations()
 
     except Exception as e:
         logger.error("Errore connessione Supabase: %s", e, exc_info=True)
         raise
 
 
-def _ensure_cs_mirror_columns():
+def _ensure_schema_migrations():
     """
-    Auto-migrazione v6: aggiunge colonne cs_mirror_* alla tabella trades su
-    Supabase Postgres. Idempotente — usa IF NOT EXISTS, gira ad ogni avvio.
+    Auto-migrazione schema su Supabase Postgres. Idempotente — usa
+    IF NOT EXISTS / DO $$ BEGIN ... END$$, gira ad ogni avvio.
+
+    Migrations applicate:
+      - v9: chat_conversations, chat_messages
+      - v10: positions.stop_loss_price, take_profit_price, auto_exit_*
+      - v11: trades.quantity / positions.quantity da INTEGER → NUMERIC(20,8)
+        (CRITICO: senza questo, sell di 99.5 azioni o 0.05 BTC falliscono
+        con "invalid input syntax for type integer")
+      - v12: technical_documents.category, is_preset
 
     Richiede uno tra:
       - DATABASE_URL: postgres://...:...@.../postgres (raccomandato)
       - SUPABASE_DB_PASSWORD: la password del DB (postgres user)
         + SUPABASE_URL per derivare l'host
-    Se nessuno è configurato, logga warning e continua (degrade graceful:
-    il sistema usa try/except su insert_trade e simili, quindi funziona
-    senza tracking ma il retry job non recupera i pending).
+    Se nessuno è configurato, logga warning e continua (degrade graceful).
     """
     db_url = os.environ.get("DATABASE_URL", "").strip()
     if not db_url:
@@ -114,15 +120,9 @@ def _ensure_cs_mirror_columns():
         return
 
     migration_sql = """
-        ALTER TABLE trades ADD COLUMN IF NOT EXISTS cs_mirror_status TEXT DEFAULT 'pending';
-        ALTER TABLE trades ADD COLUMN IF NOT EXISTS cs_mirror_reason TEXT;
-        ALTER TABLE trades ADD COLUMN IF NOT EXISTS cs_mirror_attempts INTEGER DEFAULT 0;
-        ALTER TABLE trades ADD COLUMN IF NOT EXISTS cs_mirror_last_attempt_at TIMESTAMPTZ;
-        CREATE INDEX IF NOT EXISTS idx_trades_cs_mirror_status
-            ON trades (cs_mirror_status, timestamp)
-            WHERE cs_mirror_status IN ('pending', 'failed');
-        UPDATE trades SET cs_mirror_status = 'legacy_unknown'
-            WHERE cs_mirror_status IS NULL;
+        -- (Le colonne cs_mirror_* vengono lasciate sulle righe esistenti per
+        -- backward compat ma non vengono piu' scritte da insert_trade — vedi
+        -- payload_with_mirror sotto.)
         -- v7: documenti separati per Decision normale vs Decision Crypto
         ALTER TABLE technical_documents ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'generic';
         -- backfill: i documenti caricati prima della migration hanno category=NULL.
@@ -364,13 +364,7 @@ def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
         "final_decision": final_decision,
         "confidence_score": confidence,
     }
-    # Aggiungi i campi mirror solo se la migration è stata applicata
-    # (gestione degrade graceful: se le colonne non esistono, ritenta senza)
-    payload_with_mirror = {**payload, "cs_mirror_status": "pending", "cs_mirror_attempts": 0}
-    try:
-        result = client.table("trades").insert(payload_with_mirror).execute()
-    except Exception:
-        result = client.table("trades").insert(payload).execute()
+    result = client.table("trades").insert(payload).execute()
     if result.data and len(result.data) > 0:
         return result.data[0].get("id")
     return None
@@ -383,54 +377,22 @@ def get_trades(limit=50):
 
 
 def update_trade_mirror_status(trade_id, status, reason=None, increment_attempts=True):
-    """Aggiorna stato del mirror ClawStreet per un trade (Supabase)."""
-    if not trade_id:
-        return
-    from datetime import datetime as _dt, timezone as _tz
-    client = _get_client()
-    update_fields = {
-        "cs_mirror_status": status,
-        "cs_mirror_reason": (reason or "")[:500],
-        "cs_mirror_last_attempt_at": _dt.now(_tz.utc).isoformat(),
-    }
-    try:
-        if increment_attempts:
-            current = client.table("trades").select("cs_mirror_attempts").eq("id", trade_id).execute()
-            cur_n = (current.data[0].get("cs_mirror_attempts") if current.data else 0) or 0
-            update_fields["cs_mirror_attempts"] = cur_n + 1
-        client.table("trades").update(update_fields).eq("id", trade_id).execute()
-    except Exception as exc:
-        import logging as _log
-        _log.getLogger(__name__).warning("update_trade_mirror_status fallita: %s", exc)
+    """No-op stub (ClawStreet integration rimossa)."""
+    return
 
 
 def get_pending_mirror_trades(window_hours=24, max_attempts=5, limit=50):
-    """Trade non ancora specchiati su ClawStreet (Supabase)."""
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-    cutoff = (_dt.now(_tz.utc) - _td(hours=window_hours)).isoformat()
-    client = _get_client()
-    try:
-        result = (client.table("trades")
-                  .select("*")
-                  .gte("timestamp", cutoff)
-                  .lt("cs_mirror_attempts", max_attempts)
-                  .in_("cs_mirror_status", ["pending", "failed"])
-                  .order("timestamp", desc=False)
-                  .limit(limit)
-                  .execute())
-        return result.data or []
-    except Exception as exc:
-        import logging as _log
-        _log.getLogger(__name__).warning("get_pending_mirror_trades fallita: %s", exc)
-        return []
+    """No-op stub (ClawStreet integration rimossa)."""
+    return []
 
 
 def get_mirror_status_summary():
-    """Conteggio trade per stato mirror (ultimi 7 giorni)."""
+    """No-op stub (ClawStreet integration rimossa)."""
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     cutoff = (_dt.now(_tz.utc) - _td(days=7)).isoformat()
     client = _get_client()
     try:
+        # Implementazione legacy preservata per compat (puo' essere rimossa)
         result = client.table("trades").select("cs_mirror_status").gte("timestamp", cutoff).execute()
         rows = result.data or []
         summary = {}

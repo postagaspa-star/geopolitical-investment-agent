@@ -8,8 +8,6 @@ import {
   Play,
   Square,
   Zap,
-  Trophy,
-  ExternalLink,
   RefreshCw,
   BookOpen,
 } from 'lucide-react';
@@ -182,9 +180,6 @@ export default function Sidebar({
     return () => clearInterval(id);
   }, []);
 
-  // ClawStreet status
-  const [csStatus, setCsStatus] = useState(null);
-  const [csRegistering, setCsRegistering] = useState(false);
   const API = window.location.origin;
 
   // Manual price polling
@@ -247,27 +242,6 @@ export default function Sidebar({
     }
     setAuditing(false);
     setTimeout(() => setAuditFeedback(null), 8000);
-  };
-
-  useEffect(() => {
-    fetch(`${API}/api/clawstreet/status`)
-      .then(r => r.json())
-      .then(d => setCsStatus(d))
-      .catch(() => {});
-  }, [API]);
-
-  const handleRegisterCS = async () => {
-    setCsRegistering(true);
-    try {
-      const res = await fetch(`${API}/api/clawstreet/register`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
-      });
-      if (res.ok) {
-        const updated = await fetch(`${API}/api/clawstreet/status`).then(r => r.json());
-        setCsStatus(updated);
-      }
-    } catch {}
-    setCsRegistering(false);
   };
 
   const totalValue = portfolio?.total_value ?? 0;
@@ -440,39 +414,6 @@ export default function Sidebar({
           </div>
         </div>
 
-        {/* ClawStreet */}
-        <div className="sidebar-portfolio" style={{
-          borderTop: '1px solid var(--border)', paddingTop: '0.75rem', marginTop: '0.5rem',
-        }}>
-          <div className="portfolio-label" style={{
-            display: 'flex', alignItems: 'center', gap: '0.35rem',
-          }}>
-            <Trophy size={14} /> ClawStreet
-          </div>
-          {csStatus?.registered ? (
-            <>
-              <div className="status-countdown" style={{ marginTop: '0.25rem' }}>
-                Bot: <strong>{csStatus.bot_name || 'GeoInvest AI'}</strong>
-              </div>
-              <a href="https://www.clawstreet.io/agents/geoinvest-ai"
-                target="_blank" rel="noopener noreferrer"
-                className="status-countdown"
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.25rem',
-                  marginTop: '0.25rem', color: 'var(--primary)',
-                  textDecoration: 'none', fontSize: '0.75rem',
-                }}>
-                <ExternalLink size={12} /> Pagina pubblica
-              </a>
-            </>
-          ) : (
-            <button className="btn btn-secondary"
-              style={{ marginTop: '0.35rem', fontSize: '0.75rem', padding: '0.3rem 0.6rem' }}
-              onClick={handleRegisterCS} disabled={csRegistering}>
-              {csRegistering ? 'Registrando...' : 'Registra bot pubblico'}
-            </button>
-          )}
-        </div>
       </aside>
     </>
   );

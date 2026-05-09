@@ -2790,6 +2790,81 @@ async def portfolio_refresh_prices():
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
+@app.post("/api/portfolio/adjust-cash")
+async def portfolio_adjust_cash(
+    delta: float = Query(..., description="Delta da applicare al cash_balance (positivo aggiunge, negativo sottrae)"),
+    confirm: bool = Query(default=False),
+):
+    """
+    Aggiusta cash_balance di un delta. Le posizioni non vengono toccate.
+    total_value viene ricalcolato come nuovo cash + sum(qty * current_price).
+
+    Subito dopo l'aggiornamento scrive UNO SNAPSHOT del nuovo stato in
+    portfolio_snapshots, cosi' il chart riflette immediatamente il valore
+    coerente col dashboard (non aspetta il prossimo polling tick).
+
+    Richiede confirm=true. IRREVERSIBILE.
+    """
+    if not confirm:
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "error": "Richiede confirm=true. Operazione irreversibile.",
+        })
+
+    try:
+        portfolio_now = database.get_portfolio() or {}
+        old_cash = float(portfolio_now.get("cash_balance") or 0)
+        old_total = float(portfolio_now.get("total_value") or 0)
+        new_cash = old_cash + delta
+        if new_cash < 0:
+            return JSONResponse(status_code=400, content={
+                "status": "error",
+                "error": f"Delta {delta:+.2f}$ porterebbe cash a {new_cash:.2f}$ (negativo). Aborted.",
+                "old_cash": round(old_cash, 2),
+            })
+
+        # Ricalcola total con le posizioni attuali
+        positions = database.get_positions() or []
+        positions_value = sum(
+            float(p.get("current_price") or 0) * float(p.get("quantity") or 0)
+            for p in positions
+            if float(p.get("current_price") or 0) > 0
+        )
+        new_total = new_cash + positions_value
+
+        database.update_portfolio(round(new_cash, 2), round(new_total, 2))
+
+        # Scrivi un snapshot subito per allineare il chart
+        try:
+            database.insert_portfolio_snapshot(round(new_total, 2), round(new_cash, 2))
+        except Exception as ex_snap:
+            logger.warning("adjust_cash: insert_portfolio_snapshot fallito: %s", ex_snap)
+
+        logger.info(
+            "Portfolio cash ADJUSTED: delta=%+.2f, cash %.2f→%.2f, total %.2f→%.2f",
+            delta, old_cash, new_cash, old_total, new_total,
+        )
+
+        return {
+            "status": "ok",
+            "message": (
+                f"Liquidità aggiustata di {delta:+,.2f}$. "
+                f"Cash: ${old_cash:,.2f} → ${new_cash:,.2f}. "
+                f"Total: ${old_total:,.2f} → ${new_total:,.2f}. "
+                f"Snapshot scritto."
+            ),
+            "delta": round(delta, 2),
+            "old_cash": round(old_cash, 2),
+            "new_cash": round(new_cash, 2),
+            "old_total": round(old_total, 2),
+            "new_total": round(new_total, 2),
+            "positions_value": round(positions_value, 2),
+        }
+    except Exception as e:
+        logger.error("portfolio_adjust_cash error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
 @app.get("/api/portfolio/cash-history")
 async def portfolio_cash_history(days: int = Query(default=3, ge=1, le=30)):
     """
@@ -3137,394 +3212,7 @@ class ClawStreetRegisterPayload(BaseModel):
     bio: str = "AI agent combining geopolitical intelligence with technical analysis to trade global macro themes."
 
 
-@app.post("/api/clawstreet/register")
-async def register_clawstreet_bot(payload: ClawStreetRegisterPayload):
-    """Registra il bot su ClawStreet e salva le credenziali nel database."""
-    try:
-        import data_fetchers
-        result = await data_fetchers.register_clawstreet_bot(
-            name=payload.name,
-            ticker=payload.ticker,
-            strategy=payload.strategy,
-            personality=payload.personality,
-            bio=payload.bio,
-        )
-        if result.get("success"):
-            data = result.get("data", {})
-            # Salva le credenziali nel database
-            if data.get("bot_id") or data.get("id"):
-                database.set_setting("clawstreet_bot_id", str(data.get("bot_id") or data.get("id", "")))
-            if data.get("api_key") or data.get("apiKey"):
-                database.set_setting("clawstreet_api_key", str(data.get("api_key") or data.get("apiKey", "")))
-            if data.get("claim_url") or data.get("claimUrl") or data.get("url"):
-                database.set_setting("clawstreet_claim_url", str(data.get("claim_url") or data.get("claimUrl") or data.get("url", "")))
-            # Salva anche nome e ticker
-            database.set_setting("clawstreet_bot_name", payload.name)
-            database.set_setting("clawstreet_bot_ticker", payload.ticker)
-            return {"status": "registered", "data": data}
-        else:
-            return JSONResponse(status_code=400, content={
-                "error": "Registrazione fallita",
-                "details": result,
-            })
-    except Exception as e:
-        logger.error(f"Errore nella registrazione ClawStreet: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-@app.post("/api/clawstreet/set-credentials")
-async def set_clawstreet_credentials(payload: dict):
-    """
-    Salva manualmente le credenziali di un bot ClawStreet già esistente
-    (recuperate dall'utente — tipicamente quando ha registrato il bot in
-    precedenza e ha ancora salvato bot_id + api_key).
-    """
-    bot_id = (payload.get("bot_id") or "").strip()
-    api_key = (payload.get("api_key") or "").strip()
-    bot_name = (payload.get("bot_name") or "").strip()
-    bot_ticker = (payload.get("bot_ticker") or "").strip()
-
-    if not bot_id or not api_key:
-        return JSONResponse(status_code=400, content={
-            "status": "error", "message": "bot_id e api_key sono obbligatori"
-        })
-
-    # Verifica le credenziali con ClawStreet prima di salvare
-    try:
-        import aiohttp
-        url = f"https://www.clawstreet.io/api/bots/{bot_id}/balance"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers={"Authorization": f"Bearer {api_key}"},
-                                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status not in (200, 201):
-                    body = await resp.text()
-                    return JSONResponse(status_code=400, content={
-                        "status": "error",
-                        "message": f"Credenziali non valide (HTTP {resp.status}): {body[:200]}"
-                    })
-                bal_data = await resp.json()
-    except Exception as e:
-        return JSONResponse(status_code=500, content={
-            "status": "error", "message": f"Errore verifica: {e}"
-        })
-
-    # Salva nel DB
-    database.set_setting("clawstreet_bot_id", bot_id)
-    database.set_setting("clawstreet_api_key", api_key)
-    if bot_name:
-        database.set_setting("clawstreet_bot_name", bot_name)
-    if bot_ticker:
-        database.set_setting("clawstreet_bot_ticker", bot_ticker)
-    return {"status": "ok", "bot_id": bot_id, "balance_data": bal_data}
-
-
-@app.post("/api/clawstreet/mirror-historical-trades")
-async def mirror_historical_trades(limit: int = Query(default=100, ge=1, le=1000)):
-    """
-    Replica tutti i trade già eseguiti nel paper trading interno
-    sul bot ClawStreet configurato. Utile per sincronizzare lo storico.
-    """
-    bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
-    api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
-    if not bot_id or not api_key or bot_id == "GEO":
-        return JSONResponse(status_code=400, content={
-            "status": "error",
-            "message": "Credenziali ClawStreet mancanti. Salva bot_id+api_key con /api/clawstreet/set-credentials prima.",
-        })
-
-    try:
-        import data_fetchers
-        trades = database.get_trades(limit=limit) or []
-        results = {"mirrored": 0, "skipped": 0, "failed": 0, "details": []}
-        for t in trades:
-            ticker = t.get("ticker", "")
-            action = (t.get("action") or "").lower()
-            qty = int(t.get("quantity") or 0)
-            reasoning = (t.get("final_decision") or t.get("geopolitical_reasoning") or
-                         t.get("technical_reasoning") or f"Historical trade {t.get('timestamp','')}")[:280]
-            if not ticker or action not in ("buy", "sell", "short", "cover") or qty <= 0:
-                results["skipped"] += 1
-                continue
-            mirror = await data_fetchers.mirror_trade_to_clawstreet(
-                bot_id=bot_id, api_key=api_key,
-                symbol=ticker, action=action, qty=qty, reasoning=reasoning,
-            )
-            if mirror.get("mirrored"):
-                results["mirrored"] += 1
-            else:
-                results["failed"] += 1
-            results["details"].append({
-                "ticker": ticker, "action": action, "qty": qty,
-                "result": "ok" if mirror.get("mirrored") else f"fail: {mirror.get('reason') or mirror.get('error') or mirror.get('status')}",
-            })
-        return {"status": "ok", **results}
-    except Exception as e:
-        logger.error(f"Errore mirror storico: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
-
-
-@app.post("/api/clawstreet/reconcile")
-async def reconcile_clawstreet_trades(since_hours: int = Query(default=48, ge=1, le=720)):
-    """
-    Confronta i trade locali con quelli su ClawStreet e invia quelli mancanti.
-    Usa una semplice corrispondenza per (ticker, action, qty) sui trade locali
-    delle ultime 'since_hours' ore. Idempotente entro la finestra.
-    """
-    bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
-    api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
-    if not bot_id or not api_key or bot_id == "GEO":
-        return JSONResponse(status_code=400, content={
-            "status": "error",
-            "message": "Credenziali ClawStreet mancanti.",
-        })
-
-    import data_fetchers
-    import aiohttp as _aiohttp
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-
-    cutoff = _dt.now(_tz.utc) - _td(hours=since_hours)
-
-    # 1) Trade locali nella finestra
-    local_trades = database.get_trades(limit=500) or []
-    local_in_window = []
-    for t in local_trades:
-        ts_str = t.get("timestamp") or ""
-        try:
-            t_ts = _dt.fromisoformat(ts_str.replace("Z", "+00:00"))
-        except Exception:
-            continue
-        if t_ts < cutoff:
-            continue
-        action = (t.get("action") or "").lower()
-        ticker = t.get("ticker", "")
-        qty = int(t.get("quantity") or 0)
-        if not ticker or action not in ("buy", "sell") or qty <= 0:
-            continue
-        local_in_window.append({
-            "ticker": ticker, "action": action, "qty": qty,
-            "ts": t_ts,
-            "reasoning": (t.get("final_decision") or t.get("geopolitical_reasoning") or "")[:280],
-        })
-
-    # 2) Trade gia' su ClawStreet
-    cs_trades = []
-    try:
-        url = f"https://www.clawstreet.io/api/bots/{bot_id}/trades"
-        async with _aiohttp.ClientSession() as sess:
-            async with sess.get(url, headers={"Authorization": f"Bearer {api_key}"},
-                                 timeout=_aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    cs_trades = data.get("trades", []) if isinstance(data, dict) else []
-    except Exception as e:
-        logger.warning("Reconcile: impossibile leggere trade ClawStreet: %s", e)
-
-    # Counter (ticker, action, qty) gia' presenti su CS
-    from collections import Counter
-    cs_keys = Counter(
-        (t.get("symbol", "").upper(), (t.get("action") or "").lower(), int(t.get("qty") or 0))
-        for t in cs_trades
-    )
-
-    # 3) Per ogni local trade, controlla se gia' su CS; se no, invialo
-    missing = []
-    sent = []
-    failed = []
-    # Counter dei local in window per gestire multipli identici
-    local_counter = Counter()
-    for tr in sorted(local_in_window, key=lambda x: x["ts"]):
-        key = (tr["ticker"].upper(), tr["action"], tr["qty"])
-        local_counter[key] += 1
-        already_on_cs = cs_keys.get(key, 0)
-        if local_counter[key] <= already_on_cs:
-            continue  # gia' specchiato
-        missing.append(tr)
-
-    skipped = []
-    for tr in missing:
-        result = await data_fetchers.mirror_trade_to_clawstreet(
-            bot_id=bot_id, api_key=api_key,
-            symbol=tr["ticker"], action=tr["action"], qty=tr["qty"],
-            reasoning=tr["reasoning"] or f"Reconcile {tr['ts'].isoformat()}",
-        )
-        if result.get("mirrored"):
-            sent.append({"ticker": tr["ticker"], "action": tr["action"], "qty": tr["qty"]})
-        elif result.get("skipped"):
-            # Errori "expected" (INVALID_SYMBOL, INSUFFICIENT_BUYING_POWER, ecc.):
-            # ClawStreet non supporta il simbolo o non ha capitale virtuale sufficiente.
-            # Non e' un bug dell'app — e' un limite della piattaforma vetrina.
-            skipped.append({
-                "ticker": tr["ticker"], "action": tr["action"], "qty": tr["qty"],
-                "reason": result.get("reason", "skip"),
-            })
-        else:
-            failed.append({
-                "ticker": tr["ticker"], "action": tr["action"], "qty": tr["qty"],
-                "reason": str(result.get("response") or result.get("error") or result.get("status"))[:200],
-            })
-
-    return {
-        "status": "ok",
-        "window_hours": since_hours,
-        "local_trades_in_window": len(local_in_window),
-        "clawstreet_trades": len(cs_trades),
-        "missing": len(missing),
-        "sent": len(sent),
-        "skipped": len(skipped),
-        "failed": len(failed),
-        "details": {"sent": sent, "skipped": skipped, "failed": failed},
-    }
-
-
-@app.get("/api/clawstreet/diagnostics")
-async def clawstreet_diagnostics():
-    """
-    Diagnostica completa del mirroring ClawStreet:
-      - Posizioni locali vs posizioni ClawStreet (diff per ticker)
-      - Cash balance locale vs ClawStreet
-      - Conteggio trade per stato mirror (ok/failed/skipped/pending) ultimi 7gg
-      - Lista dei pending mirrors da riprovare
-
-    Usato dal frontend per mostrare un pannello "ClawStreet sync health".
-    """
-    import aiohttp as _aiohttp
-
-    bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "")
-    api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
-    if not bot_id or not api_key or bot_id == "GEO":
-        return {
-            "status": "no_credentials",
-            "message": "Credenziali ClawStreet non configurate.",
-        }
-
-    # 1) Stato locale
-    local_portfolio = database.get_portfolio() or {}
-    local_positions = database.get_positions() or []
-    local_cash = float(local_portfolio.get("cash_balance") or 0)
-
-    # 2) Stato ClawStreet — l'endpoint /balance restituisce GIÀ le positions
-    # nel suo payload (campo "positions"), non c'è un endpoint /positions
-    # separato (404). Usiamo solo /balance e ne leggiamo entrambi.
-    headers = {"Authorization": f"Bearer {api_key}"}
-    cs_balance = None
-    cs_positions = []
-    cs_error = None
-    try:
-        async with _aiohttp.ClientSession() as sess:
-            async with sess.get(f"https://www.clawstreet.io/api/bots/{bot_id}/balance",
-                                 headers=headers,
-                                 timeout=_aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    cs_balance = await resp.json(content_type=None)
-                else:
-                    cs_error = f"HTTP {resp.status} su /balance"
-    except Exception as exc:
-        cs_error = str(exc)[:200]
-
-    # Estrai positions dal payload /balance (è una lista di dict)
-    if cs_balance and isinstance(cs_balance, dict):
-        cs_positions = cs_balance.get("positions", []) or []
-
-    cs_cash = None
-    if cs_balance:
-        # ClawStreet può ritornare balance in vari formati
-        cs_cash = (cs_balance.get("cash")
-                   or cs_balance.get("cash_balance")
-                   or cs_balance.get("balance")
-                   or (cs_balance.get("data", {}) or {}).get("cash"))
-        if cs_cash is not None:
-            try:
-                cs_cash = float(cs_cash)
-            except (ValueError, TypeError):
-                cs_cash = None
-
-    # 3) Confronto posizioni: ticker → (local_qty, cs_qty)
-    from clawstreet_universe import to_clawstreet_format
-    local_by_cs_symbol = {}
-    for p in local_positions:
-        cs_sym = to_clawstreet_format(p.get("ticker", ""))
-        local_by_cs_symbol[cs_sym] = float(p.get("quantity") or 0)
-
-    cs_by_symbol = {}
-    for p in cs_positions:
-        sym = (p.get("symbol") or p.get("ticker") or "").upper()
-        qty = float(p.get("qty") or p.get("quantity") or 0)
-        if sym:
-            cs_by_symbol[sym] = qty
-
-    all_symbols = sorted(set(local_by_cs_symbol.keys()) | set(cs_by_symbol.keys()))
-    position_diffs = []
-    in_sync = 0
-    out_of_sync = 0
-    for sym in all_symbols:
-        loc = local_by_cs_symbol.get(sym, 0)
-        cs = cs_by_symbol.get(sym, 0)
-        delta = loc - cs
-        if abs(delta) < 0.001:
-            in_sync += 1
-        else:
-            out_of_sync += 1
-            position_diffs.append({
-                "symbol": sym, "local_qty": loc, "cs_qty": cs, "delta": delta,
-            })
-
-    # 4) Riepilogo mirror status
-    mirror_summary = {}
-    pending_mirrors = []
-    try:
-        mirror_summary = database.get_mirror_status_summary()
-        pending_mirrors = database.get_pending_mirror_trades(window_hours=72, max_attempts=10, limit=20)
-    except Exception as exc:
-        logger.warning("Mirror summary fallita: %s", exc)
-
-    return {
-        "status": "ok",
-        "credentials_ok": True,
-        "cs_error": cs_error,
-        "local": {
-            "cash_balance": round(local_cash, 2),
-            "positions_count": len(local_positions),
-            "total_value": float(local_portfolio.get("total_value") or 0),
-        },
-        "clawstreet": {
-            "cash_balance": cs_cash,
-            "positions_count": len(cs_positions),
-            "raw_balance_response": cs_balance,
-        },
-        "positions_sync": {
-            "in_sync": in_sync,
-            "out_of_sync": out_of_sync,
-            "diffs": position_diffs[:30],   # primi 30 per UI
-        },
-        "mirror_status_7d": mirror_summary,
-        "pending_mirrors": [
-            {
-                "trade_id": t.get("id"),
-                "ticker": t.get("ticker"),
-                "action": t.get("action"),
-                "quantity": t.get("quantity"),
-                "status": t.get("cs_mirror_status"),
-                "reason": t.get("cs_mirror_reason"),
-                "attempts": t.get("cs_mirror_attempts"),
-                "timestamp": t.get("timestamp"),
-            } for t in pending_mirrors
-        ],
-    }
-
-
-@app.post("/api/clawstreet/retry-mirrors")
-async def retry_failed_mirrors(window_hours: int = Query(default=24, ge=1, le=168)):
-    """
-    Forza il retry dei mirror falliti (ultimi window_hours ore).
-    Utile come trigger manuale dal pulsante della UI.
-    """
-    try:
-        from clawstreet_mirror import retry_pending_mirrors
-        result = await retry_pending_mirrors(window_hours=window_hours, limit=50)
-        return {"status": "ok", **result}
-    except Exception as e:
-        logger.error("Errore retry mirror: %s", e, exc_info=True)
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+# (ClawStreet endpoints rimossi)
 
 
 @app.get("/api/scout/sources-health")
@@ -3610,49 +3298,8 @@ async def trigger_scout_run(background_tasks: BackgroundTasks):
     return {"status": "started", "run_id": run_id}
 
 
-@app.post("/api/clawstreet/clear-credentials")
-async def clear_clawstreet_credentials():
-    """
-    Pulisce le credenziali ClawStreet dal DB. Utile se è stato registrato
-    un bot per errore — il sistema non tenterà più di mirrorare i trade.
-    Il bot remoto resta unclaimed (non genera costi finché non viene attivato).
-    """
-    try:
-        for k in ["clawstreet_bot_id", "clawstreet_api_key", "clawstreet_claim_url",
-                  "clawstreet_bot_name", "clawstreet_bot_ticker"]:
-            try:
-                database.set_setting(k, "")
-            except Exception:
-                pass
-        return {"status": "ok", "message": "Credenziali ClawStreet pulite dal DB"}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+# (ClawStreet endpoints rimossi)
 
-
-@app.get("/api/clawstreet/status")
-async def get_clawstreet_status():
-    """Restituisce lo stato della registrazione ClawStreet."""
-    try:
-        # Bot gia' registrato su ClawStreet — valori noti
-        bot_id = database.get_setting("clawstreet_bot_id", "") or os.environ.get("CLAWSTREET_BOT_ID", "GEO")
-        api_key = database.get_setting("clawstreet_api_key", "") or os.environ.get("CLAWSTREET_API_KEY", "")
-        claim_url = database.get_setting("clawstreet_claim_url", "") or os.environ.get("CLAWSTREET_CLAIM_URL", "")
-        bot_name = "GeoInvest AI"
-        bot_ticker = "GEO"
-        return {
-            "registered": True,
-            "bot_id": bot_id,
-            "bot_name": bot_name,
-            "bot_ticker": bot_ticker,
-            "claim_url": claim_url,
-            "public_url": "https://www.clawstreet.io/agents/geoinvest-ai",
-        }
-    except Exception as e:
-        logger.error(f"Errore nello stato ClawStreet: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-# --- Endpoint storico portafoglio ---
 
 @app.get("/api/portfolio/history")
 async def get_portfolio_history(period: str = Query(default="30d")):

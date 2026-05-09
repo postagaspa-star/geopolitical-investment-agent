@@ -184,22 +184,16 @@ async def _call_deepseek(context: str, max_retries: int = 2) -> tuple[str, str]:
 
 def _filter_to_clawstreet_crypto(tickers: list[str]) -> list[str]:
     """
-    Filtra una lista di ticker tenendo solo quelli che sono crypto E supportati
-    da ClawStreet. Tutti gli altri (equity, crypto non supportate) sono scartati.
+    Filtra una lista di ticker tenendo solo le crypto (suffisso -USD o
+    prefisso X:). Validazione contro l'universo hard-coded
+    DEFAULT_CRYPTO_UNIVERSE per evitare ticker inventati dal LLM.
     """
-    try:
-        from clawstreet_universe import is_supported
-    except ImportError:
-        # Fallback: usa la lista hard-coded
-        valid = set(DEFAULT_CRYPTO_UNIVERSE)
-        return [t for t in tickers if t.upper() in valid]
-
+    valid = set(DEFAULT_CRYPTO_UNIVERSE)
     out = []
     for t in tickers:
         t_up = t.upper()
-        # Deve essere crypto (suffisso -USD o prefisso X:) E supportato
         is_crypto = t_up.endswith("-USD") or t_up.startswith("X:")
-        if is_crypto and is_supported(t_up):
+        if is_crypto and t_up in valid:
             out.append(t_up)
     return out
 
