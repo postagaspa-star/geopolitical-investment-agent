@@ -7,6 +7,7 @@ all'orario e al giorno (weekend / pre-market / mercato aperto).
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 
 import pytz
@@ -252,29 +253,60 @@ async def _price_polling_job():
         logger.error("Errore Price Polling: %s", e, exc_info=False)
 
 
+_last_scout_run_ts: float = 0.0
+
+
 async def _scout_hourly_job():
     """
-    Job Scout — ogni 20 minuti, sempre (24/7, anche weekend e fuori orario).
-    Sonnet 4.5 raccoglie e analizza notizie da GDELT, yFinance News, NewsAPI,
-    Reddit (sentiment retail) e X. Popola intelligence_buffer.
+    Job Scout — ogni 20 minuti durante la settimana lavorativa (lun-ven),
+    ridotto a ogni 90 minuti su weekend e festivi.
+
+    Razionale: ora che il bot opera anche su crypto 24/7 (Decision Crypto + R1),
+    serve intelligence anche nei weekend. Ma molte fonti (NewsAPI, GDELT su
+    geopolitica, Congressional trades) sono semi-quiescenti nei weekend → girare
+    ogni 20 min sprecherebbe token DeepSeek-V3. Cadenza 90min e' un buon
+    compromesso: 16 run/giorno (vs 72 weekday) = -78% di chiamate.
+
+    Implementazione: l'APScheduler fa partire il job ogni 20 min, ma se siamo
+    nel weekend/festivo e l'ultimo run e' < 90 min fa, esce subito (no-op).
     """
-    global current_mode
+    global current_mode, _last_scout_run_ts
 
     mode = get_current_mode()
     current_mode = mode
+
+    # Gate weekend/holiday: cadenza 90 min invece di 20 min
+    now_ts = time.time()
+    is_off_market = is_weekend() or is_market_holiday()
+    if is_off_market:
+        gap_seconds = now_ts - _last_scout_run_ts
+        if gap_seconds < 5400:  # 90 min in secondi
+            mins_remaining = (5400 - gap_seconds) / 60.0
+            logger.info(
+                "Scout skip (weekend/holiday): ultimo run %.0f min fa, "
+                "cadenza 90min → ~%.0f min al prossimo run",
+                gap_seconds / 60.0, mins_remaining,
+            )
+            return
+
+    _last_scout_run_ts = now_ts
 
     try:
         from uuid import uuid4
         from agents.orchestrator import run_scout_pipeline
         run_id = str(uuid4())
         result = await run_scout_pipeline(run_id=run_id)
-        logger.info("Scout orario completato: %d micro-schede", result.get("cards", 0))
+        logger.info(
+            "Scout completato (mode=%s): %d micro-schede",
+            "weekend/holiday-90min" if is_off_market else "weekday-20min",
+            result.get("cards", 0),
+        )
 
         # Pulizia periodica
         database.cleanup_old_processed_articles(days=7)
 
     except Exception as e:
-        logger.error("Errore nel job Scout orario: %s", e, exc_info=True)
+        logger.error("Errore nel job Scout: %s", e, exc_info=True)
 
 
 async def _scheduled_agent_job():
@@ -512,13 +544,15 @@ def start_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # ── Scout: ogni 20 minuti, 24/7 (Sonnet 4.5 — raccolta intelligence) ──
+    # ── Scout: ogni 20 min lun-ven, ogni 90 min su weekend/festivi ──
+    # APScheduler fa partire il job ogni 20 min; il job stesso ha un gate
+    # interno (vedi _scout_hourly_job) che salta i run extra nei weekend.
     _scheduler.add_job(
         _scout_hourly_job,
         trigger="interval",
         minutes=20,
         id="scout_hourly_job",
-        name="Scout 20min (Sonnet 4.5 intelligence buffer 24/7)",
+        name="Scout (20min weekday, 90min weekend/holiday)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
