@@ -281,6 +281,15 @@ FASE 4 — Trading
       citare la tesi commitata in FASE 3.
     - do_nothing(reasoning): se la tesi conclude no-trade.
     - set_stop_loss / set_take_profit per posizioni esistenti.
+    - set_commitment: REGISTRA un'intenzione che dovrai ricordare nei
+      run successivi. Esempi tipici:
+        * "monitor BTC.D, BUY ETH se sotto 52% entro 24h"
+        * "watch_event FOMC 12 maggio, REVIEW posizioni rischio dopo"
+        * "reminder al prossimo run: rivalutare la tesi NVDA con earnings"
+      Usalo OGNI volta che dichiari un piano condizionato/deferito —
+      altrimenti la promessa scompare e il prossimo run la ignora.
+    - resolve_commitment: marca un OBIETTIVO ATTIVO mostrato nel
+      contesto come triggered (eseguito) o cancelled (non piu' rilevante).
 
 ═══════════════════════════════════════════════════════════════════════
 
@@ -406,6 +415,13 @@ REGOLE OPERATIVE:
 CHIUSURA POSIZIONI:
 Per chiudere/ridurre, chiama execute_trade con action='SELL' e quantity dalla
 get_portfolio_state. NON esistono tool separati 'close_position' o 'sell_all'.
+
+MEMORIA TRA I RUN — set_commitment / resolve_commitment:
+Hai a disposizione una memoria persistente per le tue "promesse". Se nel
+reasoning dichiari un piano condizionato (es. "monitorero' BTC.D, comprero'
+ETH se scende sotto 52% entro 24h") DEVI registrarlo con set_commitment —
+altrimenti il prossimo run non lo sapra'. Quando un OBIETTIVO ATTIVO
+mostrato nel contesto e' soddisfatto/decaduto, chiamalo resolve_commitment.
 
 OUTPUT:
 Sii conciso. Niente bullet point ripetitivi. Logic_chain in 3-4 frasi:
@@ -673,6 +689,79 @@ DECISION_TOOLS = [
         "name": "get_portfolio_state",
         "description": "Ottieni lo stato aggiornato del portafoglio (cash, posizioni con SL/TP impostati, P&L).",
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "set_commitment",
+        "description": (
+            "Registra un IMPEGNO/INTENZIONE che il prossimo run del Decision Agent "
+            "dovra' ricordare e valutare. Usalo quando dichiari nel reasoning una "
+            "promessa tipo: 'monitorero' BTC.D, comprero' ETH se scende sotto 52% "
+            "entro 24h', oppure 'attendo FOMC del 12 maggio prima di scaricare "
+            "rischio'. Senza questo tool, la promessa scompare alla fine del run "
+            "e il prossimo run non sa nulla. Tipi:\n"
+            "  - monitor: 'tieni d'occhio X finche' Y'\n"
+            "  - conditional_buy: 'compra X se Y entro Z'\n"
+            "  - conditional_sell: 'vendi X se Y entro Z'\n"
+            "  - watch_event: 'monitora evento (es. CPI, FOMC) e fai Y dopo'\n"
+            "  - reminder: 'ricordati di Y al prossimo run'\n"
+            "Gli impegni attivi appariranno nel contesto OBIETTIVI ATTIVI dei "
+            "run successivi finche' non li risolvi (resolve_commitment) o scadono."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "commitment_type": {
+                    "type": "string",
+                    "enum": ["monitor", "conditional_buy", "conditional_sell",
+                             "watch_event", "reminder"],
+                },
+                "condition_text": {
+                    "type": "string",
+                    "description": "Descrizione della condizione/obiettivo (max 2000 char).",
+                },
+                "trigger_action": {
+                    "type": "string",
+                    "description": "Azione da intraprendere quando la condizione si verifica (testo libero, es. 'BUY ETH 0.5% portfolio', 'REVIEW posizioni', 'ALERT user').",
+                },
+                "expires_in_hours": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 720,
+                    "description": "Scadenza in ore (1-720). Tipico: 24-168. Oltre quel periodo l'impegno scade auto.",
+                },
+                "ticker": {
+                    "type": "string",
+                    "description": "Ticker rilevante (opzionale, es. 'NVDA', 'BTC-USD').",
+                },
+            },
+            "required": ["commitment_type", "condition_text", "expires_in_hours"],
+        },
+    },
+    {
+        "name": "resolve_commitment",
+        "description": (
+            "Marca un impegno attivo come triggered (condizione soddisfatta, "
+            "azione eseguita), cancelled (non piu' rilevante), o expired (manuale). "
+            "Usalo quando un OBIETTIVO ATTIVO mostrato nel contesto e' stato "
+            "raggiunto o non ha piu' senso (es. il setup tecnico e' decaduto, "
+            "il prezzo target e' stato superato, l'evento e' avvenuto)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "commitment_id": {"type": "integer"},
+                "resolution_status": {
+                    "type": "string",
+                    "enum": ["triggered", "cancelled"],
+                    "description": "triggered = condizione soddisfatta. cancelled = non piu' rilevante.",
+                },
+                "resolution_reason": {
+                    "type": "string",
+                    "description": "Motivazione (es. 'BTC.D sceso a 51.5%, ho comprato ETH come da piano').",
+                },
+            },
+            "required": ["commitment_id", "resolution_status", "resolution_reason"],
+        },
     },
 ]
 
@@ -1085,6 +1174,49 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
         elif tool_name == "get_portfolio_state":
             state = portfolio.get_portfolio_state()
             return json.dumps({"portfolio": state, "at": timestamp}, default=str)
+
+        elif tool_name == "set_commitment":
+            try:
+                commit_id = database.add_agent_commitment(
+                    agent_type="standard",
+                    commitment_type=tool_input.get("commitment_type", "reminder"),
+                    condition_text=tool_input.get("condition_text", ""),
+                    trigger_action=tool_input.get("trigger_action"),
+                    expires_in_hours=float(tool_input.get("expires_in_hours") or 48),
+                    ticker=tool_input.get("ticker"),
+                    source_run_id=run_id,
+                )
+                database.insert_agent_log(run_id, "DECISION_SET_COMMITMENT", json.dumps({
+                    "commit_id": commit_id,
+                    "type": tool_input.get("commitment_type"),
+                    "condition": (tool_input.get("condition_text") or "")[:500],
+                    "expires_in_hours": tool_input.get("expires_in_hours"),
+                    "ticker": tool_input.get("ticker"),
+                }, default=str))
+                if commit_id:
+                    return json.dumps({
+                        "success": True,
+                        "commitment_id": commit_id,
+                        "message": "Impegno registrato. Apparira' come OBIETTIVO ATTIVO nei run successivi finche' non lo risolvi o scade.",
+                    })
+                return json.dumps({"success": False, "error": "DB insert ritornato null"})
+            except Exception as e:
+                logger.warning("[%s] set_commitment error: %s", run_id, e)
+                return json.dumps({"success": False, "error": str(e)[:300]})
+
+        elif tool_name == "resolve_commitment":
+            try:
+                cid = int(tool_input.get("commitment_id") or 0)
+                status = tool_input.get("resolution_status") or "triggered"
+                reason = tool_input.get("resolution_reason") or ""
+                ok = database.resolve_agent_commitment(cid, status=status, resolved_reason=reason)
+                database.insert_agent_log(run_id, "DECISION_RESOLVE_COMMITMENT", json.dumps({
+                    "commit_id": cid, "status": status, "reason": reason[:300], "ok": ok,
+                }, default=str))
+                return json.dumps({"success": bool(ok), "commitment_id": cid, "status": status})
+            except Exception as e:
+                logger.warning("[%s] resolve_commitment error: %s", run_id, e)
+                return json.dumps({"success": False, "error": str(e)[:300]})
 
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
@@ -1648,6 +1780,59 @@ def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state,
     del Decision Agent — non possono essere ignorati senza giustificazione.
     """
     parts = []
+
+    # === OBIETTIVI ATTIVI (impegni dei run precedenti) ===
+    # Memoria persistente: gli impegni che il Decision Agent stesso ha preso
+    # in run passati appaiono qui finche' non sono triggered/cancelled/expired.
+    try:
+        import database as _db
+        if hasattr(_db, "get_active_agent_commitments"):
+            commitments = _db.get_active_agent_commitments("standard", limit=15)
+            if commitments:
+                from datetime import datetime as _dt2, timezone as _tz2
+                c_lines = ["=" * 60]
+                c_lines.append("OBIETTIVI ATTIVI (impegni presi in run precedenti)")
+                c_lines.append("=" * 60)
+                c_lines.append(
+                    "Sono promesse/intenzioni che TU stesso hai registrato in run "
+                    "passati. Per ognuno, valuta se la condizione e' soddisfatta:"
+                )
+                c_lines.append(
+                    "  • se SI: usa execute_trade come previsto e poi resolve_commitment(triggered)\n"
+                    "  • se NO ma ancora rilevante: lascialo attivo, non serve azione\n"
+                    "  • se NON PIU' RILEVANTE (setup decaduto): resolve_commitment(cancelled, motivazione)"
+                )
+                c_lines.append("")
+                now_utc = _dt2.now(_tz2.utc)
+                for c in commitments:
+                    cid = c.get("id")
+                    ctype = c.get("commitment_type", "?")
+                    cond = (c.get("condition_text") or "")[:300]
+                    trig = (c.get("trigger_action") or "")[:200]
+                    tk = c.get("ticker") or ""
+                    exp = c.get("expires_at")
+                    exp_str = ""
+                    if exp:
+                        try:
+                            exp_dt = _dt2.fromisoformat(str(exp).replace("Z", "+00:00"))
+                            hrs_left = (exp_dt - now_utc).total_seconds() / 3600.0
+                            if hrs_left > 0:
+                                exp_str = f" [scade in {hrs_left:.0f}h]"
+                            else:
+                                exp_str = " [scaduto, sweep imminente]"
+                        except Exception:
+                            pass
+                    line = f"  • [ID:{cid}] {ctype.upper()}"
+                    if tk:
+                        line += f" {tk}"
+                    line += f"{exp_str}\n     condizione: {cond}"
+                    if trig:
+                        line += f"\n     trigger: {trig}"
+                    c_lines.append(line)
+                c_lines.append("")
+                parts.append("\n".join(c_lines))
+    except Exception as _e:
+        logger.debug("Non riesco a caricare commitments: %s", _e)
 
     # === DIRETTIVE UTENTE RECENTI (chat decision) ===
     # Iniettiamo gli ultimi messaggi dell'utente dalla chat-decision standard

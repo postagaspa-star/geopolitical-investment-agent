@@ -208,6 +208,43 @@ def _ensure_schema_migrations():
             ON decision_chat_messages (conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_dec_chat_conv_agent
             ON decision_chat_conversations (agent_type, updated_at DESC);
+
+        -- v13: agent_commitments — memoria persistente delle "promesse"
+        -- che il Decision Agent prende durante un run. Vengono iniettate
+        -- nel contesto dei run successivi finche' non sono triggered/expired/cancelled.
+        --   commitment_type:
+        --     monitor          → "tieni d'occhio X finche' Y"
+        --     conditional_buy  → "compra X se Y entro Z"
+        --     conditional_sell → "vendi X se Y entro Z"
+        --     watch_event      → "monitora evento (es. FOMC) e fai Y dopo"
+        --     reminder         → "ricordati di fare Y al prossimo run"
+        --   status: active → triggered/expired/cancelled
+        --   trigger_action: testo libero descrittivo (es. "BUY ETH 0.5%")
+        --   expires_at: scadenza assoluta. Se NOW() > expires_at, il get_active
+        --     fa lo sweep automatico settando status='expired'.
+        CREATE TABLE IF NOT EXISTS agent_commitments (
+            id BIGSERIAL PRIMARY KEY,
+            agent_type TEXT NOT NULL
+                CHECK (agent_type IN ('standard','crypto')),
+            ticker TEXT,
+            commitment_type TEXT NOT NULL
+                CHECK (commitment_type IN
+                    ('monitor','conditional_buy','conditional_sell','watch_event','reminder')),
+            condition_text TEXT NOT NULL,
+            trigger_action TEXT,
+            expires_at TIMESTAMPTZ,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active','triggered','expired','cancelled')),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            resolved_at TIMESTAMPTZ,
+            resolved_reason TEXT,
+            source_run_id TEXT,
+            notes TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_commit_active
+            ON agent_commitments (agent_type, status, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_commit_recent
+            ON agent_commitments (agent_type, created_at DESC);
     """
 
     try:
@@ -1439,5 +1476,237 @@ def get_decision_chat_message(message_id: int) -> dict | None:
                 return None
     # Fallback: scan settings (slow but rare)
     return None
+
+
+# ============================================================================
+# Agent Commitments — memoria persistente delle "promesse"/intenzioni dei
+# Decision Agent. Iniettate nel contesto dei run successivi finche' non sono
+# triggered/expired/cancelled. agent_type ∈ {"standard", "crypto"}.
+# ============================================================================
+
+_AGENT_COMMIT_FALLBACK_MODE = False
+
+
+def _agent_commit_should_fallback(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(s in msg for s in [
+        "does not exist", "no such table", "relation",
+        "schema cache", "could not find", "pgrst205",
+    ])
+
+
+def _expire_old_commitments(client, agent_type: str) -> None:
+    """Sweep one-shot: marca status='expired' tutte le righe attive con expires_at < now."""
+    try:
+        client.table("agent_commitments").update({
+            "status": "expired",
+            "resolved_at": _now_iso(),
+            "resolved_reason": "auto-expired (deadline passed)",
+        }).eq("agent_type", agent_type).eq("status", "active").lt(
+            "expires_at", _now_iso()
+        ).execute()
+    except Exception as e:
+        logger.debug("expire sweep noop: %s", e)
+
+
+def add_agent_commitment(
+    agent_type: str,
+    commitment_type: str,
+    condition_text: str,
+    trigger_action: str | None = None,
+    expires_in_hours: float | None = None,
+    ticker: str | None = None,
+    source_run_id: str | None = None,
+    notes: str | None = None,
+) -> int | None:
+    """Inserisce un nuovo impegno e ritorna il suo id."""
+    global _AGENT_COMMIT_FALLBACK_MODE
+    agent_type = (agent_type or "standard").lower()
+    if agent_type not in ("standard", "crypto"):
+        agent_type = "standard"
+
+    expires_at_iso = None
+    if expires_in_hours and expires_in_hours > 0:
+        expires_at_iso = (
+            datetime.now(timezone.utc) + timedelta(hours=float(expires_in_hours))
+        ).isoformat()
+
+    client = _get_client()
+    if not _AGENT_COMMIT_FALLBACK_MODE:
+        try:
+            payload = {
+                "agent_type": agent_type,
+                "commitment_type": commitment_type,
+                "condition_text": (condition_text or "")[:2000],
+                "trigger_action": (trigger_action or "")[:1000] if trigger_action else None,
+                "expires_at": expires_at_iso,
+                "status": "active",
+                "ticker": (ticker or "").upper()[:32] if ticker else None,
+                "source_run_id": source_run_id,
+                "notes": (notes or "")[:1000] if notes else None,
+            }
+            r = client.table("agent_commitments").insert(payload).execute()
+            if r.data:
+                return r.data[0].get("id")
+            return None
+        except Exception as e:
+            if _agent_commit_should_fallback(e):
+                _AGENT_COMMIT_FALLBACK_MODE = True
+                logger.warning("agent_commitments: switch a fallback (%s)", e)
+            else:
+                logger.warning("add_agent_commitment fallita: %s", e)
+                return None
+
+    # Fallback: salva su settings come lista JSON per agent_type
+    try:
+        import time as _t
+        key = f"agent_commitments_fallback_{agent_type}"
+        existing = get_setting(key, "[]")
+        items = json.loads(existing) if existing else []
+        new_id = int(_t.time() * 1000)
+        items.append({
+            "id": new_id,
+            "agent_type": agent_type,
+            "commitment_type": commitment_type,
+            "condition_text": condition_text,
+            "trigger_action": trigger_action,
+            "expires_at": expires_at_iso,
+            "status": "active",
+            "ticker": ticker,
+            "source_run_id": source_run_id,
+            "notes": notes,
+            "created_at": _now_iso(),
+        })
+        set_setting(key, json.dumps(items[-50:]))  # keep last 50
+        return new_id
+    except Exception as e:
+        logger.warning("add_agent_commitment fallback fallita: %s", e)
+        return None
+
+
+def get_active_agent_commitments(agent_type: str, limit: int = 20) -> list:
+    """Ritorna gli impegni ATTIVI per agent_type. Sweep automatico degli expired."""
+    global _AGENT_COMMIT_FALLBACK_MODE
+    agent_type = (agent_type or "standard").lower()
+    client = _get_client()
+
+    if not _AGENT_COMMIT_FALLBACK_MODE:
+        try:
+            _expire_old_commitments(client, agent_type)
+            r = (client.table("agent_commitments")
+                 .select("*")
+                 .eq("agent_type", agent_type)
+                 .eq("status", "active")
+                 .order("created_at", desc=True)
+                 .limit(limit)
+                 .execute())
+            return r.data or []
+        except Exception as e:
+            if _agent_commit_should_fallback(e):
+                _AGENT_COMMIT_FALLBACK_MODE = True
+            else:
+                logger.warning("get_active_agent_commitments fallita: %s", e)
+                return []
+
+    # Fallback
+    try:
+        key = f"agent_commitments_fallback_{agent_type}"
+        items = json.loads(get_setting(key, "[]") or "[]")
+        now_iso = _now_iso()
+        out = []
+        for it in items:
+            if it.get("status") != "active":
+                continue
+            exp = it.get("expires_at")
+            if exp and exp < now_iso:
+                it["status"] = "expired"
+                continue
+            out.append(it)
+        # Persist sweep
+        try:
+            set_setting(key, json.dumps(items[-50:]))
+        except Exception:
+            pass
+        out.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return out[:limit]
+    except Exception:
+        return []
+
+
+def get_recent_agent_commitments(agent_type: str, limit: int = 30) -> list:
+    """Ritorna gli ultimi N impegni (qualsiasi status) per la history view."""
+    global _AGENT_COMMIT_FALLBACK_MODE
+    agent_type = (agent_type or "standard").lower()
+    client = _get_client()
+
+    if not _AGENT_COMMIT_FALLBACK_MODE:
+        try:
+            r = (client.table("agent_commitments")
+                 .select("*")
+                 .eq("agent_type", agent_type)
+                 .order("created_at", desc=True)
+                 .limit(limit)
+                 .execute())
+            return r.data or []
+        except Exception as e:
+            if _agent_commit_should_fallback(e):
+                _AGENT_COMMIT_FALLBACK_MODE = True
+            else:
+                logger.warning("get_recent_agent_commitments fallita: %s", e)
+                return []
+    try:
+        key = f"agent_commitments_fallback_{agent_type}"
+        items = json.loads(get_setting(key, "[]") or "[]")
+        items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return items[:limit]
+    except Exception:
+        return []
+
+
+def resolve_agent_commitment(
+    commitment_id: int,
+    status: str = "triggered",
+    resolved_reason: str | None = None,
+) -> bool:
+    """Marca un impegno come triggered/cancelled/expired."""
+    global _AGENT_COMMIT_FALLBACK_MODE
+    if status not in ("triggered", "cancelled", "expired"):
+        status = "cancelled"
+    client = _get_client()
+
+    if not _AGENT_COMMIT_FALLBACK_MODE:
+        try:
+            client.table("agent_commitments").update({
+                "status": status,
+                "resolved_at": _now_iso(),
+                "resolved_reason": (resolved_reason or "")[:1000],
+            }).eq("id", commitment_id).execute()
+            return True
+        except Exception as e:
+            if _agent_commit_should_fallback(e):
+                _AGENT_COMMIT_FALLBACK_MODE = True
+            else:
+                logger.warning("resolve_agent_commitment fallita: %s", e)
+                return False
+
+    # Fallback: cerca in entrambi i fallback (standard/crypto)
+    try:
+        for at in ("standard", "crypto"):
+            key = f"agent_commitments_fallback_{at}"
+            items = json.loads(get_setting(key, "[]") or "[]")
+            changed = False
+            for it in items:
+                if int(it.get("id", 0)) == int(commitment_id):
+                    it["status"] = status
+                    it["resolved_at"] = _now_iso()
+                    it["resolved_reason"] = resolved_reason or ""
+                    changed = True
+            if changed:
+                set_setting(key, json.dumps(items[-50:]))
+                return True
+        return False
+    except Exception as e:
+        logger.warning("resolve fallback fallita: %s", e)
+        return False
 
 

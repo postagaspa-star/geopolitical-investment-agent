@@ -143,7 +143,15 @@ Per CHIUDERE una posizione: get_portfolio_state per leggere quantity,
 poi execute_trade(action='SELL', quantity=...) — parziale o totale.
 
 Se chiami execute_trade prima di aver completato le 4 fasi, il sistema
-TI RIFIUTA il tool con un errore esplicito e dovrai riprovare."""
+TI RIFIUTA il tool con un errore esplicito e dovrai riprovare.
+
+MEMORIA TRA I RUN — set_commitment / resolve_commitment:
+Hai a disposizione una memoria persistente per le tue intenzioni. Se
+nel reasoning dichiari un piano condizionato (es. "monitoro BTC.D, "
+"compro ETH se sotto 52% entro 24h", "attendo unlock SOL del 12 maggio
+prima di operare"), DEVI registrarlo con set_commitment — altrimenti
+il prossimo run non lo sa. Quando un OBIETTIVO ATTIVO mostrato nel
+contesto e' soddisfatto/decaduto, chiamalo resolve_commitment(triggered/cancelled)."""
 
 
 def _get_deepseek_key() -> str:
@@ -362,6 +370,73 @@ CRYPTO_DECISION_TOOLS = [
             "name": "get_portfolio_state",
             "description": "Stato corrente cash + posizioni con SL/TP impostati.",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_commitment",
+            "description": (
+                "Registra un IMPEGNO/INTENZIONE che il prossimo run del Decision Crypto "
+                "dovra' ricordare. Esempi: 'monitorare BTC dominance e comprare ETH "
+                "se scende sotto 52% entro 24h', 'attendere il merge ETH o l'unlock "
+                "SOL prima di operare'. Senza questo tool la promessa scompare alla "
+                "fine del run. Tipi: monitor, conditional_buy, conditional_sell, "
+                "watch_event, reminder. Gli impegni attivi appariranno come OBIETTIVI "
+                "ATTIVI nei prossimi run."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "commitment_type": {
+                        "type": "string",
+                        "enum": ["monitor", "conditional_buy", "conditional_sell",
+                                 "watch_event", "reminder"],
+                    },
+                    "condition_text": {
+                        "type": "string",
+                        "description": "Descrizione condizione/obiettivo (max 2000 char).",
+                    },
+                    "trigger_action": {
+                        "type": "string",
+                        "description": "Azione quando si verifica (es. 'BUY ETH 0.5%', 'CLOSE BTC long').",
+                    },
+                    "expires_in_hours": {
+                        "type": "number",
+                        "minimum": 1,
+                        "maximum": 720,
+                        "description": "Scadenza in ore (1-720). Tipico crypto: 12-72.",
+                    },
+                    "ticker": {
+                        "type": "string",
+                        "description": "Crypto ticker (es. BTC-USD, ETH-USD).",
+                    },
+                },
+                "required": ["commitment_type", "condition_text", "expires_in_hours"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_commitment",
+            "description": (
+                "Marca un impegno attivo come triggered (condizione soddisfatta + "
+                "azione eseguita) o cancelled (non piu' rilevante). Usalo quando un "
+                "OBIETTIVO ATTIVO mostrato nel contesto e' stato raggiunto o decaduto."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "commitment_id": {"type": "integer"},
+                    "resolution_status": {
+                        "type": "string",
+                        "enum": ["triggered", "cancelled"],
+                    },
+                    "resolution_reason": {"type": "string"},
+                },
+                "required": ["commitment_id", "resolution_status", "resolution_reason"],
+            },
         },
     },
 ]
@@ -675,6 +750,49 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             ]
             return json.dumps({"portfolio": state, "at": timestamp}, default=str)
 
+        elif tool_name == "set_commitment":
+            try:
+                commit_id = database.add_agent_commitment(
+                    agent_type="crypto",
+                    commitment_type=tool_input.get("commitment_type", "reminder"),
+                    condition_text=tool_input.get("condition_text", ""),
+                    trigger_action=tool_input.get("trigger_action"),
+                    expires_in_hours=float(tool_input.get("expires_in_hours") or 48),
+                    ticker=tool_input.get("ticker"),
+                    source_run_id=run_id,
+                )
+                database.insert_agent_log(run_id, "DECISION_CRYPTO_SET_COMMITMENT", json.dumps({
+                    "commit_id": commit_id,
+                    "type": tool_input.get("commitment_type"),
+                    "condition": (tool_input.get("condition_text") or "")[:500],
+                    "expires_in_hours": tool_input.get("expires_in_hours"),
+                    "ticker": tool_input.get("ticker"),
+                }, default=str))
+                if commit_id:
+                    return json.dumps({
+                        "success": True,
+                        "commitment_id": commit_id,
+                        "message": "Impegno crypto registrato. Apparira' come OBIETTIVO ATTIVO nei run successivi.",
+                    })
+                return json.dumps({"success": False, "error": "DB insert ritornato null"})
+            except Exception as e:
+                logger.warning("[%s] crypto set_commitment error: %s", run_id, e)
+                return json.dumps({"success": False, "error": str(e)[:300]})
+
+        elif tool_name == "resolve_commitment":
+            try:
+                cid = int(tool_input.get("commitment_id") or 0)
+                status = tool_input.get("resolution_status") or "triggered"
+                reason = tool_input.get("resolution_reason") or ""
+                ok = database.resolve_agent_commitment(cid, status=status, resolved_reason=reason)
+                database.insert_agent_log(run_id, "DECISION_CRYPTO_RESOLVE_COMMITMENT", json.dumps({
+                    "commit_id": cid, "status": status, "reason": reason[:300], "ok": ok,
+                }, default=str))
+                return json.dumps({"success": bool(ok), "commitment_id": cid, "status": status})
+            except Exception as e:
+                logger.warning("[%s] crypto resolve_commitment error: %s", run_id, e)
+                return json.dumps({"success": False, "error": str(e)[:300]})
+
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
@@ -701,6 +819,52 @@ def _build_context(tech_report: dict, recent_buffer: list, portfolio_state: dict
                    crypto_docs: list) -> str:
     parts = []
     parts.append(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+
+    # === OBIETTIVI ATTIVI (impegni dei run precedenti) ===
+    try:
+        import database as _db
+        if hasattr(_db, "get_active_agent_commitments"):
+            commitments = _db.get_active_agent_commitments("crypto", limit=15)
+            if commitments:
+                from datetime import datetime as _dt2, timezone as _tz2
+                parts.append("=" * 60)
+                parts.append("OBIETTIVI ATTIVI (impegni presi in run crypto precedenti)")
+                parts.append("=" * 60)
+                parts.append(
+                    "Sono promesse/intenzioni che TU stesso hai registrato in run "
+                    "passati. Per ognuno valuta: condizione soddisfatta? -> esegui + "
+                    "resolve_commitment(triggered). Decaduta? -> resolve_commitment(cancelled). "
+                    "Ancora rilevante ma non ancora? -> lascialo attivo."
+                )
+                now_utc = _dt2.now(_tz2.utc)
+                for c in commitments:
+                    cid = c.get("id")
+                    ctype = c.get("commitment_type", "?")
+                    cond = (c.get("condition_text") or "")[:300]
+                    trig = (c.get("trigger_action") or "")[:200]
+                    tk = c.get("ticker") or ""
+                    exp = c.get("expires_at")
+                    exp_str = ""
+                    if exp:
+                        try:
+                            exp_dt = _dt2.fromisoformat(str(exp).replace("Z", "+00:00"))
+                            hrs_left = (exp_dt - now_utc).total_seconds() / 3600.0
+                            if hrs_left > 0:
+                                exp_str = f" [scade in {hrs_left:.0f}h]"
+                            else:
+                                exp_str = " [scaduto]"
+                        except Exception:
+                            pass
+                    line = f"  • [ID:{cid}] {ctype.upper()}"
+                    if tk:
+                        line += f" {tk}"
+                    line += f"{exp_str}\n     condizione: {cond}"
+                    if trig:
+                        line += f"\n     trigger: {trig}"
+                    parts.append(line)
+                parts.append("")
+    except Exception as _e:
+        logger.debug("decision_crypto: commitments non caricati: %s", _e)
 
     # === DIRETTIVE UTENTE RECENTI (chat decision crypto) ===
     try:

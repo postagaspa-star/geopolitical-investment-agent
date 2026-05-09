@@ -155,6 +155,28 @@ def init_db():
                 ON decision_chat_messages (conversation_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_dec_chat_conv_agent
                 ON decision_chat_conversations (agent_type, updated_at DESC);
+            -- v13: agent_commitments — memoria persistente delle "promesse" del Decision Agent
+            CREATE TABLE IF NOT EXISTS agent_commitments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_type TEXT NOT NULL CHECK(agent_type IN ('standard','crypto')),
+                ticker TEXT,
+                commitment_type TEXT NOT NULL CHECK(commitment_type IN
+                    ('monitor','conditional_buy','conditional_sell','watch_event','reminder')),
+                condition_text TEXT NOT NULL,
+                trigger_action TEXT,
+                expires_at TEXT,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active','triggered','expired','cancelled')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                resolved_at TEXT,
+                resolved_reason TEXT,
+                source_run_id TEXT,
+                notes TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_commit_active
+                ON agent_commitments (agent_type, status, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_agent_commit_recent
+                ON agent_commitments (agent_type, created_at DESC);
         """)
         # Migrazione: ricreare agent_logs se ha il vecchio constraint
         # (SQLite non supporta ALTER TABLE per modificare CHECK constraint)
@@ -845,6 +867,107 @@ def mark_decision_chat_trade_executed(message_id: int, trade_id: int) -> bool:
         conn.execute(
             "UPDATE decision_chat_messages SET executed_trade_id=? WHERE id=?",
             (trade_id, message_id),
+        )
+    return True
+
+
+# ============================================================================
+# Agent Commitments — memoria persistente delle "promesse" del Decision Agent
+# Mirror SQLite di db_supabase.add_agent_commitment / get_active / resolve.
+# ============================================================================
+
+def _expire_old_commitments_sqlite(conn, agent_type: str) -> None:
+    """Sweep one-shot: marca expired le righe attive con expires_at < now."""
+    try:
+        conn.execute(
+            "UPDATE agent_commitments "
+            "SET status='expired', resolved_at=datetime('now'), "
+            "    resolved_reason='auto-expired (deadline passed)' "
+            "WHERE agent_type=? AND status='active' "
+            "AND expires_at IS NOT NULL AND expires_at < datetime('now')",
+            (agent_type,),
+        )
+    except Exception as e:
+        logger.debug("expire sweep noop: %s", e)
+
+
+def add_agent_commitment(
+    agent_type: str,
+    commitment_type: str,
+    condition_text: str,
+    trigger_action: str | None = None,
+    expires_in_hours: float | None = None,
+    ticker: str | None = None,
+    source_run_id: str | None = None,
+    notes: str | None = None,
+) -> int | None:
+    agent_type = (agent_type or "standard").lower()
+    if agent_type not in ("standard", "crypto"):
+        agent_type = "standard"
+
+    expires_at_str = None
+    if expires_in_hours and expires_in_hours > 0:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        expires_at_str = (_dt.now(_tz.utc) + _td(hours=float(expires_in_hours))).isoformat()
+
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO agent_commitments "
+            "(agent_type, ticker, commitment_type, condition_text, trigger_action, "
+            " expires_at, status, source_run_id, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+            (
+                agent_type,
+                (ticker or "").upper()[:32] if ticker else None,
+                commitment_type,
+                (condition_text or "")[:2000],
+                (trigger_action or "")[:1000] if trigger_action else None,
+                expires_at_str,
+                source_run_id,
+                (notes or "")[:1000] if notes else None,
+            ),
+        )
+        return cur.lastrowid
+
+
+def get_active_agent_commitments(agent_type: str, limit: int = 20) -> list:
+    agent_type = (agent_type or "standard").lower()
+    with get_db() as conn:
+        _expire_old_commitments_sqlite(conn, agent_type)
+        rows = conn.execute(
+            "SELECT * FROM agent_commitments "
+            "WHERE agent_type=? AND status='active' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (agent_type, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_recent_agent_commitments(agent_type: str, limit: int = 30) -> list:
+    agent_type = (agent_type or "standard").lower()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM agent_commitments "
+            "WHERE agent_type=? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (agent_type, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def resolve_agent_commitment(
+    commitment_id: int,
+    status: str = "triggered",
+    resolved_reason: str | None = None,
+) -> bool:
+    if status not in ("triggered", "cancelled", "expired"):
+        status = "cancelled"
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE agent_commitments "
+            "SET status=?, resolved_at=datetime('now'), resolved_reason=? "
+            "WHERE id=?",
+            (status, (resolved_reason or "")[:1000], commitment_id),
         )
     return True
 

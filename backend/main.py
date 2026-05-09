@@ -1059,6 +1059,48 @@ async def chat_decision_execute_trade(payload: ChatDecisionExecutePayload):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# AGENT COMMITMENTS — memoria persistente delle "promesse" del Decision Agent
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/commitments/{agent_type}")
+async def list_commitments(agent_type: str, status: str = Query("active")):
+    """
+    Ritorna gli impegni del Decision Agent per agent_type ∈ {standard,crypto}.
+    status='active' (default) = solo attivi. status='all' = tutti recenti.
+    """
+    if agent_type not in ("standard", "crypto"):
+        return JSONResponse(status_code=400, content={"error": "agent_type non valido"})
+    try:
+        if status == "all":
+            items = database.get_recent_agent_commitments(agent_type, limit=30)
+        else:
+            items = database.get_active_agent_commitments(agent_type, limit=30)
+        return {"agent_type": agent_type, "status": status, "items": items, "count": len(items)}
+    except Exception as e:
+        logger.error("list_commitments error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class CommitmentCancelPayload(BaseModel):
+    reason: str | None = None
+
+
+@app.post("/api/commitments/{commitment_id}/cancel")
+async def cancel_commitment(commitment_id: int, payload: CommitmentCancelPayload):
+    """L'utente cancella manualmente un impegno attivo."""
+    try:
+        ok = database.resolve_agent_commitment(
+            commitment_id,
+            status="cancelled",
+            resolved_reason=f"[USER] {payload.reason or 'cancellato manualmente'}",
+        )
+        return {"success": bool(ok), "commitment_id": commitment_id}
+    except Exception as e:
+        logger.error("cancel_commitment error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # SIMULATOR — endpoint
 # ═══════════════════════════════════════════════════════════════════════
 

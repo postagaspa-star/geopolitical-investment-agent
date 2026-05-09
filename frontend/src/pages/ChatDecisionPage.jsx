@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   MessageSquare, Send, Loader2, Trash2, AlertCircle, Check,
   TrendingUp, TrendingDown, Bot, User, Sparkles, RefreshCw, Bitcoin, BarChart3,
+  Target, X as XIcon, Clock,
 } from "lucide-react";
 
 const API = window.location.origin;
@@ -246,6 +247,191 @@ function MessageBubble({ msg, agent, onExecuteTrade, executingMsgId, lastExecute
   );
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Pannello "OBIETTIVI ATTIVI" — mostra impegni del Decision Agent (memoria persistente)
+// ────────────────────────────────────────────────────────────────────────────
+function CommitmentsPanel({ agentType, accentColor }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
+  const [cancellingId, setCancellingId] = useState(null);
+
+  const loadItems = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/api/commitments/${agentType}?status=active`);
+      const data = await res.json();
+      if (res.ok) setItems(data.items || []);
+    } catch {
+      /* ignore */
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadItems();
+    // refresh ogni 60s in background
+    const id = setInterval(loadItems, 60000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentType]);
+
+  const cancelItem = async (id) => {
+    if (!window.confirm("Cancellare questo obiettivo? L'agente non lo vedra' piu' nei prossimi run.")) return;
+    setCancellingId(id);
+    try {
+      await fetch(`${API}/api/commitments/${id}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "cancellato dalla UI" }),
+      });
+      await loadItems();
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
+  const formatExpiry = (iso) => {
+    if (!iso) return "no scadenza";
+    try {
+      const d = new Date(iso);
+      const diffMs = d - new Date();
+      if (diffMs <= 0) return "scaduto";
+      const hrs = diffMs / 3600000;
+      if (hrs < 1) return `${Math.round(hrs * 60)}m`;
+      if (hrs < 48) return `${hrs.toFixed(0)}h`;
+      return `${Math.round(hrs / 24)}g`;
+    } catch {
+      return "?";
+    }
+  };
+
+  const typeLabels = {
+    monitor: "Monitor",
+    conditional_buy: "BUY se",
+    conditional_sell: "SELL se",
+    watch_event: "Evento",
+    reminder: "Reminder",
+  };
+
+  if (!loading && items.length === 0) {
+    return null; // niente da mostrare → nascondi del tutto
+  }
+
+  return (
+    <div style={{
+      background: "#0b1424",
+      border: "1px solid #1e293b",
+      borderRadius: "10px",
+      padding: "0.7rem 1rem",
+      marginBottom: "0.75rem",
+    }}>
+      <div
+        onClick={() => setCollapsed((c) => !c)}
+        style={{
+          display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer",
+          userSelect: "none",
+        }}>
+        <Target size={15} color={accentColor} />
+        <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "#cbd5e1" }}>
+          Obiettivi attivi
+          {items.length > 0 && (
+            <span style={{
+              marginLeft: "0.4rem", fontSize: "0.72rem",
+              background: accentColor, color: "#0f172a",
+              padding: "1px 7px", borderRadius: "10px", fontWeight: 700,
+            }}>
+              {items.length}
+            </span>
+          )}
+        </div>
+        <div style={{ flex: 1, fontSize: "0.7rem", color: "#64748b", fontStyle: "italic" }}>
+          impegni che l'agente ricorda tra un run e l'altro
+        </div>
+        <div style={{ fontSize: "0.7rem", color: "#64748b" }}>
+          {collapsed ? "espandi ▾" : "comprimi ▴"}
+        </div>
+      </div>
+
+      {!collapsed && (
+        <div style={{ marginTop: "0.6rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+          {loading && items.length === 0 && (
+            <div style={{ color: "#64748b", fontSize: "0.78rem" }}>caricamento...</div>
+          )}
+          {items.map((c) => (
+            <div key={c.id} style={{
+              background: "#0f172a",
+              border: "1px solid #1e293b",
+              borderRadius: "7px",
+              padding: "0.55rem 0.7rem",
+              display: "flex",
+              gap: "0.6rem",
+              alignItems: "flex-start",
+            }}>
+              <div style={{
+                background: "#1e293b",
+                color: accentColor,
+                fontSize: "0.65rem",
+                fontWeight: 700,
+                padding: "2px 7px",
+                borderRadius: "4px",
+                whiteSpace: "nowrap",
+                flexShrink: 0,
+                marginTop: "1px",
+              }}>
+                {typeLabels[c.commitment_type] || c.commitment_type}
+                {c.ticker && (
+                  <span style={{ marginLeft: "0.3rem", color: "#cbd5e1" }}>{c.ticker}</span>
+                )}
+              </div>
+              <div style={{ flex: 1, fontSize: "0.8rem", color: "#cbd5e1", lineHeight: 1.4 }}>
+                {c.condition_text}
+                {c.trigger_action && (
+                  <div style={{ marginTop: "0.2rem", color: "#94a3b8", fontSize: "0.74rem" }}>
+                    → {c.trigger_action}
+                  </div>
+                )}
+              </div>
+              <div style={{
+                display: "flex", alignItems: "center", gap: "0.3rem",
+                fontSize: "0.7rem", color: "#94a3b8", flexShrink: 0,
+              }}>
+                <Clock size={11} />
+                {formatExpiry(c.expires_at)}
+              </div>
+              <button
+                onClick={() => cancelItem(c.id)}
+                disabled={cancellingId === c.id}
+                title="Cancella obiettivo"
+                style={{
+                  background: "transparent",
+                  border: "1px solid #334155",
+                  color: "#94a3b8",
+                  width: 22, height: 22,
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                  padding: 0,
+                }}>
+                {cancellingId === c.id ? (
+                  <Loader2 size={11} className="spin" />
+                ) : (
+                  <XIcon size={11} />
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function ChatDecisionPage() {
   const [agentType, setAgentType] = useState("standard");
   const [messages, setMessages] = useState([]);
@@ -460,6 +646,9 @@ export default function ChatDecisionPage() {
           );
         })}
       </div>
+
+      {/* Pannello Obiettivi Attivi (memoria persistente del Decision Agent) */}
+      <CommitmentsPanel agentType={agentType} accentColor={agent.color} />
 
       {/* Messages thread */}
       <div ref={scrollRef} style={{
