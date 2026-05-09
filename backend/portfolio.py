@@ -202,31 +202,54 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
     portfolio = get_portfolio()
     cost = quantity * price
 
-    # Aggiorna la liquidita'
+    # Aggiorna la liquidita' — log error reale se il DB rifiuta
     new_cash = portfolio["cash_balance"] - cost
-    update_portfolio(new_cash, portfolio["total_value"])
+    try:
+        update_portfolio(new_cash, portfolio["total_value"])
+    except Exception as ex:
+        logger.error("execute_buy: update_portfolio FAILED for %s qty=%s price=%s: %s",
+                     ticker, quantity, price, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}",
+                "db_error": str(ex)[:500]}
 
-    # Aggiorna o crea la posizione
+    # Aggiorna o crea la posizione — log error reale se il DB rifiuta
     existing = get_position(ticker)
-    if existing is not None:
-        # Media ponderata del prezzo di acquisto
-        old_total = existing["avg_buy_price"] * existing["quantity"]
-        new_quantity = existing["quantity"] + quantity
-        new_avg_price = (old_total + cost) / new_quantity
-        upsert_position(ticker, new_quantity, new_avg_price, price)
-    else:
-        upsert_position(ticker, quantity, price, price)
+    try:
+        if existing is not None:
+            # Media ponderata del prezzo di acquisto
+            old_total = existing["avg_buy_price"] * existing["quantity"]
+            new_quantity = existing["quantity"] + quantity
+            new_avg_price = (old_total + cost) / new_quantity
+            upsert_position(ticker, new_quantity, new_avg_price, price)
+        else:
+            upsert_position(ticker, quantity, price, price)
+    except Exception as ex:
+        logger.error("execute_buy: upsert_position FAILED for %s qty=%s: %s",
+                     ticker, quantity, ex, exc_info=True)
+        # Rollback cash (best effort)
+        try:
+            update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
+        except Exception:
+            pass
+        return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}",
+                "db_error": str(ex)[:500]}
 
     # Ricalcola il valore totale del portafoglio
     new_total = calculate_total_value()
 
-    # Registra l'operazione nel log delle transazioni
+    # Registra l'operazione nel log delle transazioni — log error reale se DB rifiuta
     decision_text = f"BUY {quantity} {ticker} @ {price:.2f}"
-    trade_id = insert_trade(
-        ticker, "BUY", quantity, price,
-        geo_reasoning, tech_reasoning,
-        decision_text, confidence,
-    )
+    try:
+        trade_id = insert_trade(
+            ticker, "BUY", quantity, price,
+            geo_reasoning, tech_reasoning,
+            decision_text, confidence,
+        )
+    except Exception as ex:
+        logger.error("execute_buy: insert_trade FAILED for %s qty=%s: %s",
+                     ticker, quantity, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (trade log): {str(ex)[:200]}",
+                "db_error": str(ex)[:500]}
 
     return {
         "success": True,
@@ -291,18 +314,33 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
     portfolio = get_portfolio()
     proceeds = quantity * price
 
-    # Aggiorna la liquidita'
+    # Aggiorna la liquidita' — log error reale se il DB rifiuta
     new_cash = portfolio["cash_balance"] + proceeds
-    update_portfolio(new_cash, portfolio["total_value"])
+    try:
+        update_portfolio(new_cash, portfolio["total_value"])
+    except Exception as ex:
+        logger.error("execute_sell: update_portfolio FAILED for %s qty=%s price=%s: %s",
+                     ticker, quantity, price, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}",
+                "db_error": str(ex)[:500]}
 
-    # Aggiorna o rimuovi la posizione
+    # Aggiorna o rimuovi la posizione — log error reale se DB rifiuta
     remaining = existing["quantity"] - quantity
-    if remaining == 0:
-        # Posizione completamente chiusa
-        delete_position(ticker)
-    else:
-        # Posizione parzialmente ridotta (il prezzo medio resta invariato)
-        upsert_position(ticker, remaining, existing["avg_buy_price"], price)
+    try:
+        if remaining == 0:
+            delete_position(ticker)
+        else:
+            upsert_position(ticker, remaining, existing["avg_buy_price"], price)
+    except Exception as ex:
+        logger.error("execute_sell: position update FAILED for %s remaining=%s: %s",
+                     ticker, remaining, ex, exc_info=True)
+        # Rollback cash
+        try:
+            update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
+        except Exception:
+            pass
+        return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}",
+                "db_error": str(ex)[:500]}
 
     # Ricalcola il valore totale del portafoglio
     new_total = calculate_total_value()
@@ -312,11 +350,17 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
 
     # Registra l'operazione nel log delle transazioni
     decision_text = f"SELL {quantity} {ticker} @ {price:.2f}"
-    trade_id = insert_trade(
-        ticker, "SELL", quantity, price,
-        geo_reasoning, tech_reasoning,
-        decision_text, confidence,
-    )
+    try:
+        trade_id = insert_trade(
+            ticker, "SELL", quantity, price,
+            geo_reasoning, tech_reasoning,
+            decision_text, confidence,
+        )
+    except Exception as ex:
+        logger.error("execute_sell: insert_trade FAILED for %s qty=%s: %s",
+                     ticker, quantity, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (trade log): {str(ex)[:200]}",
+                "db_error": str(ex)[:500]}
 
     return {
         "success": True,

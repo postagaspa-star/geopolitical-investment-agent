@@ -290,65 +290,41 @@ function Settings({ onBack, onDataRefresh }) {
     }
   };
 
-  const handleRebuild = async () => {
-    if (rebuildStatus.running) return;
-    if (!window.confirm(
-      "REBUILD portafoglio.\n\n" +
-      "Ricostruisce cash + posizioni replicando tutti i trade dall'inizio. " +
-      "Lo stato attuale verrà SOSTITUITO. Trade malformati (qty/price≤0) o " +
-      "impossibili (BUY > cash, SELL > posseduti) verranno scartati.\n\n" +
-      "Operazione IRREVERSIBILE. Procedere?"
-    )) return;
-    setRebuildStatus({ running: true, result: null });
+  // === DB Diagnostic + run migrations ===
+  const [dbDiagStatus, setDbDiagStatus] = useState({ running: false, result: null });
+  const [migrateStatus, setMigrateStatus] = useState({ running: false, result: null });
+
+  const handleDbDiagnostic = async () => {
+    if (dbDiagStatus.running) return;
+    setDbDiagStatus({ running: true, result: null });
     try {
-      const r = await fetch(`${API}/api/portfolio/rebuild?confirm=true`, { method: "POST" });
+      const r = await fetch(`${API}/api/portfolio/db-diagnostic`);
       const data = await r.json();
-      setRebuildStatus({ running: false, result: { ok: r.ok && data.status === "ok", data } });
-      // Re-run audit per mostrare stato post-rebuild
-      handleAudit();
+      setDbDiagStatus({ running: false, result: { ok: r.ok, data } });
     } catch (e) {
-      setRebuildStatus({ running: false, result: { ok: false, data: { error: String(e) } } });
+      setDbDiagStatus({ running: false, result: { ok: false, data: { error: String(e) } } });
     }
   };
 
-  // === Cleanup portfolio_history outlier ===
-  const [cleanupStatus, setCleanupStatus] = useState({ running: false, result: null });
-  const handleHistoryCleanup = async (mode = "median") => {
-    if (cleanupStatus.running) return;
-    const confirmMsg = mode === "wipe"
-      ? "Conferma WIPE COMPLETO storico equity.\n\n" +
-        "Questa operazione cancella TUTTI gli snapshot del portafoglio. " +
-        "Il grafico equity sparirà finché il polling non scriverà nuovi snapshot " +
-        "(qualche minuto).\n\n" +
-        "Usalo solo se il chart è completamente compromesso (più step-jump che il " +
-        "filtro mediano non riesce a recuperare).\n\n" +
-        "Procedere?"
-      : "Conferma pulizia storico equity.\n\n" +
-        "Questa operazione cancella PERMANENTEMENTE gli snapshot del portafoglio " +
-        "il cui valore devia di oltre il 25% dalla median storica.\n\n" +
-        "Procedere?";
-    if (!window.confirm(confirmMsg)) return;
-    setCleanupStatus({ running: true, result: null });
+  const handleRunMigrations = async () => {
+    if (migrateStatus.running) return;
+    if (!window.confirm(
+      "Triggera _ensure_schema_migrations() che applica le ALTER TABLE pending " +
+      "(v11 quantity NUMERIC, v10 SL/TP, etc.).\n\n" +
+      "Idempotente. Richiede DATABASE_URL o SUPABASE_DB_PASSWORD configurato " +
+      "su Render → Environment.\n\nProcedere?"
+    )) return;
+    setMigrateStatus({ running: true, result: null });
     try {
-      const url = mode === "wipe"
-        ? `${API}/api/portfolio/history/cleanup?mode=wipe`
-        : `${API}/api/portfolio/history/cleanup?threshold_pct=25`;
-      const r = await fetch(url, { method: "POST" });
+      const r = await fetch(`${API}/api/portfolio/run-migrations`, { method: "POST" });
       const data = await r.json();
-      setCleanupStatus({
-        running: false,
-        result: {
-          ok: r.ok && data.status === "ok",
-          summary: data.message || data.error || `Status: ${data.status}`,
-          deleted: data.deleted,
-          median: data.median,
-        },
-      });
+      setMigrateStatus({ running: false, result: { ok: r.ok && data.status === "ok", data } });
+      // Re-run diagnostic to confirm fix
+      if (r.ok && data.status === "ok") {
+        setTimeout(() => handleDbDiagnostic(), 500);
+      }
     } catch (e) {
-      setCleanupStatus({
-        running: false,
-        result: { ok: false, summary: `Errore di rete: ${e}` },
-      });
+      setMigrateStatus({ running: false, result: { ok: false, data: { error: String(e) } } });
     }
   };
   const handleManualPoll = async () => {
@@ -717,6 +693,111 @@ function Settings({ onBack, onDataRefresh }) {
                     Cash: ${adjustCashStatus.result.data.old_cash?.toLocaleString()} -> ${adjustCashStatus.result.data.new_cash?.toLocaleString()}
                     {" - "}
                     Total: ${adjustCashStatus.result.data.old_total?.toLocaleString()} -> ${adjustCashStatus.result.data.new_total?.toLocaleString()}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* DB Diagnostic + run migrations */}
+          <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid #f3f4f6" }}>
+            <div style={{ marginBottom: "10px" }}>
+              <div style={{ fontSize: "14px", fontWeight: 600, color: "#111827" }}>
+                Diagnostica DB scritture
+              </div>
+              <div style={{ fontSize: "12px", color: "#6b7280", marginTop: "2px" }}>
+                Verifica se gli agenti riescono a eseguire trade. Test write con
+                quantity frazionali (0.5 BTC, sell parziali). Se la migration v11
+                NUMERIC non e' applicata, il DB rifiuta con
+                <code> "invalid input syntax for type integer"</code>.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+              <button
+                style={{
+                  ...btnSecondary,
+                  background: dbDiagStatus.running ? "#e5e7eb" : "#3b82f6",
+                  color: dbDiagStatus.running ? "#6b7280" : "#fff",
+                  borderColor: dbDiagStatus.running ? "#d1d5db" : "#3b82f6",
+                  cursor: dbDiagStatus.running ? "not-allowed" : "pointer",
+                }}
+                onClick={handleDbDiagnostic}
+                disabled={dbDiagStatus.running}
+              >
+                {dbDiagStatus.running ? "Diagnostica..." : "Diagnostica DB"}
+              </button>
+              <button
+                style={{
+                  ...btnSecondary,
+                  background: migrateStatus.running ? "#e5e7eb" : "#f59e0b",
+                  color: migrateStatus.running ? "#6b7280" : "#fff",
+                  borderColor: migrateStatus.running ? "#d1d5db" : "#f59e0b",
+                  cursor: migrateStatus.running ? "not-allowed" : "pointer",
+                }}
+                onClick={handleRunMigrations}
+                disabled={migrateStatus.running}
+              >
+                {migrateStatus.running ? "Migration..." : "Esegui migration"}
+              </button>
+            </div>
+
+            {dbDiagStatus.result?.data && (
+              <div style={{
+                marginTop: "10px", padding: "12px 14px", borderRadius: "6px",
+                fontSize: "12px",
+                background:
+                  dbDiagStatus.result.data.verdict === "OK" ? "#ecfdf5" :
+                  dbDiagStatus.result.data.verdict === "MIGRATION_V11_NOT_APPLIED" ? "#fef2f2" : "#fffbeb",
+                color:
+                  dbDiagStatus.result.data.verdict === "OK" ? "#065f46" :
+                  dbDiagStatus.result.data.verdict === "MIGRATION_V11_NOT_APPLIED" ? "#991b1b" : "#92400e",
+                border: `1px solid ${
+                  dbDiagStatus.result.data.verdict === "OK" ? "#a7f3d0" :
+                  dbDiagStatus.result.data.verdict === "MIGRATION_V11_NOT_APPLIED" ? "#fecaca" : "#fde68a"
+                }`,
+              }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                  {dbDiagStatus.result.data.verdict === "OK" ? "✓ " :
+                   dbDiagStatus.result.data.verdict === "MIGRATION_V11_NOT_APPLIED" ? "✗ " : "⚠ "}
+                  {dbDiagStatus.result.data.verdict}
+                </div>
+                <div style={{ marginBottom: 8 }}>
+                  {dbDiagStatus.result.data.verdict_message}
+                </div>
+                <details>
+                  <summary style={{ cursor: "pointer", fontWeight: 600 }}>
+                    Dettagli test ({dbDiagStatus.result.data.results?.length})
+                  </summary>
+                  <div style={{ marginTop: 6, fontFamily: "monospace", fontSize: "11px" }}>
+                    {dbDiagStatus.result.data.results?.map((r, i) => (
+                      <div key={i} style={{
+                        padding: "4px 0",
+                        borderBottom: "1px dashed rgba(0,0,0,0.06)",
+                        color: r.status === "error" ? "#dc2626" : r.status === "ok" ? "inherit" : "#92400e",
+                      }}>
+                        <strong>{r.test}</strong>: {r.status.toUpperCase()}
+                        {r.message && <div style={{ color: "#6b7280" }}>{r.message}</div>}
+                        {r.error && <div style={{ color: "#dc2626", marginTop: 2 }}>{r.error}</div>}
+                        {r.fix_suggestion && <div style={{ color: "#0891b2", marginTop: 2 }}>{r.fix_suggestion}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              </div>
+            )}
+
+            {migrateStatus.result?.data && (
+              <div style={{
+                marginTop: "8px", padding: "10px 12px", borderRadius: "6px",
+                fontSize: "12px",
+                background: migrateStatus.result.ok ? "#ecfdf5" : "#fef2f2",
+                color: migrateStatus.result.ok ? "#065f46" : "#991b1b",
+                border: `1px solid ${migrateStatus.result.ok ? "#a7f3d0" : "#fecaca"}`,
+              }}>
+                <div>{migrateStatus.result.data.message || migrateStatus.result.data.error}</div>
+                {migrateStatus.result.data.hint && (
+                  <div style={{ marginTop: 6, whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: "11px" }}>
+                    {migrateStatus.result.data.hint}
                   </div>
                 )}
               </div>

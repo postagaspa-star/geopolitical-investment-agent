@@ -2790,6 +2790,162 @@ async def portfolio_refresh_prices():
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
+@app.get("/api/portfolio/db-diagnostic")
+async def portfolio_db_diagnostic():
+    """
+    Diagnostica completa scritture DB. Risponde alla domanda:
+    "perche' gli agenti non riescono a eseguire trade?"
+
+    Test:
+    1. Insert trade con quantity frazionale 0.5 — fallisce se INTEGER
+    2. Insert position con quantity frazionale 0.25 — idem
+    3. Update portfolio
+    4. Cleanup test rows
+
+    Le righe di test usano ticker "TEST_DIAG_<timestamp>" e vengono rimosse.
+    """
+    import time as _time
+    results = []
+    test_ticker = f"TEST_DIAG_{int(_time.time())}"
+    trade_id = None
+
+    try:
+        from db_supabase import _get_client
+        client = _get_client()
+    except Exception as e:
+        return {
+            "verdict": "ERROR_DB_CONNECTION",
+            "verdict_message": f"Impossibile connettersi a Supabase: {e}",
+            "results": [{"test": "DB connection", "status": "error", "error": str(e)}],
+        }
+
+    # Test 1: trade con quantity frazionale
+    try:
+        result = client.table("trades").insert({
+            "ticker": test_ticker, "action": "BUY",
+            "quantity": 0.5, "price": 100.0, "total_value": 50.0,
+            "geopolitical_reasoning": "diagnostic test",
+            "technical_reasoning": "diagnostic test",
+            "final_decision": "diagnostic", "confidence_score": 50,
+        }).execute()
+        if result.data:
+            trade_id = result.data[0].get("id")
+            results.append({"test": "1. Insert trade quantity=0.5", "status": "ok",
+                            "message": "Migration v11 NUMERIC applicata correttamente.",
+                            "trade_id": trade_id})
+        else:
+            results.append({"test": "1. Insert trade quantity=0.5", "status": "warn",
+                            "message": "Insert ritorna data vuoto (no error)."})
+    except Exception as e:
+        err_str = str(e)[:600]
+        is_integer_bug = "invalid input syntax for type integer" in err_str.lower()
+        results.append({
+            "test": "1. Insert trade quantity=0.5", "status": "error",
+            "error": err_str, "is_integer_migration_bug": is_integer_bug,
+        })
+
+    # Test 2: position con quantity frazionale
+    try:
+        client.table("positions").insert({
+            "ticker": test_ticker, "quantity": 0.25,
+            "avg_buy_price": 100.0, "current_price": 100.0, "unrealized_pnl": 0.0,
+        }).execute()
+        results.append({"test": "2. Insert position quantity=0.25", "status": "ok"})
+    except Exception as e:
+        err_str = str(e)[:600]
+        is_integer_bug = "invalid input syntax for type integer" in err_str.lower()
+        results.append({
+            "test": "2. Insert position quantity=0.25", "status": "error",
+            "error": err_str, "is_integer_migration_bug": is_integer_bug,
+        })
+
+    # Test 3: update portfolio
+    try:
+        portfolio_now = database.get_portfolio() or {}
+        cur_cash = float(portfolio_now.get("cash_balance") or 0)
+        cur_total = float(portfolio_now.get("total_value") or 0)
+        database.update_portfolio(cur_cash, cur_total)
+        results.append({"test": "3. Update portfolio", "status": "ok"})
+    except Exception as e:
+        results.append({"test": "3. Update portfolio", "status": "error",
+                        "error": str(e)[:500]})
+
+    # Cleanup
+    try:
+        if trade_id:
+            client.table("trades").delete().eq("id", trade_id).execute()
+        client.table("positions").delete().eq("ticker", test_ticker).execute()
+    except Exception as e:
+        results.append({"test": "4. Cleanup test rows", "status": "warn",
+                        "error": str(e)[:200],
+                        "manual_action": f"DELETE FROM trades WHERE id={trade_id}; DELETE FROM positions WHERE ticker='{test_ticker}';"})
+
+    has_integer_bug = any(r.get("is_integer_migration_bug") for r in results)
+    has_errors = any(r["status"] == "error" for r in results)
+
+    if has_integer_bug:
+        verdict = "MIGRATION_V11_NOT_APPLIED"
+        verdict_message = (
+            "Migration v11 (quantity INTEGER → NUMERIC) NON e' stata applicata. "
+            "Gli agenti non possono eseguire trade con quantity frazionali. "
+            "Soluzione: configurare DATABASE_URL (o SUPABASE_DB_PASSWORD + "
+            "SUPABASE_URL) su Render → Environment, poi premere 'Esegui migration'."
+        )
+    elif has_errors:
+        verdict = "DB_WRITE_ERROR"
+        verdict_message = "Errori scritture DB rilevati — vedi dettaglio per ogni test."
+    else:
+        verdict = "OK"
+        verdict_message = "Tutti i test passati. Il DB accetta scritture frazionali correttamente."
+
+    return {"verdict": verdict, "verdict_message": verdict_message, "results": results}
+
+
+@app.post("/api/portfolio/run-migrations")
+async def portfolio_run_migrations():
+    """
+    Triggera manualmente _ensure_schema_migrations() che applica le ALTER
+    TABLE pending (v11 quantity NUMERIC, v10 SL/TP, v9 chat tables, etc.).
+
+    Idempotente. Richiede DATABASE_URL o (SUPABASE_DB_PASSWORD + SUPABASE_URL)
+    configurato su Render → Environment Variables.
+    """
+    import os as _os
+    db_url = _os.environ.get("DATABASE_URL", "").strip()
+    db_pass = _os.environ.get("SUPABASE_DB_PASSWORD", "").strip()
+    if not db_url and not db_pass:
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "error": "Né DATABASE_URL né SUPABASE_DB_PASSWORD sono configurati.",
+            "hint": (
+                "Render → Environment → aggiungi una di queste:\n"
+                "  - DATABASE_URL = postgresql://postgres.<ref>:<pwd>@aws-0-eu-central-1.pooler.supabase.com:6543/postgres\n"
+                "  - SUPABASE_DB_PASSWORD = la password del DB Postgres\n"
+                "Poi redeploy e re-triggera questa migration."
+            ),
+        })
+
+    try:
+        from db_supabase import _ensure_schema_migrations
+        _ensure_schema_migrations()
+        return {
+            "status": "ok",
+            "message": (
+                "Migration triggered. Esegui ora 'Diagnostica DB' per "
+                "confermare che il DB accetti quantity frazionali."
+            ),
+            "has_database_url": bool(db_url),
+            "has_db_password": bool(db_pass),
+        }
+    except Exception as e:
+        logger.error("run-migrations error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={
+            "status": "error",
+            "error": str(e),
+            "hint": "Errore durante l'esecuzione delle migration. Verifica i log Render.",
+        })
+
+
 @app.post("/api/portfolio/adjust-cash")
 async def portfolio_adjust_cash(
     delta: float = Query(..., description="Delta da applicare al cash_balance (positivo aggiunge, negativo sottrae)"),
