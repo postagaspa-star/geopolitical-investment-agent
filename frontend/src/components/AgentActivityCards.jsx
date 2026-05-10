@@ -189,12 +189,23 @@ function buildCards(logs) {
     }
 
     if (phase === "DECISION_CRYPTO_COMPLETE") {
+      // FIX: includere reasoning_text + thesis/action_plan/primary_risk
+      // (ora salvati anche in DECISION_CRYPTO_COMPLETE oltre che in
+      // DECISION_REASONING). Fallback chain: reasoning_text → final_text →
+      // thesis (primo non vuoto). Senza fallback, R1 che termina con solo
+      // tool calls e final_text="" mostrava "(testo vuoto)" sebbene il
+      // ragionamento esistesse nel record DECISION_REASONING separato.
+      const richText = content.reasoning_text || content.final_text
+                        || content.thesis || "";
       cards.push({
         key: `dcc_${log.id || ts}`,
         type: "decision_crypto",
         ts, model: content.model,
         trades_executed: content.trades_executed || 0,
-        final_text: content.final_text,
+        final_text: richText,
+        thesis: content.thesis || "",
+        action_plan: content.action_plan || "",
+        primary_risk: content.primary_risk || "",
       });
       continue;
     }
@@ -206,6 +217,19 @@ function buildCards(logs) {
         action: content.action, ticker: content.ticker, qty: content.qty,
         price: content.price, confidence: content.confidence,
         decision_label: "CRYPTO TRADE",
+      });
+      continue;
+    }
+    if (phase === "DECISION_CRYPTO_TRADE_FAILED") {
+      // Senza questa card l'utente vedeva trade silenziosamente fallito
+      // ("ha fatto l'operazione ma non ha mostrato nulla altro"). Ora
+      // appare un card rossa con il motivo del rifiuto.
+      cards.push({
+        key: `dctf_${log.id || ts}`,
+        type: "decision_trade_failed",
+        ts,
+        action: content.action, ticker: content.ticker, qty: content.qty,
+        price: content.price, reason: content.reason || "?",
       });
       continue;
     }
@@ -238,6 +262,7 @@ function CardRenderer({ card }) {
     case "decision_reasoning": return <ReasoningCard c={card} />;
     case "decision_decision": return <DecisionCard c={card} />;
     case "decision_crypto": return <DecisionCryptoCard c={card} />;
+    case "decision_trade_failed": return <TradeFailedCard c={card} />;
     case "decision_error": return <ErrorCard c={card} />;
     default: return null;
   }
@@ -416,6 +441,11 @@ function DecisionCard({ c }) {
 
 function DecisionCryptoCard({ c }) {
   const tone = "#f472b6";
+  // Componi il body: usa thesis/action_plan/primary_risk se disponibili,
+  // altrimenti fallback a final_text. Prima la card mostrava solo
+  // final_text troncato a 500 char (tabella markdown a meta') o
+  // "(testo vuoto)" quando R1 terminava con solo tool calls.
+  const hasRich = c.thesis || c.action_plan || c.primary_risk;
   return (
     <div style={{ ...S.card(tone), background: "#15101a" }}>
       <CardHeader
@@ -427,8 +457,80 @@ function DecisionCryptoCard({ c }) {
           </>
         }
       />
-      <div style={S.reasoningBox}>
-        {c.final_text || <em style={{ color: "#64748b" }}>(testo vuoto)</em>}
+      {hasRich ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10,
+                       paddingTop: 4 }}>
+          {c.thesis && (
+            <div>
+              <div style={{ ...S.label, color: tone, marginBottom: 4 }}>💡 Tesi</div>
+              <div style={S.reasoningBox}>{c.thesis}</div>
+            </div>
+          )}
+          {c.action_plan && (
+            <div>
+              <div style={{ ...S.label, color: tone, marginBottom: 4 }}>📋 Piano d'azione</div>
+              <div style={S.reasoningBox}>{c.action_plan}</div>
+            </div>
+          )}
+          {c.primary_risk && (
+            <div>
+              <div style={{ ...S.label, color: "#ef4444", marginBottom: 4 }}>⚠️ Rischio principale</div>
+              <div style={S.reasoningBox}>{c.primary_risk}</div>
+            </div>
+          )}
+          {c.final_text && (
+            <div>
+              <div style={{ ...S.label, marginBottom: 4 }}>✅ Conclusione</div>
+              <div style={S.reasoningBox}>{c.final_text}</div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={S.reasoningBox}>
+          {c.final_text || (
+            <em style={{ color: "#64748b" }}>
+              R1 ha completato il run senza output testuale finale (solo tool calls).
+              Vedi card "Decision — Ragionamento" sopra per la tesi completa.
+            </em>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TradeFailedCard({ c }) {
+  // Card rossa per DECISION_CRYPTO_TRADE_FAILED: senza questa, l'utente
+  // vedeva il trade fallito silenziosamente (no card, solo absent log).
+  const tone = "#ef4444";
+  return (
+    <div style={{ ...S.card(tone), background: "#1f0e0e" }}>
+      <CardHeader
+        icon={AlertCircle} iconColor={tone}
+        title={<span style={{ color: tone }}>Trade RIFIUTATO</span>}
+        ts={c.ts}
+        badges={<span style={{ ...S.cryptoBadge, color: tone,
+                                 borderColor: tone, background: "rgba(239,68,68,0.10)" }}>
+          CRYPTO</span>}
+      />
+      <div style={S.tradeBlock}>
+        <div style={S.tradeMain}>
+          <span style={{ ...S.actionTag, background: tone, color: "#fff" }}>
+            {c.action}
+          </span>
+          <span style={S.tradeQty}>{c.qty}</span>
+          <span style={S.tradeTicker}>{c.ticker}</span>
+          {c.price && (
+            <>
+              <span style={S.tradeAt}>@</span>
+              <span style={S.tradePrice}>${Number(c.price).toFixed(2)}</span>
+            </>
+          )}
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <span style={{ ...S.label, color: tone }}>Motivo rifiuto</span>
+          <span style={S.value}>{c.reason}</span>
+        </div>
       </div>
     </div>
   );

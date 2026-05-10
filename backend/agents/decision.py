@@ -1355,7 +1355,7 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             "event": "decision_complete", "model": used_model,
             "iterations": iteration, "trades_executed": len(trades_executed),
             "duration_seconds": round(duration, 1),
-            "final_text": final_text[:500],
+            "final_text": final_text[:8000],
         }, default=str))
         _save_checkpoint(run_id, "decision", "COMPLETED", {
             "trades": len(trades_executed), "duration": duration,
@@ -1553,7 +1553,7 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             "thesis": (ft.get("thesis") or "")[:2000],
             "action_plan": (ft.get("action_plan") or "")[:1000],
             "primary_risk": (ft.get("primary_risk") or "")[:1000],
-            "final_text": final_text[:500],
+            "final_text": final_text[:8000],
             "trades": len(trades_executed),
         }
         database.insert_agent_log(run_id, "DECISION_REASONING",
@@ -1569,7 +1569,7 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             "iterations": iteration,
             "trades_executed": len(trades_executed),
             "duration_seconds": round(duration, 1),
-            "final_text": final_text[:500],
+            "final_text": final_text[:8000],
         }, default=str))
 
     # Registra timestamp Sonnet per la sidebar (Decision row)
@@ -1754,7 +1754,7 @@ async def _run_deepseek_decision_loop(
             "thesis": (ft.get("thesis") or "")[:2000],
             "action_plan": (ft.get("action_plan") or "")[:1000],
             "primary_risk": (ft.get("primary_risk") or "")[:1000],
-            "final_text": final_text[:500],
+            "final_text": final_text[:8000],
             "trades": len(trades_executed),
         }, default=str))
     except Exception:

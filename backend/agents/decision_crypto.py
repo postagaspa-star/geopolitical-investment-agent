@@ -1140,14 +1140,16 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
             "model": DEEPSEEK_R1_MODEL,
             "agent": "crypto",
             "phase_state": workflow_state.phase,
+            # FIX: cap esteso per non troncare la tabella markdown finale.
+            # R1 con max_tokens=8000 puo' generare riepiloghi >500 char.
             "reasoning_text": _build_reasoning_text(ia, ft, final_text),
-            "situation_overview": (ia.get("situation_overview") or "")[:1500],
+            "situation_overview": (ia.get("situation_overview") or "")[:2500],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],
-            "thesis": (ft.get("thesis") or "")[:2000],
-            "action_plan": (ft.get("action_plan") or "")[:1000],
-            "primary_risk": (ft.get("primary_risk") or "")[:1000],
-            "final_text": final_text[:500],
+            "thesis": (ft.get("thesis") or "")[:3500],
+            "action_plan": (ft.get("action_plan") or "")[:2000],
+            "primary_risk": (ft.get("primary_risk") or "")[:2000],
+            "final_text": final_text[:8000],
             "trades": len(trades_executed),
         }, default=str))
     except Exception:
@@ -1222,12 +1224,19 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
 
     duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 
+    # FIX: il record COMPLETE deve includere anche il reasoning ricco
+    # (thesis, action_plan, primary_risk) cosi' la card UI "Decision Crypto"
+    # puo' renderle senza dipendere dal record DECISION_REASONING separato.
+    # Anche `final_text` esteso a [:8000] per non troncare le tabelle markdown.
     database.insert_agent_log(run_id, "DECISION_CRYPTO_COMPLETE", json.dumps({
         "model": used_model,
         "iterations": iterations,
         "trades_executed": len(trades),
         "duration_seconds": round(duration, 1),
-        "final_text": final_text[:500],
+        "final_text": final_text[:8000],
+        # Fallback "reasoning_text" se la card UI sceglie questo campo:
+        # vuoto se R1 ha terminato senza testo finale (solo tool calls).
+        "reasoning_text": final_text[:8000] if final_text else "",
     }, default=str))
 
     return {
