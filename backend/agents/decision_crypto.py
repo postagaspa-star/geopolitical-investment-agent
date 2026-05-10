@@ -1113,7 +1113,7 @@ def _build_context(tech_report: dict, recent_buffer: list, portfolio_state: dict
 # ─── Tool loop ──────────────────────────────────────────────────────────────
 
 async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
-                        ) -> tuple[list, str, int]:
+                        ) -> tuple[list, str, int, dict, dict]:
     api_key = _get_deepseek_key()
     if not api_key:
         raise ValueError("DEEPSEEK_API_KEY non configurata")
@@ -1258,33 +1258,21 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
                     "content": result,
                 })
 
-    # Log finale workflow state + reasoning unificato per dashboard
+    # Log finale workflow state. Il reasoning ricco (thesis/action_plan/
+    # primary_risk + final_text) viene incluso direttamente in
+    # DECISION_CRYPTO_COMPLETE dal chiamante, evitando la doppia card
+    # "Decision — Ragionamento" + "Decision Crypto" che il frontend
+    # produceva quando entrambi i log esistevano.
     try:
         import database
         database.insert_agent_log(run_id, "DECISION_CRYPTO_WORKFLOW", json.dumps(
             workflow_state.to_dict(), default=str))
-        ia = workflow_state.initial_assessment or {}
-        ft = workflow_state.final_thesis or {}
-        database.insert_agent_log(run_id, "DECISION_REASONING", json.dumps({
-            "model": DEEPSEEK_R1_MODEL,
-            "agent": "crypto",
-            "phase_state": workflow_state.phase,
-            # FIX: cap esteso per non troncare la tabella markdown finale.
-            # R1 con max_tokens=8000 puo' generare riepiloghi >500 char.
-            "reasoning_text": _build_reasoning_text(ia, ft, final_text),
-            "situation_overview": (ia.get("situation_overview") or "")[:2500],
-            "asset_candidates": ia.get("asset_candidates") or [],
-            "technical_questions": ia.get("technical_questions") or [],
-            "thesis": (ft.get("thesis") or "")[:3500],
-            "action_plan": (ft.get("action_plan") or "")[:2000],
-            "primary_risk": (ft.get("primary_risk") or "")[:2000],
-            "final_text": final_text[:8000],
-            "trades": len(trades_executed),
-        }, default=str))
     except Exception:
         pass
 
-    return trades_executed, final_text, iteration
+    ia = workflow_state.initial_assessment or {}
+    ft = workflow_state.final_thesis or {}
+    return trades_executed, final_text, iteration, ia, ft
 
 
 # ─── Main entry ─────────────────────────────────────────────────────────────
@@ -1333,7 +1321,7 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
 
     sys_prompt_crypto, coach_card_ids_crypto = _get_crypto_decision_prompt_with_meta()
     try:
-        trades, final_text, iterations = await _run_r1_loop(
+        trades, final_text, iterations, ia, ft = await _run_r1_loop(
             run_id, sys_prompt_crypto, user_message,
         )
         used_model = DEEPSEEK_R1_MODEL
@@ -1362,19 +1350,29 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
 
     duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 
-    # FIX: il record COMPLETE deve includere anche il reasoning ricco
-    # (thesis, action_plan, primary_risk) cosi' la card UI "Decision Crypto"
-    # puo' renderle senza dipendere dal record DECISION_REASONING separato.
-    # Anche `final_text` esteso a [:8000] per non troncare le tabelle markdown.
+    # DECISION_CRYPTO_COMPLETE include il reasoning ricco completo (thesis,
+    # action_plan, primary_risk + final_text). E' l'UNICO log "ricco" del
+    # crypto run: il vecchio DECISION_REASONING e' stato rimosso per evitare
+    # doppia card nella UI ("Decision — Ragionamento" + "Decision Crypto"
+    # mostravano lo stesso contenuto sovrapposto, incluso il riepilogo trade
+    # markdown ripetuto).
     database.insert_agent_log(run_id, "DECISION_CRYPTO_COMPLETE", json.dumps({
         "model": used_model,
         "iterations": iterations,
         "trades_executed": len(trades),
         "duration_seconds": round(duration, 1),
         "final_text": final_text[:8000],
-        # Fallback "reasoning_text" se la card UI sceglie questo campo:
-        # vuoto se R1 ha terminato senza testo finale (solo tool calls).
+        # reasoning_text e' fallback se la card UI lo richiede (es. quando
+        # ft e' vuoto perche' R1 ha terminato senza completare la final_thesis).
         "reasoning_text": final_text[:8000] if final_text else "",
+        # Reasoning strutturato (estratto da workflow_state.final_thesis):
+        "thesis": (ft.get("thesis") or "")[:3500],
+        "action_plan": (ft.get("action_plan") or "")[:2000],
+        "primary_risk": (ft.get("primary_risk") or "")[:2000],
+        # Initial assessment (utile per debugging / coach cards):
+        "situation_overview": (ia.get("situation_overview") or "")[:2500],
+        "asset_candidates": ia.get("asset_candidates") or [],
+        "technical_questions": ia.get("technical_questions") or [],
     }, default=str))
 
     return {

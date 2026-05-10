@@ -173,6 +173,13 @@ function buildCards(logs) {
 
     // ─── DECISION ───
     if (phase === "DECISION_REASONING") {
+      // FIX: il Decision Crypto produce sia DECISION_REASONING che
+      // DECISION_CRYPTO_COMPLETE, entrambi col reasoning_text. Per evitare
+      // doppia card "Decision — Ragionamento" + "Decision Crypto" con
+      // contenuto sovrapposto, skippiamo la card per agent="crypto" — il
+      // ragionamento e' gia' renderizzato (con thesis/action_plan/primary_risk
+      // separati) dalla DecisionCryptoCard.
+      if (content.agent === "crypto") continue;
       cards.push({
         key: `dr_${log.id || ts}`,
         type: "decision_reasoning",
