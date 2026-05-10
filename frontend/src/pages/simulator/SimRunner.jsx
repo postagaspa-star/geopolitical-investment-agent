@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Play, ChevronRight, Loader2, Wallet, AlertCircle, Trophy,
   ChevronLeft, MessageCircle, Send, TrendingUp, BookmarkPlus,
-  CheckCircle2, Bitcoin, LineChart,
+  CheckCircle2, Bitcoin, LineChart, Download,
 } from "lucide-react";
 
 const API = window.location.origin;
@@ -677,9 +677,51 @@ function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewH
   const priceSeries = finalResult.price_series || {};
   const stepDates = finalResult.step_dates || scenario.step_dates || [];
 
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const handleDownloadPDF = async () => {
+    if (pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      // Lazy import: jsPDF + html2canvas (~180kB) caricati solo on-demand
+      const { generatePDFFromSections } = await import("../../utils/pdfExport");
+      const outcome = finalResult.outcome === "green" ? "Verde (vincente)"
+                    : finalResult.outcome === "red"   ? "Rosso (perdente)"
+                    : finalResult.outcome === "yellow" ? "Giallo (neutro)"
+                    : "—";
+      const meta = {
+        title: "Simulator Report",
+        subtitle: scenario.title || "Partita Simulator",
+        runId: finalResult.run_id || scenario.run_id || "—",
+        category: scenario.category || (isCrypto ? "crypto" : "equity"),
+        scenarioType: `${history.length} turni · ${isCrypto ? "Crypto" : "Equity"}`,
+        action: `P&L: ${v.total_pnl >= 0 ? "+" : ""}$${v.total_pnl.toFixed(2)} (${v.total_pnl_pct >= 0 ? "+" : ""}${v.total_pnl_pct.toFixed(2)}%)`,
+        asset: (finalResult.asset_breakdown || [])
+                  .map(p => p.asset).slice(0, 6).join(", ") || "—",
+        outcome,
+        period: scenario.title || "—",
+        generatedAt: new Date().toLocaleString("it-IT", {
+          dateStyle: "medium", timeStyle: "short",
+        }),
+      };
+      const safeTitle = (scenario.title || "run").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 30);
+      const filename = `simulator_${safeTitle}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      await generatePDFFromSections({
+        rootId: "sim-runner-pdf",
+        filename,
+        meta,
+      });
+    } catch (e) {
+      console.error("[PDF] generation failed:", e);
+      alert("Errore generazione PDF: " + (e.message || e));
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
   return (
-    <div>
-      <div style={S.gameHeader}>
+    <div id="sim-runner-pdf">
+      <style>{`.spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <div style={S.gameHeader} data-pdf-section="true">
         <div>
           <div style={S.scenTitle}>🏁 Partita conclusa</div>
           <div style={S.scenSubtitle}>{scenario.title}</div>
@@ -689,7 +731,35 @@ function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewH
         </div>
       </div>
 
-      <div style={S.finalGrid}>
+      {/* CTA Download PDF visibile in alto + skip nel PDF stesso */}
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}
+           data-pdf-skip="true">
+        <button
+          onClick={handleDownloadPDF}
+          disabled={pdfBusy}
+          title="Genera un PDF con tutti i dati e i grafici di questa partita"
+          style={{
+            background: "transparent", color: "#cbd5e1",
+            border: "1px solid #374151", padding: "8px 14px",
+            borderRadius: 6, fontWeight: 600, cursor: pdfBusy ? "not-allowed" : "pointer",
+            display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13,
+            opacity: pdfBusy ? 0.6 : 1,
+          }}
+        >
+          {pdfBusy ? (
+            <>
+              <Loader2 size={14} className="spin" />
+              Generazione…
+            </>
+          ) : (
+            <>
+              <Download size={14} /> Scarica PDF
+            </>
+          )}
+        </button>
+      </div>
+
+      <div style={S.finalGrid} data-pdf-section="true">
         <div style={S.finalBox}>
           <div style={S.statLabel}>Valore finale</div>
           <div style={{ fontSize: 28, fontWeight: 800 }}>
@@ -714,7 +784,7 @@ function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewH
 
       {/* Chart valore portafoglio nel tempo */}
       {portfolioSeries.length >= 2 && (
-        <div style={S.chartBox}>
+        <div style={S.chartBox} data-pdf-section="true">
           <h3 style={{ marginTop: 0, color: "#a78bfa" }}>📈 Valore portafoglio per turno</h3>
           <PortfolioChart series={portfolioSeries} initialCapital={v.initial_capital} />
         </div>
@@ -722,7 +792,7 @@ function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewH
 
       {/* Chart prezzi multi-asset */}
       {Object.keys(priceSeries).length > 0 && stepDates.length >= 2 && (
-        <div style={S.chartBox}>
+        <div style={S.chartBox} data-pdf-section="true">
           <h3 style={{ marginTop: 0, color: "#a78bfa" }}>📊 Movimenti prezzi durante lo scenario</h3>
           <PriceMultiChart series={priceSeries} stepDates={stepDates}
                            assetBreakdown={finalResult.asset_breakdown || []} />
@@ -731,7 +801,7 @@ function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewH
 
       {/* Breakdown per asset */}
       {finalResult.asset_breakdown && finalResult.asset_breakdown.length > 0 && (
-        <div style={S.chartBox}>
+        <div style={S.chartBox} data-pdf-section="true">
           <h3 style={{ marginTop: 0, color: "#a78bfa" }}>💼 Breakdown posizioni finali</h3>
           {finalResult.asset_breakdown.map((p, i) => (
             <div key={i} style={S.posRow}>
@@ -752,7 +822,7 @@ function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewH
       )}
 
       {finalResult.debrief && (
-        <div style={S.debriefBox}>
+        <div style={S.debriefBox} data-pdf-section="true">
           <h3 style={{ marginTop: 0, color: "#a78bfa" }}>
             <Trophy size={18} style={{ verticalAlign: "middle" }} /> Debrief AI
           </h3>
@@ -764,7 +834,7 @@ function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewH
       )}
 
       {finalResult.description_reveal && (
-        <div style={S.revealBox}>
+        <div style={S.revealBox} data-pdf-section="true">
           <h3 style={{ marginTop: 0 }}>📖 Cosa è successo davvero</h3>
           <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
             {finalResult.description_reveal}
@@ -782,11 +852,26 @@ function DoneView({ finalResult, scenario, history, isCrypto, onRestart, onViewH
         </div>
       </details>
 
-      <div style={{ display: "flex", gap: 8, marginTop: 24 }}>
+      <div style={{ display: "flex", gap: 8, marginTop: 24, flexWrap: "wrap" }}>
         <button style={S.btnPrimary} onClick={onRestart}>
           <Play size={16} /> Nuova partita
         </button>
         <button style={S.btnGhost} onClick={onViewHistory}>Vai allo storico</button>
+        <button
+          onClick={handleDownloadPDF}
+          disabled={pdfBusy}
+          style={{
+            ...S.btnGhost,
+            opacity: pdfBusy ? 0.6 : 1,
+            cursor: pdfBusy ? "not-allowed" : "pointer",
+          }}
+        >
+          {pdfBusy ? (
+            <><Loader2 size={14} className="spin" /> Generazione…</>
+          ) : (
+            <><Download size={14} /> Scarica PDF</>
+          )}
+        </button>
       </div>
     </div>
   );
