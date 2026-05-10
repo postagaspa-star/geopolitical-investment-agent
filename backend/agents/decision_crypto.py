@@ -274,7 +274,11 @@ CRYPTO_DECISION_TOOLS = [
                     "ticker": {"type": "string",
                                "description": "Crypto in formato yfinance (BTC-USD, ETH-USD, ...)"},
                     "action": {"type": "string", "enum": ["BUY", "SELL"]},
-                    "quantity": {"type": "integer", "minimum": 1},
+                    # number (NON integer): crypto frazionarie obbligatorie.
+                    # BTC@$100k: 1 BTC = $100k che eccede risk-cap 30% → l'AI
+                    # DEVE poter emettere 0.5 BTC. Lo schema integer bloccava
+                    # silenziosamente ogni decisione su BTC/ETH.
+                    "quantity": {"type": "number", "exclusiveMinimum": 0},
                     "stop_loss": {"type": "number"},
                     "take_profit": {"type": "number"},
                     "logic_chain": {"type": "string", "description": "Reasoning tecnico+sentiment"},
@@ -483,7 +487,9 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
         if tool_name == "execute_trade":
             ticker = tool_input["ticker"]
             action = tool_input["action"]
-            quantity = int(tool_input["quantity"])
+            # FIX: float (non int). Crypto frazionarie (0.5 BTC) sono lecite.
+            # int() troncava 0.5 BTC a 0 → trade rifiutato silenziosamente.
+            quantity = float(tool_input["quantity"])
             logic_chain = tool_input["logic_chain"]
             confidence = tool_input["confidence_level"]
             # Stop_loss/take_profit: parse esplicito per evitare il bug
@@ -526,13 +532,17 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                     "rejected": True,
                 })
 
-            # Ottieni current_price: prima la cache price_quotes (60-120s
-            # fresh) per evitare hit yfinance ogni volta. Fallback a
-            # fetch_market_data via thread-pool se cache miss.
+            # Ottieni current_price: prima la cache price_quotes (TTL ~60s),
+            # poi fallback a fetch_market_data via thread-pool.
+            # FIX: max_age 120s (era 700s = 11 min). Su crypto 24/7 ad alta
+            # vola un prezzo vecchio 11 minuti puo' essere off di 1-3% →
+            # execute_buy a prezzo stale, poi update_prices con prezzo nuovo
+            # rifiuta la posizione se la 3-tier validation considera il delta
+            # un outlier. Costruivamo trade su dati spurri.
             current_price = None
             try:
                 from price_polling import get_cached_prices_bulk
-                cached = get_cached_prices_bulk([ticker], max_age_seconds=700)
+                cached = get_cached_prices_bulk([ticker], max_age_seconds=120)
                 if cached.get(ticker):
                     current_price = float(cached[ticker]["price"])
             except Exception:
@@ -741,13 +751,24 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
 
         elif tool_name == "get_portfolio_state":
             state = portfolio.get_portfolio_state()
-            # Filtra a sole posizioni crypto per chiarezza
-            positions = state.get("positions", [])
-            state["positions_crypto"] = [
-                p for p in positions
+            # FIX: il Decision Crypto opera SOLO su crypto. Esponendo le
+            # equity nel state["positions"], il modello R1 si confondeva e
+            # poteva proporre SELL su NVDA o GLD (poi rifiutati dal pre-validator
+            # ma con costo di reasoning). Ora rimpiazziamo positions con il
+            # filtro crypto-only e ricomputiamo open_positions_count coerente.
+            all_positions = state.get("positions", [])
+            crypto_positions = [
+                p for p in all_positions
                 if p.get("ticker", "").upper().endswith("-USD")
                 or p.get("ticker", "").upper().startswith("X:")
             ]
+            state["positions"] = crypto_positions
+            state["positions_crypto"] = crypto_positions   # alias backward-compat
+            state["open_positions_count"] = len(crypto_positions)
+            # equity_positions_count e' info diagnostica (non per il modello)
+            state["equity_positions_count_info"] = (
+                len(all_positions) - len(crypto_positions)
+            )
             return json.dumps({"portfolio": state, "at": timestamp}, default=str)
 
         elif tool_name == "set_commitment":
@@ -990,14 +1011,43 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
                 "tool_choice": "auto",
                 "max_tokens": 6000,
             }
-            async with session.post(
-                DEEPSEEK_API_URL, json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=120),
-            ) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise ValueError(f"DeepSeek-R1 HTTP {resp.status}: {body[:300]}")
-                data = await resp.json()
+            # Timeout 180s + 1 retry: DeepSeek-R1 in fase final_thesis puo'
+            # impiegare 60-90s di reasoning. 120s lasciava pochissimo buffer
+            # per spike di latenza. Il retry e' fondamentale per non abortire
+            # la pipeline crypto su un singolo timeout transient.
+            data = None
+            last_err = None
+            for _retry_idx in range(2):
+                try:
+                    async with session.post(
+                        DEEPSEEK_API_URL, json=payload, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=180),
+                    ) as resp:
+                        if resp.status != 200:
+                            body = await resp.text()
+                            # 429/5xx = transient → retry una volta
+                            if resp.status == 429 or 500 <= resp.status < 600:
+                                last_err = f"HTTP {resp.status}: {body[:150]}"
+                                if _retry_idx == 0:
+                                    logger.warning("[%s][DEC-CRYPTO] R1 transient %s, retry",
+                                                    run_id, last_err)
+                                    await asyncio.sleep(3)
+                                    continue
+                            raise ValueError(
+                                f"DeepSeek-R1 HTTP {resp.status}: {body[:300]}"
+                            )
+                        data = await resp.json()
+                        break
+                except asyncio.TimeoutError:
+                    last_err = "timeout 180s"
+                    if _retry_idx == 0:
+                        logger.warning("[%s][DEC-CRYPTO] R1 timeout, retry once",
+                                        run_id)
+                        await asyncio.sleep(2)
+                        continue
+                    raise ValueError(f"DeepSeek-R1 {last_err} (post retry)")
+            if data is None:
+                raise ValueError(f"DeepSeek-R1 failed: {last_err}")
 
             choice = data["choices"][0]
             finish_reason = choice.get("finish_reason", "")

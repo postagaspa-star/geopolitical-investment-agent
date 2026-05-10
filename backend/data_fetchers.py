@@ -396,14 +396,25 @@ async def _fetch_provider_ohlcv_async(
     Endpoint: /v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}
 
     Returns: {ticker, data: [{date, open, high, low, close, volume}], error, source}
+
+    Conversione automatica formato crypto: yfinance usa "BTC-USD",
+    Polygon vuole "X:BTCUSD". Senza questa conversione, ogni richiesta
+    crypto live risponde 404/no-results e il cascade scende a yfinance
+    rate-limited 24/7 → tech_crypto_no_data cronico.
     """
     if not api_key:
         return {"ticker": ticker, "data": [], "error": f"{provider}: no API key", "source": provider}
 
+    # Converti crypto da formato yfinance al formato Polygon prima di costruire l'URL.
+    # Lo facciamo qui (non dal caller) cosi' tutti i path sync/async sono coperti.
+    polygon_ticker = ticker
+    if "-USD" in ticker and not ticker.startswith("X:"):
+        polygon_ticker = f"X:{ticker.replace('-USD', 'USD')}"
+
     end_date = datetime.utcnow().date()
     start_date = end_date - timedelta(days=period_days + 5)  # buffer per weekend
     url = (
-        f"{base_url}/v2/aggs/ticker/{ticker}/range/1/day/"
+        f"{base_url}/v2/aggs/ticker/{polygon_ticker}/range/1/day/"
         f"{start_date.isoformat()}/{end_date.isoformat()}"
     )
     params = {"adjusted": "true", "sort": "asc", "limit": 5000, "apiKey": api_key}

@@ -582,7 +582,12 @@ DECISION_TOOLS = [
                 "ticker": {"type": "string", "description": "Ticker azionario o crypto (es. AAPL, BTC-USD)"},
                 "action": {"type": "string", "enum": ["BUY", "SELL"],
                            "description": "BUY = apre/incrementa long. SELL = chiude/riduce posizione esistente."},
-                "quantity": {"type": "integer", "description": "Numero azioni/unità. Per chiudere full position, usa la quantity dalla posizione corrente.", "minimum": 1},
+                # FIX: number (non integer). Per equity 1 azione minima e' OK,
+                # ma il Decision standard puo' comprare anche crypto frazionarie
+                # (BTC-USD, ETH-USD), e int blocca queste a quantity=0.
+                # exclusiveMinimum=0 invece di minimum=1: per crypto 0.001 BTC
+                # = ~$100 e' un trade legittimo.
+                "quantity": {"type": "number", "description": "Numero azioni/unità (frazionarie ammesse per crypto). Per chiudere full position usa quantity esatta della posizione corrente.", "exclusiveMinimum": 0},
                 "stop_loss": {"type": "number", "description": "Prezzo stop-loss (0 = nessuno)"},
                 "take_profit": {"type": "number", "description": "Prezzo take-profit (0 = nessuno)"},
                 "logic_chain": {"type": "string", "description": "Chain of Thought completo: integra geo+tech reasoning. Per SELL specifica se è profit-taking, stop-loss manuale, rotation, o de-risk."},

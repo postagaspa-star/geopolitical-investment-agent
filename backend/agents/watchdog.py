@@ -40,14 +40,30 @@ URGENCY_THRESHOLD = 5  # 1-10
 # news, lasciando l'over-exposure indefinitamente. Il rebalancing è un
 # "safety net" che bypassa la valutazione discrezionale del LLM.
 #
-# 35% è il threshold richiesto dall'utente; sotto viene tollerato anche se
-# concentrato perche' la concentrazione mirata e' una scelta valida.
+# 35% threshold per asset NORMALI (equity). Per crypto la threshold e' piu'
+# alta (45%) perche' la volatilita' intraday del 5-8% e' fisiologica e
+# triggererebbe rebalance ogni 4h su posizioni 30-32% legittime.
 REBALANCE_THRESHOLD_PCT = 35.0
+REBALANCE_THRESHOLD_PCT_CRYPTO = 45.0
 
 # Cooldown tra rebalance trigger sullo stesso ticker. Senza questo, ogni
 # 5 minuti il watchdog farebbe partire un Decision per ribilanciare lo stesso
 # asset, esaurendo il budget di tool calls e creando rumore.
 REBALANCE_COOLDOWN_HOURS = 4
+
+
+def _is_crypto_ticker(ticker: str) -> bool:
+    """Determina se un ticker e' crypto (per applicare threshold differenziato)."""
+    if not ticker:
+        return False
+    t = ticker.upper().strip()
+    return t.startswith("X:") or (t.endswith("-USD") and len(t) > 4)
+
+
+def _threshold_for(ticker: str) -> float:
+    """Threshold di rebalance applicabile al ticker."""
+    return REBALANCE_THRESHOLD_PCT_CRYPTO if _is_crypto_ticker(ticker) \
+        else REBALANCE_THRESHOLD_PCT
 
 # Urgenza assegnata ai trigger di rebalancing. Volutamente alta (8) per
 # garantire che superi sempre URGENCY_THRESHOLD e che il routing
@@ -314,7 +330,15 @@ def _check_position_overweight(database) -> tuple[bool, str, float, list[str]]:
         if not positions:
             return False, "", 0.0, []
 
-        # Calcola il valore di mercato per posizione (resilient a prezzi nulli)
+        # Calcola il valore di mercato per posizione (resilient a prezzi nulli).
+        # FIX: la banda originale 0.3-3.0x rifiutava prezzi legittimi: una
+        # posizione con +250% di gain (NVDA 2023, BTC bull) sarebbe stata
+        # "corrotta" e calcolata su avg → la sua value veniva sottostimata,
+        # il rebalance NON scattava quando doveva. Inverso anche peggio:
+        # un drawdown -75% legittimo veniva ricalcolato a avg → falso
+        # overweight artificioso. Allargo la banda agli stessi limiti di
+        # portfolio.calculate_total_value (10x equity, 20x crypto):
+        # 0.10-10x equity, 0.05-20x crypto.
         position_values = {}
         total_pos_value = 0.0
         for p in positions:
@@ -327,16 +351,17 @@ def _check_position_overweight(database) -> tuple[bool, str, float, list[str]]:
                     continue
                 cur = float(p.get("current_price") or 0)
                 avg = float(p.get("avg_buy_price") or 0)
-                # Se il current_price e' invalido o assurdo (< 30% o > 300%
-                # dell'avg), usa avg per evitare di prendere decisioni di
-                # rebalance basate su prezzi corrotti.
+                is_cry = _is_crypto_ticker(ticker)
+                outer_min = 0.05 if is_cry else 0.10
+                outer_max = 20.0 if is_cry else 10.0
+                # Se il current_price non c'e' affatto, usa avg (cost basis).
                 if cur <= 0:
                     cur = avg
                 elif avg > 0:
                     ratio = cur / avg
-                    if ratio < 0.3 or ratio > 3.0:
-                        # Prezzo sospetto — usa l'avg come fallback safe.
-                        # Loggato in run_watchdog per audit.
+                    if ratio < outer_min or ratio > outer_max:
+                        # Prezzo SOLO se davvero corrotto (decimal-shift,
+                        # ticker mismatch). Trade legittimi rimangono in cur.
                         cur = avg
                 if cur <= 0:
                     continue
@@ -350,11 +375,11 @@ def _check_position_overweight(database) -> tuple[bool, str, float, list[str]]:
         if total_value <= 0:
             return False, "", 0.0, []
 
-        # Trova tutte le posizioni overweight
+        # Trova tutte le posizioni overweight (threshold differenziato crypto vs equity)
         overweight = []
         for ticker, value in position_values.items():
             pct = (value / total_value) * 100
-            if pct > REBALANCE_THRESHOLD_PCT:
+            if pct > _threshold_for(ticker):
                 overweight.append((ticker, pct))
 
         if not overweight:
@@ -550,9 +575,17 @@ async def run_watchdog(run_id: str) -> dict:
                 # Forza il trigger. Bypassa anche il cost guard mercato chiuso:
                 # il rebalance vale sia per crypto sia per equity (anche se
                 # equity verra' poi bloccato dall'orchestrator se mercato chiuso).
-                _record_rebalance_trigger(database, top_ticker)
+                # NOTA: NON registriamo il cooldown qui. Lo facciamo solo
+                # se l'orchestrator effettivamente esegue il Decision (che
+                # decide come ridurre la posizione). Se il pipeline si ferma
+                # prima — market_closed, errore — la posizione resta sopra
+                # soglia e dobbiamo poter ritriggherare al prossimo tick.
+                # Il caller dell'orchestrator chiamera' _record_rebalance_trigger
+                # solo dopo successo del Decision.
+                threshold_used = _threshold_for(top_ticker)
                 reason = (
-                    f"REBALANCE: {top_ticker} a {top_pct:.1f}% del NAV (cap {REBALANCE_THRESHOLD_PCT:.0f}%) — "
+                    f"REBALANCE: {top_ticker} a {top_pct:.1f}% del NAV "
+                    f"(cap {threshold_used:.0f}%) — "
                     f"vendere parzialmente per ridurre concentrazione"
                 )
                 logger.warning(
@@ -565,7 +598,8 @@ async def run_watchdog(run_id: str) -> dict:
                         "event": "watchdog_rebalance_trigger",
                         "ticker_overweight": top_ticker,
                         "pct_of_portfolio": round(top_pct, 2),
-                        "threshold_pct": REBALANCE_THRESHOLD_PCT,
+                        "threshold_pct": threshold_used,
+                        "is_crypto": _is_crypto_ticker(top_ticker),
                         "all_overweight": all_tickers,
                         "trigger": True,
                         "urgency": REBALANCE_URGENCY,
