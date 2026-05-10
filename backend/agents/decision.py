@@ -490,6 +490,104 @@ def _get_decision_prompt(engine: str | None = None) -> str:
     return text
 
 
+def _build_recent_decisions_block(agent_type: str = "standard",
+                                   limit: int = 12) -> str:
+    """
+    Costruisce un blocco di "memoria operativa" con le ultime N decisioni del
+    Decision Agent (Live) — TRADE, NO_TRADE, tesi e razionali. Iniettato nel
+    system prompt per chiudere il feedback loop: senza questa memoria,
+    l'agente partiva from-scratch ad ogni run e non convergeva.
+
+    Phase incluse:
+      - DECISION_REASONING       (run standard)
+      - DECISION_CRYPTO_COMPLETE (run crypto)
+
+    Filtri per agent_type ("standard" | "crypto" | None) per evitare di
+    inquinare il prompt crypto con decisioni equity e viceversa.
+
+    Output esempio (max ~1500 char):
+        ─── MEMORIA OPERATIVA: tue ultime 12 decisioni ───
+        Usa questa traccia per evitare di ripetere errori, riconoscere
+        pattern ricorrenti e mantenere coerenza con tesi recenti.
+
+        [09/05 14:23] STD NO_TRADE conv=- "Mercato laterale, no edge..."
+        [09/05 12:11] STD TRADE long NVDA q=10 conv=0.65 — "Breakout..."
+        ...
+    """
+    try:
+        import database as _db
+        rows = _db.get_recent_decisions(limit=limit, agent_type=agent_type)
+    except Exception as exc:
+        logger.debug("get_recent_decisions failed: %s", exc)
+        return ""
+
+    if not rows:
+        return ""
+
+    lines: list[str] = []
+    for r in rows:
+        try:
+            ts_raw = r.get("timestamp") or r.get("created_at") or ""
+            try:
+                ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                stamp = ts.strftime("%d/%m %H:%M")
+            except Exception:
+                stamp = str(ts_raw)[:16]
+
+            phase = r.get("phase", "")
+            tag = "STD" if phase == "DECISION_REASONING" else "CRY"
+
+            content = r.get("content")
+            if isinstance(content, str):
+                try:
+                    payload = json.loads(content)
+                except Exception:
+                    payload = {}
+            elif isinstance(content, dict):
+                payload = content
+            else:
+                payload = {}
+
+            trades = payload.get("trades_executed")
+            n_trades = trades if isinstance(trades, int) else (
+                len(trades) if isinstance(trades, list) else 0)
+
+            thesis = (payload.get("thesis") or "").strip()
+            action_plan = (payload.get("action_plan") or "").strip()
+            no_trade = (payload.get("no_trade_reasoning") or "").strip()
+            final_text = (payload.get("final_text") or "").strip()
+            reasoning_text = (payload.get("reasoning_text") or "").strip()
+
+            # Tesi sintetica: prima preferenza thesis, poi action_plan,
+            # poi no_trade_reasoning, poi final_text/reasoning_text
+            summary = thesis or action_plan or no_trade or final_text or reasoning_text
+            if not summary:
+                continue   # skip log "vuoti" che non aiutano l'agente
+            # Single-line, truncate a 220 char
+            summary = " ".join(summary.split())
+            if len(summary) > 220:
+                summary = summary[:217] + "..."
+
+            verdict = "TRADE" if n_trades > 0 else "NO_TRADE"
+            line = f"[{stamp}] {tag} {verdict} ({n_trades} trade) — {summary}"
+            lines.append(line)
+        except Exception as exc:
+            logger.debug("skip recent decision row: %s", exc)
+            continue
+
+    if not lines:
+        return ""
+
+    header = (
+        "─── MEMORIA OPERATIVA: tue ultime decisioni Live ───\n"
+        "Usa questa traccia per evitare di ripetere errori, riconoscere\n"
+        "pattern ricorrenti e mantenere coerenza con tesi recenti. Se la\n"
+        "stessa tesi e' stata applicata piu' volte senza risultato, valuta\n"
+        "un approccio diverso o rimani flat.\n"
+    )
+    return header + "\n" + "\n".join(lines) + "\n"
+
+
 def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list[str]]:
     """
     Carica il system prompt del Decision Agent.
@@ -547,14 +645,26 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
 
     coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
 
-    # 4. Shared principles (in coda)
+    # 4. Memoria operativa: ultime N decisioni del Live (chiude feedback loop).
+    #    Senza questo blocco, l'agente partiva from-scratch a ogni run e
+    #    rifaceva le stesse tesi inutilmente in mercati laterali/macro,
+    #    senza mai convergere su un approccio diverso.
+    try:
+        recent_block = _build_recent_decisions_block(agent_type="standard", limit=12)
+    except Exception as exc:
+        logger.debug("recent decisions block failed: %s", exc)
+        recent_block = ""
+    recent_section = (recent_block + "\n" + "═" * 60 + "\n") if recent_block else ""
+
+    # 5. Shared principles (in coda)
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        text = (directives_block + risk_block + coach_section + base_prompt
-                + "\n\n" + "═" * 60 + "\n" + shared)
+        text = (directives_block + risk_block + coach_section + recent_section
+                + base_prompt + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        text = directives_block + risk_block + coach_section + base_prompt
+        text = (directives_block + risk_block + coach_section + recent_section
+                + base_prompt)
     return text, coach_card_ids
 
 

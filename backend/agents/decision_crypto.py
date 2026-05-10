@@ -226,14 +226,27 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
         logger.debug("[DEC-CRYPTO] coach cards block fallito: %s", e)
     coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
 
-    # 4. Shared principles in coda
+    # 4. Memoria operativa: ultime N decisioni crypto del Live (feedback loop).
+    #    Iniettata anche qui per evitare che R1 ripeta tesi gia' applicate
+    #    senza esito su crypto laterali / regime range-bound.
+    recent_section = ""
+    try:
+        from agents.decision import _build_recent_decisions_block
+        recent_block = _build_recent_decisions_block(agent_type="crypto", limit=12)
+        if recent_block:
+            recent_section = recent_block + "\n" + "═" * 60 + "\n"
+    except Exception as exc:
+        logger.debug("[DEC-CRYPTO] recent decisions block failed: %s", exc)
+
+    # 5. Shared principles in coda
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        text = (directives_block + risk_block + coach_section + base
-                + "\n\n" + "═" * 60 + "\n" + shared)
+        text = (directives_block + risk_block + coach_section + recent_section
+                + base + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        text = directives_block + risk_block + coach_section + base
+        text = (directives_block + risk_block + coach_section + recent_section
+                + base)
     return text, coach_card_ids
 
 

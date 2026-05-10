@@ -379,6 +379,38 @@ def get_logs_by_run(run_id):
     with get_db() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM agent_logs WHERE run_id=? ORDER BY timestamp ASC", (run_id,)).fetchall()]
 
+
+def get_recent_decisions(limit=15, agent_type=None):
+    """
+    Recupera gli ultimi N "consigli finali" del Decision Agent (Live).
+    Usata per iniettare memoria operativa nel system prompt del run successivo,
+    cosi' l'agente vede pattern, errori ricorrenti e tesi recenti dei propri
+    cicli passati invece di partire from-scratch ogni volta.
+
+    Phases incluse (un record per run, il "consiglio finale" sintetico):
+      - DECISION_REASONING       (Decision standard, Claude o R1)
+      - DECISION_CRYPTO_COMPLETE (Decision crypto, R1)
+
+    @param limit       max numero di decisioni
+    @param agent_type  None | "standard" | "crypto" — filtra per dominio
+    """
+    if agent_type == "standard":
+        phases = ("DECISION_REASONING",)
+    elif agent_type == "crypto":
+        phases = ("DECISION_CRYPTO_COMPLETE",)
+    else:
+        phases = ("DECISION_REASONING", "DECISION_CRYPTO_COMPLETE")
+
+    placeholders = ",".join("?" * len(phases))
+    sql = (
+        f"SELECT * FROM agent_logs "
+        f"WHERE phase IN ({placeholders}) "
+        f"ORDER BY timestamp DESC LIMIT ?"
+    )
+    with get_db() as conn:
+        rows = conn.execute(sql, (*phases, limit)).fetchall()
+        return [dict(r) for r in rows]
+
 def insert_geopolitical_snapshot(run_id, source, raw_data, processed_summary):
     with get_db() as conn:
         conn.execute("INSERT INTO geopolitical_snapshots (run_id,source,raw_data,processed_summary) VALUES (?,?,?,?)",

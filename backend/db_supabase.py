@@ -474,6 +474,39 @@ def get_logs_by_run(run_id):
     return result.data or []
 
 
+def get_recent_decisions(limit=15, agent_type=None):
+    """
+    Recupera gli ultimi N "consigli finali" del Decision Agent (Live).
+    Usata per iniettare memoria operativa nel system prompt del run successivo,
+    cosi' l'agente vede pattern, errori ricorrenti e tesi recenti dei propri
+    cicli passati invece di partire from-scratch ogni volta.
+
+    Phases incluse (un record per run, il "consiglio finale" sintetico):
+      - DECISION_REASONING       (Decision standard, Claude o R1)
+      - DECISION_CRYPTO_COMPLETE (Decision crypto, R1)
+
+    @param limit       max numero di decisioni
+    @param agent_type  None | "standard" | "crypto" — filtra per dominio
+    """
+    if agent_type == "standard":
+        phases = ["DECISION_REASONING"]
+    elif agent_type == "crypto":
+        phases = ["DECISION_CRYPTO_COMPLETE"]
+    else:
+        phases = ["DECISION_REASONING", "DECISION_CRYPTO_COMPLETE"]
+
+    client = _get_client()
+    result = (
+        client.table("agent_logs")
+        .select("*")
+        .in_("phase", phases)
+        .order("timestamp", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return result.data or []
+
+
 # ============================================================
 # Geopolitical Snapshots
 # ============================================================
