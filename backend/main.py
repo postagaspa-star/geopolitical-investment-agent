@@ -4232,6 +4232,29 @@ _ENCRYPTION_ENABLED = os.environ.get("ENCRYPTION_ENABLED", "").lower() in ("1", 
 _encrypted_dir = os.path.join(os.path.dirname(__file__), "encrypted_assets")
 _encrypted_bundle = os.path.join(_encrypted_dir, "bundle.enc")
 _unlock_html = os.path.join(_encrypted_dir, "unlock.html")
+_about_html = os.path.join(_encrypted_dir, "about.html")
+
+
+# /about: pagina pubblica di documentazione, fuori dal bundle cifrato.
+# Servita SEMPRE (in entrambe le modalita': encryption ON e OFF), cosi' il
+# link e' permanente e indicizzabile da motori di ricerca / crawler AI.
+# DEVE essere registrata prima delle catch-all route in modo da avere precedenza.
+@app.get("/about")
+async def serve_public_about():
+    """Documentazione tecnica pubblica di GeoInvest AI (no auth)."""
+    if not os.path.isfile(_about_html):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "about.html mancante"},
+        )
+    return FileResponse(
+        _about_html,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 if _ENCRYPTION_ENABLED:
     if not os.path.isfile(_encrypted_bundle):

@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { TrendingUp, FlaskConical, ArrowRight } from "lucide-react";
+import { TrendingUp, FlaskConical, ArrowRight, BookOpen } from "lucide-react";
 
 /**
  * Pagina iniziale: scelta tra GeoInvest AI Live e GeoInvest AI Simulator.
@@ -72,6 +72,25 @@ export default function EntryPage() {
           portafoglio Live né muove fondi reali — è solo un sandbox cognitivo.
         </div>
       </div>
+
+      {/* Floating Action Button — sempre visibile in basso a destra,
+          porta alla pagina pubblica di documentazione (/about) */}
+      <button
+        onClick={() => nav("/about")}
+        style={styles.fab}
+        title="Scopri come funziona GeoInvest AI"
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "#c4b5fd";
+          e.currentTarget.style.transform = "translateY(-2px)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "#a78bfa";
+          e.currentTarget.style.transform = "translateY(0)";
+        }}
+      >
+        <BookOpen size={18} />
+        <span>Come funziona</span>
+      </button>
     </div>
   );
 }
@@ -176,5 +195,26 @@ const styles = {
     textAlign: "center",
     color: "#64748b",
     fontSize: "0.85rem",
+  },
+  fab: {
+    position: "fixed",
+    bottom: 24,
+    right: 24,
+    zIndex: 9999,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "14px 22px",
+    background: "#a78bfa",
+    color: "#0a0e1a",
+    border: "none",
+    borderRadius: 999,
+    fontSize: "0.92rem",
+    fontWeight: 700,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    boxShadow:
+      "0 6px 24px rgba(167,139,250,0.45), 0 2px 8px rgba(0,0,0,0.3)",
+    transition: "all 0.2s ease",
   },
 };

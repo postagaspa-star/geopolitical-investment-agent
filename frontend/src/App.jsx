@@ -12,6 +12,7 @@ import Settings from "./components/Settings";
 import ChatWidget from "./components/ChatWidget";
 
 import EntryPage from "./pages/EntryPage";
+import AboutPage from "./pages/AboutPage";
 import SimulatorLayout from "./pages/simulator/SimulatorLayout";
 import SimDashboard from "./pages/simulator/SimDashboard";
 import SimRunner from "./pages/simulator/SimRunner";
@@ -213,6 +214,9 @@ function App() {
       <Routes>
         {/* Entry page con scelta Live/Simulator */}
         <Route path="/" element={<EntryPage />} />
+
+        {/* About: documentazione pubblica (no auth, indicizzabile) */}
+        <Route path="/about" element={<AboutPage />} />
 
         {/* Live: dashboard bot operativo (route esistente "/" interna) */}
         <Route path="/live/*" element={<LiveApp />} />

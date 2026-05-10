@@ -23,6 +23,39 @@
         font-size: 14px; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   .err { margin-top: 10px; font-size: 12px; color: #ff6b6b; min-height: 1em; }
+
+  /* Floating Action Button: porta alla pagina pubblica di documentazione (/about) */
+  .docs-fab {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 9999;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 22px;
+    background: #a78bfa;
+    color: #0a0e1a;
+    border: 0;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    text-decoration: none;
+    font-family: inherit;
+    box-shadow: 0 6px 24px rgba(167,139,250,0.45), 0 2px 8px rgba(0,0,0,0.3);
+    transition: all 0.2s ease;
+  }
+  .docs-fab:hover {
+    background: #c4b5fd;
+    transform: translateY(-2px);
+    text-decoration: none;
+  }
+  .docs-fab svg { display: block; }
+  @media (max-width: 480px) {
+    .docs-fab { bottom: 16px; right: 16px; padding: 12px 18px; font-size: 13px; }
+    .docs-fab .label { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -33,6 +66,19 @@
   <button id="b" type="submit">Sblocca</button>
   <div class="err" id="e"></div>
 </form>
+
+<!-- Floating button per documentazione pubblica.
+     /about e' servita direttamente da FastAPI come HTML statico,
+     fuori dal bundle cifrato: accessibile senza token. -->
+<a href="/about" class="docs-fab" title="Scopri come funziona GeoInvest AI">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" stroke-width="2.2" stroke-linecap="round"
+       stroke-linejoin="round">
+    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+  </svg>
+  <span class="label">Come funziona</span>
+</a>
 
 <script>
 "use strict";
