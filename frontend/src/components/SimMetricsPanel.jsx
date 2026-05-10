@@ -105,7 +105,7 @@ function KPIBlock({ quantMetrics, commissionBps, totalCommissions }) {
 
   const help = explainKPIBlock(quantMetrics, commissionBps, totalCommissions);
   return (
-    <div style={S.card}>
+    <div style={S.card} data-pdf-section="true">
       <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
         <span style={{ display: "inline-flex", alignItems: "center" }}>
           <Sigma size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
@@ -190,7 +190,7 @@ function EquityVsBenchmarkChart({ portfolio, benchmark, benchmarkTicker }) {
   ];
   if (allValues.length === 0) {
     return (
-      <div style={S.card}>
+      <div style={S.card} data-pdf-section="true">
         <div style={S.cardTitle}>Equity Curve vs Benchmark</div>
         <div style={{ color: "#64748b", padding: 20, textAlign: "center" }}>
           Dati insufficienti per il grafico
@@ -227,7 +227,7 @@ function EquityVsBenchmarkChart({ portfolio, benchmark, benchmarkTicker }) {
 
   const help = explainEquityVsBenchmark(portfolio, benchmark, benchmarkTicker);
   return (
-    <div style={S.card}>
+    <div style={S.card} data-pdf-section="true">
       <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
         <span style={{ display: "inline-flex", alignItems: "center" }}>
           <BarChart3 size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
@@ -328,7 +328,7 @@ function UnderwaterChart({ data, maxDD }) {
 
   const help = explainUnderwater(data, maxDD);
   return (
-    <div style={S.card}>
+    <div style={S.card} data-pdf-section="true">
       <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
         <span style={{ display: "inline-flex", alignItems: "center" }}>
           <TrendingDown size={14} style={{ display: "inline", marginRight: 6, color: "#ef4444" }} />
@@ -392,7 +392,7 @@ function ReturnsHistogram({ data }) {
 
   const help = explainReturnsHistogram(data);
   return (
-    <div style={S.card}>
+    <div style={S.card} data-pdf-section="true">
       <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
         <span style={{ display: "inline-flex", alignItems: "center" }}>
           <BarChart3 size={14} style={{ display: "inline", marginRight: 6, color: "#fbbf24" }} />
@@ -501,7 +501,7 @@ function ConfidenceOutcomeScatter({ data }) {
 
   const help = explainConfidenceScatter(data);
   return (
-    <div style={S.card}>
+    <div style={S.card} data-pdf-section="true">
       <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
         <span style={{ display: "inline-flex", alignItems: "center" }}>
           <Target size={14} style={{ display: "inline", marginRight: 6, color: "#06b6d4" }} />
@@ -618,7 +618,7 @@ function SlippageSensitivity({ runId, commissionBps }) {
 
   const help = explainSlippageSensitivity(commissionBps);
   return (
-    <div style={S.card}>
+    <div style={S.card} data-pdf-section="true">
       <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
         <span style={{ display: "inline-flex", alignItems: "center" }}>
           <Zap size={14} style={{ display: "inline", marginRight: 6, color: "#fbbf24" }} />
