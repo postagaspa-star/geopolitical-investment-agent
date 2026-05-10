@@ -314,13 +314,16 @@ def _get_portfolio_tickers(database) -> list[str]:
 # REBALANCING — controlla se una posizione eccede il REBALANCE_THRESHOLD_PCT
 # ═══════════════════════════════════════════════════════════════════════
 
-def _check_position_overweight(database) -> tuple[bool, str, float, list[str]]:
+def _check_position_overweight(database) -> tuple[bool, str, float, list[tuple[str, float]]]:
     """
     Controlla se una qualunque posizione eccede REBALANCE_THRESHOLD_PCT
     del valore totale del portafoglio.
 
     Output:
-        (needs_rebalance, ticker_overweight, pct_of_portfolio, all_overweight_tickers)
+        (needs_rebalance, top_ticker, top_pct_of_portfolio, all_overweight)
+        all_overweight: list[(ticker, pct)] ordinata per pct decrescente.
+        Il caller usa questa lista per filtrare per market state (es. mercato
+        equity chiuso → tieni solo gli overweight crypto, attuabili 24/7).
 
     Per il calcolo del totale usa cash + Σ(qty × current_price). Se non c'è
     current_price valido per una posizione, fallback ad avg_buy_price (cost
@@ -393,11 +396,13 @@ def _check_position_overweight(database) -> tuple[bool, str, float, list[str]]:
         if not overweight:
             return False, "", 0.0, []
 
-        # Ordina per concentrazione decrescente, prendi il piu' grande
+        # Ordina per concentrazione decrescente, prendi il piu' grande.
+        # Ritorna la lista completa con (ticker, pct) cosi' run_watchdog puo'
+        # filtrare per market state e selezionare un overweight ATTUABILE
+        # (es. equity chiuso → tieni solo i crypto della lista).
         overweight.sort(key=lambda x: x[1], reverse=True)
         top_ticker, top_pct = overweight[0]
-        all_tickers = [t for t, _ in overweight]
-        return True, top_ticker, top_pct, all_tickers
+        return True, top_ticker, top_pct, overweight
     except Exception as exc:
         logger.warning("[WATCHDOG] _check_position_overweight error: %s", exc)
         return False, "", 0.0, []
@@ -622,63 +627,127 @@ async def run_watchdog(run_id: str) -> dict:
     # NB: usa il proprio cooldown (REBALANCE_COOLDOWN_HOURS) per non spam-mare
     # il Decision Agent quando il ticker rimane overweight.
     try:
-        needs_reb, top_ticker, top_pct, all_tickers = await asyncio.to_thread(
+        needs_reb, top_ticker, top_pct, all_overweight = await asyncio.to_thread(
             _check_position_overweight, database
         )
         if needs_reb:
-            if _is_rebalance_throttled(database, top_ticker):
-                logger.debug(
-                    "[%s][WATCHDOG] Rebalance %s overweight %.1f%% ma throttled "
-                    "(<%dh dall'ultimo trigger su questo ticker)",
-                    run_id, top_ticker, top_pct, REBALANCE_COOLDOWN_HOURS,
-                )
+            # ── MARKET-AWARE FILTERING ─────────────────────────────────────
+            # Il Decision standard puo' modificare posizioni equity SOLO durante
+            # market hours. Se NVDA e' overweight di sabato, triggherare e' inutile:
+            # l'orchestrator skipperebbe l'esecuzione, ma il global cooldown 15-min
+            # sarebbe gia' stato settato → blocchiamo anche eventuali trigger crypto.
+            # Filtra gli overweight tenendo solo quelli ATTUABILI dato lo stato
+            # del mercato. Il Decision Crypto e' 24/7 quindi i ticker crypto sono
+            # sempre attuabili.
+            try:
+                from scheduler import is_market_open as _market_check
+                _market_open = _market_check()
+            except Exception:
+                _market_open = True
+
+            if _market_open:
+                actionable = list(all_overweight)
             else:
-                # Forza il trigger. Bypassa anche il cost guard mercato chiuso:
-                # il rebalance vale sia per crypto sia per equity (anche se
-                # equity verra' poi bloccato dall'orchestrator se mercato chiuso).
-                # NOTA: NON registriamo il cooldown qui. Lo facciamo solo
-                # se l'orchestrator effettivamente esegue il Decision (che
-                # decide come ridurre la posizione). Se il pipeline si ferma
-                # prima — market_closed, errore — la posizione resta sopra
-                # soglia e dobbiamo poter ritriggherare al prossimo tick.
-                # Il caller dell'orchestrator chiamera' _record_rebalance_trigger
-                # solo dopo successo del Decision.
-                threshold_used = _threshold_for(top_ticker)
-                reason = (
-                    f"REBALANCE: {top_ticker} a {top_pct:.1f}% del NAV "
-                    f"(cap {threshold_used:.0f}%) — "
-                    f"vendere parzialmente per ridurre concentrazione"
-                )
-                logger.warning(
-                    "[%s][WATCHDOG] REBALANCE TRIGGER (bypass throttle): %s "
-                    "(altri overweight: %s)",
-                    run_id, reason, [t for t in all_tickers if t != top_ticker] or "nessuno",
+                actionable = [(t, p) for t, p in all_overweight if _is_crypto_ticker(t)]
+
+            if not actionable:
+                # Tutti overweight sono equity ma il mercato e' chiuso: skip.
+                # La posizione restera' sopra soglia, ricontrolleremo alla
+                # riapertura. Nessun cooldown viene settato → quando il mercato
+                # riapre il rebalance trigger fara' subito.
+                logger.info(
+                    "[%s][WATCHDOG] Rebalance skip: %s overweight %.1f%% MA mercato "
+                    "chiuso e nessun overweight crypto attuabile (Decision standard "
+                    "non puo' girare). Aspetto la riapertura.",
+                    run_id, top_ticker, top_pct,
                 )
                 try:
                     database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
-                        "event": "watchdog_rebalance_trigger",
+                        "event": "watchdog_rebalance_skipped",
+                        "reason": (
+                            f"Mercato chiuso: {top_ticker} ({top_pct:.1f}% NAV) "
+                            f"e' equity, il Decision standard non puo' girare. "
+                            f"Aspettiamo la riapertura."
+                        ),
                         "ticker_overweight": top_ticker,
                         "pct_of_portfolio": round(top_pct, 2),
-                        "threshold_pct": threshold_used,
-                        "is_crypto": _is_crypto_ticker(top_ticker),
-                        "all_overweight": all_tickers,
-                        "trigger": True,
-                        "urgency": REBALANCE_URGENCY,
-                        "bypass_throttle": True,
+                        "all_overweight": [t for t, _ in all_overweight],
+                        "is_crypto": False,
+                        "market_open": False,
                     }))
                 except Exception:
                     pass
-                # Setta global cooldown: il trigger è inviato ora. Previene
-                # ripetizione ogni 5 min se orchestrator non esegue Decision.
-                _set_global_trigger_cooldown(database)
-                return {
-                    "should_trigger": True,
-                    "urgency": REBALANCE_URGENCY,
-                    "reason": reason,
-                    "focus_tickers": [top_ticker],
-                    "elapsed_seconds": round(time.time() - t0, 2),
-                    "rebalance": True,
-                }
+                # Falls through al flusso normale DeepSeek (probabilmente
+                # bloccato anche lui dal cost guard market_closed_no_news)
+            else:
+                # Riseleziona il ticker actionable: puo' differire da top_ticker
+                # se top era equity e c'e' un crypto overweight piu' avanti.
+                act_ticker, act_pct = actionable[0]
+
+                if _is_rebalance_throttled(database, act_ticker):
+                    logger.debug(
+                        "[%s][WATCHDOG] Rebalance %s overweight %.1f%% ma throttled "
+                        "(<%dh dall'ultimo trigger su questo ticker)",
+                        run_id, act_ticker, act_pct, REBALANCE_COOLDOWN_HOURS,
+                    )
+                    try:
+                        database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
+                            "event": "watchdog_rebalance_throttled",
+                            "reason": (
+                                f"Per-ticker cooldown: {act_ticker} "
+                                f"({act_pct:.1f}% NAV) ha gia' avuto un trigger "
+                                f"entro le ultime {REBALANCE_COOLDOWN_HOURS}h"
+                            ),
+                            "ticker_overweight": act_ticker,
+                            "pct_of_portfolio": round(act_pct, 2),
+                            "is_crypto": _is_crypto_ticker(act_ticker),
+                        }))
+                    except Exception:
+                        pass
+                else:
+                    # NOTA: il per-ticker cooldown (4h) viene settato dall'
+                    # orchestrator solo dopo successo Decision. Il global
+                    # cooldown (15min) lo settiamo qui per fermare lo spam.
+                    threshold_used = _threshold_for(act_ticker)
+                    is_cry = _is_crypto_ticker(act_ticker)
+                    asset_kind = "crypto" if is_cry else "equity"
+                    reason = (
+                        f"REBALANCE: {act_ticker} a {act_pct:.1f}% del NAV "
+                        f"(cap {threshold_used:.0f}% per {asset_kind}) — "
+                        f"vendere parzialmente per ridurre concentrazione"
+                    )
+                    other_ow = [t for t, _ in all_overweight if t != act_ticker]
+                    logger.warning(
+                        "[%s][WATCHDOG] REBALANCE TRIGGER: %s | altri overweight: %s "
+                        "| market_open=%s",
+                        run_id, reason, other_ow or "nessuno", _market_open,
+                    )
+                    try:
+                        database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
+                            "event": "watchdog_rebalance_trigger",
+                            "reason": reason,
+                            "ticker_overweight": act_ticker,
+                            "pct_of_portfolio": round(act_pct, 2),
+                            "threshold_pct": threshold_used,
+                            "is_crypto": is_cry,
+                            "all_overweight": [t for t, _ in all_overweight],
+                            "market_open": _market_open,
+                            "trigger": True,
+                            "urgency": REBALANCE_URGENCY,
+                            "bypass_throttle": True,
+                        }))
+                    except Exception:
+                        pass
+                    # Setta global cooldown: trigger inviato ora.
+                    _set_global_trigger_cooldown(database)
+                    return {
+                        "should_trigger": True,
+                        "urgency": REBALANCE_URGENCY,
+                        "reason": reason,
+                        "focus_tickers": [act_ticker],
+                        "elapsed_seconds": round(time.time() - t0, 2),
+                        "rebalance": True,
+                    }
     except Exception as exc:
         # Best-effort: il rebalance check non deve mai bloccare il watchdog.
         logger.warning("[%s][WATCHDOG] Rebalance check error (skip, continue normal flow): %s",

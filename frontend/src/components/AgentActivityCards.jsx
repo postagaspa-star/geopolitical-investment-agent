@@ -74,11 +74,35 @@ function buildCards(logs) {
     catch { content = { raw: log.content }; }
     const ts = log.timestamp;
 
-    // ─── WATCHDOG: solo trigger positivi (skip throttled/no-trigger) ───
+    // ─── WATCHDOG: trigger + eventi rebalance (anche skipped/throttled) ───
+    // Skip solo gli eventi puramente "rumore" (throttle Decision, no-trigger
+    // generico). Mostra invece sempre gli eventi rebalance: il trigger e' il
+    // caso ovvio, ma anche skipped/throttled sono informativi (l'utente vuole
+    // capire perche' il watchdog non sta agendo su una posizione overweight).
     if (phase === "WATCHDOG") {
       if (skipNoise.has(content.event) && !content.trigger) continue;
       if (content.event === "watchdog_complete" && !content.trigger) continue;
       if (content.event === "watchdog_throttled") continue;
+
+      // Eventi rebalance "non-trigger" (skipped/throttled): mostrali con
+      // variant diagnostica perche' la motivazione e' utile per debugging.
+      if (content.event === "watchdog_rebalance_skipped"
+          || content.event === "watchdog_rebalance_throttled") {
+        cards.push({
+          key: `wd_${log.id || ts}`,
+          type: "watchdog",
+          ts,
+          urgency: 0,
+          reason: content.reason,
+          focus_tickers: content.ticker_overweight ? [content.ticker_overweight] : [],
+          variant: content.event === "watchdog_rebalance_skipped"
+            ? "rebalance_skipped" : "rebalance_throttled",
+          pct_of_portfolio: content.pct_of_portfolio,
+          all_overweight: content.all_overweight || [],
+        });
+        continue;
+      }
+
       if (content.trigger) {
         cards.push({
           key: `wd_${log.id || ts}`,
@@ -86,9 +110,12 @@ function buildCards(logs) {
           ts,
           urgency: content.urgency,
           reason: content.reason,
-          focus_tickers: content.focus_tickers || [],
+          focus_tickers: content.focus_tickers
+            || (content.ticker_overweight ? [content.ticker_overweight] : []),
           deep_check: content.deep_check,
           portfolio_tickers: content.portfolio_tickers,
+          variant: content.event === "watchdog_rebalance_trigger" ? "rebalance" : "trigger",
+          pct_of_portfolio: content.pct_of_portfolio,
         });
       }
       continue;
@@ -290,21 +317,51 @@ function CardHeader({ icon: Icon, iconColor, title, subtitle, ts, badges }) {
 // ─── Cards ──────────────────────────────────────────────────────────────
 
 function WatchdogCard({ c }) {
-  const tone = "#fbbf24";
+  // Variant determina colore/titolo: trigger=giallo, rebalance=arancione,
+  // skipped=grigio (informativo), throttled=blu (cooldown attivo)
+  const variant = c.variant || "trigger";
+  const config = {
+    trigger:             { tone: "#fbbf24", title: "Watchdog → trigger" },
+    rebalance:           { tone: "#fb923c", title: "Watchdog → REBALANCE TRIGGER" },
+    rebalance_skipped:   { tone: "#94a3b8", title: "Watchdog → rebalance skipped" },
+    rebalance_throttled: { tone: "#60a5fa", title: "Watchdog → rebalance throttled" },
+  }[variant] || { tone: "#fbbf24", title: "Watchdog" };
+
+  // Per rebalance mostra anche pct di portafoglio e altri overweight
+  const showRebalanceDetails =
+    variant === "rebalance" || variant === "rebalance_skipped" || variant === "rebalance_throttled";
+
   return (
-    <div style={S.card("#fbbf24")}>
+    <div style={S.card(config.tone)}>
       <CardHeader
-        icon={Eye} iconColor={tone} title="Watchdog → trigger" ts={c.ts}
-        badges={<span style={S.urgencyBadge}>urgency {c.urgency}/10</span>}
+        icon={Eye} iconColor={config.tone} title={config.title} ts={c.ts}
+        badges={
+          variant === "trigger" || variant === "rebalance"
+            ? <span style={S.urgencyBadge}>urgency {c.urgency}/10</span>
+            : null
+        }
       />
       <div style={S.body}>
         <span style={S.label}>Motivazione</span>
-        <span style={S.value}>{c.reason}</span>
+        <span style={S.value}>{c.reason || "(nessuna motivazione registrata)"}</span>
       </div>
+      {showRebalanceDetails && c.pct_of_portfolio !== undefined && (
+        <div style={S.body}>
+          <span style={S.label}>% del NAV</span>
+          <span style={S.value}>{c.pct_of_portfolio?.toFixed?.(1) ?? c.pct_of_portfolio}%</span>
+        </div>
+      )}
       {c.focus_tickers?.length > 0 && (
         <div style={S.tickerRow}>
           <span style={S.labelInline}>Focus:</span>
           {c.focus_tickers.map(t => <span key={t} style={S.tickerPill}>{t}</span>)}
+        </div>
+      )}
+      {showRebalanceDetails && c.all_overweight?.length > 1 && (
+        <div style={S.tickerRow}>
+          <span style={S.labelInline}>Altri overweight:</span>
+          {c.all_overweight.filter(t => !c.focus_tickers?.includes(t))
+            .map(t => <span key={t} style={S.tickerPill}>{t}</span>)}
         </div>
       )}
     </div>
