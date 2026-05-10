@@ -251,6 +251,19 @@ def init_db():
         except Exception:
             pass
 
+        # ── v14: actionable chat — la chat decisionale puo' proporre azioni
+        #    diverse dal solo trade (stop-loss, take-profit, direttive utente).
+        #    Salviamo l'array JSON in proposed_actions; executed_action_results
+        #    e' un dict {action_index_str: result_dict} con esiti per azione.
+        for col_def in (
+            "proposed_actions TEXT",
+            "executed_action_results TEXT",
+        ):
+            try:
+                conn.execute(f"ALTER TABLE decision_chat_messages ADD COLUMN {col_def}")
+            except Exception:
+                pass
+
 def get_portfolio():
     with get_db() as conn:
         row = conn.execute("SELECT * FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
@@ -749,14 +762,40 @@ def get_or_create_decision_chat_conversation(agent_type: str) -> int | None:
         return cur.lastrowid
 
 
+def _deserialize_decision_chat_row(d: dict) -> dict:
+    """Helper: decodifica i campi JSON delle righe decision_chat_messages."""
+    pt = d.get("proposed_trade")
+    if pt:
+        try:
+            d["proposed_trade"] = _json.loads(pt)
+        except Exception:
+            d["proposed_trade"] = None
+    pa = d.get("proposed_actions")
+    if pa:
+        try:
+            d["proposed_actions"] = _json.loads(pa)
+        except Exception:
+            d["proposed_actions"] = None
+    ear = d.get("executed_action_results")
+    if ear:
+        try:
+            d["executed_action_results"] = _json.loads(ear)
+        except Exception:
+            d["executed_action_results"] = None
+    return d
+
+
 def insert_decision_chat_message(conversation_id: int, role: str, content: str,
-                                 proposed_trade: dict | None = None) -> int | None:
+                                 proposed_trade: dict | None = None,
+                                 proposed_actions: list | None = None) -> int | None:
     pt_json = _json.dumps(proposed_trade) if proposed_trade else None
+    pa_json = _json.dumps(proposed_actions) if proposed_actions else None
     with get_db() as conn:
         cur = conn.execute(
             "INSERT INTO decision_chat_messages "
-            "(conversation_id, role, content, proposed_trade) VALUES (?,?,?,?)",
-            (conversation_id, role, content, pt_json),
+            "(conversation_id, role, content, proposed_trade, proposed_actions) "
+            "VALUES (?,?,?,?,?)",
+            (conversation_id, role, content, pt_json, pa_json),
         )
         conn.execute(
             "UPDATE decision_chat_conversations SET updated_at=datetime('now') WHERE id=?",
@@ -769,22 +808,13 @@ def get_decision_chat_messages(conversation_id: int, limit: int = 100) -> list:
     with get_db() as conn:
         rows = conn.execute(
             "SELECT id, conversation_id, role, content, proposed_trade, "
-            "executed_trade_id, created_at "
+            "proposed_actions, executed_trade_id, executed_action_results, "
+            "created_at "
             "FROM decision_chat_messages WHERE conversation_id=? "
             "ORDER BY created_at ASC LIMIT ?",
             (conversation_id, limit),
         ).fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            pt = d.get("proposed_trade")
-            if pt:
-                try:
-                    d["proposed_trade"] = _json.loads(pt)
-                except Exception:
-                    d["proposed_trade"] = None
-            out.append(d)
-        return out
+        return [_deserialize_decision_chat_row(dict(r)) for r in rows]
 
 
 def get_decision_chat_message(message_id: int) -> dict | None:
@@ -795,14 +825,7 @@ def get_decision_chat_message(message_id: int) -> dict | None:
         ).fetchone()
         if not row:
             return None
-        d = dict(row)
-        pt = d.get("proposed_trade")
-        if pt:
-            try:
-                d["proposed_trade"] = _json.loads(pt)
-            except Exception:
-                d["proposed_trade"] = None
-        return d
+        return _deserialize_decision_chat_row(dict(row))
 
 
 def clear_decision_chat(agent_type: str) -> bool:
@@ -844,6 +867,37 @@ def mark_decision_chat_trade_executed(message_id: int, trade_id: int) -> bool:
         conn.execute(
             "UPDATE decision_chat_messages SET executed_trade_id=? WHERE id=?",
             (trade_id, message_id),
+        )
+    return True
+
+
+def mark_decision_chat_action_executed(message_id: int, action_index: int,
+                                       result: dict) -> bool:
+    """
+    Salva il risultato dell'esecuzione di una proposed_action (stop-loss,
+    take-profit, direttiva). I risultati sono indicizzati per
+    `action_index` (posizione nell'array proposed_actions del messaggio)
+    cosi' il frontend puo' mostrare lo stato per ogni singola azione.
+    """
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT executed_action_results FROM decision_chat_messages WHERE id=?",
+            (message_id,),
+        ).fetchone()
+        if not row:
+            return False
+        current = {}
+        if row["executed_action_results"]:
+            try:
+                current = _json.loads(row["executed_action_results"])
+                if not isinstance(current, dict):
+                    current = {}
+            except Exception:
+                current = {}
+        current[str(action_index)] = result
+        conn.execute(
+            "UPDATE decision_chat_messages SET executed_action_results=? WHERE id=?",
+            (_json.dumps(current), message_id),
         )
     return True
 

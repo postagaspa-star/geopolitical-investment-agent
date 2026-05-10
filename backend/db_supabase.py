@@ -195,10 +195,17 @@ def _ensure_schema_migrations():
                 REFERENCES decision_chat_conversations(id) ON DELETE CASCADE,
             role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
             content TEXT NOT NULL,
-            proposed_trade TEXT,           -- JSON string con {ticker,action,quantity,...}
+            proposed_trade TEXT,           -- JSON string con {ticker,action,quantity,...} (legacy/compat)
             executed_trade_id BIGINT,      -- FK a trades.id quando l'utente conferma l'esecuzione
+            proposed_actions TEXT,         -- v14: JSON array di azioni proposte (trade/stop_loss/take_profit/directive)
+            executed_action_results TEXT,  -- v14: JSON dict {action_index_str: result_dict}
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        -- v14: migrazione idempotente per DB pre-esistenti senza queste colonne
+        ALTER TABLE decision_chat_messages
+            ADD COLUMN IF NOT EXISTS proposed_actions TEXT;
+        ALTER TABLE decision_chat_messages
+            ADD COLUMN IF NOT EXISTS executed_action_results TEXT;
         CREATE INDEX IF NOT EXISTS idx_dec_chat_messages_conv
             ON decision_chat_messages (conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_dec_chat_conv_agent
@@ -1235,14 +1242,28 @@ def get_or_create_decision_chat_conversation(agent_type: str) -> int | None:
         return None
 
 
+def _dec_chat_decode_row(r: dict) -> dict:
+    """Decodifica i campi JSON-string di una riga decision_chat_messages."""
+    for key in ("proposed_trade", "proposed_actions", "executed_action_results"):
+        v = r.get(key)
+        if v and isinstance(v, str):
+            try:
+                r[key] = json.loads(v)
+            except Exception:
+                r[key] = None
+    return r
+
+
 def insert_decision_chat_message(
     conversation_id: int, role: str, content: str,
     proposed_trade: dict | None = None,
+    proposed_actions: list | None = None,
 ) -> int | None:
     """
-    Aggiunge un messaggio. proposed_trade e' un dict opzionale con i campi
-    {ticker, action, quantity, reasoning, confidence}. Se la risposta
-    dell'agente non propone un trade, lascia None.
+    Aggiunge un messaggio. proposed_trade e' legacy (dict opzionale).
+    proposed_actions e' la nuova interfaccia: lista di azioni dell'agente
+    (trade / stop_loss / take_profit / directive) che l'utente puo' eseguire
+    singolarmente.
     """
     global _DECISION_CHAT_FALLBACK_MODE
     client = _get_client()
@@ -1255,6 +1276,8 @@ def insert_decision_chat_message(
             }
             if proposed_trade:
                 payload["proposed_trade"] = json.dumps(proposed_trade)
+            if proposed_actions:
+                payload["proposed_actions"] = json.dumps(proposed_actions)
             result = client.table("decision_chat_messages").insert(payload).execute()
             client.table("decision_chat_conversations").update({
                 "updated_at": _now_iso(),
@@ -1282,6 +1305,7 @@ def insert_decision_chat_message(
         msgs.append({
             "id": msg_id, "role": role, "content": content,
             "proposed_trade": proposed_trade,
+            "proposed_actions": proposed_actions,
             "created_at": _now_iso(),
         })
         # Cap a 200 messaggi per conversazione
@@ -1305,14 +1329,9 @@ def get_decision_chat_messages(conversation_id: int, limit: int = 100) -> list:
                       .limit(limit)
                       .execute())
             rows = result.data or []
-            # Decode proposed_trade JSON string → dict
+            # Decode JSON-string fields → dict/list
             for r in rows:
-                pt = r.get("proposed_trade")
-                if pt and isinstance(pt, str):
-                    try:
-                        r["proposed_trade"] = json.loads(pt)
-                    except Exception:
-                        r["proposed_trade"] = None
+                _dec_chat_decode_row(r)
             return rows
         except Exception as e:
             if _dec_chat_should_fallback(e):
@@ -1464,6 +1483,46 @@ def mark_decision_chat_trade_executed(message_id: int, trade_id: int) -> bool:
     return True
 
 
+def mark_decision_chat_action_executed(message_id: int, action_index: int,
+                                       result: dict) -> bool:
+    """
+    Salva il risultato dell'esecuzione di una proposed_action della chat
+    (stop-loss, take-profit, direttiva). I risultati sono indicizzati per
+    posizione nell'array proposed_actions (key = action_index string).
+    """
+    global _DECISION_CHAT_FALLBACK_MODE
+    client = _get_client()
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            r = (client.table("decision_chat_messages")
+                 .select("executed_action_results")
+                 .eq("id", message_id)
+                 .limit(1)
+                 .execute())
+            current = {}
+            if r.data:
+                ear = r.data[0].get("executed_action_results")
+                if ear and isinstance(ear, str):
+                    try:
+                        current = json.loads(ear) or {}
+                    except Exception:
+                        current = {}
+                elif isinstance(ear, dict):
+                    current = ear
+            current[str(action_index)] = result
+            client.table("decision_chat_messages").update({
+                "executed_action_results": json.dumps(current),
+            }).eq("id", message_id).execute()
+            return True
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("mark_decision_chat_action_executed fallita: %s", e)
+                return False
+    return True
+
+
 def get_decision_chat_message(message_id: int) -> dict | None:
     """Ritorna un singolo messaggio per ID (usato da execute-trade endpoint)."""
     global _DECISION_CHAT_FALLBACK_MODE
@@ -1476,14 +1535,7 @@ def get_decision_chat_message(message_id: int) -> dict | None:
                  .limit(1)
                  .execute())
             if r.data:
-                row = r.data[0]
-                pt = row.get("proposed_trade")
-                if pt and isinstance(pt, str):
-                    try:
-                        row["proposed_trade"] = json.loads(pt)
-                    except Exception:
-                        row["proposed_trade"] = None
-                return row
+                return _dec_chat_decode_row(r.data[0])
             return None
         except Exception as e:
             if _dec_chat_should_fallback(e):

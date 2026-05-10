@@ -883,6 +883,12 @@ class ChatDecisionExecutePayload(BaseModel):
     message_id: int
 
 
+class ChatDecisionExecuteActionPayload(BaseModel):
+    """Esegue una specifica proposed_action di un messaggio chat decision."""
+    message_id: int
+    action_index: int
+
+
 @app.post("/api/chat-decision/send")
 async def chat_decision_send(payload: ChatDecisionSendPayload):
     """
@@ -1052,6 +1058,237 @@ async def chat_decision_execute_trade(payload: ChatDecisionExecutePayload):
 
     except Exception as e:
         logger.error("chat_decision_execute_trade top-level: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__},
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ACTIONABLE CHAT — esecuzione generica di proposed_actions[]
+# ──────────────────────────────────────────────────────────────────────────
+
+def _exec_action_set_stop_loss(action: dict) -> dict:
+    """Imposta stop-loss su una posizione esistente. Calcola il prezzo
+    assoluto da pct se necessario (rispetto all'avg_entry_price)."""
+    ticker = (action.get("ticker") or "").upper().strip()
+    if not ticker:
+        return {"ok": False, "error": "ticker mancante"}
+
+    # Recupera la posizione per validare e per calcolare stop_loss_price da pct
+    positions = database.get_positions() or []
+    pos = next((p for p in positions if (p.get("ticker") or "").upper() == ticker), None)
+    if not pos:
+        return {"ok": False, "error": f"nessuna posizione aperta su {ticker}"}
+
+    if action.get("stop_loss_price") is not None:
+        sl_price = float(action["stop_loss_price"])
+    else:
+        pct = float(action.get("stop_loss_pct", 0))
+        entry = float(pos.get("avg_entry_price") or pos.get("entry_price") or 0)
+        if entry <= 0:
+            return {"ok": False, "error": "avg_entry_price non disponibile"}
+        # pct negativo per BUY (long), positivo per SHORT — qui assumiamo long
+        sl_price = round(entry * (1 + pct / 100.0), 4)
+
+    if sl_price <= 0:
+        return {"ok": False, "error": "stop_loss_price calcolato non valido"}
+
+    try:
+        database.update_position_auto_exit(
+            ticker, stop_loss_price=sl_price, set_by="chat_decision_user",
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"update DB fallito: {e}"}
+
+    return {"ok": True, "ticker": ticker, "stop_loss_price": sl_price}
+
+
+def _exec_action_set_take_profit(action: dict) -> dict:
+    """Imposta take-profit su una posizione esistente."""
+    ticker = (action.get("ticker") or "").upper().strip()
+    if not ticker:
+        return {"ok": False, "error": "ticker mancante"}
+
+    positions = database.get_positions() or []
+    pos = next((p for p in positions if (p.get("ticker") or "").upper() == ticker), None)
+    if not pos:
+        return {"ok": False, "error": f"nessuna posizione aperta su {ticker}"}
+
+    if action.get("take_profit_price") is not None:
+        tp_price = float(action["take_profit_price"])
+    else:
+        pct = float(action.get("take_profit_pct", 0))
+        entry = float(pos.get("avg_entry_price") or pos.get("entry_price") or 0)
+        if entry <= 0:
+            return {"ok": False, "error": "avg_entry_price non disponibile"}
+        tp_price = round(entry * (1 + pct / 100.0), 4)
+
+    if tp_price <= 0:
+        return {"ok": False, "error": "take_profit_price calcolato non valido"}
+
+    try:
+        database.update_position_auto_exit(
+            ticker, take_profit_price=tp_price, set_by="chat_decision_user",
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"update DB fallito: {e}"}
+
+    return {"ok": True, "ticker": ticker, "take_profit_price": tp_price}
+
+
+def _exec_action_add_directive(action: dict) -> dict:
+    """Appende una direttiva utente al testo esistente in settings."""
+    new_directive = (action.get("text") or "").strip()
+    if not new_directive or len(new_directive) < 3:
+        return {"ok": False, "error": "testo direttiva mancante"}
+
+    try:
+        current = database.get_setting("user_directives_text", "") or ""
+        # Append come bullet su nuova riga
+        prefix = f"- [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC, da chat] "
+        line = prefix + new_directive
+        if current.strip():
+            updated = current.rstrip() + "\n" + line
+        else:
+            updated = line
+        database.set_setting("user_directives_text", updated[:8000])
+    except Exception as e:
+        return {"ok": False, "error": f"set_setting fallito: {e}"}
+
+    return {"ok": True, "directive_text": new_directive}
+
+
+async def _exec_action_execute_trade(action: dict) -> dict:
+    """Esegue un trade equivalentemente all'endpoint execute-trade legacy."""
+    ticker = (action.get("ticker") or "").upper().strip()
+    act = (action.get("action") or "").upper().strip()
+    try:
+        qty = float(action.get("quantity", 0))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "quantity non valida"}
+    if not ticker or act not in ("BUY", "SELL") or qty <= 0:
+        return {"ok": False, "error": "parametri trade invalidi"}
+
+    # Prezzo corrente
+    current_price = None
+    try:
+        import data_fetchers as _df
+        md = _df.fetch_market_data(ticker, period_days=2)
+        if md and md.get("data"):
+            current_price = md["data"][-1].get("close")
+    except Exception as e:
+        logger.warning("fetch price for chat action trade %s: %s", ticker, e)
+    if not current_price or current_price <= 0:
+        return {"ok": False, "error": f"prezzo non disponibile per {ticker}"}
+
+    import portfolio as _portfolio
+    geo_reasoning = f"[CHAT-USER-CONFIRMED] {action.get('reasoning') or 'trade via chat'}"
+    tech_reasoning = "(eseguito via chat decision agent — proposed_actions)"
+    try:
+        if act == "BUY":
+            result = _portfolio.execute_buy(
+                ticker, qty, current_price, geo_reasoning, tech_reasoning, 80,
+            )
+        else:
+            result = _portfolio.execute_sell(
+                ticker, qty, current_price, geo_reasoning, tech_reasoning, 80,
+            )
+    except Exception as e:
+        return {"ok": False, "error": f"esecuzione fallita: {e}"}
+
+    if not result or not result.get("success"):
+        return {"ok": False,
+                "error": "trade non eseguito",
+                "reason": (result or {}).get("reason", "unknown")}
+
+    return {"ok": True, "trade_id": result.get("trade_id"),
+            "ticker": ticker, "action": act,
+            "quantity": qty, "price": current_price}
+
+
+@app.post("/api/chat-decision/execute-action")
+async def chat_decision_execute_action(payload: ChatDecisionExecuteActionPayload):
+    """
+    Esegue una specifica proposed_action (per indice) di un messaggio chat
+    della pagina /live/chat. Tipi supportati:
+      - execute_trade
+      - set_stop_loss
+      - set_take_profit
+      - add_directive
+
+    Richiede sempre conferma esplicita dell'utente (chiamata triggerata dal
+    bottone "Conferma" della card frontend).
+    """
+    try:
+        msg = database.get_decision_chat_message(payload.message_id)
+        if not msg:
+            return JSONResponse(status_code=404, content={"error": "messaggio non trovato"})
+
+        actions = msg.get("proposed_actions") or []
+        if not isinstance(actions, list) or not actions:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "il messaggio non contiene proposed_actions"},
+            )
+
+        if payload.action_index < 0 or payload.action_index >= len(actions):
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"action_index {payload.action_index} fuori range (0..{len(actions)-1})"},
+            )
+
+        # Già eseguita?
+        prev = msg.get("executed_action_results") or {}
+        if isinstance(prev, dict) and str(payload.action_index) in prev:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "azione gia' eseguita",
+                         "previous_result": prev[str(payload.action_index)]},
+            )
+
+        action = actions[payload.action_index]
+        atype = (action.get("type") or "").lower()
+
+        if atype == "execute_trade":
+            result = await _exec_action_execute_trade(action)
+            # Se TRADE OK, marca anche executed_trade_id per compat UI legacy
+            if result.get("ok") and result.get("trade_id"):
+                try:
+                    database.mark_decision_chat_trade_executed(
+                        payload.message_id, result["trade_id"],
+                    )
+                except Exception:
+                    pass
+        elif atype == "set_stop_loss":
+            result = _exec_action_set_stop_loss(action)
+        elif atype == "set_take_profit":
+            result = _exec_action_set_take_profit(action)
+        elif atype == "add_directive":
+            result = _exec_action_add_directive(action)
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"tipo azione non supportato: {atype}"},
+            )
+
+        # Persisti il risultato per indice
+        try:
+            database.mark_decision_chat_action_executed(
+                payload.message_id, payload.action_index, result,
+            )
+        except Exception as e:
+            logger.warning("mark_decision_chat_action_executed fallita: %s", e)
+
+        status_code = 200 if result.get("ok") else 400
+        return JSONResponse(status_code=status_code, content={
+            "executed": bool(result.get("ok")),
+            "action_type": atype,
+            "result": result,
+        })
+
+    except Exception as e:
+        logger.error("chat_decision_execute_action top-level: %s", e, exc_info=True)
         return JSONResponse(
             status_code=500,
             content={"error": str(e), "type": type(e).__name__},

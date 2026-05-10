@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   MessageSquare, Send, Loader2, Trash2, AlertCircle, Check,
   TrendingUp, TrendingDown, Bot, User, Sparkles, RefreshCw, Bitcoin, BarChart3,
-  Target, X as XIcon, Clock,
+  Target, X as XIcon, Clock, Shield, Award, FileText,
 } from "lucide-react";
 
 const API = window.location.origin;
@@ -205,7 +205,155 @@ function ProposedTradeCard({ message, onExecute, executing, executedTradeId }) {
   );
 }
 
-function MessageBubble({ msg, agent, onExecuteTrade, executingMsgId, lastExecutedId }) {
+// ────────────────────────────────────────────────────────────────────────────
+// PROPOSED ACTIONS — nuova UI multi-action (trade / stop-loss / take-profit / direttive)
+// ────────────────────────────────────────────────────────────────────────────
+function actionMeta(action) {
+  const t = (action.type || "").toLowerCase();
+  if (t === "execute_trade") {
+    const isBuy = (action.action || "").toUpperCase() === "BUY";
+    return {
+      icon: isBuy ? TrendingUp : TrendingDown,
+      color: isBuy ? "#10b981" : "#f87171",
+      label: `${action.action} ${action.quantity} ${action.ticker}`,
+      kind: "Trade",
+    };
+  }
+  if (t === "set_stop_loss") {
+    const target = action.stop_loss_price != null
+      ? `prezzo $${action.stop_loss_price}`
+      : `${action.stop_loss_pct}%`;
+    return {
+      icon: Shield,
+      color: "#fb923c",
+      label: `Stop-loss ${action.ticker} → ${target}`,
+      kind: "Stop-Loss",
+    };
+  }
+  if (t === "set_take_profit") {
+    const target = action.take_profit_price != null
+      ? `prezzo $${action.take_profit_price}`
+      : `+${action.take_profit_pct}%`;
+    return {
+      icon: Award,
+      color: "#34d399",
+      label: `Take-profit ${action.ticker} → ${target}`,
+      kind: "Take-Profit",
+    };
+  }
+  if (t === "add_directive") {
+    return {
+      icon: FileText,
+      color: "#a78bfa",
+      label: "Nuova direttiva utente",
+      kind: "Direttiva",
+    };
+  }
+  return {
+    icon: AlertCircle, color: "#64748b",
+    label: action.type || "azione sconosciuta", kind: "Sconosciuto",
+  };
+}
+
+function ProposedActionCard({
+  message, action, index, onExecute, executing, executedResult,
+}) {
+  const meta = actionMeta(action);
+  const Icon = meta.icon;
+  const ok = !!(executedResult && executedResult.ok);
+  const failed = !!(executedResult && executedResult.ok === false);
+
+  return (
+    <div style={{
+      marginTop: "0.6rem",
+      background: "#0f172a",
+      border: `1.5px solid ${meta.color}`,
+      borderRadius: "10px",
+      padding: "0.85rem 1rem",
+      display: "flex",
+      flexDirection: "column",
+      gap: "0.65rem",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <Icon size={18} color={meta.color} />
+        <strong style={{ color: meta.color, fontSize: "0.95rem" }}>
+          {meta.kind}: {meta.label}
+        </strong>
+        {action.confidence_level && (
+          <span style={{
+            marginLeft: "auto", fontSize: "0.7rem",
+            background: "#1e293b", color: "#94a3b8",
+            padding: "2px 8px", borderRadius: "10px", border: "1px solid #334155",
+          }}>
+            conf: {action.confidence_level}
+          </span>
+        )}
+      </div>
+
+      {action.type === "add_directive" && action.text && (
+        <div style={{
+          fontSize: "0.85rem", color: "#e2e8f0",
+          background: "#1e293b", border: "1px solid #334155",
+          padding: "0.5rem 0.7rem", borderRadius: "6px",
+          fontStyle: "italic",
+        }}>
+          "{action.text}"
+        </div>
+      )}
+
+      {action.reasoning && (
+        <div style={{ fontSize: "0.8rem", color: "#cbd5e1", lineHeight: 1.4 }}>
+          {action.reasoning}
+        </div>
+      )}
+
+      {ok ? (
+        <div style={{
+          display: "flex", alignItems: "center", gap: "0.4rem",
+          color: "#10b981", fontSize: "0.85rem", fontWeight: 600,
+          padding: "0.4rem 0.6rem",
+          background: "rgba(16, 185, 129, 0.1)", borderRadius: "6px",
+        }}>
+          <Check size={14} /> Eseguita
+          {executedResult.trade_id && ` (trade #${executedResult.trade_id})`}
+          {executedResult.stop_loss_price && ` — stop a $${executedResult.stop_loss_price}`}
+          {executedResult.take_profit_price && ` — target $${executedResult.take_profit_price}`}
+        </div>
+      ) : failed ? (
+        <div style={{
+          display: "flex", alignItems: "flex-start", gap: "0.4rem",
+          color: "#f87171", fontSize: "0.82rem",
+          padding: "0.4rem 0.6rem",
+          background: "rgba(248, 113, 113, 0.1)", borderRadius: "6px",
+        }}>
+          <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>Fallita: {executedResult.error || "errore sconosciuto"}</span>
+        </div>
+      ) : (
+        <button
+          onClick={() => onExecute(message.id, index)}
+          disabled={executing}
+          style={{
+            background: meta.color, color: "#0f172a", border: "none",
+            padding: "0.55rem 1rem", borderRadius: "6px",
+            fontWeight: 600, fontSize: "0.9rem",
+            cursor: executing ? "not-allowed" : "pointer",
+            opacity: executing ? 0.6 : 1,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: "0.4rem",
+          }}>
+          {executing ? (
+            <><Loader2 size={14} className="spin" /> Esecuzione...</>
+          ) : (
+            <><Check size={14} /> Conferma ed esegui</>
+          )}
+        </button>
+      )}
+    </div>
+  );
+}
+
+
+function MessageBubble({ msg, agent, onExecuteTrade, onExecuteAction, executingMsgId, executingActionIndex, lastExecutedId }) {
   const isUser = msg.role === "user";
   const isErr = msg.role === "assistant" && (msg.content || "").startsWith("Errore tecnico:");
 
@@ -234,7 +382,25 @@ function MessageBubble({ msg, agent, onExecuteTrade, executingMsgId, lastExecute
         <div style={{ fontSize: "0.88rem" }}>
           {renderMessage(msg.content)}
         </div>
-        {!isUser && msg.proposed_trade && (
+
+        {/* NUOVA UI: proposed_actions[] — supporta trade + stop-loss + take-profit + direttive */}
+        {!isUser && Array.isArray(msg.proposed_actions) && msg.proposed_actions.length > 0 && (
+          msg.proposed_actions.map((a, idx) => (
+            <ProposedActionCard
+              key={idx}
+              message={msg}
+              action={a}
+              index={idx}
+              onExecute={onExecuteAction}
+              executing={executingMsgId === msg.id && executingActionIndex === idx}
+              executedResult={(msg.executed_action_results || {})[String(idx)]}
+            />
+          ))
+        )}
+
+        {/* LEGACY UI: solo se nessuna proposed_actions ma c'e' proposed_trade (msg vecchi nel DB) */}
+        {!isUser && (!Array.isArray(msg.proposed_actions) || msg.proposed_actions.length === 0)
+          && msg.proposed_trade && (
           <ProposedTradeCard
             message={msg}
             onExecute={onExecuteTrade}
@@ -443,6 +609,7 @@ export default function ChatDecisionPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [executingMsgId, setExecutingMsgId] = useState(null);
+  const [executingActionIndex, setExecutingActionIndex] = useState(null);
   const [lastExecutedId, setLastExecutedId] = useState(null);
   const scrollRef = useRef(null);
 
@@ -546,6 +713,42 @@ export default function ChatDecisionPage() {
       setError(`Esecuzione fallita: ${e.message || e}`);
     } finally {
       setExecutingMsgId(null);
+    }
+  };
+
+  // Nuova UI: esegue una singola proposed_action (trade/stop-loss/take-profit/direttiva)
+  // indicizzata dal suo posto nell'array proposed_actions del messaggio.
+  const executeAction = async (messageId, actionIndex) => {
+    if (!window.confirm(
+      "Confermi l'esecuzione di questa azione? L'operazione e' immediata."
+    )) return;
+    setExecutingMsgId(messageId);
+    setExecutingActionIndex(actionIndex);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/api/chat-decision/execute-action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message_id: messageId, action_index: actionIndex }),
+      });
+      const data = await res.json();
+      if (!res.ok && !data.result) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      // Refresh history per vedere il nuovo executed_action_results
+      const histRes = await fetch(`${API}/api/chat-decision/history/${agentType}`);
+      const hist = await histRes.json();
+      if (histRes.ok) {
+        setMessages(hist.messages || []);
+      }
+      if (data.result && data.result.ok === false) {
+        setError(`Azione fallita: ${data.result.error || "errore sconosciuto"}`);
+      }
+    } catch (e) {
+      setError(`Esecuzione fallita: ${e.message || e}`);
+    } finally {
+      setExecutingMsgId(null);
+      setExecutingActionIndex(null);
     }
   };
 
@@ -705,7 +908,9 @@ export default function ChatDecisionPage() {
               msg={m}
               agent={agent}
               onExecuteTrade={executeTrade}
+              onExecuteAction={executeAction}
               executingMsgId={executingMsgId}
+              executingActionIndex={executingActionIndex}
               lastExecutedId={lastExecutedId}
             />
           ))
