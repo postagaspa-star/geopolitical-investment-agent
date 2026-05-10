@@ -316,11 +316,23 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                       <th>Azione</th>
                       <th>Quantita</th>
                       <th>Prezzo</th>
+                      <th>Valore</th>
+                      <th title="Costo stimato commissione (0.10% del valore trade)">Costo</th>
                       <th>Confidence</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {trades.map((trade, idx) => (
+                    {trades.map((trade, idx) => {
+                      // Calcolo costo commissione: usa campo commission se presente,
+                      // altrimenti stima 10bps (0.10%) dal total_value
+                      const tradeValue = trade.total_value || (trade.quantity * trade.price) || 0;
+                      const commAbs = trade.commission != null
+                        ? trade.commission
+                        : tradeValue * 0.001;          // 10 bps default
+                      const commPct = trade.commission_bps != null
+                        ? (trade.commission_bps / 100).toFixed(2)
+                        : "0.10";
+                      return (
                       <React.Fragment key={idx}>
                         <tr
                           className="trade-row"
@@ -344,6 +356,21 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                           </td>
                           <td>{trade.quantity}</td>
                           <td>{formatUSD(trade.price)}</td>
+                          <td style={{ color: "#e2e8f0" }}>
+                            {tradeValue > 0 ? formatUSD(tradeValue) : "—"}
+                          </td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            <span style={{
+                              color: "#fbbf24",
+                              fontSize: 12,
+                              fontFamily: "monospace",
+                            }}>
+                              {formatUSD(commAbs)}
+                              <span style={{ color: "#78716c", marginLeft: 4 }}>
+                                ({commPct}%)
+                              </span>
+                            </span>
+                          </td>
                           <td>
                             {trade.confidence_score != null
                               ? `${Number(trade.confidence_score).toFixed(0)}%`
@@ -352,7 +379,7 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                         </tr>
                         {expandedTradeIdx === idx && (
                           <tr className="trade-reasoning-row">
-                            <td colSpan={6}>
+                            <td colSpan={8}>
                               <div className="trade-reasoning">
                                 <strong>Reasoning:</strong>{" "}
                                 {trade.final_decision || trade.geopolitical_reasoning || trade.technical_reasoning || "Nessun dettaglio disponibile."}
@@ -361,7 +388,8 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                           </tr>
                         )}
                       </React.Fragment>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               )}

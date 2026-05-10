@@ -617,6 +617,25 @@ function StepCard({ step }) {
                     <span style={{ color: "#64748b", marginLeft: 8 }}>
                       ({t.allocation_pct?.toFixed(0)}% del portafoglio)
                     </span>
+                    {/* Costo commissione per trade */}
+                    {(t.commission != null && t.commission > 0) && (() => {
+                      const commAbs = t.commission;
+                      const commPct = t.commission_bps != null
+                        ? (t.commission_bps / 100).toFixed(2)
+                        : t.executed_value > 0
+                          ? ((commAbs / t.executed_value) * 100).toFixed(2)
+                          : "?";
+                      return (
+                        <span style={{
+                          display: "inline-flex", alignItems: "center", gap: 4,
+                          marginLeft: 10, padding: "1px 7px", borderRadius: 4,
+                          background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.25)",
+                          color: "#fbbf24", fontSize: 11, fontFamily: "monospace",
+                        }}>
+                          💸 ${commAbs.toFixed(2)} ({commPct}%)
+                        </span>
+                      );
+                    })()}
                   </div>
                 )}
                 {isSkipped && (

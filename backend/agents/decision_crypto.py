@@ -477,6 +477,43 @@ CRYPTO_DECISION_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_capital_from_orchestrator",
+            "description": (
+                "Chiede al CAPITAL ORCHESTRATOR (DeepSeek-V3) di liberare capitale "
+                "vendendo parzialmente posizioni dell'altro agente (in questo caso "
+                "il Decision Standard, equity/ETF). Da usare SOLO se hai conviction "
+                ">= 0.70 su un trade crypto ma il cash disponibile non basta perché "
+                "bloccato in posizioni equity.\n\n"
+                "L'orchestratore vede entrambi i sub-portfolio e decide se conviene "
+                "liquidare parzialmente una posizione equity (preferendo: profit alto, "
+                "età matura >7gg, % NAV alto). Guardrail automatici: cooldown 2h, "
+                "max 25% NAV per riallocazione, no-realize-loss > -10%.\n\n"
+                "Output: approved=true significa che il cash è già stato liberato → "
+                "riprova execute_trade. approved=false → usa do_nothing o scala la size.\n\n"
+                "Costo: ~$0.0002 (V3 chat). Non chiamare se gap < $500."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string",
+                               "description": "Ticker crypto che vuoi comprare (es. 'BTC-USD')."},
+                    "amount_needed_usd": {"type": "number", "exclusiveMinimum": 0,
+                                           "description": "USD totale necessario per il trade."},
+                    "amount_available_usd": {"type": "number", "minimum": 0,
+                                              "description": "USD disponibili come cash (da get_portfolio_state)."},
+                    "conviction": {"type": "number", "minimum": 0, "maximum": 1,
+                                    "description": "Conviction 0.0-1.0. Min 0.70."},
+                    "reasoning": {"type": "string",
+                                   "description": "Spiegazione (max 500 char) del perché serve capitale."},
+                },
+                "required": ["ticker", "amount_needed_usd", "amount_available_usd",
+                              "conviction", "reasoning"],
+            },
+        },
+    },
 ]
 
 
@@ -847,6 +884,64 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             except Exception as e:
                 logger.warning("[%s] crypto resolve_commitment error: %s", run_id, e)
                 return json.dumps({"success": False, "error": str(e)[:300]})
+
+        elif tool_name == "request_capital_from_orchestrator":
+            # Decision Crypto chiama il Capital Orchestrator (DeepSeek-V3) per
+            # liberare cash bloccato in posizioni equity gestite dal Decision
+            # Standard. L'orchestratore decide se vale la pena disturbare l'altro
+            # agente e, se sì, esegue le liquidazioni cross-agent direttamente.
+            try:
+                from agents.capital_orchestrator import request_capital
+                ticker = str(tool_input.get("ticker", "")).upper().strip()
+                amount_needed = float(tool_input.get("amount_needed_usd") or 0)
+                amount_available = float(tool_input.get("amount_available_usd") or 0)
+                conviction = float(tool_input.get("conviction") or 0)
+                reasoning = str(tool_input.get("reasoning") or "")[:500]
+
+                if not ticker or amount_needed <= 0:
+                    return json.dumps({
+                        "approved": False,
+                        "error": "ticker o amount_needed_usd non validi",
+                    })
+
+                result = await request_capital(
+                    run_id=run_id,
+                    requesting_agent="crypto",
+                    ticker=ticker,
+                    amount_needed=amount_needed,
+                    amount_available=amount_available,
+                    conviction=conviction,
+                    reasoning=reasoning,
+                )
+                database.insert_agent_log(
+                    run_id, "DECISION_CRYPTO_ORCHESTRATOR_REQUEST",
+                    json.dumps({
+                        "ticker": ticker,
+                        "amount_needed": amount_needed,
+                        "approved": result.get("approved"),
+                        "amount_freed": result.get("amount_freed", 0),
+                        "skipped": result.get("skipped"),
+                    }, default=str)
+                )
+                return json.dumps({
+                    "approved": result.get("approved", False),
+                    "amount_freed_usd": result.get("amount_freed", 0),
+                    "actions_executed_count": len(result.get("actions_executed") or []),
+                    "actions_executed": result.get("actions_executed") or [],
+                    "reasoning": result.get("reasoning", ""),
+                    "skipped": result.get("skipped"),
+                    "next_step": (
+                        "Cash liberato. Riprova execute_trade ora."
+                        if result.get("approved") else
+                        "Riallocazione negata. Usa do_nothing o riduci la size."
+                    ),
+                }, default=str)
+            except Exception as e:
+                logger.warning("[%s] crypto orchestrator request error: %s", run_id, e)
+                return json.dumps({
+                    "approved": False, "error": str(e)[:300],
+                    "next_step": "Errore orchestratore: usa do_nothing o execute_trade scalato.",
+                })
 
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
