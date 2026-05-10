@@ -13,9 +13,13 @@
  * pulsanti di azione).
  */
 
-// jsPDF e html2canvas sono pesanti (~180kB combined). Per non gonfiare
-// il bundle, vengono importati dinamicamente al primo uso di
-// generatePDFFromSections.
+// jsPDF + html2canvas (~180kB combined). Importati staticamente perché
+// in modalità ENCRYPTION_ENABLED tutti i chunk dinamici fallirebbero:
+// il catch-all FastAPI restituisce unlock.html invece dei .chunk.js.
+// Con import statico finiscono nel main bundle, che è inlinato in
+// index.html e cifrato come singolo blob.
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
 
 const BG_COLOR = "#0a0e1a";
 const PAGE_MARGIN_MM = 8;
@@ -31,11 +35,6 @@ const SECTION_GAP_MM = 4;
  * @returns {Promise<void>}
  */
 export async function generatePDFFromSections({ rootId, filename, meta }) {
-  // Lazy import delle librerie (~180kB combined)
-  const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
-    import("jspdf"),
-    import("html2canvas"),
-  ]);
 
   const root = document.getElementById(rootId);
   if (!root) {

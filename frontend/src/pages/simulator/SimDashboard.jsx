@@ -3,6 +3,9 @@ import { useNavigate } from "react-router-dom";
 import { Play, Zap, RefreshCw, Activity, BookOpen, Cpu, Bot,
          Bitcoin, TrendingUp, AlertCircle, CheckCircle2, Loader2,
          Download } from "lucide-react";
+// Import statico: in modalita' encryption i chunk dinamici falliscono
+// (catch-all FastAPI restituisce unlock.html invece dei .chunk.js).
+import { generatePDFFromSections } from "../../utils/pdfExport";
 
 const API = window.location.origin;
 
@@ -53,7 +56,6 @@ export default function SimDashboard() {
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
       await new Promise(r => setTimeout(r, 60));
 
-      const { generatePDFFromSections } = await import("../../utils/pdfExport");
       const dates = runs
         .map(r => r.completed_at)
         .filter(Boolean)

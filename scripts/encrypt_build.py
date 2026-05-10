@@ -121,6 +121,7 @@ def _inline_html(index_html: Path) -> str:
     # come <script>...</script> subito prima di </body>, preservando l'ordine
     # originale (importante se ci sono multiple deps che dipendono fra loro).
     inline_scripts: list[str] = []
+    referenced_scripts: set[str] = set()
 
     def collect_script(m: re.Match) -> str:
         src = m.group(1)
@@ -131,12 +132,41 @@ def _inline_html(index_html: Path) -> str:
         # Escape `</script>` dentro il codice JS (safety per il parser HTML)
         js = js.replace("</script>", "<\\/script>")
         inline_scripts.append(js)
+        referenced_scripts.add(f.resolve().as_posix())
         return ""  # rimuove il tag dalla posizione originale
 
     html = re.sub(
         r'<script[^>]+src=["\']([^"\']+)["\'][^>]*>\s*</script>',
         collect_script, html,
     )
+
+    # 2.b) Code-split chunks di webpack (es. 732.xxx.chunk.js, 977.xxx.chunk.js).
+    # In modalità ENCRYPTION_ENABLED il server NON li serve come file separati
+    # (il catch-all FastAPI restituisce unlock.html), quindi se restano fuori
+    # dal bundle cifrato `__webpack_require__.e()` fallisce con "Loading chunk
+    # X failed". I chunk webpack JSONP-style si auto-registrano in
+    # `self["webpackChunkX"]` quando il loro <script> viene eseguito: basta
+    # quindi inlinearli prima del runtime/main così il main runtime li trova
+    # già nell'array (o se inseriti dopo, .push viene già intercettato dal
+    # loader). L'ordine non è critico per la correttezza JSONP.
+    js_dir = base / "static" / "js"
+    if js_dir.is_dir():
+        chunk_scripts: list[str] = []
+        chunk_names: list[str] = []
+        for chunk_file in sorted(js_dir.glob("*.chunk.js")):
+            if chunk_file.resolve().as_posix() in referenced_scripts:
+                continue   # già incluso via <script src> in index.html
+            js = chunk_file.read_text(encoding="utf-8")
+            js = js.replace("</script>", "<\\/script>")
+            chunk_scripts.append(js)
+            chunk_names.append(chunk_file.name)
+        if chunk_scripts:
+            print(f"      -> inline {len(chunk_scripts)} webpack chunk(s): "
+                  f"{', '.join(chunk_names)}")
+            # Prepongo i chunk PRIMA del runtime/main così quando il main parte
+            # trova le entry già pushate in self["webpackChunkX"]; questo è il
+            # comportamento standard JSONP di webpack 5.
+            inline_scripts = chunk_scripts + inline_scripts
 
     if inline_scripts:
         # Concatena con un newline come separatore — preserva l'ordine

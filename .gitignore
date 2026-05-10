@@ -23,6 +23,9 @@ backend/documents/
 # Backend static (generated on Render)
 backend/static/
 
+# Encrypted bundle (generated on Render via scripts/encrypt_build.py)
+backend/encrypted_assets/bundle.enc
+
 # Node
 node_modules/
 frontend/build/
