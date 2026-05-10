@@ -166,12 +166,23 @@ def _get_deepseek_key() -> str:
 
 
 def _get_crypto_decision_prompt() -> str:
-    """Carica il prompt custom dalle settings + direttive utente + shared_principles.
+    """Versione legacy compat: ritorna solo testo (no card_ids tracking)."""
+    text, _ids = _get_crypto_decision_prompt_with_meta()
+    return text
+
+
+def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
+    """Carica prompt custom + Direttive + Coach Cards + Shared.
+
+    Ritorna (prompt_text, coach_card_ids). Il caller deve invocare
+    coach_cards.increment_applied(id) DOPO il successo del run.
 
     Ordine di priorità nel prompt finale:
       1. Direttive Utente (in cima, max priority)
-      2. Prompt base (custom o default)
-      3. Shared principles (in coda)
+      2. Risk profile (crypto-specific)
+      3. Coach Cards (sintesi settimanale memoria Simulator)
+      4. Prompt base (custom o default)
+      5. Shared principles (in coda)
     """
     base = CRYPTO_DECISION_PROMPT_DEFAULT
     try:
@@ -196,13 +207,36 @@ def _get_crypto_decision_prompt() -> str:
     except Exception:
         risk_block = ""
 
-    # 3. Shared principles in coda
+    # 3. Coach Cards: stesse del Decision standard (la sintesi settimanale
+    #    legge tutti gli advice del Simulator, equity + crypto). Le card hanno
+    #    `category_focus` e `scenarios_signature` cosi' R1 sa quali sono
+    #    crypto-specific. Iniettare TUTTE non confonde: il Decision Crypto
+    #    filtra per rilevanza nel context del prompt.
+    coach_block = ""
+    coach_card_ids: list[str] = []
+    try:
+        from agents import coach_cards as _cc
+        coach_block = _cc.get_active_cards_block_for_decision() or ""
+        if coach_block:
+            for c in _cc.list_cards(active_only=True)[:10]:
+                cid = c.get("id")
+                if cid:
+                    coach_card_ids.append(cid)
+    except Exception as e:
+        logger.debug("[DEC-CRYPTO] coach cards block fallito: %s", e)
+    coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
+
+    # 4. Shared principles in coda
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        return directives_block + risk_block + base + "\n\n" + "═" * 60 + "\n" + shared
+        text = (directives_block + risk_block + coach_section + base
+                + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        return directives_block + risk_block + base
+        text = directives_block + risk_block + coach_section + base
+    return text, coach_card_ids
+
+
 
 
 def is_cooldown_active() -> tuple[bool, int]:
@@ -1202,12 +1236,21 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
         "portfolio_total": portfolio_state.get("total_value", 0),
     }, default=str))
 
+    sys_prompt_crypto, coach_card_ids_crypto = _get_crypto_decision_prompt_with_meta()
     try:
         trades, final_text, iterations = await _run_r1_loop(
-            run_id, _get_crypto_decision_prompt(), user_message,
+            run_id, sys_prompt_crypto, user_message,
         )
         used_model = DEEPSEEK_R1_MODEL
         _record_run_timestamp()
+        # Increment Coach Cards applied_count: track ROI delle card
+        # (piu' applied = card piu' usata dal Decision)
+        try:
+            from agents import coach_cards as _cc
+            for _cid in coach_card_ids_crypto:
+                _cc.increment_applied(_cid)
+        except Exception:
+            pass
     except Exception as exc:
         logger.error("[%s][DECISION-CRYPTO] R1 fallito: %s", run_id, exc, exc_info=True)
         try:

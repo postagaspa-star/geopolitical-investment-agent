@@ -482,7 +482,19 @@ def _build_risk_block(asset_class: str = "equity") -> str:
 
 def _get_decision_prompt(engine: str | None = None) -> str:
     """
+    Carica il system prompt del Decision Agent (compat: solo testo).
+    Per il tracking delle Coach Cards iniettate, usa
+    _get_decision_prompt_with_meta() che ritorna anche i card_ids.
+    """
+    text, _ids = _get_decision_prompt_with_meta(engine)
+    return text
+
+
+def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list[str]]:
+    """
     Carica il system prompt del Decision Agent.
+    Ritorna (prompt_text, coach_card_ids) — il caller usa gli ids per
+    chiamare coach_cards.increment_applied(id) dopo successo del run.
 
     Args:
         engine: 'claude' o 'deepseek-r1'. Se None, viene risolto da _resolve_engine_for_run().
@@ -490,9 +502,9 @@ def _get_decision_prompt(engine: str | None = None) -> str:
     Per Claude:    setting key 'prompt_decision'    → fallback DECISION_SYSTEM_PROMPT_DEFAULT
     Per R1:        setting key 'prompt_decision_r1' → fallback DECISION_R1_SYSTEM_PROMPT_DEFAULT
 
-    Inietta IN CIMA le direttive utente (priorità massima) e in coda il
-    blocco shared_principles (gestione SL/TP + dialog Technical) condiviso
-    tra Live e Simulator.
+    Inietta IN CIMA le direttive utente (priorità massima), poi le Coach
+    Cards attive (sintesi settimanale advice del Simulator), poi il prompt
+    base, e in coda il blocco shared_principles condiviso con il Simulator.
     """
     if engine is None:
         engine = _resolve_engine_for_run()
@@ -515,13 +527,35 @@ def _get_decision_prompt(engine: str | None = None) -> str:
     # 2. Risk profile (subito sotto le direttive, hard constraints)
     risk_block = _build_risk_block(asset_class="equity")
 
-    # 3. Shared principles (in coda)
+    # 3. Coach Cards: regole operative emerse dalla memoria del Simulator,
+    #    sintetizzate settimanalmente da DeepSeek-V3 (job in scheduler).
+    #    Iniettate qui per chiudere il loop Sim → Live: senza questa
+    #    iniezione, le card venivano generate ma il Decision Live non le
+    #    leggeva mai → sapere accumulato sprecato.
+    coach_block = ""
+    coach_card_ids: list[str] = []
+    try:
+        from agents import coach_cards as _cc
+        coach_block = _cc.get_active_cards_block_for_decision() or ""
+        if coach_block:
+            for c in _cc.list_cards(active_only=True)[:10]:
+                cid = c.get("id")
+                if cid:
+                    coach_card_ids.append(cid)
+    except Exception as e:
+        logger.debug("coach cards block fallito: %s", e)
+
+    coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
+
+    # 4. Shared principles (in coda)
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        return directives_block + risk_block + base_prompt + "\n\n" + "═" * 60 + "\n" + shared
+        text = (directives_block + risk_block + coach_section + base_prompt
+                + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        return directives_block + risk_block + base_prompt
+        text = directives_block + risk_block + coach_section + base_prompt
+    return text, coach_card_ids
 
 
 def _get_client() -> Anthropic:
@@ -1331,13 +1365,22 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     #   - DECISION_ENGINE=hybrid + market closed (default GEO overnight)
     if resolved_engine == "deepseek-r1":
         logger.info("[%s][DECISION] Engine: DeepSeek-R1 (overnight/tournament)", run_id)
+        sys_prompt_r1, coach_card_ids_r1 = _get_decision_prompt_with_meta("deepseek-r1")
         try:
             trades_executed, final_text, iteration = await _run_deepseek_decision_loop(
-                run_id, _get_decision_prompt("deepseek-r1"), user_message
+                run_id, sys_prompt_r1, user_message
             )
             used_model = DEEPSEEK_R1_MODEL
             # Registra timestamp per cooldown 2h30 (solo se il run ha completato senza errore)
             record_r1_run_timestamp()
+            # Increment applied_count delle Coach Cards iniettate (track ROI
+            # delle card: piu' applied_count = card piu' usata dal Decision)
+            try:
+                from agents import coach_cards as _cc
+                for _cid in coach_card_ids_r1:
+                    _cc.increment_applied(_cid)
+            except Exception:
+                pass
         except Exception as ds_err:
             logger.error("[%s][DECISION] DeepSeek-R1 fallito: %s", run_id, ds_err, exc_info=True)
             # Fail-safe: ritorna no-trade, non crashare l'intero pipeline
@@ -1377,7 +1420,7 @@ async def run_decision_agent(run_id: str, tech_report: dict,
 
     model = _select_model()
     client = _get_client()
-    system_prompt = _get_decision_prompt("claude")
+    system_prompt, coach_card_ids_claude = _get_decision_prompt_with_meta("claude")
 
     # CRITICO: Anthropic SDK è sincrono → wrap in asyncio.to_thread per non
     # bloccare l'event loop (evita di fermare polling, watchdog, ecc.).
@@ -1574,6 +1617,15 @@ async def run_decision_agent(run_id: str, tech_report: dict,
 
     # Registra timestamp Sonnet per la sidebar (Decision row)
     record_sonnet_run_timestamp()
+
+    # Increment applied_count delle Coach Cards iniettate nel prompt.
+    # Eseguito SOLO dopo che il run e' completato (no fail-fast).
+    try:
+        from agents import coach_cards as _cc
+        for _cid in coach_card_ids_claude:
+            _cc.increment_applied(_cid)
+    except Exception:
+        pass
 
     _save_checkpoint(run_id, "decision", "COMPLETED", {
         "trades": len(trades_executed),
