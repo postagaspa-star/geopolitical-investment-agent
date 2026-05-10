@@ -180,9 +180,11 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
     Ordine di priorità nel prompt finale:
       1. Direttive Utente (in cima, max priority)
       2. Risk profile (crypto-specific)
-      3. Coach Cards (sintesi settimanale memoria Simulator)
-      4. Prompt base (custom o default)
-      5. Shared principles (in coda)
+      3. Regime Protocol (framework decisionale obbligatorio)
+      4. Coach Cards (sintesi settimanale memoria Simulator)
+      5. Memoria operativa (ultime decisioni crypto Live)
+      6. Prompt base (custom o default)
+      7. Shared principles (in coda)
     """
     base = CRYPTO_DECISION_PROMPT_DEFAULT
     try:
@@ -207,7 +209,20 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
     except Exception:
         risk_block = ""
 
-    # 3. Coach Cards: stesse del Decision standard (la sintesi settimanale
+    # 3. Regime Protocol (asset_class=crypto): forza la classificazione
+    #    del regime e aggiunge default NO_TRADE per LATERAL/MACRO.
+    #    Per crypto i regimi LATERAL e MACRO sono particolarmente
+    #    insidiosi (range trading senza catalyst macro forte erode
+    #    capitale via funding/spread), quindi il default flat e' ancora
+    #    piu' importante che su equity.
+    regime_block = ""
+    try:
+        from agents.decision import _build_regime_protocol_block
+        regime_block = _build_regime_protocol_block(asset_class="crypto")
+    except Exception as exc:
+        logger.debug("[DEC-CRYPTO] regime protocol block failed: %s", exc)
+
+    # 4. Coach Cards: stesse del Decision standard (la sintesi settimanale
     #    legge tutti gli advice del Simulator, equity + crypto). Le card hanno
     #    `category_focus` e `scenarios_signature` cosi' R1 sa quali sono
     #    crypto-specific. Iniettare TUTTE non confonde: il Decision Crypto
@@ -226,7 +241,7 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
         logger.debug("[DEC-CRYPTO] coach cards block fallito: %s", e)
     coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
 
-    # 4. Memoria operativa: ultime N decisioni crypto del Live (feedback loop).
+    # 5. Memoria operativa: ultime N decisioni crypto del Live (feedback loop).
     #    Iniettata anche qui per evitare che R1 ripeta tesi gia' applicate
     #    senza esito su crypto laterali / regime range-bound.
     recent_section = ""
@@ -238,15 +253,15 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
     except Exception as exc:
         logger.debug("[DEC-CRYPTO] recent decisions block failed: %s", exc)
 
-    # 5. Shared principles in coda
+    # 6. Shared principles in coda
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        text = (directives_block + risk_block + coach_section + recent_section
-                + base + "\n\n" + "═" * 60 + "\n" + shared)
+        text = (directives_block + risk_block + regime_block + coach_section
+                + recent_section + base + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        text = (directives_block + risk_block + coach_section + recent_section
-                + base)
+        text = (directives_block + risk_block + regime_block + coach_section
+                + recent_section + base)
     return text, coach_card_ids
 
 

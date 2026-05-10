@@ -588,6 +588,142 @@ def _build_recent_decisions_block(agent_type: str = "standard",
     return header + "\n" + "\n".join(lines) + "\n"
 
 
+def _build_regime_protocol_block(asset_class: str = "equity") -> str:
+    """
+    Regime Protocol: framework decisionale OBBLIGATORIO che precede ogni
+    trade-decision. Forza l'agente a:
+      1. classificare esplicitamente il regime di mercato corrente,
+      2. selezionare il profilo operativo del regime (modificatori
+         ADDITIVI sopra il Risk Profile attivo, mai meno conservativi),
+      3. decidere il trade applicando regime + risk profile.
+
+    Razionale: l'analisi di 30+ run del Simulator ha mostrato win-rate
+    0% su mercati LATERALI e MACRO, contro 50% su CRASH/RALLY e 25% su
+    GEOPOLITICAL. Causa: l'agente passa direttamente da "leggo i dati"
+    a "decido il trade", senza un layer intermedio di regime-classification.
+    Nei regimi senza direzione chiara questa omissione e' fatale (l'azione
+    corretta e' spesso flat, ma il bias inerente a un LLM e' verso l'azione).
+
+    Il blocco e' COMPATIBILE con il Risk Profile: i suoi parametri sono
+    SEMPRE applicabili come tetto massimo. Il regime puo' solo RESTRINGERE
+    (richiedere conviction piu' alta, SL piu' stretto, meno posizioni nuove).
+    Non puo' MAI rilassare i vincoli del Risk Profile.
+
+    Posizione nel prompt: subito sotto il risk_block, sopra coach_section.
+    """
+    # Leggi il floor min_confidence del profilo attivo per riferirlo
+    # esplicitamente (cosi' il modificatore "+0.10" e' aggancia al valore reale).
+    try:
+        import risk_profile as _rp
+        prof = _rp.get_active_profile()
+        prof_label = prof.get("label", "Moderato")
+        base_conf = float(prof.get("min_confidence", 0.65))
+        prof_conf_str = f"{base_conf:.2f}"
+        boosted_conf_str = f"{min(0.95, base_conf + 0.10):.2f}"
+    except Exception:
+        prof_label = "(profilo attivo)"
+        prof_conf_str = "min_confidence del profilo"
+        boosted_conf_str = "min_confidence del profilo + 0.10"
+
+    is_crypto = asset_class == "crypto"
+    asset_word = "crypto" if is_crypto else "equity"
+
+    lines = [
+        "═" * 60,
+        "🧭  REGIME PROTOCOL — DECISION FRAMEWORK (OBBLIGATORIO)",
+        "═" * 60,
+        "",
+        "Prima di QUALSIASI trade-decision esegui questi 3 step in ordine.",
+        "Non e' opzionale: e' il processo che chiude il gap diagnosticato",
+        "dalla memoria del Simulator (win-rate 0% in mercati laterali/macro).",
+        "",
+        "─── STEP 1 — CLASSIFICA IL REGIME ───",
+        "",
+        "Scegli ESATTAMENTE UNA di queste 5 categorie e dichiarala in chiaro",
+        "all'inizio del tuo ragionamento (es. \"Regime: [LATERAL]\"):",
+        "",
+        "  [TREND-UP]    trend rialzista strutturale",
+        "                (breadth > 60%, VIX < 20, momentum positivo, no",
+        "                 catalyst macro avverso in 48h)",
+        "",
+        "  [TREND-DOWN]  trend ribassista strutturale",
+        "                (breadth < 40%, VIX > 25, momentum negativo,",
+        "                 deterioramento macro/earnings)",
+        "",
+        "  [LATERAL]     range-bound, low conviction, no edge direzionale",
+        "                (breadth 40-60%, VIX 15-22, no catalyst forte,",
+        "                 volumi compressi, news non-decisive)",
+        "",
+        "  [MACRO]       finestra di evento macro / event-driven",
+        "                (FOMC week, CPI/PPI nelle 24h, GDP, NFP, eventi",
+        "                 geopolitici binari di cui aspetti l'esito)",
+        "",
+        "  [CRASH-RALLY] shock di volatilita' o capitulation rebound",
+        "                (VIX > 30, mosse > 3% nella seduta, panic flows",
+        "                 oppure relief rally post-shock)",
+        "",
+        "─── STEP 2 — APPLICA IL PROFILO OPERATIVO DEL REGIME ───",
+        "",
+        f"Risk Profile attivo: {prof_label} (min_confidence baseline = {prof_conf_str}).",
+        "I modificatori sotto sono ADDITIVI: possono restringere il Risk",
+        "Profile (richiedere piu' conviction, SL piu' stretto, meno posizioni",
+        "nuove), MAI allargarlo. Il Risk Profile resta il tetto massimo.",
+        "",
+        "  [TREND-UP]    Regole standard del Risk Profile.",
+        "                Piena operativita': conviction = floor profilo,",
+        "                SL nel range del profilo, max-positions del profilo.",
+        "",
+        "  [TREND-DOWN]  Conviction = floor profilo. SL preferibilmente",
+        "                sull'estremo STRETTO del range del profilo.",
+        "                Max nuove posizioni in questa run: -1 vs profilo",
+        "                (se profilo=6 → max 5). Privilegio chiusure/hedge.",
+        "",
+        "  [LATERAL]     Conviction MINIMA elevata: " + boosted_conf_str + " (= floor",
+        "                profilo + 0.10, capped a 0.95). SL OBBLIGATORIAMENTE",
+        "                sull'estremo STRETTO del range del profilo.",
+        "                MAX 1 NUOVA posizione in questa run, indipendentemente",
+        "                dal max-positions del profilo. Default = NO_TRADE.",
+        "",
+        "  [MACRO]       Stesse soglie di [LATERAL] (conviction " + boosted_conf_str + ",",
+        "                SL stretto, max 1 nuova). In piu': preferenza per",
+        "                cash o hedge difensivo finche' il catalyst non si",
+        "                risolve. Default = NO_TRADE; deroga solo per setup",
+        "                con risk/reward asimmetrico misurato in chiaro.",
+        "",
+        "  [CRASH-RALLY] Conviction = floor profilo. SL nel range standard",
+        "                del profilo (volatilita' alta richiede stop non",
+        "                troppo stretti, altrimenti vieni stoppato dal noise).",
+        "                Max-positions = profilo. Privilegio risk-on con",
+        "                size ridotta o hedge contrarian misurato.",
+        "",
+        "─── STEP 3 — DECIDI IL TRADE (regime + risk profile) ───",
+        "",
+        "Applica QUALSIASI vincolo che sia piu' stretto: o quello del Risk",
+        "Profile, o quello del Regime. In caso di conflitto vince il piu'",
+        "conservativo (mai il piu' aggressivo).",
+        "",
+        "REGOLA D'ANCORAGGIO (sempre attiva):",
+        "  Se hai classificato [LATERAL] o [MACRO] e decidi di entrare,",
+        "  DEVI scrivere ESPLICITAMENTE prima del tool execute_trade:",
+        "    \"Deroga dal NO_TRADE default perche':",
+        "       (a) catalyst specifico = [...],",
+        "       (b) conviction = X.XX > " + boosted_conf_str + " perche' [...],",
+        "       (c) SL = Y% e' sostenibile perche' [...].\"",
+        "  Senza queste tre giustificazioni il trade NON e' ammesso.",
+        "",
+        "REGOLA ANTI-AZIONISMO:",
+        "  NO_TRADE non e' una sconfitta. In [LATERAL] e [MACRO] e' il",
+        "  comportamento ATTESO. La memoria operativa del Live + i 30+ run",
+        f"  del Simulator confermano: tradare {asset_word} in questi regimi",
+        "  ha distrutto alpha sistematicamente. Stai flat e aspetta un",
+        "  regime favorevole. Il valore atteso del NO_TRADE in regime",
+        "  laterale supera quello del trade aggressivo.",
+        "═" * 60,
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list[str]]:
     """
     Carica il system prompt del Decision Agent.
@@ -625,7 +761,21 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
     # 2. Risk profile (subito sotto le direttive, hard constraints)
     risk_block = _build_risk_block(asset_class="equity")
 
-    # 3. Coach Cards: regole operative emerse dalla memoria del Simulator,
+    # 3. Regime Protocol: framework decisionale obbligatorio.
+    #    Forza l'agente a classificare il regime PRIMA di decidere.
+    #    Aggiunge il default NO_TRADE per regimi LATERAL/MACRO con
+    #    requisiti di giustificazione esplicita per la deroga.
+    #    Posizione: sopra le coach cards perche' e' un MECCANISMO di
+    #    processo (non un consiglio tattico) e deve guidare TUTTO il
+    #    ragionamento successivo, comprese le coach cards stesse.
+    #    Compatibile con Risk Profile: solo additivo conservativo.
+    try:
+        regime_block = _build_regime_protocol_block(asset_class="equity")
+    except Exception as exc:
+        logger.debug("regime protocol block failed: %s", exc)
+        regime_block = ""
+
+    # 4. Coach Cards: regole operative emerse dalla memoria del Simulator,
     #    sintetizzate settimanalmente da DeepSeek-V3 (job in scheduler).
     #    Iniettate qui per chiudere il loop Sim → Live: senza questa
     #    iniezione, le card venivano generate ma il Decision Live non le
@@ -645,7 +795,7 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
 
     coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
 
-    # 4. Memoria operativa: ultime N decisioni del Live (chiude feedback loop).
+    # 5. Memoria operativa: ultime N decisioni del Live (chiude feedback loop).
     #    Senza questo blocco, l'agente partiva from-scratch a ogni run e
     #    rifaceva le stesse tesi inutilmente in mercati laterali/macro,
     #    senza mai convergere su un approccio diverso.
@@ -656,15 +806,15 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
         recent_block = ""
     recent_section = (recent_block + "\n" + "═" * 60 + "\n") if recent_block else ""
 
-    # 5. Shared principles (in coda)
+    # 6. Shared principles (in coda)
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        text = (directives_block + risk_block + coach_section + recent_section
-                + base_prompt + "\n\n" + "═" * 60 + "\n" + shared)
+        text = (directives_block + risk_block + regime_block + coach_section
+                + recent_section + base_prompt + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        text = (directives_block + risk_block + coach_section + recent_section
-                + base_prompt)
+        text = (directives_block + risk_block + regime_block + coach_section
+                + recent_section + base_prompt)
     return text, coach_card_ids
 
 
