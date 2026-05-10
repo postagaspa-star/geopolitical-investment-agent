@@ -630,8 +630,17 @@ async def finalize_crypto_run(
         periods_per_year=_metrics.ANNUALIZATION_CRYPTO,
     )
 
-    debrief = await _generate_crypto_debrief(scenario, history, final_valuation,
-                                              benchmark_pnl_pct, reveal)
+    # Debrief AI (narrativa) + Lessons learned crypto-tailored, in parallelo.
+    # _generate_lessons_learned è in v2_engine ed è generico (funziona anche
+    # per crypto perché il prompt accetta qualsiasi tipo di scenario).
+    from simulator.v2_engine import _generate_lessons_learned as _gen_lessons
+    debrief, lessons_learned = await asyncio.gather(
+        _generate_crypto_debrief(scenario, history, final_valuation,
+                                  benchmark_pnl_pct, reveal),
+        _gen_lessons(scenario, history, final_valuation,
+                     benchmark_pnl_pct, reveal),
+        return_exceptions=False,
+    )
 
     result = {
         "scenario_id": scenario.get("id"),
@@ -644,6 +653,9 @@ async def finalize_crypto_run(
         "benchmark_value_series": benchmark_value_series,
         "outcome": _classify_outcome(final_valuation, benchmark_pnl_pct),
         "debrief": debrief,
+        # Lessons learned: lista [{title, text, type}, ...] generata in parallel
+        # al debrief; iniettata in _auto_save_thesis_advice per save automatico.
+        "lessons_learned": lessons_learned or [],
         "description_reveal": reveal,
         "num_steps": scenario.get("num_steps"),
         "portfolio_value_series": portfolio_value_series,

@@ -1244,9 +1244,16 @@ async def finalize_run(
         periods_per_year=_metrics.ANNUALIZATION_EQUITY,
     )
 
-    # Debrief AI
-    debrief = await _generate_debrief(scenario, history, final_valuation,
-                                       benchmark_pnl_pct, reveal)
+    # Debrief AI (narrativa) + Lessons learned (insights azionabili).
+    # Eseguiti in parallelo per minimizzare la latenza del finalize_run:
+    # entrambi sono chiamate AI separate ma indipendenti.
+    debrief, lessons_learned = await asyncio.gather(
+        _generate_debrief(scenario, history, final_valuation,
+                          benchmark_pnl_pct, reveal),
+        _generate_lessons_learned(scenario, history, final_valuation,
+                                   benchmark_pnl_pct, reveal),
+        return_exceptions=False,
+    )
 
     result = {
         "scenario_id": scenario.get("id"),
@@ -1257,6 +1264,8 @@ async def finalize_run(
         "benchmark_value_series": benchmark_value_series,   # per chart vs benchmark
         "outcome": _classify_outcome(final_valuation, benchmark_pnl_pct),
         "debrief": debrief,
+        # Lista [{title, text, type}, ...] iniettata in _auto_save_thesis_advice
+        "lessons_learned": lessons_learned or [],
         "description_reveal": reveal,
         "num_steps": scenario.get("num_steps"),
         "portfolio_value_series": portfolio_value_series,   # per chart
@@ -1383,39 +1392,154 @@ def _classify_outcome(valuation: dict, benchmark_pct: Optional[float]) -> str:
     return "yellow"
 
 
+async def _generate_lessons_learned(
+    scenario: dict, history: list[dict], final_valuation: dict,
+    benchmark_pct: Optional[float], reveal: str
+) -> list[dict]:
+    """
+    Genera 2-4 LESSON LEARNED specifiche e azionabili dal run, via DeepSeek-R1.
+
+    Differenza con il debrief:
+      - Debrief: narrativa di 4-6 frasi che riassume "cosa è successo"
+      - Lessons: 2-4 insights ATTUABILI, ognuno trasferibile a scenari simili
+        futuri (es. "Quando il VIX supera 25 in conflitto militare, allocare
+        15-25% in Defense entro 1 settimana dall'evento")
+
+    Ogni lesson è un dict {title, text, type} dove:
+      - type: "rotazione" | "timing" | "size" | "stop_loss" | "diversificazione"
+              | "regime" | "altro"
+      - title: max 60 char (sintesi della lesson)
+      - text: max 250 char (azione specifica + condizione di applicabilità)
+
+    Best-effort: se la chiamata fallisce o il JSON è malformato, ritorna []
+    e l'auto-save proseguirà con il solo debrief.
+    """
+    if not history:
+        return []
+
+    lessons_prompt = """Sei un coach di trading post-mortem. L'utente ha completato
+una simulazione su uno scenario storico. Estrai 2-4 LESSON LEARNED specifiche e
+azionabili da applicare in scenari futuri simili.
+
+Ogni lesson DEVE essere:
+- SPECIFICA: riferita a una decisione/momento preciso del run, non generica
+- AZIONABILE: contiene una regola pratica (cosa fare quando si presenta X)
+- CATEGORIZZATA: un type tra: rotazione, timing, size, stop_loss, diversificazione, regime, altro
+- BREVE: title max 60 char, text max 250 char
+
+ESEMPI di lesson buone:
+  • "Rotazione defense in conflitto militare" / "Quando VIX > 25 e c'è
+    escalation geopolitica, allocare 15-25% in LMT/RTX entro 1 settimana"
+  • "Stop-loss su tech in rate shock" / "Se 10y yield sale > 50bp in 1 mese,
+    chiudere o ridurre del 50% le posizioni growth (NVDA, ARKK)"
+
+OUTPUT: SOLO JSON, nessun testo extra:
+{
+  "lessons": [
+    {"title": "...", "text": "...", "type": "rotazione|timing|size|stop_loss|diversificazione|regime|altro"}
+  ]
+}"""
+
+    # Costruzione contesto: storia decisioni + esito finale
+    decisions = []
+    for h in history:
+        trades = h.get("ai_trades") or []
+        if trades:
+            ts = "; ".join(
+                f"{t.get('action', '?')} {t.get('asset', '?')} {t.get('allocation_pct', 0):.0f}%"
+                for t in trades
+            )
+        else:
+            ts = "no action"
+        decisions.append(f"T{h.get('step_index', 0) + 1}: {ts}")
+
+    pnl_pct = final_valuation.get("total_pnl_pct", 0)
+    bench_str = f"{benchmark_pct:.2f}%" if benchmark_pct is not None else "n/d"
+    user_msg = (
+        f"Scenario: {scenario.get('title', '?')}\n"
+        f"Categoria: {scenario.get('category', '?')}\n"
+        f"Decisioni ({len(history)} turni): {' | '.join(decisions)}\n"
+        f"P&L finale portafoglio: {pnl_pct:+.2f}%\n"
+        f"Benchmark SPY: {bench_str}\n"
+        f"Cosa è successo davvero: {reveal[:600]}\n\n"
+        f"Genera 2-4 lessons in JSON come da schema."
+    )
+
+    try:
+        raw = await _call_r1(lessons_prompt, user_msg, max_retries=2)
+    except Exception as e:
+        logger.warning("[SIM-V2] _generate_lessons_learned: AI call fallita: %s", e)
+        return []
+
+    # Strip <think> e parse JSON (best-effort: cerca il primo blob {})
+    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+
+    payload = None
+    if "```" in text:
+        try:
+            chunk = text.split("```")[1].replace("json", "", 1).strip()
+            payload = json.loads(chunk)
+        except Exception:
+            pass
+    if payload is None:
+        m = re.search(r"\{[\s\S]*\}", text)
+        if m:
+            try:
+                payload = json.loads(m.group(0))
+            except Exception:
+                pass
+
+    if not isinstance(payload, dict):
+        logger.warning("[SIM-V2] _generate_lessons_learned: JSON non parsabile")
+        return []
+
+    raw_lessons = payload.get("lessons") or []
+    if not isinstance(raw_lessons, list):
+        return []
+
+    valid_types = {"rotazione", "timing", "size", "stop_loss",
+                   "diversificazione", "regime", "altro"}
+    out: list[dict] = []
+    for ls in raw_lessons[:4]:   # max 4
+        if not isinstance(ls, dict):
+            continue
+        title = str(ls.get("title") or "").strip()[:60]
+        body = str(ls.get("text") or "").strip()[:250]
+        if not title or not body:
+            continue
+        ltype = str(ls.get("type") or "altro").strip().lower()
+        if ltype not in valid_types:
+            ltype = "altro"
+        out.append({"title": title, "text": body, "type": ltype})
+    return out
+
+
 def _auto_save_thesis_advice(scenario: dict, final_result: dict,
                               run_mode: str = "manual") -> None:
     """
-    Salva automaticamente la Valutazione tesi (debrief) come advice nella
-    memoria categorizzata del Sim Advisor.
+    Salva automaticamente al termine del run:
+      1. Il DEBRIEF come 1 advice (narrativa di 4-6 frasi)
+      2. Le LESSONS LEARNED come 2-4 advice separati (insights azionabili)
 
-    Stesso pattern del save manuale via UI "Analizza & Migliora", ma:
-      - Eseguito automaticamente al finalize_run
-      - Tag "auto:true" nei tags per distinguerlo dagli advice manuali
-      - Title generato dal titolo scenario + outcome
-      - Text = debrief completo (la "Valutazione tesi" mostrata nella UI)
-      - Rationale = breve riassunto P&L + benchmark per contesto
+    Differenza vs versione precedente: anche se persist fallisce, si tenta
+    comunque il save (con UUID generato). Così la memoria si arricchisce
+    a OGNI run, indipendentemente dalla persistenza nel DB.
 
-    Skip silenzioso se:
-      - Debrief vuoto (advisor non disponibile o errore generation)
-      - sim_advisor non importabile
-      - run_mode == "auto" e debrief contiene solo placeholder default
-        (per evitare di affollare la memoria di micro-advice da run
-        automatici a basso valore)
+    Tag in scenario_tags:
+      - auto: True (per filtro Auto vs Manual nella UI)
+      - run_mode: "manual" | "auto" (per analytics)
+      - lesson_type: "rotazione|timing|size|..." (solo nelle lessons,
+                     non nel debrief)
+      - source: "debrief" | "lesson"
 
-    Idempotente: se lo stesso run viene finalizzato due volte (raro),
-    save_advice fa upsert per id (ma qui generiamo id deterministico
-    basato su persisted_run_id cosi' duplicati vengono mergiati).
+    Schedulato come sync wrapper attorno a chiamata async (lessons gen
+    è async). Se chiamato da contesto sync, le lessons vengono skippate
+    silenziosamente — il debrief comunque viene salvato.
     """
-    debrief = (final_result.get("debrief") or "").strip()
-    if not debrief or len(debrief) < 30:
-        logger.debug("[SIM-V2] auto-save advice skip: debrief vuoto/troppo corto")
-        return
+    import uuid as _uuid
 
-    persisted_run_id = final_result.get("persisted_run_id")
-    if not persisted_run_id:
-        logger.debug("[SIM-V2] auto-save advice skip: persist failed (no run_id)")
-        return
+    debrief = (final_result.get("debrief") or "").strip()
+    persisted_run_id = final_result.get("persisted_run_id") or f"unpersisted-{_uuid.uuid4()}"
 
     try:
         from agents import sim_advisor
@@ -1423,8 +1547,7 @@ def _auto_save_thesis_advice(scenario: dict, final_result: dict,
         logger.debug("[SIM-V2] sim_advisor import fallito: %s", e)
         return
 
-    # Costruisci un fake "run record" per detect_scenario_key (signature
-    # dell'API esistente — usata anche dal save manuale via UI).
+    # ── Detect scenario key + tags base ──────────────────────────────────
     fake_run = {
         "category": scenario.get("category", "unknown"),
         "scenario_id": scenario.get("id"),
@@ -1445,46 +1568,85 @@ def _auto_save_thesis_advice(scenario: dict, final_result: dict,
         },
     }
     try:
-        category_key, tags = sim_advisor.detect_scenario_key(fake_run)
+        category_key, base_tags = sim_advisor.detect_scenario_key(fake_run)
     except Exception as e:
         logger.debug("[SIM-V2] detect_scenario_key fallita: %s", e)
         category_key = scenario.get("category", "unknown")
-        tags = {"category": category_key}
+        base_tags = {"category": category_key}
 
-    # Tag "auto" per distinguere dagli advice manuali (utile per filtri UI)
-    tags = {**(tags or {}), "auto": True, "run_mode": run_mode}
+    base_tags = {**(base_tags or {}), "auto": True, "run_mode": run_mode}
 
     pnl_pct = (final_result.get("final_valuation") or {}).get("total_pnl_pct", 0)
     bench_pct = final_result.get("benchmark_spy_pnl_pct")
     bench_str = f"{bench_pct:+.2f}%" if isinstance(bench_pct, (int, float)) else "n/d"
-
-    title = (
-        f"[Auto] {scenario.get('title', 'Scenario')[:60]} → "
-        f"{final_result.get('outcome', 'yellow').upper()} "
-        f"(P&L {pnl_pct:+.1f}%)"
-    )[:200]
-
-    rationale = (
+    rationale_base = (
         f"P&L finale: {pnl_pct:+.2f}% · Benchmark: {bench_str} · "
         f"Outcome: {final_result.get('outcome', 'yellow')} · "
         f"Steps: {scenario.get('num_steps', '?')} · "
         f"Run mode: {run_mode}"
     )[:600]
 
-    advice = {
-        "run_id": persisted_run_id,
-        "scenario_category": category_key,
-        "scenario_tags": tags,
-        "title": title,
-        "text": debrief[:1000],
-        "rationale": rationale,
-    }
-    try:
-        aid = sim_advisor.save_advice(advice)
-        logger.info("[SIM-V2] auto-saved thesis advice: id=%s category=%s",
-                    aid, category_key)
-    except Exception as e:
-        logger.warning("[SIM-V2] save_advice fallito (non critico): %s", e)
+    saved_count = 0
+
+    # ── 1. SAVE DEBRIEF (se non vuoto) ──────────────────────────────────
+    if debrief and len(debrief) >= 30:
+        debrief_title = (
+            f"[Auto] {scenario.get('title', 'Scenario')[:60]} → "
+            f"{final_result.get('outcome', 'yellow').upper()} "
+            f"(P&L {pnl_pct:+.1f}%)"
+        )[:200]
+        debrief_advice = {
+            "run_id": persisted_run_id,
+            "scenario_category": category_key,
+            "scenario_tags": {**base_tags, "source": "debrief"},
+            "title": debrief_title,
+            "text": debrief[:1000],
+            "rationale": rationale_base,
+        }
+        try:
+            aid = sim_advisor.save_advice(debrief_advice)
+            logger.info("[SIM-V2] auto-saved DEBRIEF advice: id=%s category=%s",
+                        aid, category_key)
+            saved_count += 1
+        except Exception as e:
+            logger.warning("[SIM-V2] save_advice debrief fallito: %s", e)
+
+    # ── 2. SAVE LESSONS (lista pre-generata in final_result.lessons) ────
+    # Le lessons sono generate in finalize_run via _generate_lessons_learned
+    # e iniettate qui in final_result["lessons_learned"]. Se assenti, skip.
+    lessons = final_result.get("lessons_learned") or []
+    for idx, lesson in enumerate(lessons[:4], start=1):
+        if not isinstance(lesson, dict):
+            continue
+        l_title = str(lesson.get("title") or "").strip()[:200]
+        l_text = str(lesson.get("text") or "").strip()[:1000]
+        l_type = str(lesson.get("type") or "altro").strip().lower()
+        if not l_title or not l_text:
+            continue
+        lesson_advice = {
+            "run_id": f"{persisted_run_id}-lesson-{idx}",
+            "scenario_category": category_key,
+            "scenario_tags": {**base_tags, "source": "lesson", "lesson_type": l_type},
+            "title": f"[{l_type.upper()}] {l_title}"[:200],
+            "text": l_text,
+            "rationale": rationale_base,
+        }
+        try:
+            aid = sim_advisor.save_advice(lesson_advice)
+            logger.info("[SIM-V2] auto-saved LESSON advice [%s]: id=%s title='%s'",
+                        l_type, aid, l_title[:50])
+            saved_count += 1
+        except Exception as e:
+            logger.warning("[SIM-V2] save_advice lesson #%d fallito: %s", idx, e)
+
+    if saved_count == 0:
+        logger.warning("[SIM-V2] auto-save: NESSUN advice salvato per run %s "
+                       "(debrief='%s', lessons=%d)",
+                       persisted_run_id, debrief[:40] if debrief else "(empty)",
+                       len(lessons))
+    else:
+        logger.info("[SIM-V2] auto-save COMPLETATO: %d advice salvati per run %s "
+                    "(category %s)", saved_count, persisted_run_id, category_key)
 
 
 async def _generate_debrief(

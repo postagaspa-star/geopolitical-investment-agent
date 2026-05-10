@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { BookOpen, Trash2, Sparkles, Loader2, RefreshCw, AlertCircle,
-         Search, X, Bot, User, ArrowUpDown } from "lucide-react";
+         Search, X, Bot, User } from "lucide-react";
 
 const API = window.location.origin;
 
@@ -96,6 +96,55 @@ export default function SimMemory() {
     setExpandedKeys(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
+  // ⚠️ Filtraggio + ordinamento DEVE essere chiamato PRIMA degli early return
+  // (loading/error) per rispettare le Rules of Hooks. Bug precedente: useMemo
+  // dopo gli early return causava "Rendered more hooks than during the
+  // previous render" quando loading passava da true a false → React
+  // unmontava l'intera page → "schermo bianco con solo lo sfondo".
+  //
+  // Difensivo anche su input non-object: se groups arriva come null/array
+  // per qualche motivo, Object.entries({}) torna [] senza crash.
+  const filteredGroups = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filterAdvice = (a) => {
+      if (!a || typeof a !== "object") return false;
+      // Source filter (auto vs manual)
+      if (sourceFilter !== "all") {
+        const tags = a.scenario_tags;
+        const isAuto = !!(tags && typeof tags === "object" && tags.auto);
+        if (sourceFilter === "auto" && !isAuto) return false;
+        if (sourceFilter === "manual" && isAuto) return false;
+      }
+      // Search testo
+      if (q) {
+        const blob = `${a.title || ""}\n${a.text || ""}\n${a.rationale || ""}`.toLowerCase();
+        if (!blob.includes(q)) return false;
+      }
+      return true;
+    };
+    const sortAdvice = (a, b) => {
+      if (sortBy === "applied_count_desc") {
+        return (Number(b.apply_count) || 0) - (Number(a.apply_count) || 0);
+      }
+      if (sortBy === "title") {
+        return String(a.title || "").localeCompare(String(b.title || ""));
+      }
+      // default: recent
+      return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+    };
+
+    const out = {};
+    const safeGroups = (groups && typeof groups === "object" && !Array.isArray(groups))
+      ? groups : {};
+    for (const [key, items] of Object.entries(safeGroups)) {
+      if (categoryFilter !== "all" && key !== categoryFilter) continue;
+      const itemsArr = Array.isArray(items) ? items : [];
+      const filtered = itemsArr.filter(filterAdvice).sort(sortAdvice);
+      if (filtered.length > 0) out[key] = filtered;
+    }
+    return out;
+  }, [groups, search, categoryFilter, sourceFilter, sortBy]);
+
   if (loading) {
     return (
       <div style={S.loading}>
@@ -116,49 +165,6 @@ export default function SimMemory() {
       </div>
     );
   }
-
-  // Filtraggio + ordinamento applicati ai gruppi.
-  // Applico:
-  //  - search: case-insensitive su title/text/rationale
-  //  - categoryFilter: tiene solo il gruppo selezionato
-  //  - sourceFilter: tiene solo advice con scenario_tags.auto == true (Auto)
-  //                  o == false (Manual)
-  //  - sortBy: ordina i singoli items dentro ogni gruppo
-  const filteredGroups = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const filterAdvice = (a) => {
-      // Source filter (auto vs manual)
-      if (sourceFilter !== "all") {
-        const isAuto = !!(a.scenario_tags && a.scenario_tags.auto);
-        if (sourceFilter === "auto" && !isAuto) return false;
-        if (sourceFilter === "manual" && isAuto) return false;
-      }
-      // Search testo
-      if (q) {
-        const blob = `${a.title || ""}\n${a.text || ""}\n${a.rationale || ""}`.toLowerCase();
-        if (!blob.includes(q)) return false;
-      }
-      return true;
-    };
-    const sortAdvice = (a, b) => {
-      if (sortBy === "applied_count_desc") {
-        return (b.apply_count || 0) - (a.apply_count || 0);
-      }
-      if (sortBy === "title") {
-        return (a.title || "").localeCompare(b.title || "");
-      }
-      // default: recent
-      return (b.created_at || "").localeCompare(a.created_at || "");
-    };
-
-    const out = {};
-    for (const [key, items] of Object.entries(groups)) {
-      if (categoryFilter !== "all" && key !== categoryFilter) continue;
-      const filtered = (items || []).filter(filterAdvice).sort(sortAdvice);
-      if (filtered.length > 0) out[key] = filtered;
-    }
-    return out;
-  }, [groups, search, categoryFilter, sourceFilter, sortBy]);
 
   const categoryKeys = Object.keys(filteredGroups).sort();
   const allCategoryKeys = Object.keys(groups).sort();
@@ -341,15 +347,38 @@ export default function SimMemory() {
 }
 
 function AdviceCard({ advice, onDelete }) {
-  const isAuto = !!(advice.scenario_tags && advice.scenario_tags.auto);
+  const safeAdvice = advice || {};
+  const tags = safeAdvice.scenario_tags;
+  const isAuto = !!(tags && typeof tags === "object" && tags.auto);
+  const lessonType = tags && typeof tags === "object" ? tags.lesson_type : null;
+
+  // Date parsing difensivo: se created_at e' invalido, mostra "—"
+  let createdLabel = "—";
+  try {
+    if (safeAdvice.created_at) {
+      const d = new Date(safeAdvice.created_at);
+      if (!isNaN(d.getTime())) {
+        createdLabel = d.toLocaleString("it-IT", {
+          day: "2-digit", month: "2-digit", year: "numeric",
+          hour: "2-digit", minute: "2-digit",
+        });
+      }
+    }
+  } catch { /* fallback "—" */ }
+
   return (
     <div style={S.advice}>
       <div style={S.adviceHeader}>
         <div style={S.adviceTitle}>
           <Sparkles size={13} style={{ color: "#fbbf24", marginRight: 6 }} />
-          {advice.title || "(senza titolo)"}
+          {safeAdvice.title || "(senza titolo)"}
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {lessonType && (
+            <span style={S.lessonTypeBadge} title={`Tipo lesson: ${lessonType}`}>
+              {String(lessonType).toUpperCase()}
+            </span>
+          )}
           {isAuto ? (
             <span style={S.autoBadge} title="Salvato automaticamente al termine del run">
               <Bot size={10} style={{ marginRight: 3, verticalAlign: "middle" }} />
@@ -361,23 +390,20 @@ function AdviceCard({ advice, onDelete }) {
               MANUAL
             </span>
           )}
-          <span style={S.applyBadge}>iniettato {advice.apply_count || 0}×</span>
+          <span style={S.applyBadge}>iniettato {Number(safeAdvice.apply_count) || 0}×</span>
           <button style={S.deleteBtn} onClick={onDelete} title="Elimina">
             <Trash2 size={12} />
           </button>
         </div>
       </div>
-      <div style={S.adviceText}>{advice.text}</div>
-      {advice.rationale && (
+      <div style={S.adviceText}>{safeAdvice.text || ""}</div>
+      {safeAdvice.rationale && (
         <div style={S.adviceRationale}>
-          <em>Razionale:</em> {advice.rationale}
+          <em>Razionale:</em> {safeAdvice.rationale}
         </div>
       )}
       <div style={S.adviceMeta}>
-        Creato: {new Date(advice.created_at).toLocaleString("it-IT", {
-          day: "2-digit", month: "2-digit", year: "numeric",
-          hour: "2-digit", minute: "2-digit",
-        })}
+        Creato: {createdLabel}
       </div>
     </div>
   );
@@ -459,6 +485,12 @@ const S = {
     border: "1px solid rgba(6,182,212,0.30)",
     padding: "3px 8px", borderRadius: 999, whiteSpace: "nowrap",
     fontWeight: 600, letterSpacing: "0.04em",
+  },
+  lessonTypeBadge: {
+    fontSize: 10, color: "#fbbf24", background: "rgba(251,191,36,0.08)",
+    border: "1px solid rgba(251,191,36,0.25)",
+    padding: "3px 8px", borderRadius: 999, whiteSpace: "nowrap",
+    fontWeight: 700, letterSpacing: "0.06em", fontFamily: "monospace",
   },
 
   // Barra filtri
