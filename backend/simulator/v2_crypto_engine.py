@@ -673,6 +673,14 @@ async def finalize_crypto_run(
         except Exception as e:
             logger.error("[SIM-CRYPTO] persist failed: %s", e, exc_info=True)
             result["persist_error"] = str(e)[:200]
+        # Auto-save Valutazione tesi crypto come advice (riusa l'helper di
+        # v2_engine: la logica e' identica, distingue il flag is_crypto via
+        # detect_scenario_key e tag).
+        try:
+            from simulator.v2_engine import _auto_save_thesis_advice
+            _auto_save_thesis_advice(scenario, result, run_mode=run_mode)
+        except Exception as _e:
+            logger.warning("[SIM-CRYPTO] auto-save advice fallito (non critico): %s", _e)
         # Tracking: mark completed (anche se persist fail)
         if tracking_id:
             try:

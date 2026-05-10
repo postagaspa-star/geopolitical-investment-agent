@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Eye, Brain, Target, AlertCircle, TrendingUp, TrendingDown, Sparkles, BarChart3 } from "lucide-react";
 import SimAdvisorChat from "../../components/SimAdvisorChat";
 import SimMetricsPanel from "../../components/SimMetricsPanel";
+import ChartHelpButton from "../../components/ChartHelpButton";
 
 const API = window.location.origin;
 
@@ -242,7 +243,34 @@ function ResultView({ run, runId, nav }) {
       {/* STATISTICHE PERIODO */}
       {Object.keys(stats).length > 0 && (
         <div style={S.card}>
-          <div style={S.cardTitle}>Statistiche del periodo</div>
+          <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+            <span>Statistiche del periodo</span>
+            <ChartHelpButton
+              title="Statistiche del periodo"
+              general={
+                <>
+                  Riassume il movimento del prezzo dell'asset nei 90 giorni
+                  della simulazione: <b>massimo</b> e <b>minimo</b> raggiunti,
+                  <b> max run-up</b> (massimo guadagno teorico se avessi venduto al
+                  picco), <b>max drawdown</b> (massima perdita teorica dal picco)
+                  e <b>volatilità annualizzata</b>. Servono per capire se il
+                  range di oscillazione era compatibile con SL/TP scelti.
+                </>
+              }
+              specific={
+                <>
+                  Range prezzo: da <b>${(stats.min_price_period || 0).toFixed(2)}</b>
+                  {" "}a <b>${(stats.max_price_period || 0).toFixed(2)}</b>.
+                  {" "}Max run-up: <b>{(stats.max_runup_pct || 0).toFixed(2)}%</b>.
+                  {" "}Max drawdown: <b>{(stats.max_drawdown_pct || 0).toFixed(2)}%</b>.
+                  {" "}Volatilità annualizzata: <b>{(stats.annualized_volatility_pct || 0).toFixed(1)}%</b>
+                  {" — "}{(stats.annualized_volatility_pct || 0) > 50 ? "asset molto volatile, SL stretti rischiosi"
+                    : (stats.annualized_volatility_pct || 0) > 25 ? "volatilità moderata"
+                    : "asset stabile"}.
+                </>
+              }
+            />
+          </div>
           <div style={S.statsGrid}>
             <StatBox label="Max prezzo" value={fmtUsd(stats.max_price_period)} />
             <StatBox label="Min prezzo" value={fmtUsd(stats.min_price_period)} />
@@ -300,7 +328,38 @@ function ResultView({ run, runId, nav }) {
 
       {/* GRAFICO con SL/TP overlay */}
       <div style={S.card}>
-        <div style={S.cardTitle}>Evoluzione prezzo asset (3 mesi)</div>
+        <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+          <span>Evoluzione prezzo asset (3 mesi)</span>
+          <ChartHelpButton
+            title="Evoluzione prezzo asset"
+            general={
+              <>
+                Mostra il prezzo storico dell'asset scelto dall'AI (linea viola)
+                nei 90 giorni successivi a T0. Le linee tratteggiate orizzontali
+                sono lo <b>Stop-Loss</b> (rosso) e <b>Take-Profit</b> (verde) che
+                l'AI aveva impostato all'apertura. I pallini gialli T0/T1/T2/...
+                sono i punti di decisione (multi-step). Se il prezzo tocca SL/TP
+                la posizione si chiuderebbe automaticamente.
+              </>
+            }
+            specific={
+              <>
+                Asset: <b>{run.asset_chosen || "—"}</b>.
+                {slTp.stop_loss_target && (
+                  <> SL a <b>${slTp.stop_loss_target}</b>
+                  {slTp.stop_loss_would_hit ? " — TOCCATO" : " — mai toccato"}.</>
+                )}
+                {slTp.take_profit_target && (
+                  <> TP a <b>${slTp.take_profit_target}</b>
+                  {slTp.take_profit_would_hit ? " — TOCCATO" : " — mai toccato"}.</>
+                )}
+                {(full.price_chart || []).length > 0 && (
+                  <> Min/Max nel periodo: vedi card "Statistiche".</>
+                )}
+              </>
+            }
+          />
+        </div>
         <PriceChart data={full.price_chart || []} stepsData={stepsData}
                     slTarget={slTp.stop_loss_target} tpTarget={slTp.take_profit_target} />
       </div>

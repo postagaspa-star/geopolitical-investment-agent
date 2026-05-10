@@ -1241,6 +1241,14 @@ async def finalize_run(
         except Exception as e:
             logger.error("[SIM-V2] persist failed: %s", e, exc_info=True)
             result["persist_error"] = str(e)[:200]
+        # Auto-save Valutazione tesi (debrief) come advice nella memoria
+        # categorizzata. Cosi' ogni run completato contribuisce automatica-
+        # mente alla "memoria operativa" del Simulator senza richiedere
+        # all'utente di cliccare "Salva consiglio" nella UI Analizza & Migliora.
+        try:
+            _auto_save_thesis_advice(scenario, result, run_mode=run_mode)
+        except Exception as _e:
+            logger.warning("[SIM-V2] auto-save advice fallito (non critico): %s", _e)
         # Tracking: marca completed (anche su persist fail, il run e' fatto)
         if tracking_id:
             try:
@@ -1327,6 +1335,110 @@ def _classify_outcome(valuation: dict, benchmark_pct: Optional[float]) -> str:
     if pnl < -3:
         return "red"
     return "yellow"
+
+
+def _auto_save_thesis_advice(scenario: dict, final_result: dict,
+                              run_mode: str = "manual") -> None:
+    """
+    Salva automaticamente la Valutazione tesi (debrief) come advice nella
+    memoria categorizzata del Sim Advisor.
+
+    Stesso pattern del save manuale via UI "Analizza & Migliora", ma:
+      - Eseguito automaticamente al finalize_run
+      - Tag "auto:true" nei tags per distinguerlo dagli advice manuali
+      - Title generato dal titolo scenario + outcome
+      - Text = debrief completo (la "Valutazione tesi" mostrata nella UI)
+      - Rationale = breve riassunto P&L + benchmark per contesto
+
+    Skip silenzioso se:
+      - Debrief vuoto (advisor non disponibile o errore generation)
+      - sim_advisor non importabile
+      - run_mode == "auto" e debrief contiene solo placeholder default
+        (per evitare di affollare la memoria di micro-advice da run
+        automatici a basso valore)
+
+    Idempotente: se lo stesso run viene finalizzato due volte (raro),
+    save_advice fa upsert per id (ma qui generiamo id deterministico
+    basato su persisted_run_id cosi' duplicati vengono mergiati).
+    """
+    debrief = (final_result.get("debrief") or "").strip()
+    if not debrief or len(debrief) < 30:
+        logger.debug("[SIM-V2] auto-save advice skip: debrief vuoto/troppo corto")
+        return
+
+    persisted_run_id = final_result.get("persisted_run_id")
+    if not persisted_run_id:
+        logger.debug("[SIM-V2] auto-save advice skip: persist failed (no run_id)")
+        return
+
+    try:
+        from agents import sim_advisor
+    except Exception as e:
+        logger.debug("[SIM-V2] sim_advisor import fallito: %s", e)
+        return
+
+    # Costruisci un fake "run record" per detect_scenario_key (signature
+    # dell'API esistente — usata anche dal save manuale via UI).
+    fake_run = {
+        "category": scenario.get("category", "unknown"),
+        "scenario_id": scenario.get("id"),
+        "outcome": final_result.get("outcome", "yellow"),
+        "perf_1m": (final_result.get("final_valuation") or {}).get("total_pnl_pct", 0) / 100.0,
+        "asset_chosen": None,
+        "full_data": {
+            "scenario": {
+                "asset_universe": scenario.get("asset_universe"),
+                "market_data": scenario.get("market_data"),
+            },
+            "steps": [{
+                "context": {
+                    "market_data": scenario.get("market_data") or [],
+                    "asset_universe": scenario.get("asset_universe") or [],
+                },
+            }],
+        },
+    }
+    try:
+        category_key, tags = sim_advisor.detect_scenario_key(fake_run)
+    except Exception as e:
+        logger.debug("[SIM-V2] detect_scenario_key fallita: %s", e)
+        category_key = scenario.get("category", "unknown")
+        tags = {"category": category_key}
+
+    # Tag "auto" per distinguere dagli advice manuali (utile per filtri UI)
+    tags = {**(tags or {}), "auto": True, "run_mode": run_mode}
+
+    pnl_pct = (final_result.get("final_valuation") or {}).get("total_pnl_pct", 0)
+    bench_pct = final_result.get("benchmark_spy_pnl_pct")
+    bench_str = f"{bench_pct:+.2f}%" if isinstance(bench_pct, (int, float)) else "n/d"
+
+    title = (
+        f"[Auto] {scenario.get('title', 'Scenario')[:60]} → "
+        f"{final_result.get('outcome', 'yellow').upper()} "
+        f"(P&L {pnl_pct:+.1f}%)"
+    )[:200]
+
+    rationale = (
+        f"P&L finale: {pnl_pct:+.2f}% · Benchmark: {bench_str} · "
+        f"Outcome: {final_result.get('outcome', 'yellow')} · "
+        f"Steps: {scenario.get('num_steps', '?')} · "
+        f"Run mode: {run_mode}"
+    )[:600]
+
+    advice = {
+        "run_id": persisted_run_id,
+        "scenario_category": category_key,
+        "scenario_tags": tags,
+        "title": title,
+        "text": debrief[:1000],
+        "rationale": rationale,
+    }
+    try:
+        aid = sim_advisor.save_advice(advice)
+        logger.info("[SIM-V2] auto-saved thesis advice: id=%s category=%s",
+                    aid, category_key)
+    except Exception as e:
+        logger.warning("[SIM-V2] save_advice fallito (non critico): %s", e)
 
 
 async def _generate_debrief(

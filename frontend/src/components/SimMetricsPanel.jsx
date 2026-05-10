@@ -3,6 +3,10 @@ import {
   Activity, TrendingDown, BarChart3, Target,
   Zap, Clock, DollarSign, Sigma,
 } from "lucide-react";
+import ChartHelpButton, {
+  explainKPIBlock, explainEquityVsBenchmark, explainUnderwater,
+  explainReturnsHistogram, explainConfidenceScatter, explainSlippageSensitivity,
+} from "./ChartHelpButton";
 
 const API = window.location.origin;
 
@@ -99,11 +103,16 @@ function KPIBlock({ quantMetrics, commissionBps, totalCommissions }) {
     : pf >= 1 ? "#84cc16"
     : "#ef4444";
 
+  const help = explainKPIBlock(quantMetrics, commissionBps, totalCommissions);
   return (
     <div style={S.card}>
-      <div style={S.cardTitle}>
-        <Sigma size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
-        Metriche di Performance Quantitative
+      <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <Sigma size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
+          Metriche di Performance Quantitative
+        </span>
+        <ChartHelpButton title="Metriche Quantitative"
+                          general={help.general} specific={help.specific} />
       </div>
       <div style={S.subtitle}>
         Calcoli numerici sulla qualità della strategia, non solo sul P&L finale.
@@ -216,11 +225,16 @@ function EquityVsBenchmarkChart({ portfolio, benchmark, benchmarkTicker }) {
     ? (finalBench - benchmark[0].value) / benchmark[0].value * 100 : null;
   const alpha = portReturn != null && benchReturn != null ? portReturn - benchReturn : null;
 
+  const help = explainEquityVsBenchmark(portfolio, benchmark, benchmarkTicker);
   return (
     <div style={S.card}>
-      <div style={S.cardTitle}>
-        <BarChart3 size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
-        Equity Curve vs {benchmarkTicker || "Benchmark"}
+      <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <BarChart3 size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
+          Equity Curve vs {benchmarkTicker || "Benchmark"}
+        </span>
+        <ChartHelpButton title={`Equity Curve vs ${benchmarkTicker || "Benchmark"}`}
+                          general={help.general} specific={help.specific} />
       </div>
       <div style={S.subtitle}>
         La tua linea sovrapposta al benchmark buy-and-hold. Se la tua sale meno
@@ -312,11 +326,16 @@ function UnderwaterChart({ data, maxDD }) {
   const points = data.map((d, i) => `${xToPx(i)},${yToPx(d.drawdown_pct)}`).join(" ");
   const areaPoints = `${padL},${padT} ${points} ${xToPx(n - 1)},${padT}`;
 
+  const help = explainUnderwater(data, maxDD);
   return (
     <div style={S.card}>
-      <div style={S.cardTitle}>
-        <TrendingDown size={14} style={{ display: "inline", marginRight: 6, color: "#ef4444" }} />
-        Underwater Drawdown
+      <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <TrendingDown size={14} style={{ display: "inline", marginRight: 6, color: "#ef4444" }} />
+          Underwater Drawdown
+        </span>
+        <ChartHelpButton title="Underwater Drawdown"
+                          general={help.general} specific={help.specific} />
       </div>
       <div style={S.subtitle}>
         Quanto tempo il portafoglio passa sotto zero rispetto al picco più alto.
@@ -371,11 +390,16 @@ function ReturnsHistogram({ data }) {
   const maxCount = Math.max(...bins.map(b => b.count), 1);
   const binW = innerW / bins.length;
 
+  const help = explainReturnsHistogram(data);
   return (
     <div style={S.card}>
-      <div style={S.cardTitle}>
-        <BarChart3 size={14} style={{ display: "inline", marginRight: 6, color: "#fbbf24" }} />
-        Distribuzione dei Ritorni per Step
+      <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <BarChart3 size={14} style={{ display: "inline", marginRight: 6, color: "#fbbf24" }} />
+          Distribuzione dei Ritorni per Step
+        </span>
+        <ChartHelpButton title="Distribuzione Ritorni"
+                          general={help.general} specific={help.specific} />
       </div>
       <div style={S.subtitle}>
         Frequenza dei ritorni tra step. Una distribuzione "a campana" suggerisce
@@ -475,11 +499,16 @@ function ConfidenceOutcomeScatter({ data }) {
   const highConvWinRate = highConv.length ? highConvWinners / highConv.length : null;
   const overconfident = highConvWinRate != null && highConvWinRate < 0.5 && highConv.length >= 3;
 
+  const help = explainConfidenceScatter(data);
   return (
     <div style={S.card}>
-      <div style={S.cardTitle}>
-        <Target size={14} style={{ display: "inline", marginRight: 6, color: "#06b6d4" }} />
-        Confidenza vs Esito (overconfidence detector)
+      <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <Target size={14} style={{ display: "inline", marginRight: 6, color: "#06b6d4" }} />
+          Confidenza vs Esito (overconfidence detector)
+        </span>
+        <ChartHelpButton title="Confidenza vs Esito"
+                          general={help.general} specific={help.specific} />
       </div>
       <div style={S.subtitle}>
         Ogni punto è un trade. Asse X: conviction dichiarata dall'AI. Asse Y: P&L
@@ -587,11 +616,16 @@ function SlippageSensitivity({ runId, commissionBps }) {
     }
   };
 
+  const help = explainSlippageSensitivity(commissionBps);
   return (
     <div style={S.card}>
-      <div style={S.cardTitle}>
-        <Zap size={14} style={{ display: "inline", marginRight: 6, color: "#fbbf24" }} />
-        Slippage Sensitivity Test
+      <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
+        <span style={{ display: "inline-flex", alignItems: "center" }}>
+          <Zap size={14} style={{ display: "inline", marginRight: 6, color: "#fbbf24" }} />
+          Slippage Sensitivity Test
+        </span>
+        <ChartHelpButton title="Slippage Sensitivity"
+                          general={help.general} specific={help.specific} />
       </div>
       <div style={S.subtitle}>
         Replay del run con diverse rate di commissione (0% / 0.1% / 0.25% / 0.5% / 1%).
