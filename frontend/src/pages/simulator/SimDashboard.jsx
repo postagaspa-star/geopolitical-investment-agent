@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Play, Zap, RefreshCw, Activity, BookOpen, Cpu, Bot,
-         Bitcoin, TrendingUp, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+         Bitcoin, TrendingUp, AlertCircle, CheckCircle2, Loader2,
+         Download } from "lucide-react";
 
 const API = window.location.origin;
 
@@ -18,6 +19,82 @@ export default function SimDashboard() {
   const [drift, setDrift] = useState(null);
   const [activeRuns, setActiveRuns] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // ── PDF export ─────────────────────────────────────────────────
+  const [pdfBusy, setPdfBusy] = useState(false);
+  // pdfAllRuns viene popolato solo durante la generazione PDF e contiene
+  // TUTTI i run (non solo gli ultimi 10) per la tabella riassuntiva
+  // off-screen che entra nel report.
+  const [pdfAllRuns, setPdfAllRuns] = useState(null);
+
+  const handleDownloadGlobalPDF = async () => {
+    if (pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      // Fetch TUTTI i dati aggregati + l'elenco completo dei run
+      const [kFresh, allRuns, wFresh, dFresh] = await Promise.all([
+        fetch(`${API}/api/simulator/kpi`).then(r => r.ok ? r.json() : null),
+        fetch(`${API}/api/simulator/runs?limit=500`).then(r => r.ok ? r.json() : []),
+        fetch(`${API}/api/simulator/win-by-scenario`).then(r => r.ok ? r.json() : null),
+        fetch(`${API}/api/simulator/sentiment-drift`).then(r => r.ok ? r.json() : null),
+      ]);
+
+      // Aggiorna anche le card visibili con i dati appena fetchati
+      // (l'utente vede la dashboard "fresca" dopo la generazione)
+      if (kFresh) setKpi(kFresh);
+      if (wFresh) setWinByScenario(wFresh);
+      if (dFresh) setDrift(dFresh);
+
+      // Renderizza la tabella full-runs off-screen
+      const runs = Array.isArray(allRuns) ? allRuns : [];
+      setPdfAllRuns(runs);
+
+      // Aspetta 2 frame perché React renderizzi la tabella off-screen
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await new Promise(r => setTimeout(r, 60));
+
+      const { generatePDFFromSections } = await import("../../utils/pdfExport");
+      const dates = runs
+        .map(r => r.completed_at)
+        .filter(Boolean)
+        .sort();
+      const periodStr = dates.length >= 2
+        ? `${new Date(dates[0]).toLocaleDateString("it-IT")} → ${new Date(dates[dates.length - 1]).toLocaleDateString("it-IT")}`
+        : dates.length === 1
+          ? new Date(dates[0]).toLocaleDateString("it-IT")
+          : "—";
+
+      const meta = {
+        title: "Simulator — Report Globale",
+        subtitle: `Riepilogo aggregato di tutte le ${runs.length} simulazioni completate`,
+        runId: "global-summary",
+        category: "Tutte le categorie",
+        scenarioType: `${kFresh?.single_step ?? 0} single-step · ${kFresh?.multi_step ?? 0} multi-step`,
+        action: kFresh
+          ? `Win rate ${(kFresh.win_rate * 100).toFixed(0)}% · Score ${(kFresh.score ?? 0).toFixed(1)}`
+          : "—",
+        asset: "—",
+        outcome: kFresh?.score_label ?? "—",
+        period: periodStr,
+        generatedAt: new Date().toLocaleString("it-IT", {
+          dateStyle: "medium", timeStyle: "short",
+        }),
+      };
+      const filename = `simulator-global-report-${new Date().toISOString().slice(0, 10)}.pdf`;
+
+      await generatePDFFromSections({
+        rootId: "sim-dashboard-pdf",
+        filename,
+        meta,
+      });
+    } catch (e) {
+      console.error("[PDF] global report failed:", e);
+      alert("Errore generazione PDF: " + (e.message || e));
+    } finally {
+      setPdfAllRuns(null);
+      setPdfBusy(false);
+    }
+  };
 
   const reload = async () => {
     setLoading(true);
@@ -129,20 +206,52 @@ export default function SimDashboard() {
       `}</style>
       <div style={S.header}>
         <h1 style={S.h1}>GeoInvest AI Simulator</h1>
-        <button style={S.refreshBtn} onClick={reload} disabled={loading}>
-          <RefreshCw size={14} style={loading ? { animation: "spin 1s linear infinite" } : {}} />
-          {loading ? "..." : "Aggiorna"}
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            style={{
+              ...S.refreshBtn,
+              opacity: (pdfBusy || !kpi || (kpi.total ?? 0) === 0) ? 0.5 : 1,
+              cursor: (pdfBusy || !kpi || (kpi.total ?? 0) === 0) ? "not-allowed" : "pointer",
+            }}
+            onClick={handleDownloadGlobalPDF}
+            disabled={pdfBusy || !kpi || (kpi.total ?? 0) === 0}
+            title={
+              !kpi || (kpi.total ?? 0) === 0
+                ? "Avvia almeno un run prima di scaricare il report"
+                : "Scarica un PDF con il riepilogo globale di tutte le simulazioni"
+            }
+          >
+            {pdfBusy ? (
+              <>
+                <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
+                Generazione…
+              </>
+            ) : (
+              <>
+                <Download size={14} /> Scarica PDF
+              </>
+            )}
+          </button>
+          <button style={S.refreshBtn} onClick={reload} disabled={loading}>
+            <RefreshCw size={14} style={loading ? { animation: "spin 1s linear infinite" } : {}} />
+            {loading ? "..." : "Aggiorna"}
+          </button>
+        </div>
       </div>
       <p style={S.sub}>
         Stato complessivo sui run completati. Clicca su uno scenario per vedere il dettaglio.
       </p>
 
       {/* RUN IN CORSO — sezione live (polling 4s quando attivi, 15s idle) */}
+      {/* NON dentro il container PDF: e' UI operativa, non riepilogo. */}
       <ActiveRunsSection runs={activeRuns} nav={nav} />
 
+      {/* Container PDF: tutte le sezioni con data-pdf-section qui dentro
+          finiranno nel report globale. */}
+      <div id="sim-dashboard-pdf">
+
       {/* KPI ROW */}
-      <div style={S.kpiRow}>
+      <div style={S.kpiRow} data-pdf-section="true">
         <KPI label="Score composito" value={kpi?.score?.toFixed(1) ?? "—"}
              sub={kpi?.score_label ?? "Nessun dato"} tone="#a78bfa" />
         <KPI label="Win rate globale" value={kpi ? `${(kpi.win_rate * 100).toFixed(0)}%` : "—"}
@@ -154,13 +263,13 @@ export default function SimDashboard() {
       </div>
 
       {/* Win rate per categoria */}
-      <div style={S.card}>
+      <div style={S.card} data-pdf-section="true">
         <div style={S.cardTitle}>Win rate per categoria</div>
         <CategoryBars data={kpi?.win_by_category} />
       </div>
 
       {/* Win rate per Scenario specifico (NON solo categoria) */}
-      <div style={S.card}>
+      <div style={S.card} data-pdf-section="true">
         <div style={S.cardTitle}>
           <Activity size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
           Win Rate per Scenario
@@ -179,7 +288,7 @@ export default function SimDashboard() {
       </div>
 
       {/* Sentiment Drift: Top advice + Sharpe rolling */}
-      <div style={S.card}>
+      <div style={S.card} data-pdf-section="true">
         <div style={S.cardTitle}>
           <BookOpen size={14} style={{ display: "inline", marginRight: 6, color: "#06b6d4" }} />
           Sentiment Drift (evoluzione strategia)
@@ -248,6 +357,138 @@ export default function SimDashboard() {
           </table>
         )}
       </div>
+
+      {/* OFF-SCREEN: tabella completa di tutti i run, renderizzata SOLO
+          durante la generazione PDF. Non visibile all'utente, ma html2canvas
+          la cattura perche' ha dimensioni reali (position:fixed con offset
+          fuori viewport invece di display:none). */}
+      {pdfAllRuns && pdfAllRuns.length > 0 && (
+        <div data-pdf-section="true"
+             style={{
+               position: "fixed", left: -10000, top: 0,
+               width: 1100, background: "#0a0e1a",
+               padding: 20, borderRadius: 8,
+               border: "1px solid #1f2937",
+               fontFamily: "inherit",
+             }}>
+          <FullRunsTable runs={pdfAllRuns} kpi={kpi} />
+        </div>
+      )}
+
+      </div>{/* /sim-dashboard-pdf */}
+    </div>
+  );
+}
+
+// ─── Tabella completa di tutti i run (per il PDF globale) ─────────────────
+function FullRunsTable({ runs, kpi }) {
+  if (!runs || runs.length === 0) return null;
+
+  // Conta esiti per riepilogo
+  const greenN = runs.filter(r => r.outcome === "green").length;
+  const yellowN = runs.filter(r => r.outcome === "yellow").length;
+  const redN = runs.filter(r => r.outcome === "red").length;
+
+  return (
+    <div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: "#e2e8f0",
+                     marginBottom: 4 }}>
+        Tutte le simulazioni ({runs.length})
+      </div>
+      <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 14,
+                     lineHeight: 1.5 }}>
+        Storico completo dei run completati, ordinato dal più recente.
+        {" "}Esiti: <span style={{ color: "#10b981" }}>{greenN} verdi</span>
+        {" · "}<span style={{ color: "#fbbf24" }}>{yellowN} gialli</span>
+        {" · "}<span style={{ color: "#ef4444" }}>{redN} rossi</span>
+        {kpi?.win_rate != null && (
+          <> {" · "}Win rate: <strong>{(kpi.win_rate * 100).toFixed(1)}%</strong></>
+        )}
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+        <thead>
+          <tr style={{ borderBottom: "2px solid #334155", color: "#94a3b8" }}>
+            <th style={{ textAlign: "left", padding: "6px 4px" }}>#</th>
+            <th style={{ textAlign: "left", padding: "6px 4px" }}>Data</th>
+            <th style={{ textAlign: "left", padding: "6px 4px" }}>Categoria</th>
+            <th style={{ textAlign: "left", padding: "6px 4px" }}>Tipo</th>
+            <th style={{ textAlign: "left", padding: "6px 4px" }}>Asset</th>
+            <th style={{ textAlign: "left", padding: "6px 4px" }}>Azione</th>
+            <th style={{ textAlign: "right", padding: "6px 4px" }}>Conv.</th>
+            <th style={{ textAlign: "right", padding: "6px 4px" }}>Perf 1S</th>
+            <th style={{ textAlign: "right", padding: "6px 4px" }}>Perf 1M</th>
+            <th style={{ textAlign: "right", padding: "6px 4px" }}>Perf 3M</th>
+            <th style={{ textAlign: "right", padding: "6px 4px" }}>Δ S&P</th>
+            <th style={{ textAlign: "center", padding: "6px 4px" }}>Esito</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((r, i) => {
+            const fmtPct = (v) => v == null ? "—"
+              : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(2)}%`;
+            const colorPct = (v) => v == null ? "#94a3b8"
+              : v >= 0 ? "#10b981" : "#ef4444";
+            const outcomeColor = r.outcome === "green" ? "#10b981"
+                               : r.outcome === "yellow" ? "#fbbf24"
+                               : r.outcome === "red" ? "#ef4444" : "#475569";
+            return (
+              <tr key={r.id || i} style={{
+                borderBottom: "1px solid #1f2937",
+                color: "#cbd5e1",
+              }}>
+                <td style={{ padding: "5px 4px", color: "#64748b" }}>{i + 1}</td>
+                <td style={{ padding: "5px 4px" }}>
+                  {r.completed_at
+                    ? new Date(r.completed_at).toLocaleDateString("it-IT")
+                    : "—"}
+                </td>
+                <td style={{ padding: "5px 4px", color: "#94a3b8" }}>
+                  {r.category || "—"}
+                </td>
+                <td style={{ padding: "5px 4px", color: "#94a3b8" }}>
+                  {r.scenario_type === "multi" ? `${r.steps}-step` : "single"}
+                </td>
+                <td style={{ padding: "5px 4px", fontFamily: "monospace" }}>
+                  {r.asset_chosen || "—"}
+                </td>
+                <td style={{ padding: "5px 4px",
+                              color: r.action_chosen === "BUY" ? "#10b981"
+                                    : r.action_chosen === "SELL" ? "#ef4444"
+                                    : "#94a3b8",
+                              fontWeight: 600 }}>
+                  {r.action_chosen || "—"}
+                </td>
+                <td style={{ padding: "5px 4px", textAlign: "right",
+                              color: "#94a3b8" }}>
+                  {r.conviction || "—"}
+                </td>
+                <td style={{ padding: "5px 4px", textAlign: "right",
+                              color: colorPct(r.perf_1w) }}>
+                  {fmtPct(r.perf_1w)}
+                </td>
+                <td style={{ padding: "5px 4px", textAlign: "right",
+                              color: colorPct(r.perf_1m), fontWeight: 600 }}>
+                  {fmtPct(r.perf_1m)}
+                </td>
+                <td style={{ padding: "5px 4px", textAlign: "right",
+                              color: colorPct(r.perf_3m) }}>
+                  {fmtPct(r.perf_3m)}
+                </td>
+                <td style={{ padding: "5px 4px", textAlign: "right",
+                              color: colorPct(r.delta_sp) }}>
+                  {fmtPct(r.delta_sp)}
+                </td>
+                <td style={{ padding: "5px 4px", textAlign: "center" }}>
+                  <span style={{
+                    display: "inline-block", width: 10, height: 10,
+                    borderRadius: "50%", background: outcomeColor,
+                  }} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

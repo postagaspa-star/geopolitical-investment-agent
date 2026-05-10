@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Eye, Brain, Target, AlertCircle, TrendingUp, TrendingDown, Sparkles, BarChart3, Download, Loader2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Eye, Brain, Target, AlertCircle, TrendingUp, TrendingDown, Sparkles, BarChart3 } from "lucide-react";
 import SimAdvisorChat from "../../components/SimAdvisorChat";
 import SimMetricsPanel from "../../components/SimMetricsPanel";
 import ChartHelpButton from "../../components/ChartHelpButton";
-// pdfExport viene lazy-loaded al click di "Scarica PDF" per non gonfiare il bundle
 
 const API = window.location.origin;
 
@@ -12,7 +11,6 @@ const fmtPct = (v) => v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFix
 const fmtUsd = (v) => v == null ? "—" :
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(v);
 const colorFor = (v) => v == null ? "#64748b" : v >= 0 ? "#10b981" : "#ef4444";
-const truncate = (s, n) => (s && s.length > n) ? s.slice(0, n - 1) + "…" : (s || "");
 
 /**
  * Risultato di uno scenario: verdetto + grafico + analisi del ragionamento +
@@ -25,46 +23,6 @@ export default function SimResult() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState("result"); // "result" | "advisor"
-  const [pdfBusy, setPdfBusy] = useState(false);
-
-  const handleDownloadPDF = async () => {
-    if (!run || pdfBusy) return;
-    setPdfBusy(true);
-    try {
-      // Lazy import: jsPDF + html2canvas (~180kB) caricati solo on-demand
-      const { generatePDFFromSections } = await import("../../utils/pdfExport");
-      const meta = {
-        title: "Simulator Report",
-        subtitle: run.original_thesis
-          ? truncate(run.original_thesis, 240)
-          : `Risultato scenario ${run.category || ""} ${run.action_chosen || ""}`,
-        runId,
-        category: run.category || "—",
-        scenarioType: run.scenario_type === "multi" ? `${run.steps}-step` : "Single-step",
-        action: run.action_chosen || "—",
-        asset: run.asset_chosen || "—",
-        outcome: run.outcome === "green" ? "Tesi confermata"
-                : run.outcome === "yellow" ? "Esito misto"
-                : run.outcome === "red" ? "Tesi smentita" : "—",
-        period: run.historical_period || "—",
-        generatedAt: new Date().toLocaleString("it-IT", {
-          dateStyle: "medium", timeStyle: "short",
-        }),
-      };
-      const tickerSafe = (run.asset_chosen || "run").replace(/[^a-zA-Z0-9-]/g, "_");
-      const filename = `simulator_${tickerSafe}_${runId.slice(0, 8)}.pdf`;
-      await generatePDFFromSections({
-        rootId: "sim-result-pdf",
-        filename,
-        meta,
-      });
-    } catch (e) {
-      console.error("[PDF] generation failed:", e);
-      alert("Errore generazione PDF: " + (e.message || e));
-    } finally {
-      setPdfBusy(false);
-    }
-  };
 
   useEffect(() => {
     let cancelled = false;
@@ -119,35 +77,15 @@ export default function SimResult() {
 
   return (
     <div>
-      <style>{`.spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
       {/* HEADER */}
       <div style={S.headerRow}>
         <button style={S.backBtn} onClick={() => nav("/simulator")}>
           <ArrowLeft size={16} /> Dashboard
         </button>
         <h1 style={S.h1}>Risultato Scenario</h1>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            style={{ ...S.btnSecondary, opacity: pdfBusy ? 0.6 : 1 }}
-            onClick={handleDownloadPDF}
-            disabled={pdfBusy}
-            title="Genera un PDF con tutti i dati e i grafici di questo run"
-          >
-            {pdfBusy ? (
-              <>
-                <Loader2 size={14} className="spin" />
-                Generazione…
-              </>
-            ) : (
-              <>
-                <Download size={14} /> Scarica PDF
-              </>
-            )}
-          </button>
-          <button style={S.btnPrimary} onClick={() => nav("/simulator/runner")}>
-            Avvia nuovo <ArrowRight size={16} />
-          </button>
-        </div>
+        <button style={S.btnPrimary} onClick={() => nav("/simulator/runner")}>
+          Avvia nuovo <ArrowRight size={16} />
+        </button>
       </div>
 
       {/* TAB SWITCHER */}
@@ -203,9 +141,9 @@ function ResultView({ run, runId, nav }) {
   const actionColor = isHold ? "#94a3b8" : isBuy ? "#10b981" : "#ef4444";
 
   return (
-    <div id="sim-result-pdf">
+    <>
       {/* META INFO esteso (8 box) */}
-      <div style={S.metaGrid} data-pdf-section="true">
+      <div style={S.metaGrid}>
         <Meta label="Categoria" value={run.category} mono />
         <Meta label="Tipo" value={run.scenario_type === "multi" ? `${run.steps}-step` : "Single-step"} />
         <Meta label="Azione" value={
@@ -227,7 +165,7 @@ function ResultView({ run, runId, nav }) {
       </div>
 
       {/* OUTCOME + PERFORMANCE GRID */}
-      <div style={{ ...S.card, borderLeft: `4px solid ${outcomeColor}` }} data-pdf-section="true">
+      <div style={{ ...S.card, borderLeft: `4px solid ${outcomeColor}` }}>
         <div style={S.outcomeLabel}>{outcomeLabel}</div>
 
         {/* Banner SHORT/LONG: chiarisce di che tipo di posizione si tratta */}
@@ -273,7 +211,7 @@ function ResultView({ run, runId, nav }) {
 
       {/* PREZZI ENTRY/EXIT + P&L $$ */}
       {(full.entry_price != null) && (
-        <div style={S.card} data-pdf-section="true">
+        <div style={S.card}>
           <div style={S.cardTitle}>Prezzi & P&L</div>
           <div style={S.priceTimeline}>
             <PriceMilestone label="Entry T0" price={full.entry_price} />
@@ -304,7 +242,7 @@ function ResultView({ run, runId, nav }) {
 
       {/* STATISTICHE PERIODO */}
       {Object.keys(stats).length > 0 && (
-        <div style={S.card} data-pdf-section="true">
+        <div style={S.card}>
           <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
             <span>Statistiche del periodo</span>
             <ChartHelpButton
@@ -363,7 +301,7 @@ function ResultView({ run, runId, nav }) {
 
       {/* SL/TP ANALYSIS — nuova sezione critica */}
       {(slTp.stop_loss_target != null || slTp.take_profit_target != null) && (
-        <div style={S.card} data-pdf-section="true">
+        <div style={S.card}>
           <div style={S.cardTitle}>
             <Target size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
             Analisi Stop-Loss / Take-Profit proposti
@@ -389,7 +327,7 @@ function ResultView({ run, runId, nav }) {
       )}
 
       {/* GRAFICO con SL/TP overlay */}
-      <div style={S.card} data-pdf-section="true">
+      <div style={S.card}>
         <div style={{ ...S.cardTitle, justifyContent: "space-between" }}>
           <span>Evoluzione prezzo asset (3 mesi)</span>
           <ChartHelpButton
@@ -427,7 +365,7 @@ function ResultView({ run, runId, nav }) {
       </div>
 
       {/* RAGIONAMENTO COMPLETO (3 sezioni: lettura/ragionamento/decisione) */}
-      <div style={S.card} data-pdf-section="true">
+      <div style={S.card}>
         <div style={S.cardTitle}>
           <Brain size={14} style={{ display: "inline", marginRight: 6, color: "#10b981" }} />
           Analisi del ragionamento dell'agente
@@ -464,7 +402,7 @@ function ResultView({ run, runId, nav }) {
 
       {/* STEP BREAKDOWN — supporta multiple decisions per step */}
       {stepsData.length > 0 && (
-        <div style={S.card} data-pdf-section="true">
+        <div style={S.card}>
           <div style={S.cardTitle}>
             Decisioni step-by-step ({stepsData.length} step
             {stepsData.some(s => (s.decisions_count || 1) > 1) && ", multi-azione"})
@@ -520,7 +458,7 @@ function ResultView({ run, runId, nav }) {
 
       {/* PERIODO STORICO (reveal) */}
       {run.historical_period && (
-        <div style={S.revealBox} data-pdf-section="true">
+        <div style={S.revealBox}>
           🕰️ Periodo storico: <strong>{run.historical_period}</strong>
           {run._source && (
             <span style={{ fontSize: 11, marginLeft: 12, color: "#64748b" }}>
@@ -529,7 +467,7 @@ function ResultView({ run, runId, nav }) {
           )}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -721,13 +659,6 @@ const S = {
   },
   btnPrimary: {
     background: "#a78bfa", color: "#0a0e1a", border: 0, padding: "8px 14px",
-    borderRadius: 6, fontWeight: 600, cursor: "pointer",
-    display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13,
-    fontFamily: "inherit",
-  },
-  btnSecondary: {
-    background: "transparent", color: "#cbd5e1",
-    border: "1px solid #374151", padding: "8px 14px",
     borderRadius: 6, fontWeight: 600, cursor: "pointer",
     display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13,
     fontFamily: "inherit",
