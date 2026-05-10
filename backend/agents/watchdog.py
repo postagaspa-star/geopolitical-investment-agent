@@ -51,6 +51,14 @@ REBALANCE_THRESHOLD_PCT_CRYPTO = 45.0
 # asset, esaurendo il budget di tool calls e creando rumore.
 REBALANCE_COOLDOWN_HOURS = 4
 
+# Cooldown globale tra QUALSIASI trigger del watchdog (rebalance O DeepSeek).
+# Previene trigger spam quando la pipeline non riesce ad eseguire il Decision
+# (mercato chiuso, orchestrator error, API timeout): senza questo limite il
+# watchdog riprova ogni 5 min indefinitamente.
+# Separato dal throttle 60-min (_is_throttled) che controlla se un Decision
+# è COMPLETATO recentemente — qui controlliamo se il trigger è stato INVIATO.
+GLOBAL_TRIGGER_COOLDOWN_MIN = 15
+
 
 def _is_crypto_ticker(ticker: str) -> bool:
     """Determina se un ticker e' crypto (per applicare threshold differenziato)."""
@@ -428,6 +436,42 @@ def _record_rebalance_trigger(database, ticker: str) -> None:
         pass
 
 
+def _is_global_trigger_cooldown_active(database) -> bool:
+    """
+    True se il watchdog ha inviato un trigger negli ultimi GLOBAL_TRIGGER_COOLDOWN_MIN
+    minuti, indipendentemente dal tipo (rebalance o DeepSeek).
+
+    Usato per evitare che il watchdog ripeta lo stesso trigger ogni 5 minuti
+    quando l'orchestrator non riesce ad eseguire il Decision (es. mercato chiuso,
+    errore API, pipeline crash). Senza questa guardia il pattern è:
+      T+0: trigger → orchestrator skips (mercato chiuso)
+      T+5: trigger → orchestrator skips
+      ... → log pieno di trigger, API DeepSeek consumata inutilmente.
+    """
+    try:
+        last_iso = database.get_setting("watchdog_last_trigger_sent_at", "") or ""
+        if not last_iso:
+            return False
+        last_dt = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        age_min = (datetime.now(timezone.utc) - last_dt).total_seconds() / 60
+        return age_min < GLOBAL_TRIGGER_COOLDOWN_MIN
+    except Exception:
+        return False
+
+
+def _set_global_trigger_cooldown(database) -> None:
+    """Salva il timestamp dell'ultimo trigger inviato per il global cooldown."""
+    try:
+        database.set_setting(
+            "watchdog_last_trigger_sent_at",
+            datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        pass
+
+
 def _get_headlines_for_tickers(database, tickers: list[str], minutes: int = 60) -> list[str]:
     """
     Cerca nel buffer headlines che menzionano almeno uno dei ticker forniti.
@@ -555,6 +599,23 @@ async def run_watchdog(run_id: str) -> dict:
 
     t0 = time.time()
 
+    # ─── GLOBAL TRIGGER COOLDOWN (15 min) ──────────────────────────────────
+    # Controlla PRIMA di qualunque altra logica (rebalance o DeepSeek):
+    # se un trigger è stato inviato negli ultimi 15 min, skip questo ciclo.
+    # Previene spam da pipeline che non riescono ad eseguire il Decision.
+    if _is_global_trigger_cooldown_active(database):
+        logger.debug(
+            "[%s][WATCHDOG] Global cooldown attivo (<%d min dall'ultimo trigger), skip",
+            run_id, GLOBAL_TRIGGER_COOLDOWN_MIN,
+        )
+        return {
+            "should_trigger": False,
+            "reason": "global_trigger_cooldown",
+            "urgency": 0,
+            "elapsed_seconds": round(time.time() - t0, 2),
+        }
+    # ───────────────────────────────────────────────────────────────────────
+
     # ─── 0. REBALANCE CHECK ────────────────────────────────────────────────
     # Esegue PRIMA di tutto: se una posizione e' sopra-soglia, il rebalance
     # e' una decisione di safety che non deve aspettare throttle/cost guard.
@@ -607,6 +668,9 @@ async def run_watchdog(run_id: str) -> dict:
                     }))
                 except Exception:
                     pass
+                # Setta global cooldown: il trigger è inviato ora. Previene
+                # ripetizione ogni 5 min se orchestrator non esegue Decision.
+                _set_global_trigger_cooldown(database)
                 return {
                     "should_trigger": True,
                     "urgency": REBALANCE_URGENCY,
@@ -772,6 +836,8 @@ async def run_watchdog(run_id: str) -> dict:
                 database.set_setting("watchdog_last_trigger_sig", current_sig)
                 database.set_setting("watchdog_last_trigger_at",
                                       datetime.now(timezone.utc).isoformat())
+                # Aggiorna il global cooldown: trigger inviato ora
+                _set_global_trigger_cooldown(database)
         except Exception as exc:
             logger.warning("[%s][WATCHDOG] dedup check failed: %s", run_id, exc)
 

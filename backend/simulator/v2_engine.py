@@ -79,6 +79,27 @@ REGOLE CHIAVE (LEGGI CON ATTENZIONE)
    posseduto = apre uno short. SELL su asset già posseduto = chiude la
    posizione long.
 
+5. PENSA GLOBALMENTE — ROTAZIONE SETTORIALE OBBLIGATORIA
+   Ogni scenario include un CONTESTO GLOBALE con macro indicators e segnali
+   cross-settoriali. Leggilo SEMPRE e ragiona sulle implicazioni per TUTTI
+   i settori disponibili nell'asset_universe, non solo quello primario.
+
+   Se il settore principale è sotto pressione e non vedi asset positivi al
+   suo interno → NON stare in cash: individua il settore BENEFICIARIO e
+   ruota lì. La rotazione settoriale è spesso la mossa più redditizia.
+
+   Correlazioni fondamentali da applicare:
+   • Conflitto militare  →  Defense ↑, Energy ↑, Gold ↑, Tech ↓, Bond ↑
+   • Crisi bancaria       →  Finanziari ↓, TLT ↑, Gold ↑, Mega-cap tech ↑
+   • Inflazione alta      →  Commodity ↑, Energy ↑, Bond ↓, Growth ↓
+   • Pivot/taglio tassi   →  Growth ↑, TLT ↑, Value ↓, Crypto ↑
+   • Panico (VIX 30+)    →  Safe-haven ↑ (GLD, TLT), tutto il resto ↓
+   • Yen carry unwind     →  JPY ↑, globale ↓ inizialmente, poi rimbalzo
+   • Elezioni USA         →  Settori policy-sensitive divergono per candidato
+
+   Regola pratica: per ogni scenario, chiediti "CHI VINCE in questo contesto?"
+   Poi cerca quel settore nell'asset_universe e allocaci.
+
 ═══════════════════════════════════════════════════════════════════════
 PROCEDURA OBBLIGATORIA (3 sezioni in ordine, NESSUNA OMISSIONE)
 ═══════════════════════════════════════════════════════════════════════
@@ -1049,6 +1070,31 @@ def _build_step_message(
         for h in headlines:
             parts.append(f"  • {h}")
         parts.append("")
+
+    # ── CONTESTO GLOBALE — cross-sector + macro ───────────────────────────
+    # Questo blocco fornisce segnali su settori ESTERNI al primario dello
+    # scenario, permettendo rotazione settoriale intelligente. Mostrato ad
+    # ogni turno: il regime macro è costante nel periodo simulato.
+    global_ctx = scenario.get("global_context", {})
+    if global_ctx:
+        parts.append("🌍 CONTESTO GLOBALE (guarda oltre il settore primario):")
+        macro = global_ctx.get("macro", [])
+        if macro:
+            parts.append("  📊 Macro: " + " | ".join(macro))
+        cross = global_ctx.get("cross_sector", [])
+        if cross:
+            parts.append("  🔄 Segnali cross-settoriali:")
+            for cs in cross:
+                direction = cs.get("direction", "neutral")
+                icon = "🟢" if direction == "bullish" else (
+                    "🔴" if direction == "bearish" else "🟡"
+                )
+                parts.append(f"    {icon} {cs['sector']}: {cs['signal']}")
+        second_order = global_ctx.get("second_order", "")
+        if second_order:
+            parts.append(f"  💡 Effetti di 2° ordine: {second_order}")
+        parts.append("")
+    # ─────────────────────────────────────────────────────────────────────
 
     # Storico decisioni (se non è il primo turno)
     if step_index > 0 and history:
