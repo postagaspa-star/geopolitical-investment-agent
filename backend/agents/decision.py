@@ -309,12 +309,9 @@ REGOLE OPERATIVE Fase ESECUZIONE:
     quando proteggere il profitto o tagliare la perdita basandoti su segnali
     tecnici, news, regime di mercato e tempo trascorso dall'apertura.
 
-UNIVERSO INVESTIBILE — VINCOLO RIGIDO ClawStreet:
-Il portfolio è specchiato live su ClawStreet (vetrina pubblica del bot, leaderboard
-del torneo Season One). ClawStreet supporta SOLO ~498 simboli specifici. Trade su
-ticker NON supportati vengono rifiutati con INVALID_SYMBOL: il portfolio interno
-si aggiorna ma ClawStreet no → divergenza → leaderboard sballata. È il difetto
-critico da evitare.
+UNIVERSO INVESTIBILE — VINCOLO RIGIDO:
+Il portfolio opera su un universo specifico di simboli. Trade su ticker NON
+supportati vengono rifiutati. Rispetta SEMPRE le liste sottostanti.
 
 ✓ AZIONI TRADABILI: ~484 titoli S&P 500 (es. NVDA, TSLA, AAPL, XOM, MSFT, AMZN,
   GOOGL, META, JPM, V, MA, JNJ, UNH, PG, KO, PEP, COST, WMT, HD, CVX, MRK, LLY,
@@ -381,14 +378,14 @@ Engine: DeepSeek-R1 (reasoning model). Subentri a Claude Sonnet 4.5 fuori orario
 CONTESTO OVERNIGHT:
 NYSE/LSE/XETRA chiuse. Le crypto sono il SOLO universo tradabile in tempo reale.
 Le azioni S&P 500 restano nello stato della sessione precedente — non puoi aprire
-posizioni equity perché ClawStreet non eseguirà BUY su titoli a mercato chiuso.
+posizioni equity perché i mercati equity sono chiusi.
 
 UNIVERSO INVESTIBILE (ridotto, overnight):
 ✓ 14 CRYPTO (formato yfinance "X-USD"):
   BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD, LTC-USD,
   DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD.
-✗ Azioni S&P 500 (mercati chiusi → BUY rifiutato da ClawStreet).
-✗ Altre crypto (BNB, SHIB, AAVE, PEPE, FIL, etc. → fuori universo ClawStreet).
+✗ Azioni S&P 500 (mercati chiusi → BUY non eseguibile).
+✗ Altre crypto (BNB, SHIB, AAVE, PEPE, FIL, etc. → fuori universo supportato).
 ✗ ETF indicizzati (SPY, QQQ, TLT) → non supportati neanche di giorno.
 
 Hai il tool execute_trade per BUY/SELL e do_nothing per non operare.
@@ -972,13 +969,11 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                 )
 
             # FIX CRITICO: se l'execute è fallito (cash insufficiente,
-            # no-position, qty<=0...) NON fare il mirror su ClawStreet.
-            # Bug precedente: il mirror veniva eseguito sempre →
-            # ClawStreet apriva il trade mentre localmente non esisteva
-            # → divergenza permanente del portfolio pubblico.
+            # no-position, qty<=0...) ritorniamo subito un errore strutturato
+            # senza propagare la failure al downstream.
             if not (isinstance(result, dict) and result.get("success")):
                 fail_reason = (result or {}).get("reason", "unknown") if isinstance(result, dict) else str(result)
-                logger.warning("[%s][DECISION] execute_%s fallito su %s qty=%s: %s — skip mirror",
+                logger.warning("[%s][DECISION] execute_%s fallito su %s qty=%s: %s",
                                run_id, action.lower(), ticker, quantity, fail_reason)
                 database.insert_agent_log(run_id, "DECISION_TRADE_FAILED", json.dumps({
                     "ticker": ticker, "action": action, "qty": quantity,
@@ -1866,35 +1861,71 @@ def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state,
     # === WATCHDOG TRIGGER (in cima, alta priorita') ===
     if focus_tickers or watchdog_reason:
         wd_lines = ["=" * 60]
-        wd_lines.append("⚠️  WATCHDOG TRIGGER — INPUT PRIORITARIO ⚠️")
+        # Rilevazione speciale: rebalance trigger (dal Watchdog quando una
+        # posizione eccede il 35% del NAV). Riceve istruzioni di SELL
+        # parziale invece di BUY/analisi.
+        is_rebalance = bool(watchdog_reason and watchdog_reason.upper().startswith("REBALANCE"))
+        if is_rebalance:
+            wd_lines.append("⚠️  WATCHDOG REBALANCE TRIGGER — RIDUZIONE RISCHIO OBBLIGATORIA ⚠️")
+        else:
+            wd_lines.append("⚠️  WATCHDOG TRIGGER — INPUT PRIORITARIO ⚠️")
         wd_lines.append("=" * 60)
         if watchdog_reason:
             wd_lines.append(f"Motivo: {watchdog_reason}")
         if focus_tickers:
-            wd_lines.append(
-                f"FOCUS TICKERS (rilevati con movimento anomalo): "
-                f"{', '.join(focus_tickers)}"
-            )
+            label = ("POSIZIONE OVERWEIGHT da ridurre"
+                     if is_rebalance else "FOCUS TICKERS (rilevati con movimento anomalo)")
+            wd_lines.append(f"{label}: {', '.join(focus_tickers)}")
         wd_lines.append("")
-        wd_lines.append("ISTRUZIONI OBBLIGATORIE:")
-        wd_lines.append(
-            "  1. Includi TUTTI i FOCUS TICKERS in asset_candidates "
-            "    di FASE 1 (commit_initial_assessment)."
-        )
-        wd_lines.append(
-            "  2. Le tue technical_questions DEVONO riguardare PRIMA i FOCUS "
-            "    TICKERS, poi eventuali altri ticker correlati al tema."
-        )
-        wd_lines.append(
-            "  3. Il run e' stato attivato perche' QUESTI ticker si sono "
-            "    mossi: ignorarli per analizzarne altri e' uno spreco "
-            "    della trigger window."
-        )
-        wd_lines.append(
-            "  4. Se decidi di NON operare su un focus ticker, devi "
-            "    motivarlo esplicitamente nel commit_final_thesis "
-            "    (es. 'NVDA gia' overbought, attendo pullback')."
-        )
+        if is_rebalance:
+            # Istruzioni specifiche per il rebalance: il LLM DEVE proporre
+            # un SELL parziale per riportare la concentrazione sotto soglia.
+            # NON deve fare ulteriori BUY su questo ticker (sarebbe controproducente).
+            wd_lines.append("ISTRUZIONI OBBLIGATORIE — REBALANCE (priorita' max):")
+            wd_lines.append(
+                "  1. La posizione mostrata sopra ha superato il 35% del NAV "
+                "    per via della crescita. Concentrazione eccessiva = rischio "
+                "    non controllato."
+            )
+            wd_lines.append(
+                "  2. ESEGUI un SELL PARZIALE per riportare la posizione "
+                "    sotto il 30% del NAV (trim ~25-40% della quantita' attuale, "
+                "    a tua discrezione in base ai segnali tecnici)."
+            )
+            wd_lines.append(
+                "  3. NON aggiungere mai a questa posizione (no BUY) finche' "
+                "    rimane sopra-soglia: sarebbe il contrario del rebalance."
+            )
+            wd_lines.append(
+                "  4. Se hai motivi tecnici fortissimi per NON ridurre "
+                "    (es. breakout strutturale appena confermato con volumi 3x), "
+                "    documentalo in commit_final_thesis e usa do_nothing."
+            )
+            wd_lines.append(
+                "  5. Workflow standard 4 fasi obbligatorio: "
+                "    FASE 1 (commit_initial_assessment) → FASE 2 (request_technical) "
+                "    → FASE 3 (commit_final_thesis) → FASE 4 (execute_trade SELL)."
+            )
+        else:
+            wd_lines.append("ISTRUZIONI OBBLIGATORIE:")
+            wd_lines.append(
+                "  1. Includi TUTTI i FOCUS TICKERS in asset_candidates "
+                "    di FASE 1 (commit_initial_assessment)."
+            )
+            wd_lines.append(
+                "  2. Le tue technical_questions DEVONO riguardare PRIMA i FOCUS "
+                "    TICKERS, poi eventuali altri ticker correlati al tema."
+            )
+            wd_lines.append(
+                "  3. Il run e' stato attivato perche' QUESTI ticker si sono "
+                "    mossi: ignorarli per analizzarne altri e' uno spreco "
+                "    della trigger window."
+            )
+            wd_lines.append(
+                "  4. Se decidi di NON operare su un focus ticker, devi "
+                "    motivarlo esplicitamente nel commit_final_thesis "
+                "    (es. 'NVDA gia' overbought, attendo pullback')."
+            )
         wd_lines.append("=" * 60)
         parts.append("\n".join(wd_lines))
 

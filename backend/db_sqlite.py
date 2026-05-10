@@ -61,7 +61,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS agent_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
-                phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO','MARKET_INTELLIGENCE','CLAWSTREET_MIRROR')),
+                phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO','MARKET_INTELLIGENCE')),
                 content TEXT NOT NULL,
                 timestamp TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -194,7 +194,7 @@ def init_db():
                 CREATE TABLE agent_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
-                    phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO','MARKET_INTELLIGENCE','CLAWSTREET_MIRROR')),
+                    phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO','MARKET_INTELLIGENCE')),
                     content TEXT NOT NULL,
                     timestamp TEXT NOT NULL DEFAULT (datetime('now'))
                 )
@@ -227,21 +227,6 @@ def init_db():
                 conn.execute(f"ALTER TABLE positions ADD COLUMN {col_def}")
             except Exception:
                 pass
-
-        # ── Migrazione tabella trades: aggiunta colonne ClawStreet mirror ──
-        # Permette di tracciare per ogni trade se è stato specchiato con
-        # successo su ClawStreet e di riprovare le mirror fallite.
-        # SQLite non supporta IF NOT EXISTS su ALTER TABLE → catch errore.
-        for col_def in (
-            "cs_mirror_status TEXT DEFAULT 'pending'",
-            "cs_mirror_reason TEXT",
-            "cs_mirror_attempts INTEGER DEFAULT 0",
-            "cs_mirror_last_attempt_at TEXT",
-        ):
-            try:
-                conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
-            except Exception:
-                pass  # colonna già esistente
 
         # ── Migrazione documenti: aggiunta colonna category ──
         # Permette di separare documenti generici (per Decision normale)
@@ -354,7 +339,6 @@ def count_positions():
 def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning, final_decision, confidence):
     """
     Inserisce un trade e ritorna l'ID della riga creata.
-    L'ID è necessario per linkare il trade allo stato del mirror ClawStreet.
     """
     with get_db() as conn:
         cur = conn.execute(
@@ -369,58 +353,19 @@ def get_trades(limit=50):
 
 
 def update_trade_mirror_status(trade_id, status, reason=None, increment_attempts=True):
-    """
-    Aggiorna lo stato del mirror ClawStreet per un trade.
-
-    Args:
-        trade_id: ID del trade nella tabella trades
-        status: 'ok' | 'failed' | 'skipped' | 'pending' | 'no_creds' | 'unsupported'
-        reason: dettaglio errore (es. HTTP 500, INVALID_SYMBOL, ...)
-        increment_attempts: True per incrementare il contatore tentativi
-    """
-    with get_db() as conn:
-        if increment_attempts:
-            conn.execute(
-                "UPDATE trades SET cs_mirror_status=?, cs_mirror_reason=?, "
-                "cs_mirror_attempts=COALESCE(cs_mirror_attempts,0)+1, "
-                "cs_mirror_last_attempt_at=datetime('now') WHERE id=?",
-                (status, (reason or "")[:500], trade_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE trades SET cs_mirror_status=?, cs_mirror_reason=?, "
-                "cs_mirror_last_attempt_at=datetime('now') WHERE id=?",
-                (status, (reason or "")[:500], trade_id),
-            )
+    """No-op stub (mantenuto per compat: nessun mirror esterno attivo)."""
+    return
 
 
 def get_pending_mirror_trades(window_hours=24, max_attempts=5, limit=50):
-    """
-    Ritorna i trade non ancora specchiati su ClawStreet (status in 'pending'/'failed')
-    nelle ultime `window_hours` ore, esclusi quelli che hanno già fallito >max_attempts volte.
-    """
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM trades "
-            "WHERE (cs_mirror_status IS NULL "
-            "       OR cs_mirror_status IN ('pending','failed')) "
-            "  AND COALESCE(cs_mirror_attempts,0) < ? "
-            "  AND timestamp >= datetime('now', ?) "
-            "ORDER BY timestamp ASC LIMIT ?",
-            (max_attempts, f"-{window_hours} hours", limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+    """No-op stub (mantenuto per compat: nessun mirror esterno attivo)."""
+    return []
 
 
 def get_mirror_status_summary():
-    """Conteggio trade per stato mirror (ultimi 7 giorni). Utile per diagnostica."""
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT COALESCE(cs_mirror_status,'pending') as status, COUNT(*) as cnt "
-            "FROM trades WHERE timestamp >= datetime('now','-7 days') "
-            "GROUP BY cs_mirror_status"
-        ).fetchall()
-        return {r["status"]: r["cnt"] for r in rows}
+    """No-op stub (mantenuto per compat: nessun mirror esterno attivo)."""
+    return {}
+
 
 def insert_agent_log(run_id, phase, content):
     with get_db() as conn:

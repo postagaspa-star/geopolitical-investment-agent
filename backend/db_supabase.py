@@ -106,23 +106,18 @@ def _ensure_schema_migrations():
 
     if not db_url:
         logger.warning(
-            "Auto-migrazione cs_mirror_* SKIPPED: configurare DATABASE_URL "
-            "(consigliato) oppure SUPABASE_DB_PASSWORD su Render. "
-            "In alternativa eseguire manualmente backend/migrations/init_v6_cs_mirror.sql "
-            "su Supabase Dashboard → SQL Editor."
+            "Auto-migrazione schema SKIPPED: configurare DATABASE_URL "
+            "(consigliato) oppure SUPABASE_DB_PASSWORD su Render."
         )
         return
 
     try:
         import psycopg2
     except ImportError:
-        logger.warning("psycopg2 non installato — auto-migrazione cs_mirror_* skipped.")
+        logger.warning("psycopg2 non installato — auto-migrazione schema skipped.")
         return
 
     migration_sql = """
-        -- (Le colonne cs_mirror_* vengono lasciate sulle righe esistenti per
-        -- backward compat ma non vengono piu' scritte da insert_trade — vedi
-        -- payload_with_mirror sotto.)
         -- v7: documenti separati per Decision normale vs Decision Crypto
         ALTER TABLE technical_documents ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'generic';
         -- backfill: i documenti caricati prima della migration hanno category=NULL.
@@ -252,12 +247,12 @@ def _ensure_schema_migrations():
             with conn.cursor() as cur:
                 cur.execute(migration_sql)
             conn.commit()
-        logger.info("Auto-migrazione cs_mirror_* applicata su Supabase con successo.")
+        logger.info("Auto-migrazione schema applicata su Supabase con successo.")
     except Exception as exc:
         # Non bloccare l'avvio del bot — degrade graceful
         logger.warning(
-            "Auto-migrazione cs_mirror_* fallita (%s). Esegui manualmente "
-            "backend/migrations/init_v6_cs_mirror.sql su Supabase Dashboard.",
+            "Auto-migrazione schema fallita (%s). Esegui manualmente "
+            "le migration SQL su Supabase Dashboard.",
             exc,
         )
 
@@ -410,8 +405,7 @@ def count_positions():
 
 def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning, final_decision, confidence):
     """
-    Inserisce un trade e ritorna l'ID della riga creata (necessario per
-    linkare il trade allo stato del mirror ClawStreet).
+    Inserisce un trade e ritorna l'ID della riga creata.
     """
     client = _get_client()
     payload = {
@@ -438,29 +432,19 @@ def get_trades(limit=50):
 
 
 def update_trade_mirror_status(trade_id, status, reason=None, increment_attempts=True):
-    """No-op stub (ClawStreet integration rimossa)."""
+    """No-op stub (mantenuto per compat: nessun mirror esterno attivo)."""
     return
 
 
 def get_pending_mirror_trades(window_hours=24, max_attempts=5, limit=50):
-    """No-op stub (ClawStreet integration rimossa)."""
+    """No-op stub (mantenuto per compat: nessun mirror esterno attivo)."""
     return []
 
 
 def get_mirror_status_summary():
-    """No-op stub (ClawStreet integration rimossa)."""
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-    cutoff = (_dt.now(_tz.utc) - _td(days=7)).isoformat()
-    client = _get_client()
+    """No-op stub (mantenuto per compat: nessun mirror esterno attivo)."""
     try:
-        # Implementazione legacy preservata per compat (puo' essere rimossa)
-        result = client.table("trades").select("cs_mirror_status").gte("timestamp", cutoff).execute()
-        rows = result.data or []
-        summary = {}
-        for r in rows:
-            key = r.get("cs_mirror_status") or "pending"
-            summary[key] = summary.get(key, 0) + 1
-        return summary
+        return {}
     except Exception:
         return {}
 

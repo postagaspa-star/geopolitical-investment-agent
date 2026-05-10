@@ -1333,6 +1333,9 @@ class SimV2StartReq(BaseModel):
     num_steps: int = 4              # 3-5
     scenario_id: str | None = None  # opzionale, se None scelta random
     initial_capital: float = 100000.0
+    # Costo per trade in bps (10 = 0.10%). None = default 10 bps.
+    # Pass 0 per slippage rerun "no fees" comparativo.
+    commission_bps: float | None = None
 
 
 @app.post("/api/simulator/v2/start")
@@ -1349,6 +1352,7 @@ async def sim_v2_start(req: SimV2StartReq):
             num_steps=req.num_steps,
             scenario_id=req.scenario_id,
             initial_capital=req.initial_capital,
+            commission_bps=req.commission_bps,
         )
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -1556,6 +1560,7 @@ class SimV2CryptoStartReq(BaseModel):
     num_steps: int = 6           # 5-7 turni
     scenario_id: str | None = None
     initial_capital: float = 100000.0
+    commission_bps: float | None = None   # default 10 bps
 
 
 @app.get("/api/simulator/v2/crypto/scenarios")
@@ -1583,6 +1588,7 @@ async def sim_v2_crypto_start(req: SimV2CryptoStartReq):
         return await engine.start_crypto_run(
             category=req.category, num_steps=req.num_steps,
             scenario_id=req.scenario_id, initial_capital=req.initial_capital,
+            commission_bps=req.commission_bps,
         )
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -1662,6 +1668,29 @@ async def sim_v2_crypto_advisor(req: SimV2CryptoAdvisorReq):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/simulator/active-runs")
+async def sim_active_runs(include_recent: bool = Query(default=True)):
+    """
+    Lista dei run del Simulator attualmente in esecuzione (e quelli appena
+    completati per qualche secondo, per dare il "flash di fine partita").
+
+    Polling target: ogni 3-5 secondi dalla SimDashboard.
+
+    Ogni record contiene: tracking_id, engine, mode (manual/auto), categoria,
+    titolo scenario, step corrente / totale, status corrente, elapsed_seconds,
+    e — solo se completato — outcome + pnl_pct + persisted_run_id.
+
+    include_recent: se False filtra solo quelli ancora "running" (no completed/error).
+    """
+    try:
+        from simulator import active_runs as _ar
+        runs = _ar.list_active(include_recent=include_recent)
+        return {"runs": runs, "count": len(runs)}
+    except Exception as e:
+        logger.error("[SIM] active_runs endpoint error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/simulator/auto-mode")
 async def sim_get_auto_mode():
     from simulator import db as sim_db
@@ -1712,6 +1741,287 @@ async def sim_analytics():
         "outcome_distribution": outcomes,
         "learning_curve": learning,
         "patterns_text": sim_db.get_setting("patterns_analysis", ""),
+    }
+
+
+@app.get("/api/simulator/win-by-scenario")
+async def sim_win_by_scenario():
+    """
+    Win rate breakdown per scenario_id (NON solo categoria).
+    Risponde a: "in QUALI scenari l'AI e' piu' intelligente?".
+
+    Per ogni scenario_id ritorna:
+      - title: nome leggibile
+      - category: macro/geo/normale/crash_rally/bull_cycle/...
+      - n_runs:   quante volte e' stato giocato
+      - n_green:  quanti outcome verdi
+      - win_rate: green / total
+      - avg_pnl_1m: P&L medio a 1M (se presente)
+      - avg_sharpe: Sharpe medio dei run V2 (se computato)
+
+    Considera solo scenari con almeno 1 run (no rumore).
+    """
+    from simulator import db as sim_db
+    from simulator import scenarios as _scn
+    from simulator import crypto_scenarios as _cs
+
+    runs = sim_db.list_runs(limit=2000)
+
+    # Mappa scenario_id → metadata
+    sid_meta = {}
+    for s in _scn._all_scenarios():
+        sid_meta[s.get("id")] = {"title": s.get("title", ""),
+                                 "category": s.get("category", "")}
+    try:
+        for s in _cs.list_crypto_scenarios():
+            sid_meta[s.get("id")] = {"title": s.get("title", ""),
+                                     "category": s.get("category", "")}
+    except Exception:
+        pass
+
+    # Aggrega per scenario_id
+    by_sid: dict = {}
+    for r in runs:
+        sid = r.get("scenario_id")
+        if not sid:
+            continue
+        bucket = by_sid.setdefault(sid, {"n_runs": 0, "n_green": 0,
+                                          "pnl_sum": 0, "pnl_n": 0,
+                                          "sharpe_sum": 0.0, "sharpe_n": 0})
+        bucket["n_runs"] += 1
+        if r.get("outcome") == "green":
+            bucket["n_green"] += 1
+        if r.get("perf_1m") is not None:
+            bucket["pnl_sum"] += float(r.get("perf_1m") or 0)
+            bucket["pnl_n"] += 1
+        # Sharpe: solo nei run V2 lo abbiamo nel full_data
+        full = r.get("full_data") or {}
+        if isinstance(full, str):
+            try:
+                full = json.loads(full)
+            except Exception:
+                full = {}
+        sh = (full.get("quant_metrics") or {}).get("sharpe_ratio") if isinstance(full, dict) else None
+        if isinstance(sh, (int, float)):
+            bucket["sharpe_sum"] += float(sh)
+            bucket["sharpe_n"] += 1
+
+    out = []
+    for sid, b in by_sid.items():
+        meta = sid_meta.get(sid, {})
+        out.append({
+            "scenario_id": sid,
+            "title": meta.get("title", sid),
+            "category": meta.get("category", "?"),
+            "n_runs": b["n_runs"],
+            "n_green": b["n_green"],
+            "win_rate": round(b["n_green"] / b["n_runs"], 3) if b["n_runs"] else 0,
+            "avg_pnl_1m": round(b["pnl_sum"] / b["pnl_n"], 4) if b["pnl_n"] else None,
+            "avg_sharpe": round(b["sharpe_sum"] / b["sharpe_n"], 2) if b["sharpe_n"] else None,
+        })
+    # Ordina: piu' giocati prima, e win rate alto prima a parita' di n_runs
+    out.sort(key=lambda x: (-x["n_runs"], -(x["win_rate"] or 0)))
+    return {"scenarios": out, "total_scenarios_played": len(out)}
+
+
+@app.get("/api/simulator/sentiment-drift")
+async def sim_sentiment_drift():
+    """
+    "Sentiment Drift" — evoluzione della strategia nel tempo.
+
+    Ritorna:
+      - top_advice: lista dei 3 advice piu' applicati (apply_count desc) con
+        i dettagli (title, text, scenario_category, apply_count).
+      - sharpe_evolution: serie temporale dello Sharpe medio rolling sui run
+        V2, ordinati per completed_at. Permette di vedere se l'applicazione
+        crescente degli advice ha migliorato lo Sharpe.
+
+    Vincolo: serve almeno qualche run V2 con quant_metrics per avere segnale.
+    """
+    from simulator import db as sim_db
+    try:
+        from agents import sim_advisor
+        all_advice = sim_advisor.list_all_advice()
+    except Exception as e:
+        all_advice = {}
+        logger.warning("sentiment_drift: advice load fallita: %s", e)
+
+    # Flatten + sort by apply_count desc, top 3
+    flat = []
+    for cat_key, items in (all_advice or {}).items():
+        for it in items:
+            flat.append({
+                "id": it.get("id"),
+                "title": it.get("title", ""),
+                "text": (it.get("text") or "")[:400],
+                "scenario_category": cat_key,
+                "apply_count": int(it.get("apply_count") or 0),
+                "created_at": it.get("created_at", ""),
+            })
+    flat.sort(key=lambda x: x["apply_count"], reverse=True)
+    top_advice = flat[:3]
+
+    # Sharpe evolution: ordina i run V2 per completed_at e calcola rolling mean
+    runs = sim_db.list_runs(limit=1000)
+    runs.sort(key=lambda r: r.get("completed_at") or "")
+    series = []
+    rolling_window = 5
+    sharpes = []
+    for r in runs:
+        full = r.get("full_data") or {}
+        if isinstance(full, str):
+            try:
+                full = json.loads(full)
+            except Exception:
+                full = {}
+        if not isinstance(full, dict):
+            continue
+        sh = (full.get("quant_metrics") or {}).get("sharpe_ratio")
+        if not isinstance(sh, (int, float)):
+            continue
+        sharpes.append(float(sh))
+        # Rolling mean ultimi N (cap window)
+        window = sharpes[-rolling_window:]
+        rolling = sum(window) / len(window)
+        series.append({
+            "completed_at": r.get("completed_at", ""),
+            "scenario_id": r.get("scenario_id", ""),
+            "category": r.get("category", ""),
+            "sharpe": round(float(sh), 2),
+            "rolling_mean_sharpe": round(rolling, 2),
+            "n_in_window": len(window),
+        })
+
+    return {
+        "top_advice": top_advice,
+        "sharpe_evolution": series,
+        "rolling_window": rolling_window,
+        "total_advice_categories": len(all_advice or {}),
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Slippage Sensitivity Rerun
+# ────────────────────────────────────────────────────────────────────────────
+class SimSlippageRerunReq(BaseModel):
+    """
+    Replay di un run V2 esistente con un commission_bps diverso.
+    Permette di rispondere: "Se le fees fossero state 0.5% invece di 0.1%,
+    questa strategia sarebbe ancora profittevole?".
+    """
+    run_id: str
+    commission_bps_list: list[float] = [0.0, 10.0, 25.0, 50.0]   # default benchmark
+
+
+@app.post("/api/simulator/slippage-rerun")
+async def sim_slippage_rerun(req: SimSlippageRerunReq):
+    """
+    Re-applica i trade del run originale a vari livelli di commission_bps,
+    ricalcola portfolio_value_series + metriche per ogni livello.
+    Stateless rispetto al DB: non sovrascrive il run originale, ritorna
+    solo gli scenari per la UI.
+    """
+    from simulator import db as sim_db
+    from simulator import v2_engine, metrics as _metrics
+
+    run = sim_db.get_run(req.run_id)
+    if not run:
+        return JSONResponse(status_code=404, content={"error": "Run non trovato"})
+
+    full = run.get("full_data") or {}
+    if isinstance(full, str):
+        try:
+            full = json.loads(full)
+        except Exception:
+            full = {}
+
+    history = full.get("history") or []
+    scenario = full.get("scenario") or {}
+    if not history or not scenario:
+        return JSONResponse(status_code=400, content={
+            "error": "Run non rieseguibile: serve full_data.history e .scenario "
+                     "(presenti solo nei run Simulator V2)."
+        })
+
+    initial = float(((full.get("final_valuation") or {}).get("initial_capital"))
+                     or 100000.0)
+    price_series = scenario.get("price_series") or full.get("price_series") or {}
+    step_dates = scenario.get("step_dates") or full.get("step_dates") or []
+    is_crypto = scenario.get("engine_mode") == "crypto" or run.get("category") == "crypto"
+    benchmark_ticker = "BTC-USD" if is_crypto else "SPY"
+    step_unit_days = 2.0 if is_crypto else 7.0
+    periods_year = (_metrics.ANNUALIZATION_CRYPTO if is_crypto
+                    else _metrics.ANNUALIZATION_EQUITY)
+
+    out = []
+    for bps in req.commission_bps_list:
+        # Replay: parti da initial, applica i trade di ogni step a quel bps
+        portfolio = v2_engine.make_initial_portfolio(initial, commission_bps=bps)
+        equity_curve = [{"step_index": -1, "step_date": (step_dates[0] if step_dates else None),
+                          "value": initial}]
+        replayed_history = []
+        # Tracciamo l'ultima valuation valida per il fallback finale (se nessuno
+        # step ha prezzi → si usa lo state iniziale come final_val).
+        last_valuation = v2_engine.compute_portfolio_value(portfolio, {})
+        for h in history:
+            sd = h.get("step_date")
+            prices = v2_engine.extract_prices_at_date(price_series, sd) if sd else {}
+            if not prices:
+                # Salta step senza prezzi: equity invariata
+                equity_curve.append({"step_index": h.get("step_index"),
+                                     "step_date": sd,
+                                     "value": equity_curve[-1]["value"]})
+                continue
+            ai_trades = h.get("ai_trades") or []
+            apply_res = v2_engine.apply_trades(portfolio, ai_trades, prices,
+                                                commission_bps=bps)
+            portfolio = apply_res["portfolio"]
+            last_valuation = v2_engine.compute_portfolio_value(portfolio, prices)
+            equity_curve.append({"step_index": h.get("step_index"),
+                                 "step_date": sd,
+                                 "value": last_valuation["total_value"]})
+            replayed_history.append({**h, "applied_trades": apply_res["applied_trades"],
+                                      "valuation_after": last_valuation})
+
+        # Punto finale
+        final_date = step_dates[-1] if step_dates else None
+        final_prices = v2_engine.extract_prices_at_date(price_series, final_date) if final_date else {}
+        final_val = (v2_engine.compute_portfolio_value(portfolio, final_prices)
+                     if final_prices else last_valuation)
+        equity_curve.append({"step_index": len(history), "step_date": final_date,
+                             "value": final_val["total_value"]})
+
+        # Metriche
+        qm = _metrics.compute_all_metrics(
+            equity_curve=equity_curve,
+            history=replayed_history,
+            final_valuation=final_val,
+            step_unit_days=step_unit_days,
+            periods_per_year=periods_year,
+        )
+        # Benchmark series sulla stessa cadenza
+        bench = v2_engine._build_benchmark_value_series(
+            price_series, benchmark_ticker, step_dates, initial,
+            replayed_history, final_date or step_dates[0],
+        )
+        out.append({
+            "commission_bps": bps,
+            "final_value": final_val["total_value"],
+            "final_pnl_pct": final_val["total_pnl_pct"],
+            "total_commissions_paid": final_val.get("total_commissions_paid", 0),
+            "portfolio_value_series": equity_curve,
+            "benchmark_value_series": bench,
+            "sharpe_ratio": qm.get("sharpe_ratio"),
+            "max_drawdown": qm.get("max_drawdown", {}).get("max_drawdown_pct"),
+            "profit_factor": qm.get("profit_factor"),
+            "expectancy": qm.get("expectancy", {}).get("expectancy_dollars"),
+        })
+
+    return {
+        "run_id": req.run_id,
+        "scenarios": out,
+        "benchmark_ticker": benchmark_ticker,
+        "is_crypto": is_crypto,
     }
 
 
@@ -3589,20 +3899,6 @@ async def close_position(payload: ClosePositionPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-# --- Endpoint ClawStreet ---
-
-
-class ClawStreetRegisterPayload(BaseModel):
-    name: str = "GeoInvest AI"
-    ticker: str = "GEO"
-    strategy: str = "Geopolitical risk analysis combined with technical analysis. Uses GDELT, NewsAPI, and Congressional trading data to identify macro opportunities."
-    personality: str = "Disciplined and data-driven. Follows the trend, never averages down losses, always sets stop-loss."
-    bio: str = "AI agent combining geopolitical intelligence with technical analysis to trade global macro themes."
-
-
-# (ClawStreet endpoints rimossi)
-
-
 @app.get("/api/scout/sources-health")
 async def scout_sources_health():
     """
@@ -3618,9 +3914,7 @@ async def scout_sources_health():
         ("YFINANCE_NEWS", _df.fetch_yfinance_news, []),
         ("REDDIT", _df.fetch_reddit_sentiment, ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"]),
         ("X_TWITTER", _df.fetch_x_sentiment, ["X_BEARER_TOKEN"]),
-        ("CLAWSTREET_MARKET", _df.fetch_clawstreet_market_context, []),
         ("CONGRESSIONAL", _df.fetch_congressional_trades, []),
-        ("CLAWSTREET_ECONOMY", _df.fetch_clawstreet_economy, []),
         ("COINGECKO", _df.fetch_coingecko_data, []),
     ]
 
@@ -3684,9 +3978,6 @@ async def trigger_scout_run(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_do)
     return {"status": "started", "run_id": run_id}
-
-
-# (ClawStreet endpoints rimossi)
 
 
 @app.get("/api/portfolio/history")

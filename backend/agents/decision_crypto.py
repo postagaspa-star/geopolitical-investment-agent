@@ -2,11 +2,11 @@
 Decision Crypto Agent — DeepSeek-R1 reasoning, focus ESCLUSIVO crypto 24/7.
 
 Riceve l'output di technical_crypto.py + buffer intelligence + report aggregati
-+ documenti specifici crypto. Decide se eseguire trade su crypto ClawStreet.
++ documenti specifici crypto. Decide se eseguire trade su crypto.
 
 Differenze rispetto a decision.py:
-  - SOLO crypto: pre-validation hard-fails su qualunque ticker non in
-    ClawStreet's crypto subset
+  - SOLO crypto: pre-validation hard-fails su qualunque ticker non nel
+    subset crypto supportato (14 ticker)
   - Documenti separati: carica solo doc con category='crypto' (non i doc
     generici dei mercati equity)
   - Prompt specializzato su rischio crypto: leverage, liquidation, depeg,
@@ -59,7 +59,7 @@ CRYPTO_COOLDOWN_SECONDS = 50 * 60   # 50 min: lascia 10 min di margine vs schedu
 CRYPTO_DECISION_PROMPT_DEFAULT = """Sei il Decision Agent CRYPTO di GeoInvest AI — sistema autonomo focalizzato ESCLUSIVAMENTE sui mercati crypto (BTC, ETH, SOL, ecc.).
 
 UNIVERSO INVESTIBILE — VINCOLO RIGIDO:
-Solo i 14 ticker crypto supportati da ClawStreet (formato yfinance):
+Solo i 14 ticker crypto supportati (formato yfinance):
   BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD,
   LTC-USD, DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD.
 
@@ -816,9 +816,50 @@ def _load_crypto_documents(database) -> list[dict]:
 
 
 def _build_context(tech_report: dict, recent_buffer: list, portfolio_state: dict,
-                   crypto_docs: list) -> str:
+                   crypto_docs: list,
+                   focus_tickers: list[str] | None = None,
+                   watchdog_reason: str | None = None) -> str:
     parts = []
     parts.append(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+
+    # === WATCHDOG TRIGGER (in cima, alta priorita') — incluso REBALANCE ===
+    if focus_tickers or watchdog_reason:
+        is_rebalance = bool(watchdog_reason and watchdog_reason.upper().startswith("REBALANCE"))
+        wd_lines = ["=" * 60]
+        if is_rebalance:
+            wd_lines.append("⚠️  WATCHDOG REBALANCE TRIGGER — RIDUZIONE RISCHIO OBBLIGATORIA ⚠️")
+        else:
+            wd_lines.append("⚠️  WATCHDOG TRIGGER — INPUT PRIORITARIO ⚠️")
+        wd_lines.append("=" * 60)
+        if watchdog_reason:
+            wd_lines.append(f"Motivo: {watchdog_reason}")
+        if focus_tickers:
+            label = ("POSIZIONE OVERWEIGHT da ridurre"
+                     if is_rebalance else "FOCUS TICKERS")
+            wd_lines.append(f"{label}: {', '.join(focus_tickers)}")
+        wd_lines.append("")
+        if is_rebalance:
+            wd_lines.append("ISTRUZIONI OBBLIGATORIE — REBALANCE crypto:")
+            wd_lines.append(
+                "  1. La posizione mostrata sopra ha superato il 35% del NAV. "
+                "    Concentrazione eccessiva = rischio non controllato."
+            )
+            wd_lines.append(
+                "  2. ESEGUI un SELL PARZIALE per riportare la posizione "
+                "    sotto il 25% del NAV (le crypto sono piu' volatili: "
+                "    riduci a target piu' basso vs equity)."
+            )
+            wd_lines.append(
+                "  3. NON aggiungere a questa posizione (no BUY) finche' "
+                "    rimane sopra-soglia."
+            )
+            wd_lines.append(
+                "  4. Workflow standard 4 fasi obbligatorio: "
+                "    commit_initial_assessment → request_crypto_technical_analysis "
+                "    → commit_final_thesis → execute_trade SELL."
+            )
+        wd_lines.append("=" * 60)
+        parts.append("\n".join(wd_lines))
 
     # === OBIETTIVI ATTIVI (impegni dei run precedenti) ===
     try:
@@ -1067,13 +1108,20 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
 
 # ─── Main entry ─────────────────────────────────────────────────────────────
 
-async def run_crypto_decision(run_id: str, tech_report: dict | None) -> dict:
+async def run_crypto_decision(run_id: str, tech_report: dict | None,
+                               focus_tickers: list[str] | None = None,
+                               watchdog_reason: str | None = None) -> dict:
     """Esegue il Decision Crypto Agent con DeepSeek-R1 reasoning.
 
     NOTA: tech_report e' Optional. Nel workflow a 4 fasi (default ora),
     l'orchestrator passa None: il Decision Crypto deve richiedere il
     tech_report via tool durante la FASE 2. Per back-compat con chiamate
     legacy che lo passano come dict, accettiamo entrambi i casi.
+
+    Args:
+        focus_tickers: ticker prioritari indicati dal Watchdog (es. rebalance)
+        watchdog_reason: motivo del trigger (se inizia con "REBALANCE:" il
+                         Decision riceve istruzioni di SELL parziale).
     """
     import database
     from agents.scout import get_recent_buffer
@@ -1090,7 +1138,10 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None) -> dict:
     portfolio_state = portfolio.get_portfolio_state()
     crypto_docs = _load_crypto_documents(database)
 
-    user_message = _build_context(tech_report, recent_buffer, portfolio_state, crypto_docs)
+    user_message = _build_context(
+        tech_report, recent_buffer, portfolio_state, crypto_docs,
+        focus_tickers=focus_tickers, watchdog_reason=watchdog_reason,
+    )
 
     database.insert_agent_log(run_id, "DECISION_CRYPTO_CONTEXT", json.dumps({
         "tech_engine": tech_report.get("engine", "deferred_to_decision"),

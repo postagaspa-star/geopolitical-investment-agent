@@ -271,10 +271,13 @@ function CommitmentsPanel({ agentType, accentColor }) {
 
   useEffect(() => {
     loadItems();
-    // refresh ogni 60s in background
+    // refresh ogni 60s in background.
+    // NOTA: loadItems usa agentType via closure; ricreare l'effect ad ogni
+    // cambio di agentType e' il comportamento corretto (cambia categoria →
+    // ricarica). Non includiamo loadItems nelle deps perche' verrebbe
+    // ricreata ad ogni render dei sibling state, causando reset del setInterval.
     const id = setInterval(loadItems, 60000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentType]);
 
   const cancelItem = async (id) => {

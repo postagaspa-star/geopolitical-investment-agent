@@ -1,12 +1,12 @@
 """
-Technical Crypto Agent — DeepSeek-V3, focus ESCLUSIVO crypto ClawStreet 24/7.
+Technical Crypto Agent — DeepSeek-V3, focus ESCLUSIVO crypto 24/7.
 
 Differenze rispetto a technical.py:
-  - Universo HARD-LIMITED ai 14 ticker crypto supportati da ClawStreet
+  - Universo HARD-LIMITED ai 14 ticker crypto supportati
     (BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD,
     LTC-USD, DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD)
-  - Ogni ticker richiesto viene validato via clawstreet_universe.is_supported()
-    PRIMA di chiamare DeepSeek; ticker non-crypto / non-supportati → skip
+  - Ogni ticker richiesto viene validato contro questa lista PRIMA di
+    chiamare DeepSeek; ticker non-crypto / non-supportati → skip
   - Prompt specializzato su tecnica crypto: volumi 24h, funding rate,
     on-chain flow, wallet activity, sentiment retail (X/Reddit), non gap
     di apertura, alta sensibilità a sentiment regulatorio.
@@ -30,9 +30,8 @@ logger = logging.getLogger(__name__)
 DEEPSEEK_MODEL = "deepseek-chat"   # V3
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# Hard-limit dei 14 ticker crypto supportati da ClawStreet.
-# La verifica live via clawstreet_universe.is_supported() li include sempre,
-# ma teniamo questa lista come default per i run senza Watchdog focus.
+# Hard-limit dei 14 ticker crypto supportati. Default per i run senza
+# Watchdog focus. La validazione runtime usa la stessa lista.
 DEFAULT_CRYPTO_UNIVERSE = [
     "BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "AVAX-USD",
     "ADA-USD", "XRP-USD", "LTC-USD", "DOT-USD", "LINK-USD",
@@ -243,7 +242,7 @@ async def _call_deepseek(context: str, max_retries: int = 2) -> tuple[str, str]:
     raise ValueError(f"DeepSeek-V3 failed after {max_retries} attempts: {last_error}")
 
 
-def _filter_to_clawstreet_crypto(tickers: list[str]) -> list[str]:
+def _filter_to_supported_crypto(tickers: list[str]) -> list[str]:
     """
     Filtra una lista di ticker tenendo solo le crypto (suffisso -USD o
     prefisso X:). Validazione contro l'universo hard-coded
@@ -257,6 +256,8 @@ def _filter_to_clawstreet_crypto(tickers: list[str]) -> list[str]:
         if is_crypto and t_up in valid:
             out.append(t_up)
     return out
+
+
 
 
 async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) -> dict:
@@ -278,13 +279,13 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
         tickers = ["BTC-USD", "ETH-USD", "SOL-USD",
                    "DOGE-USD", "AVAX-USD", "LINK-USD"]
 
-    # Pre-validation: solo crypto supportate da ClawStreet
+    # Pre-validation: solo crypto supportate (universo hard-coded a 14 ticker)
     original_count = len(tickers)
-    tickers = _filter_to_clawstreet_crypto(tickers)
+    tickers = _filter_to_supported_crypto(tickers)
     filtered_count = original_count - len(tickers)
 
     if not tickers:
-        msg = "Nessun ticker valido (crypto + ClawStreet-supported) → skip Technical Crypto"
+        msg = "Nessun ticker valido (crypto supportato) → skip Technical Crypto"
         logger.warning("[%s][TECH-CRYPTO] %s", run_id, msg)
         try:
             database.insert_agent_log(run_id, "TECH_CRYPTO", json.dumps({

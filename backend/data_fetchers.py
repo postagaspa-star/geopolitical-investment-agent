@@ -753,23 +753,6 @@ def get_all_watchlist_tickers() -> List[str]:
 
 
 # ============================================================
-# Trade mirror (no-op stub — ClawStreet integration removed)
-# ============================================================
-
-
-async def mirror_trade_to_clawstreet(
-    bot_id: str = "", api_key: str = "", symbol: str = "", action: str = "",
-    qty: int = 0, reasoning: str = ""
-) -> Dict[str, Any]:
-    """
-    No-op stub. ClawStreet integration was removed; this function
-    preserves the call signature so existing callers in execute_buy/sell
-    do not break.
-    """
-    return {"mirrored": False, "reason": "ClawStreet integration removed"}
-
-
-# ============================================================
 # Finnhub Congressional Trades
 # ============================================================
 

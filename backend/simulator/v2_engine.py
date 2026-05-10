@@ -190,11 +190,21 @@ async def fetch_prices_at_date(
 # PORTFOLIO ENGINE — apply trades, compute P&L
 # ═════════════════════════════════════════════════════════════════════════
 
-def make_initial_portfolio(initial_capital: float) -> dict:
-    """Portafoglio vuoto al T0."""
+def make_initial_portfolio(initial_capital: float,
+                            commission_bps: float | None = None) -> dict:
+    """
+    Portafoglio vuoto al T0.
+
+    commission_bps: 10 bps default = 0.10% per trade. Pass 0 per test
+    "no fees" (slippage rerun comparativo).
+    """
+    from simulator.metrics import normalize_commission_bps
+    bps = normalize_commission_bps(commission_bps)
     return {
         "cash": float(initial_capital),
         "initial_capital": float(initial_capital),
+        "commission_bps": bps,
+        "total_commissions_paid": 0.0,
         "positions": [],   # list of {asset, quantity, avg_entry_price, side: 'long'|'short'}
     }
 
@@ -246,13 +256,31 @@ def compute_portfolio_value(portfolio: dict, prices: dict[str, float]) -> dict:
         "total_pnl_pct": round(total_pnl_pct, 2),
         "initial_capital": initial,
         "positions": enriched_positions,
+        # Commissioni: utili per la UI ("hai pagato $X di fees finora")
+        # e per il rerun slippage sensitivity.
+        "commission_bps": float(portfolio.get("commission_bps", 0) or 0),
+        "total_commissions_paid": round(
+            float(portfolio.get("total_commissions_paid", 0) or 0), 2
+        ),
     }
 
 
-def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) -> dict:
+def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
+                  commission_bps: float | None = None) -> dict:
     """
-    Applica una lista di trade al portfolio.
+    Applica una lista di trade al portfolio con simulazione commissioni/slippage.
     Modifica il portfolio (mutativo) e ritorna il nuovo stato.
+
+    Args:
+      portfolio: stato corrente {cash, positions, ...}
+      trades: lista di {action, asset, allocation_pct, ...}
+      prices: prezzi correnti {ticker: price}
+      commission_bps: costo per trade in basis points (default 10 = 0.10%).
+                       Sottratto dal cash su BUY (oltre al cost) e dal proceeds
+                       su SELL. Senza questo, il sim era leggermente troppo
+                       ottimistico — i trade aggressivi sembravano "gratis"
+                       e l'AI sviluppava strategie irrealistiche.
+                       Pass 0 per disabilitare (rerun "no fees" comparativo).
 
     Logica:
       - BUY su asset esistente long → aumenta quantity, ricalcola avg_entry
@@ -261,10 +289,23 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
       - SELL su asset NON esistente → apre short
       - SELL su asset esistente short → aumenta short (avg_entry ricalcolato)
     """
+    from simulator.metrics import normalize_commission_bps, commission_amount
+
+    # Risolvi commission_bps. Priorita':
+    # 1. parametro esplicito (override del caller, es. slippage rerun)
+    # 2. portfolio.commission_bps (settato a start_run dal client/server)
+    # 3. default 10 bps
+    if commission_bps is None:
+        commission_bps = portfolio.get("commission_bps")
+    commission_bps = normalize_commission_bps(commission_bps)
+    fee_factor = commission_bps / 10_000.0   # 10 bps → 0.001
+
     # Copia profonda per non mutare l'input
     new_portfolio = {
         "cash": float(portfolio.get("cash", 0)),
         "initial_capital": float(portfolio.get("initial_capital", 0)),
+        "commission_bps": commission_bps,
+        "total_commissions_paid": float(portfolio.get("total_commissions_paid", 0)),
         "positions": [
             {**p} for p in (portfolio.get("positions") or [])
         ],
@@ -303,7 +344,8 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
         # Trade-record builder che riflette gli effettivi valori eseguiti
         # (FIX: prima si scriveva l'allocation_pct ORIGINALE anche dopo
         # scaling per cash insufficient → confondeva la diagnostica).
-        def _record(executed_qty: float, status: str, **extra) -> dict:
+        def _record(executed_qty: float, status: str, fee: float = 0.0,
+                    **extra) -> dict:
             ev = executed_qty * price
             actual_pct = (ev / total_value_now * 100) if total_value_now else 0
             return {
@@ -312,41 +354,48 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                 "executed_price": round(price, 4),
                 "executed_value": round(ev, 2),
                 "actual_allocation_pct": round(actual_pct, 2),
+                "commission": round(fee, 4),
+                "commission_bps": commission_bps,
                 **extra,
             }
 
         if action == "BUY":
-            cost = quantity * price
-            if cost > new_portfolio["cash"] + 0.01:
-                # Cash insufficiente: scala al massimo possibile
-                quantity = round(new_portfolio["cash"] / price, 4)
-                cost = quantity * price
+            gross_cost = quantity * price
+            fee = commission_amount(gross_cost, commission_bps)
+            total_cost = gross_cost + fee
+            if total_cost > new_portfolio["cash"] + 0.01:
+                # Cash insufficiente: scala al massimo possibile INCLUDENDO la
+                # commissione (max_qty * price * (1 + fee_factor) = cash).
+                effective_unit_cost = price * (1 + fee_factor)
+                quantity = round(new_portfolio["cash"] / effective_unit_cost, 4)
                 if quantity <= 0:
                     applied_trades.append({**trade, "status": "skipped",
                                            "reason": "cash exhausted"})
                     continue
-            new_portfolio["cash"] -= cost
+                gross_cost = quantity * price
+                fee = commission_amount(gross_cost, commission_bps)
+                total_cost = gross_cost + fee
+            new_portfolio["cash"] -= total_cost
+            new_portfolio["total_commissions_paid"] += fee
             if existing and existing.get("side") == "long":
                 new_qty = existing["quantity"] + quantity
                 new_avg = (existing["avg_entry_price"] * existing["quantity"]
                            + price * quantity) / new_qty
                 existing["quantity"] = round(new_qty, 4)
                 existing["avg_entry_price"] = round(new_avg, 4)
-                applied_trades.append(_record(quantity, "executed_add_long"))
+                applied_trades.append(_record(quantity, "executed_add_long", fee=fee))
             elif existing and existing.get("side") == "short":
                 # BUY su SHORT = riacquista (chiude). FIX accounting:
                 # all'apertura dello short avevamo INCASSATO avg*qty nel cash.
-                # Ora paghiamo `cost = quantity*price` (già scalato sopra).
+                # Ora paghiamo `gross_cost = quantity*price` + commissione.
                 # Il P&L sul close è IMPLICITO nel cash flow netto:
-                #   net = -close_qty*price (paid now) + close_qty*avg (received past) = (avg-price)*close_qty
-                # NON va aggiunto manualmente — sarebbe doppio conteggio.
+                #   net = -close_qty*price - fee_open - fee_close + close_qty*avg
+                # La fee qui copre l'intera quantity (close + eventuale residual).
                 close_qty = min(quantity, existing["quantity"])
                 pnl_realized = (existing["avg_entry_price"] - price) * close_qty
                 existing["quantity"] -= close_qty
                 if existing["quantity"] <= 0.0001:
                     new_portfolio["positions"].remove(existing)
-                # Residuo → apre LONG netto sul prezzo corrente.
-                # Cost del residuo già scalato nel `cost = quantity*price` iniziale.
                 residual = quantity - close_qty
                 if residual > 0:
                     new_portfolio["positions"].append({
@@ -356,15 +405,13 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                         "conviction": trade.get("conviction", "MEDIA"),
                     })
                     applied_trades.append(_record(quantity, "executed_flip_short_to_long",
+                                                   fee=fee,
                                                    close_qty=round(close_qty, 4),
                                                    pnl_realized=round(pnl_realized, 2),
                                                    long_residual=round(residual, 4)))
                 else:
-                    # Solo close: il cost incluso per close_qty è > di quanto serviva.
-                    # Restituisci la differenza (= cost - close_qty*price). Nota:
-                    # se quantity == close_qty (no residual), cost = close_qty*price
-                    # quindi differenza = 0. Niente da restituire.
                     applied_trades.append(_record(close_qty, "executed_close_short",
+                                                   fee=fee,
                                                    pnl_realized=round(pnl_realized, 2)))
             else:
                 new_portfolio["positions"].append({
@@ -373,22 +420,28 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                     "thesis": trade.get("thesis", "")[:300],
                     "conviction": trade.get("conviction", "MEDIA"),
                 })
-                applied_trades.append(_record(quantity, "executed_open_long"))
+                applied_trades.append(_record(quantity, "executed_open_long", fee=fee))
 
         else:  # SELL
             if existing and existing.get("side") == "long":
                 # Chiude/riduce long. FIX: se qty supera il long, il residuo
                 # apre uno SHORT netto (prima si scartava il residuo).
                 close_qty = min(quantity, existing["quantity"])
-                proceeds = close_qty * price
-                new_portfolio["cash"] += proceeds
+                gross_proceeds = close_qty * price
+                fee_close = commission_amount(gross_proceeds, commission_bps)
+                net_proceeds = gross_proceeds - fee_close
+                new_portfolio["cash"] += net_proceeds
+                new_portfolio["total_commissions_paid"] += fee_close
                 existing["quantity"] -= close_qty
                 if existing["quantity"] <= 0.0001:
                     new_portfolio["positions"].remove(existing)
                 residual = quantity - close_qty
                 if residual > 0:
-                    short_proceeds = residual * price
-                    new_portfolio["cash"] += short_proceeds
+                    # Apre SHORT netto col residuo: incassa proceeds netti
+                    short_gross = residual * price
+                    fee_short = commission_amount(short_gross, commission_bps)
+                    new_portfolio["cash"] += short_gross - fee_short
+                    new_portfolio["total_commissions_paid"] += fee_short
                     new_portfolio["positions"].append({
                         "asset": asset, "quantity": round(residual, 4),
                         "avg_entry_price": round(price, 4), "side": "short",
@@ -396,23 +449,32 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                         "conviction": trade.get("conviction", "MEDIA"),
                     })
                     applied_trades.append(_record(quantity, "executed_flip_long_to_short",
+                                                   fee=fee_close + fee_short,
                                                    close_qty=round(close_qty, 4),
                                                    short_residual=round(residual, 4)))
                 else:
                     applied_trades.append(_record(close_qty, "executed_close_long",
-                                                   proceeds=round(proceeds, 2)))
+                                                   fee=fee_close,
+                                                   proceeds=round(net_proceeds, 2)))
             elif existing and existing.get("side") == "short":
+                gross_proceeds = quantity * price
+                fee = commission_amount(gross_proceeds, commission_bps)
+                net_proceeds = gross_proceeds - fee
                 new_qty = existing["quantity"] + quantity
                 new_avg = (existing["avg_entry_price"] * existing["quantity"]
                            + price * quantity) / new_qty
                 existing["quantity"] = round(new_qty, 4)
                 existing["avg_entry_price"] = round(new_avg, 4)
-                # Incassa il proceeds anche sull'aumento short
-                new_portfolio["cash"] += quantity * price
-                applied_trades.append(_record(quantity, "executed_add_short"))
+                # Incassa il proceeds NETTO anche sull'aumento short
+                new_portfolio["cash"] += net_proceeds
+                new_portfolio["total_commissions_paid"] += fee
+                applied_trades.append(_record(quantity, "executed_add_short", fee=fee))
             else:
-                proceeds = quantity * price
-                new_portfolio["cash"] += proceeds
+                gross_proceeds = quantity * price
+                fee = commission_amount(gross_proceeds, commission_bps)
+                net_proceeds = gross_proceeds - fee
+                new_portfolio["cash"] += net_proceeds
+                new_portfolio["total_commissions_paid"] += fee
                 new_portfolio["positions"].append({
                     "asset": asset, "quantity": quantity,
                     "avg_entry_price": price, "side": "short",
@@ -420,8 +482,13 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float]) 
                     "conviction": trade.get("conviction", "MEDIA"),
                 })
                 applied_trades.append(_record(quantity, "executed_open_short",
-                                               proceeds=round(proceeds, 2)))
+                                               fee=fee,
+                                               proceeds=round(net_proceeds, 2)))
 
+    # Round dei totali per pulizia
+    new_portfolio["total_commissions_paid"] = round(
+        new_portfolio["total_commissions_paid"], 2
+    )
     return {"portfolio": new_portfolio, "applied_trades": applied_trades}
 
 
@@ -645,18 +712,25 @@ def extract_prices_at_date(
 
 async def start_run(
     category: str, num_steps: int, scenario_id: Optional[str] = None,
-    initial_capital: float = 100000.0
+    initial_capital: float = 100000.0,
+    commission_bps: float | None = None,
+    run_mode: str = "manual",
 ) -> dict:
     """
     Inizializza una nuova partita simulator V2.
     Ritorna il payload completo (scenario + step_dates + portfolio iniziale
-    + price_series complete pre-fetched) da consegnare al client.
+    + price_series complete pre-fetched + benchmark SPY) da consegnare al client.
 
     Pre-fetch ALL prices at start: garantisce che tutti gli step abbiano
     prezzi disponibili e che il P&L sia computabile in modo deterministico
     senza dipendere da Polygon disponibilità a runtime.
+
+    commission_bps: costo per trade in basis points (default 10 bps = 0.10%).
+    Pre-baked nel portfolio: ogni step lo eredita automaticamente.
+    Pass 0 per test "no fees" comparativo (slippage rerun).
     """
     from simulator import scenarios as _scen
+    from simulator.metrics import normalize_commission_bps
 
     if scenario_id:
         scenario = _scen.get_scenario_by_id(scenario_id)
@@ -673,8 +747,15 @@ async def start_run(
     hardcoded_t0 = {m["ticker"]: float(m["price_t0"])
                     for m in scenario.get("market_data", [])}
 
+    # Garantisce SPY nel pool del prefetch per il benchmark equity curve.
+    # Anche se SPY non e' nell'universe (l'AI non puo' tradarlo), serve per
+    # disegnare la linea S&P sovrapposta a quella del portafoglio.
+    fetch_pool = list(universe)
+    if "SPY" not in fetch_pool:
+        fetch_pool.append("SPY")
+
     # Pre-fetch SERIE COMPLETA di tutti i prezzi per tutti gli step
-    price_series = await fetch_full_price_series(universe, step_dates, hardcoded_t0)
+    price_series = await fetch_full_price_series(fetch_pool, step_dates, hardcoded_t0)
     t0_prices = extract_prices_at_date(price_series, step_dates[0])
 
     # Diagnostica: quanti ticker hanno dati reali vs fallback
@@ -683,7 +764,47 @@ async def start_run(
     logger.info("[SIM-V2] start_run scenario=%s steps=%d, %d/%d ticker con prezzi completi",
                 scenario["id"], num_steps, real_count, len(universe))
 
-    portfolio = make_initial_portfolio(initial_capital)
+    bps = normalize_commission_bps(commission_bps)
+    portfolio = make_initial_portfolio(initial_capital, commission_bps=bps)
+
+    # ── Tracking ID per la live progress dashboard ────────────────────────
+    # Il client carry-forward this ID nel scenario, gli endpoint /step e
+    # /finalize lo usano per aggiornare active_runs registry.
+    tracking_id = str(uuid4())
+    try:
+        from simulator import active_runs as _ar
+        _ar.register(
+            run_id=tracking_id, engine="v2_equity", mode=run_mode,
+            category=scenario.get("category", "?"),
+            scenario_id=scenario.get("id", "?"),
+            scenario_title=scenario.get("title", ""),
+            total_steps=num_steps,
+        )
+    except Exception as e:
+        logger.debug("[SIM-V2] active_runs register fallita: %s", e)
+
+    # ── Carica advice memory UNA SOLA VOLTA al start del run ─────────────
+    # Stesso pattern del V1 runner. Lo storiamo nello scenario cosi' il client
+    # lo rispedisce ad ogni step e l'execute_step lo inietta nel system prompt.
+    # increment_apply_count una sola volta al start (non per ogni step).
+    advice_block_text = ""
+    advice_meta = {"category_key": "", "ids": []}
+    try:
+        from agents import sim_advisor
+        block, cat_key, ids = sim_advisor.get_advice_block_for_runner(
+            scenario, max_items=5
+        )
+        if block:
+            advice_block_text = block
+            advice_meta = {"category_key": cat_key, "ids": ids}
+            try:
+                sim_advisor.increment_apply_count(ids, cat_key)
+            except Exception:
+                pass
+            logger.info("[SIM-V2] iniettati %d advice per categoria %s",
+                        len(ids), cat_key)
+    except Exception as e:
+        logger.debug("[SIM-V2] advice injection skipped: %s", e)
 
     return {
         "scenario": {
@@ -698,8 +819,17 @@ async def start_run(
             "step_dates": step_dates,   # [T0, T+1w, ..., T+Nw]
             "headlines_master": scenario.get("headlines", []),
             # SERIE PREZZI PRE-FETCH: il client non chiama più Polygon
-            # per gli step. Tutti i prezzi sono già qui dentro.
+            # per gli step. Tutti i prezzi sono già qui dentro (compreso SPY).
             "price_series": price_series,
+            "benchmark_ticker": "SPY",   # marker per UI/finalize
+            "commission_bps": bps,
+            # Advice memory pre-caricata: il client la rispedisce ad ogni
+            # step → execute_step la inietta nel system prompt.
+            "advice_block": advice_block_text,
+            "advice_meta": advice_meta,
+            # Tracking ID per la "Run in corso" dashboard
+            "tracking_id": tracking_id,
+            "run_mode": run_mode,
         },
         "portfolio": portfolio,
         "t0_prices": t0_prices,
@@ -743,6 +873,15 @@ async def execute_step(
     if step_index >= num_steps:
         raise ValueError(f"step_index {step_index} >= num_steps {num_steps}")
 
+    # Tracking: aggiorna registry "calling_ai" prima della chiamata R1
+    tracking_id = scenario.get("tracking_id")
+    if tracking_id:
+        try:
+            from simulator import active_runs as _ar
+            _ar.update_step(tracking_id, step_index, status="calling_ai")
+        except Exception:
+            pass
+
     target_date = step_dates[step_index]
     universe = scenario.get("asset_universe", [])
     price_series = scenario.get("price_series", {})
@@ -776,16 +915,28 @@ async def execute_step(
         headlines, history, step_index, num_steps, target_date
     )
 
-    # 5. Call AI — inietta direttive utente in cima al system prompt
+    # 5. Call AI — inietta direttive utente + advice memory in cima al system prompt
     try:
         from agents.decision import _build_directives_block
         sys_prompt = _build_directives_block() + SIM_V2_SYSTEM_PROMPT
     except Exception:
         sys_prompt = SIM_V2_SYSTEM_PROMPT
+    # Advice memory: pre-caricata da start_run e veicolata via scenario.
+    # Stesso pattern dei "MEMORIA — run recenti" del V1, ma stateless: il
+    # blocco e' calcolato una volta sola al T0 e rispedito ad ogni step.
+    advice_block = (scenario.get("advice_block") or "").strip()
+    if advice_block:
+        sys_prompt = advice_block + "\n\n" + ("═" * 60) + "\n" + sys_prompt
     raw = await _call_r1(sys_prompt, user_msg)
     parsed = _parse_response(raw)
 
-    # 6. Apply trades
+    # 6. Apply trades — aggiorna lo status del registry
+    if tracking_id:
+        try:
+            from simulator import active_runs as _ar
+            _ar.update_status(tracking_id, "applying_trades")
+        except Exception:
+            pass
     apply_result = apply_trades(portfolio, parsed["trades"], prices)
     new_portfolio = apply_result["portfolio"]
     applied_trades = apply_result["applied_trades"]
@@ -935,7 +1086,7 @@ def _build_step_message(
 
 async def finalize_run(
     scenario: dict, portfolio: dict, history: list[dict],
-    persist: bool = True
+    persist: bool = True, run_mode: str = "manual",
 ) -> dict:
     """
     Chiude la simulazione:
@@ -990,8 +1141,17 @@ async def finalize_run(
     full_scenario = _scen.get_scenario_by_id(scenario.get("id", ""))
     reveal = full_scenario.get("description_reveal", "") if full_scenario else ""
 
-    # Costruisci serie portfolio_value per chart
-    portfolio_value_series = []
+    # Costruisci serie portfolio_value per chart.
+    # T0 = capitale iniziale (prima di qualunque trade). Senza questo punto la
+    # equity curve "parte" dal valore dopo il primo step e perde il segmento
+    # iniziale di crescita/perdita.
+    initial = float(final_valuation.get("initial_capital",
+                     final_valuation.get("total_value", 100000)))
+    portfolio_value_series = [{
+        "step_index": -1,
+        "step_date": step_dates[0],
+        "value": initial,
+    }]
     for h in history:
         portfolio_value_series.append({
             "step_index": h.get("step_index"),
@@ -1004,6 +1164,14 @@ async def finalize_run(
         "step_date": final_date,
         "value": final_valuation.get("total_value"),
     })
+
+    # ── Benchmark equity curve (SPY) sovrapposta al portafoglio ────────────
+    # Stessa cadenza degli step: $initial all'inizio, scalato per il return SPY
+    # cumulato a ogni data. Permette al chart "Equity vs Benchmark" di mostrare
+    # le due linee sulla stessa scala.
+    benchmark_value_series = _build_benchmark_value_series(
+        price_series, "SPY", step_dates, initial, history, final_date
+    )
 
     # Per-asset performance breakdown (cosa ha guadagnato/perso ciascuna posizione)
     asset_breakdown = []
@@ -1019,6 +1187,17 @@ async def finalize_run(
             "unrealized_pnl_pct": p["unrealized_pnl_pct"],
         })
 
+    # ── METRICHE QUANTITATIVE: Sharpe, MDD, Profit Factor, Expectancy, ecc.
+    # Calcolate da metrics.py su equity_curve + history.
+    from simulator import metrics as _metrics
+    quant_metrics = _metrics.compute_all_metrics(
+        equity_curve=portfolio_value_series,
+        history=history,
+        final_valuation=final_valuation,
+        step_unit_days=7.0,
+        periods_per_year=_metrics.ANNUALIZATION_EQUITY,
+    )
+
     # Debrief AI
     debrief = await _generate_debrief(scenario, history, final_valuation,
                                        benchmark_pnl_pct, reveal)
@@ -1029,6 +1208,7 @@ async def finalize_run(
         "final_prices": final_prices,
         "final_valuation": final_valuation,
         "benchmark_spy_pnl_pct": benchmark_pnl_pct,
+        "benchmark_value_series": benchmark_value_series,   # per chart vs benchmark
         "outcome": _classify_outcome(final_valuation, benchmark_pnl_pct),
         "debrief": debrief,
         "description_reveal": reveal,
@@ -1037,17 +1217,98 @@ async def finalize_run(
         "asset_breakdown": asset_breakdown,                 # per breakdown UI
         "price_series": price_series,                       # per chart prezzi
         "step_dates": step_dates,
+        # Metriche quantitative + dataset per i grafici statistici
+        "quant_metrics": quant_metrics,
+        # Riassunto fees per UI
+        "total_commissions_paid": float(
+            final_valuation.get("total_commissions_paid", 0) or 0
+        ),
+        "commission_bps": float(final_valuation.get("commission_bps", 0) or 0),
     }
 
     if persist:
+        # Tracking: marca finalizing prima del persist
+        tracking_id = scenario.get("tracking_id")
+        if tracking_id:
+            try:
+                from simulator import active_runs as _ar
+                _ar.update_status(tracking_id, "finalizing")
+            except Exception:
+                pass
         try:
-            persisted_id = _persist_run(scenario, history, result)
+            persisted_id = _persist_run(scenario, history, result, run_mode=run_mode)
             result["persisted_run_id"] = persisted_id
         except Exception as e:
             logger.error("[SIM-V2] persist failed: %s", e, exc_info=True)
             result["persist_error"] = str(e)[:200]
+        # Tracking: marca completed (anche su persist fail, il run e' fatto)
+        if tracking_id:
+            try:
+                from simulator import active_runs as _ar
+                _ar.mark_completed(
+                    tracking_id,
+                    outcome=result.get("outcome"),
+                    pnl_pct=(result.get("final_valuation") or {}).get("total_pnl_pct"),
+                    persisted_run_id=result.get("persisted_run_id"),
+                )
+            except Exception:
+                pass
 
     return result
+
+
+def _build_benchmark_value_series(
+    price_series: dict[str, dict[str, float]], benchmark_ticker: str,
+    step_dates: list[str], initial: float,
+    history: list[dict], final_date: str,
+) -> list[dict]:
+    """
+    Costruisce la equity curve del benchmark (SPY o BTC) sulla stessa cadenza
+    di step della partita. Allineata 1-a-1 col portfolio_value_series cosi'
+    la UI puo' sovrapporre le due linee sullo stesso asse temporale.
+
+    Strategia:
+      - T0: $initial
+      - Ad ogni step_date: $initial * (price_at_step / price_at_T0)
+
+    Se il benchmark non ha dati (nessuna serie), ritorna lista vuota → il
+    chart mostra solo il portfolio.
+    """
+    bench = price_series.get(benchmark_ticker, {})
+    if not bench:
+        return []
+    t0 = bench.get(step_dates[0])
+    if not t0 or t0 <= 0:
+        return []
+
+    # Punto T0
+    out = [{"step_index": -1, "step_date": step_dates[0], "value": round(initial, 2)}]
+    # Per ogni step della history, prendi il valore del benchmark a quella data
+    for h in history or []:
+        sd = h.get("step_date")
+        bp = bench.get(sd) if sd else None
+        if bp and bp > 0:
+            v = initial * (bp / t0)
+        else:
+            # Se manca il prezzo a quella data, mantieni l'ultimo valore (no jump)
+            v = out[-1]["value"]
+        out.append({
+            "step_index": h.get("step_index"),
+            "step_date": sd,
+            "value": round(v, 2),
+        })
+    # Punto finale
+    bp_final = bench.get(final_date)
+    if bp_final and bp_final > 0:
+        v_final = initial * (bp_final / t0)
+    else:
+        v_final = out[-1]["value"]
+    out.append({
+        "step_index": len(history) if history else 0,
+        "step_date": final_date,
+        "value": round(v_final, 2),
+    })
+    return out
 
 
 def _classify_outcome(valuation: dict, benchmark_pct: Optional[float]) -> str:
@@ -1229,10 +1490,15 @@ Stile delle risposte:
         return f"Errore advisor: {str(e)[:200]}"
 
 
-def _persist_run(scenario: dict, history: list[dict], final_result: dict) -> str:
+def _persist_run(scenario: dict, history: list[dict], final_result: dict,
+                  run_mode: str = "manual") -> str:
     """
     Salva la simulazione completata su Supabase per memoria storica.
     Usa la tabella sim_runs esistente (compatibilità con la dashboard).
+
+    run_mode: 'manual' (default, run avviato dall'utente) o 'auto' (run
+    avviato dal job scheduler.simulator_auto_run). Usato da
+    `sim_db.runs_today(mode='auto')` per rispettare il daily_cap.
     """
     from simulator import db as sim_db
     run_id = str(uuid4())
@@ -1260,7 +1526,9 @@ def _persist_run(scenario: dict, history: list[dict], final_result: dict) -> str
     run_data = {
         "id": run_id,
         "completed_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "simulator_v2",
+        # mode='auto' nei run avviati dallo scheduler (per il cap giornaliero);
+        # 'simulator_v2' (default) per i run manuali. Tracciato da runs_today.
+        "mode": "auto" if run_mode == "auto" else "simulator_v2",
         "category": scenario.get("category", "unknown"),
         "scenario_type": "multi" if scenario.get("num_steps", 1) > 1 else "single",
         "steps": scenario.get("num_steps", 1),
@@ -1286,7 +1554,15 @@ def _persist_run(scenario: dict, history: list[dict], final_result: dict) -> str
             "history": history,
             "final_valuation": final_result.get("final_valuation"),
             "benchmark_spy_pnl_pct": final_result.get("benchmark_spy_pnl_pct"),
+            "benchmark_value_series": final_result.get("benchmark_value_series"),
+            "portfolio_value_series": final_result.get("portfolio_value_series"),
             "final_prices": final_result.get("final_prices"),
+            # Metriche quantitative — usate dalla UI Result e per il rerun
+            # slippage sensitivity (re-applicare i trade con commission_bps
+            # diverso).
+            "quant_metrics": final_result.get("quant_metrics"),
+            "total_commissions_paid": final_result.get("total_commissions_paid", 0),
+            "commission_bps": final_result.get("commission_bps", 0),
         },
     }
     sim_db.insert_run(run_data)

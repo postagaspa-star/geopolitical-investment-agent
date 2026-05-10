@@ -8,7 +8,7 @@
 CREATE TABLE IF NOT EXISTS intelligence_buffer (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
-    source_type TEXT NOT NULL,        -- 'GDELT', 'NEWSAPI', 'CLAWSTREET', 'FINNHUB'
+    source_type TEXT NOT NULL,        -- 'GDELT', 'NEWSAPI', 'YFINANCE_NEWS', 'REDDIT', 'X', 'CONGRESSIONAL', 'COINGECKO'
     raw_content TEXT,
     micro_summary TEXT,
     sentiment_score DOUBLE PRECISION DEFAULT 0,  -- -1 to 1

@@ -458,6 +458,174 @@ async def _standard_pipeline_job():
         logger.error("Errore standard pipeline: %s", e, exc_info=True)
 
 
+async def _simulator_auto_run_job():
+    """
+    Simulator auto-mode — ogni 30 minuti.
+
+    Se l'utente ha abilitato la modalita' automatica dalla SimDashboard,
+    questo job scieglie uno scenario random (cyclando le categorie),
+    avvia un run V2 multi-step, lo porta a termine completo (start →
+    N step → finalize) e salva su sim_runs. La memoria advice viene
+    iniettata automaticamente dai prompt V2.
+
+    Vincoli:
+      - Skip se auto_mode_enabled = false
+      - Skip se runs_today >= daily_cap (rispetta il budget configurato)
+      - Skip se DEEPSEEK_API_KEY non configurata
+      - Lock soft via sim_settings.auto_run_in_progress per evitare run
+        sovrapposti (max 1 alla volta)
+      - Timeout 8 min: se sfora, marca il flag come stale al prossimo tick
+
+    Scelta scenario: alterna equity (norm/geo/macro/crash_rally) e crypto
+    in modo round-robin per costruire memoria diversificata. Round-robin
+    state in sim_settings.auto_last_engine.
+    """
+    import asyncio as _asyncio
+    from uuid import uuid4 as _uuid4
+
+    try:
+        from simulator import db as sim_db
+    except Exception as e:
+        logger.warning("[SIM-AUTO] sim_db import failed: %s", e)
+        return
+
+    enabled = sim_db.get_setting("auto_mode_enabled", "false") == "true"
+    if not enabled:
+        return
+
+    # Budget
+    cap = int(sim_db.get_setting("auto_mode_daily_cap", "5") or 5)
+    today = sim_db.runs_today(mode="auto")
+    if today >= cap:
+        logger.info("[SIM-AUTO] cap raggiunto (%d/%d), skip", today, cap)
+        return
+
+    # API key
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        logger.warning("[SIM-AUTO] DEEPSEEK_API_KEY mancante, skip")
+        return
+
+    # Lock soft (cross-pod best-effort)
+    in_progress = sim_db.get_setting("auto_run_in_progress", "") or ""
+    if in_progress:
+        try:
+            from datetime import datetime as _dt
+            ts = _dt.fromisoformat(in_progress.replace("Z", "+00:00"))
+            elapsed = (datetime.now(pytz.utc) - ts).total_seconds() / 60.0
+            if elapsed < 9:
+                logger.info("[SIM-AUTO] altro run in corso da %.1fmin, skip", elapsed)
+                return
+            logger.warning("[SIM-AUTO] lock stale (%.1fmin), forzo riavvio", elapsed)
+        except Exception:
+            # Lock corrotto, lo resetto
+            pass
+
+    sim_db.set_setting("auto_run_in_progress",
+                        datetime.now(pytz.utc).isoformat())
+
+    # Round-robin engine: equity / crypto alternati
+    last_engine = sim_db.get_setting("auto_last_engine", "")
+    use_crypto = (last_engine != "crypto")   # alterna
+    sim_db.set_setting("auto_last_engine", "crypto" if use_crypto else "equity")
+
+    run_id_for_log = "auto-" + str(_uuid4())[:8]
+    logger.info("[SIM-AUTO][%s] avvio run automatico (engine=%s, today=%d/%d)",
+                run_id_for_log, "crypto" if use_crypto else "equity", today, cap)
+
+    try:
+        # Esegue UN run completo (3-5 step equity, 5-7 step crypto) con timeout
+        await _asyncio.wait_for(
+            _execute_one_auto_run(use_crypto, run_id_for_log),
+            timeout=480,   # 8 minuti hard cap
+        )
+    except _asyncio.TimeoutError:
+        logger.error("[SIM-AUTO][%s] TIMEOUT (>8min), abort", run_id_for_log)
+    except Exception as e:
+        logger.error("[SIM-AUTO][%s] crash: %s", run_id_for_log, e, exc_info=True)
+    finally:
+        sim_db.set_setting("auto_run_in_progress", "")
+
+
+async def _execute_one_auto_run(use_crypto: bool, log_id: str):
+    """
+    Esegue UNA partita simulator V2 end-to-end:
+      1. start_run: sceglie random scenario, fetcha prezzi
+      2. execute_step * num_steps: ad ogni step, applica trade dell'AI
+      3. finalize_run: persiste su sim_runs con metriche complete
+
+    Il flag mode='auto' viene poi propagato in `_persist_run` (categoria
+    auto). Cosi' `runs_today(mode="auto")` puo' contarli.
+    """
+    import random as _random
+
+    if use_crypto:
+        from simulator import v2_crypto_engine as engine
+        # Categorie crypto: bull_cycle, crash, regulatory_event, sideways
+        category = _random.choice(["bull_cycle", "crash",
+                                    "regulatory_event", "sideways"])
+        num_steps = _random.choice([5, 6, 7])
+        # run_mode="auto" propaga a active_runs.register e a sim_runs.mode
+        start_kw = {"category": category, "num_steps": num_steps,
+                    "run_mode": "auto"}
+        start_fn = engine.start_crypto_run
+        step_fn = engine.execute_crypto_step
+        finalize_fn = engine.finalize_crypto_run
+        engine_label = "CRYPTO"
+    else:
+        from simulator import v2_engine as engine
+        category = _random.choice(["normale", "geopolitico",
+                                    "macro", "crash_rally"])
+        num_steps = _random.choice([3, 4, 5])
+        start_kw = {"category": category, "num_steps": num_steps,
+                    "run_mode": "auto"}
+        start_fn = engine.start_run
+        step_fn = engine.execute_step
+        finalize_fn = engine.finalize_run
+        engine_label = "EQUITY"
+
+    logger.info("[SIM-AUTO][%s] %s: cat=%s steps=%d",
+                log_id, engine_label, category, num_steps)
+
+    payload = await start_fn(**start_kw)
+    scenario = payload["scenario"]
+    portfolio = payload["portfolio"]
+    history: list = []
+    total = payload["total_steps"]
+    tracking_id = scenario.get("tracking_id")
+
+    for i in range(total):
+        try:
+            step_data = await step_fn(scenario=scenario, portfolio=portfolio,
+                                       history=history, step_index=i)
+            portfolio = step_data["new_portfolio"]
+            history.append(step_data)
+        except Exception as e:
+            logger.error("[SIM-AUTO][%s] step %d crash: %s — abort run",
+                         log_id, i, e)
+            # Marca errore nel registry cosi' l'utente vede il fallimento
+            if tracking_id:
+                try:
+                    from simulator import active_runs as _ar
+                    _ar.mark_error(tracking_id,
+                                    f"step {i} crash: {str(e)[:200]}")
+                except Exception:
+                    pass
+            return
+
+    # finalize_fn accetta run_mode='auto' che propaga al record salvato:
+    # sim_runs.mode = 'auto' → contato da runs_today() per il daily_cap.
+    final_result = await finalize_fn(scenario=scenario, portfolio=portfolio,
+                                      history=history, persist=True,
+                                      run_mode="auto")
+
+    pnl_pct = (final_result.get("final_valuation") or {}).get("total_pnl_pct", 0)
+    sharpe = (final_result.get("quant_metrics") or {}).get("sharpe_ratio")
+    logger.info("[SIM-AUTO][%s] run completato: P&L=%+.2f%% Sharpe=%s outcome=%s",
+                log_id, pnl_pct,
+                f"{sharpe:.2f}" if sharpe is not None else "n/d",
+                final_result.get("outcome"))
+
+
 async def _coach_cards_weekly_job():
     """
     Synthesis settimanale Coach Cards — ogni Lunedì alle 06:00 UTC.
@@ -650,6 +818,22 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+    )
+
+    # ── Simulator AUTO-MODE: ogni 30 minuti ──────────────────────────────
+    # No-op se auto_mode_enabled = false. Quando abilitato, fa girare un
+    # run V2 completo (alterna equity/crypto) rispettando il daily_cap
+    # configurato dalla SimDashboard. Idempotente, lock soft cross-pod.
+    _scheduler.add_job(
+        _simulator_auto_run_job,
+        trigger="interval",
+        minutes=30,
+        id="simulator_auto_mode",
+        name="Simulator auto-mode (30min, opt-in via UI)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=now_utc + timedelta(minutes=2),
     )
 
     _scheduler.start()

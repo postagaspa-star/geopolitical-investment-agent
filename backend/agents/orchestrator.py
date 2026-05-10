@@ -124,7 +124,11 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
             "route": "decision_crypto",
         }))
         try:
-            crypto_result = await run_crypto_pipeline(run_id=run_id)
+            crypto_result = await run_crypto_pipeline(
+                run_id=run_id,
+                focus_tickers=crypto_focus,
+                watchdog_reason=reason,
+            )
         except Exception as e:
             logger.error("[%s][ORCHESTRATOR] Crypto pipeline (event-driven) fallita: %s",
                          run_id, e, exc_info=True)
@@ -240,7 +244,9 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
 # Pipeline Crypto (scheduled ogni 1h, 24/7)
 # ============================================================
 
-async def run_crypto_pipeline(run_id: str | None = None) -> dict:
+async def run_crypto_pipeline(run_id: str | None = None,
+                                focus_tickers: list[str] | None = None,
+                                watchdog_reason: str | None = None) -> dict:
     """
     Pipeline crypto-only ogni 1h, 24/7. Bypassa Watchdog.
 
@@ -249,6 +255,10 @@ async def run_crypto_pipeline(run_id: str | None = None) -> dict:
       2. Decision Crypto (DeepSeek-R1) con tech_report + buffer + doc crypto
       3. Cooldown 50min per evitare doppi run da test manuali
 
+    Args:
+        focus_tickers: ticker prioritari (es. da Watchdog rebalance)
+        watchdog_reason: motivo del trigger (per rebalance routing)
+
     Costo per run: ~$0.0006 (Tech V3) + ~$0.006 (Decision R1) ≈ $0.007
     24 run/giorno × $0.007 = $0.17/giorno ≈ $5/mese
     """
@@ -256,29 +266,36 @@ async def run_crypto_pipeline(run_id: str | None = None) -> dict:
         run_id = str(uuid4())
 
     start = time.time()
-    logger.info("[%s][ORCHESTRATOR] Crypto pipeline avviata", run_id)
+    logger.info("[%s][ORCHESTRATOR] Crypto pipeline avviata%s",
+                run_id, f" (focus={focus_tickers})" if focus_tickers else "")
 
-    # 1. Cooldown check
-    try:
-        from agents.decision_crypto import is_cooldown_active
-        active, seconds_left = is_cooldown_active()
-        if active:
-            logger.info("[%s][ORCHESTRATOR] Cooldown crypto attivo (%ds) — skip",
-                        run_id, seconds_left)
-            return {"run_id": run_id, "skipped": "cooldown",
-                    "cooldown_seconds_left": seconds_left,
-                    "duration_seconds": round(time.time() - start, 2)}
-    except Exception:
-        pass
+    # Rilevazione rebalance: il rebalance deve bypassare il cooldown 50min
+    # perche' e' una protezione del rischio, non discrezionale.
+    is_rebalance = bool(watchdog_reason and watchdog_reason.upper().startswith("REBALANCE"))
+
+    # 1. Cooldown check (saltato se rebalance)
+    if not is_rebalance:
+        try:
+            from agents.decision_crypto import is_cooldown_active
+            active, seconds_left = is_cooldown_active()
+            if active:
+                logger.info("[%s][ORCHESTRATOR] Cooldown crypto attivo (%ds) — skip",
+                            run_id, seconds_left)
+                return {"run_id": run_id, "skipped": "cooldown",
+                        "cooldown_seconds_left": seconds_left,
+                        "duration_seconds": round(time.time() - start, 2)}
+        except Exception:
+            pass
 
     # 2. Tickers default — top 6 crypto liquidità
-    crypto_tickers = ["BTC-USD", "ETH-USD", "SOL-USD",
-                      "DOGE-USD", "AVAX-USD", "LINK-USD"]
+    crypto_tickers = focus_tickers or ["BTC-USD", "ETH-USD", "SOL-USD",
+                                        "DOGE-USD", "AVAX-USD", "LINK-USD"]
 
     database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
         "event": "crypto_pipeline_start",
         "tickers": crypto_tickers,
-        "trigger_source": "scheduler_1h",
+        "trigger_source": "watchdog" if focus_tickers else "scheduler_1h",
+        "rebalance": is_rebalance,
     }))
 
     # 3. WORKFLOW A 4 FASI: Technical Crypto NON eseguito a priori.
@@ -288,7 +305,11 @@ async def run_crypto_pipeline(run_id: str | None = None) -> dict:
     # 4. Decision Crypto
     try:
         from agents.decision_crypto import run_crypto_decision
-        decision_result = await run_crypto_decision(run_id, tech_report)
+        decision_result = await run_crypto_decision(
+            run_id, tech_report,
+            focus_tickers=focus_tickers,
+            watchdog_reason=watchdog_reason,
+        )
     except Exception as e:
         import traceback as _tb
         logger.error("[%s][ORCHESTRATOR] Decision Crypto fallito: %s\n%s",
@@ -492,16 +513,16 @@ def _extract_hot_tickers(micro_cards: list[dict]) -> list[str]:
 
 def _is_crypto_ticker(ticker: str) -> bool:
     """
-    True se il ticker è una crypto (universo ClawStreet 24/7).
+    True se il ticker è una crypto (universo 24/7).
 
-    Riconosce sia il formato yfinance ("BTC-USD") sia ClawStreet ("X:BTCUSD").
+    Riconosce sia il formato yfinance ("BTC-USD") sia il formato esteso ("X:BTCUSD").
     Usata dall'orchestrator per decidere se overnight + watchdog trigger
     deve effettivamente avviare il Decision Agent (engine R1).
     """
     if not ticker:
         return False
     t = ticker.upper().strip()
-    # Formato ClawStreet: "X:BTCUSD"
+    # Formato esteso: "X:BTCUSD"
     if t.startswith("X:"):
         return True
     # Formato yfinance: "BTC-USD", "ETH-USD", ...

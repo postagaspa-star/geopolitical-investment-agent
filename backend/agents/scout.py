@@ -298,11 +298,6 @@ async def run_scout_20min(run_id: str) -> list[dict]:
     _save_checkpoint(run_id, "scout", "RUNNING", {"phase": "data_collection"})
 
     # 1. Raccogli dati in parallelo da TUTTE le fonti
-    # NB: le fonti CLAWSTREET_MARKET / CLAWSTREET_ECONOMY sono state rimosse
-    # quando ClawStreet stesso e' stato dismesso. Le funzioni di fetch non
-    # esistono piu' in data_fetchers.py — chiamarle qui causerebbe un
-    # AttributeError immediato (prima ancora del gather), facendo crashare
-    # tutto il pipeline Scout senza log visibili nel frontend.
     source_names = [
         "GDELT", "NEWSAPI", "YFINANCE_NEWS",
         "REDDIT", "X",

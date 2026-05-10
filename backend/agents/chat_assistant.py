@@ -105,7 +105,6 @@ def _summarize_trade(t: dict) -> dict:
         "geopolitical_reasoning": _trunc(t.get("geopolitical_reasoning")),
         "technical_reasoning": _trunc(t.get("technical_reasoning")),
         "final_decision": _trunc(t.get("final_decision"), 1200),
-        "cs_mirror_status": t.get("cs_mirror_status"),
     }
 
 
@@ -144,7 +143,6 @@ def _compact_trade(t: dict) -> dict:
         "q": t.get("quantity"),
         "p": t.get("price"),
         "c": t.get("confidence_score"),
-        "cs": t.get("cs_mirror_status"),
     }
 
 
@@ -296,7 +294,7 @@ def build_live_context() -> str:
                 "sells": n_sell,
                 "unique_tickers": len(unique_tickers),
                 "tickers_traded": unique_tickers,
-                "legend": "tk=ticker, a=action, q=qty, p=price, c=confidence%, cs=cs_mirror_status",
+                "legend": "tk=ticker, a=action, q=qty, p=price, c=confidence%",
             }
             sections.append(
                 f"ALL TRADES STATS:\n```json\n"
@@ -382,7 +380,7 @@ def build_live_context() -> str:
         all_settings = database.get_all_settings() or {}
         # Filtra: rimuovi chiavi sensibili (API keys, password)
         SENSITIVE = {"deepseek_api_key", "anthropic_api_key", "news_api_key",
-                     "fred_api_key", "openai_api_key", "clawstreet_api_key",
+                     "fred_api_key", "openai_api_key",
                      "supabase_db_password", "polygon_api_key", "massive_api_key"}
         filtered = {}
         for k, v in all_settings.items():

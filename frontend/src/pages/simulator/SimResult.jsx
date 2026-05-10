@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Eye, Brain, Target, AlertCircle, TrendingUp, TrendingDown, Sparkles, BarChart3 } from "lucide-react";
 import SimAdvisorChat from "../../components/SimAdvisorChat";
+import SimMetricsPanel from "../../components/SimMetricsPanel";
 
 const API = window.location.origin;
 
@@ -253,6 +254,22 @@ function ResultView({ run, runId, nav }) {
           </div>
         </div>
       )}
+
+      {/* ── METRICHE QUANTITATIVE + GRAFICI STATISTICI (V2 only) ──────────
+         Renderizza solo se quant_metrics è presente (run V2). Per i V1
+         legacy non c'e' nulla da mostrare e il componente ritorna null. */}
+      <SimMetricsPanel
+        quantMetrics={full.quant_metrics}
+        portfolioValueSeries={full.portfolio_value_series}
+        benchmarkValueSeries={full.benchmark_value_series}
+        benchmarkTicker={
+          (full.scenario && full.scenario.benchmark_ticker)
+          || (full.engine === "simulator_v2_crypto" ? "BTC-USD" : "SPY")
+        }
+        commissionBps={full.commission_bps}
+        totalCommissions={full.total_commissions_paid}
+        runId={runId}
+      />
 
       {/* SL/TP ANALYSIS — nuova sezione critica */}
       {(slTp.stop_loss_target != null || slTp.take_profit_target != null) && (

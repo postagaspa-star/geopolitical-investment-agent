@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 class ScoutReport(BaseModel):
     """Micro-scheda prodotta dallo Scout ogni 20 minuti."""
-    source_type: str = Field(description="GDELT|NEWSAPI|CLAWSTREET|FINNHUB|CONGRESSIONAL")
+    source_type: str = Field(description="GDELT|NEWSAPI|YFINANCE_NEWS|REDDIT|X|FINNHUB|CONGRESSIONAL|COINGECKO")
     micro_summary: str = Field(description="Sintesi in 2-3 frasi dell'evento/dato")
     sentiment_score: float = Field(default=0.0, ge=-1.0, le=1.0, description="Sentiment -1 (bearish) a +1 (bullish)")
     key_tickers: list[str] = Field(default_factory=list, description="Ticker impattati")

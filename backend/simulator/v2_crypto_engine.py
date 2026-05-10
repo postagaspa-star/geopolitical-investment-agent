@@ -189,10 +189,20 @@ async def _call_crypto_r1(system_prompt: str, user_message: str,
 async def start_crypto_run(
     category: Optional[str], num_steps: int,
     scenario_id: Optional[str] = None,
-    initial_capital: float = 100000.0
+    initial_capital: float = 100000.0,
+    commission_bps: float | None = None,
+    run_mode: str = "manual",
 ) -> dict:
-    """Inizializza una nuova partita simulator V2 Crypto."""
+    """
+    Inizializza una nuova partita simulator V2 Crypto.
+
+    commission_bps: 10 bps default. Crypto exchange tipici applicano fees
+    piu' alte del retail equity (taker maker spread + spread bid/ask wider),
+    ma manteniamo il default uniforme per coerenza vs equity. L'utente puo'
+    sovrascrivere via slippage rerun.
+    """
     from simulator import crypto_scenarios as _scen
+    from simulator.metrics import normalize_commission_bps
 
     if scenario_id:
         scenario = _scen.get_crypto_scenario_by_id(scenario_id)
@@ -208,7 +218,13 @@ async def start_crypto_run(
     hardcoded_t0 = {m["ticker"]: float(m["price_t0"])
                     for m in scenario.get("market_data", [])}
 
-    price_series = await fetch_full_price_series(universe, step_dates, hardcoded_t0)
+    # BTC-USD e' il benchmark crypto. Se gia' nell'universe (di solito si),
+    # niente da aggiungere; altrimenti lo includiamo per il chart vs benchmark.
+    fetch_pool = list(universe)
+    if "BTC-USD" not in fetch_pool:
+        fetch_pool.append("BTC-USD")
+
+    price_series = await fetch_full_price_series(fetch_pool, step_dates, hardcoded_t0)
     t0_prices = extract_prices_at_date(price_series, step_dates[0])
 
     real_count = sum(1 for t in universe if price_series.get(t)
@@ -216,7 +232,42 @@ async def start_crypto_run(
     logger.info("[SIM-CRYPTO] start scenario=%s steps=%d, %d/%d ticker complete",
                 scenario["id"], num_steps, real_count, len(universe))
 
-    portfolio = make_initial_portfolio(initial_capital)
+    bps = normalize_commission_bps(commission_bps)
+    portfolio = make_initial_portfolio(initial_capital, commission_bps=bps)
+
+    # ── Tracking ID per la live progress dashboard ────────────────────────
+    tracking_id = str(uuid4())
+    try:
+        from simulator import active_runs as _ar
+        _ar.register(
+            run_id=tracking_id, engine="v2_crypto", mode=run_mode,
+            category=scenario.get("category", "?"),
+            scenario_id=scenario.get("id", "?"),
+            scenario_title=scenario.get("title", ""),
+            total_steps=num_steps,
+        )
+    except Exception as e:
+        logger.debug("[SIM-CRYPTO] active_runs register fallita: %s", e)
+
+    # ── Advice memory crypto: stessa logica di v2_engine.start_run ───────
+    advice_block_text = ""
+    advice_meta = {"category_key": "", "ids": []}
+    try:
+        from agents import sim_advisor
+        block, cat_key, ids = sim_advisor.get_advice_block_for_runner(
+            scenario, max_items=5
+        )
+        if block:
+            advice_block_text = block
+            advice_meta = {"category_key": cat_key, "ids": ids}
+            try:
+                sim_advisor.increment_apply_count(ids, cat_key)
+            except Exception:
+                pass
+            logger.info("[SIM-CRYPTO] iniettati %d advice per categoria %s",
+                        len(ids), cat_key)
+    except Exception as e:
+        logger.debug("[SIM-CRYPTO] advice injection skipped: %s", e)
 
     return {
         "scenario": {
@@ -233,6 +284,12 @@ async def start_crypto_run(
             "price_series": price_series,
             "engine_mode": "crypto",          # marker per UI/debrief
             "step_unit": "2 giorni",
+            "benchmark_ticker": "BTC-USD",    # benchmark crypto invece di SPY
+            "commission_bps": bps,
+            "advice_block": advice_block_text,
+            "advice_meta": advice_meta,
+            "tracking_id": tracking_id,
+            "run_mode": run_mode,
         },
         "portfolio": portfolio,
         "t0_prices": t0_prices,
@@ -399,6 +456,15 @@ async def execute_crypto_step(
     if step_index >= num_steps:
         raise ValueError(f"step_index {step_index} >= num_steps {num_steps}")
 
+    # Tracking: registry update prima della chiamata R1
+    tracking_id = scenario.get("tracking_id")
+    if tracking_id:
+        try:
+            from simulator import active_runs as _ar
+            _ar.update_step(tracking_id, step_index, status="calling_ai")
+        except Exception:
+            pass
+
     target_date = step_dates[step_index]
     universe = scenario.get("asset_universe", [])
     price_series = scenario.get("price_series", {})
@@ -422,15 +488,24 @@ async def execute_crypto_step(
         headlines, history, step_index, num_steps, target_date
     )
 
-    # Inietta direttive utente in cima al system prompt
+    # Inietta direttive utente + advice memory in cima al system prompt
     try:
         from agents.decision import _build_directives_block
         sys_prompt = _build_directives_block() + SIM_CRYPTO_SYSTEM_PROMPT
     except Exception:
         sys_prompt = SIM_CRYPTO_SYSTEM_PROMPT
+    advice_block = (scenario.get("advice_block") or "").strip()
+    if advice_block:
+        sys_prompt = advice_block + "\n\n" + ("═" * 60) + "\n" + sys_prompt
     raw = await _call_crypto_r1(sys_prompt, user_msg)
     parsed = _parse_crypto_response(raw)
 
+    if tracking_id:
+        try:
+            from simulator import active_runs as _ar
+            _ar.update_status(tracking_id, "applying_trades")
+        except Exception:
+            pass
     apply_result = apply_trades(portfolio, parsed["trades"], prices)
     new_portfolio = apply_result["portfolio"]
     applied_trades = apply_result["applied_trades"]
@@ -474,7 +549,7 @@ async def execute_crypto_step(
 
 async def finalize_crypto_run(
     scenario: dict, portfolio: dict, history: list[dict],
-    persist: bool = True
+    persist: bool = True, run_mode: str = "manual",
 ) -> dict:
     """Chiusura partita crypto: P&L finale, benchmark BTC buy&hold, debrief."""
     step_dates = scenario.get("step_dates", [])
@@ -505,8 +580,14 @@ async def finalize_crypto_run(
     full_scenario = _scen.get_crypto_scenario_by_id(scenario.get("id", ""))
     reveal = full_scenario.get("description_reveal", "") if full_scenario else ""
 
-    # Series per chart
-    portfolio_value_series = []
+    # Series per chart. T0 = capitale iniziale (prima dei trade).
+    initial = float(final_valuation.get("initial_capital",
+                     final_valuation.get("total_value", 100000)))
+    portfolio_value_series = [{
+        "step_index": -1,
+        "step_date": step_dates[0],
+        "value": initial,
+    }]
     for h in history:
         portfolio_value_series.append({
             "step_index": h.get("step_index"),
@@ -518,6 +599,13 @@ async def finalize_crypto_run(
         "step_date": final_date,
         "value": final_valuation.get("total_value"),
     })
+
+    # ── Benchmark equity curve BTC buy-and-hold ────────────────────────────
+    # Riusa la helper di v2_engine: stessa logica della SPY series.
+    from simulator.v2_engine import _build_benchmark_value_series
+    benchmark_value_series = _build_benchmark_value_series(
+        price_series, "BTC-USD", step_dates, initial, history, final_date
+    )
 
     asset_breakdown = []
     for p in final_valuation.get("positions", []):
@@ -531,6 +619,17 @@ async def finalize_crypto_run(
             "unrealized_pnl_pct": p["unrealized_pnl_pct"],
         })
 
+    # ── METRICHE QUANTITATIVE crypto ───────────────────────────────────────
+    # Step unit = 2 giorni → annualization ~182.5 periodi/anno.
+    from simulator import metrics as _metrics
+    quant_metrics = _metrics.compute_all_metrics(
+        equity_curve=portfolio_value_series,
+        history=history,
+        final_valuation=final_valuation,
+        step_unit_days=2.0,
+        periods_per_year=_metrics.ANNUALIZATION_CRYPTO,
+    )
+
     debrief = await _generate_crypto_debrief(scenario, history, final_valuation,
                                               benchmark_pnl_pct, reveal)
 
@@ -542,6 +641,7 @@ async def finalize_crypto_run(
         "final_valuation": final_valuation,
         "benchmark_btc_pnl_pct": benchmark_pnl_pct,    # NB: BTC, non SPY
         "benchmark_spy_pnl_pct": benchmark_pnl_pct,    # alias per UI generico
+        "benchmark_value_series": benchmark_value_series,
         "outcome": _classify_outcome(final_valuation, benchmark_pnl_pct),
         "debrief": debrief,
         "description_reveal": reveal,
@@ -550,15 +650,41 @@ async def finalize_crypto_run(
         "asset_breakdown": asset_breakdown,
         "price_series": price_series,
         "step_dates": step_dates,
+        # Metriche e fees
+        "quant_metrics": quant_metrics,
+        "total_commissions_paid": float(
+            final_valuation.get("total_commissions_paid", 0) or 0
+        ),
+        "commission_bps": float(final_valuation.get("commission_bps", 0) or 0),
     }
 
     if persist:
+        tracking_id = scenario.get("tracking_id")
+        if tracking_id:
+            try:
+                from simulator import active_runs as _ar
+                _ar.update_status(tracking_id, "finalizing")
+            except Exception:
+                pass
         try:
-            persisted_id = _persist_crypto_run(scenario, history, result)
+            persisted_id = _persist_crypto_run(scenario, history, result,
+                                                 run_mode=run_mode)
             result["persisted_run_id"] = persisted_id
         except Exception as e:
             logger.error("[SIM-CRYPTO] persist failed: %s", e, exc_info=True)
             result["persist_error"] = str(e)[:200]
+        # Tracking: mark completed (anche se persist fail)
+        if tracking_id:
+            try:
+                from simulator import active_runs as _ar
+                _ar.mark_completed(
+                    tracking_id,
+                    outcome=result.get("outcome"),
+                    pnl_pct=(result.get("final_valuation") or {}).get("total_pnl_pct"),
+                    persisted_run_id=result.get("persisted_run_id"),
+                )
+            except Exception:
+                pass
 
     return result
 
@@ -703,8 +829,12 @@ Stile risposte:
         return f"Errore advisor: {str(e)[:200]}"
 
 
-def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict) -> str:
-    """Salva la partita crypto su sim_runs (categoria='crypto')."""
+def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
+                          run_mode: str = "manual") -> str:
+    """
+    Salva la partita crypto su sim_runs (categoria='crypto').
+    run_mode: 'manual' o 'auto' (cf. v2_engine._persist_run).
+    """
     from simulator import db as sim_db
     run_id = str(uuid4())
 
@@ -729,7 +859,9 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict)
     run_data = {
         "id": run_id,
         "completed_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "simulator_v2_crypto",
+        # mode='auto' nei run avviati dallo scheduler (cap giornaliero),
+        # 'simulator_v2_crypto' nei run manuali.
+        "mode": "auto" if run_mode == "auto" else "simulator_v2_crypto",
         "category": scenario.get("category", "crypto"),
         "scenario_type": "multi",
         "steps": scenario.get("num_steps", 1),
@@ -751,7 +883,13 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict)
             "scenario": scenario, "history": history,
             "final_valuation": final_result.get("final_valuation"),
             "benchmark_btc_pnl_pct": final_result.get("benchmark_btc_pnl_pct"),
+            "benchmark_value_series": final_result.get("benchmark_value_series"),
+            "portfolio_value_series": final_result.get("portfolio_value_series"),
             "final_prices": final_result.get("final_prices"),
+            # Metriche crypto: Sharpe annualizzato a 182.5 periodi/anno (2-day step)
+            "quant_metrics": final_result.get("quant_metrics"),
+            "total_commissions_paid": final_result.get("total_commissions_paid", 0),
+            "commission_bps": final_result.get("commission_bps", 0),
         },
     }
     sim_db.insert_run(run_data)

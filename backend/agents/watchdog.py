@@ -29,6 +29,32 @@ DEEPSEEK_TIMEOUT = 20
 # Soglia urgenza per triggerare la pipeline completa.
 URGENCY_THRESHOLD = 5  # 1-10
 
+# ─── REBALANCING AUTOMATICO ────────────────────────────────────────────────
+# Soglia: se un singolo asset eccede questa percentuale del valore totale
+# del portafoglio (cash + posizioni), il Watchdog FORZA un Decision run per
+# vendere parzialmente e riportare il rischio sotto controllo.
+#
+# Razionale: una posizione che cresce molto (es. NVDA da 25% a 45% del NAV
+# per via di un rally) concentra il rischio in modo non voluto. Il sistema
+# normale potrebbe non triggherare un Decision se non ci sono catalisti
+# news, lasciando l'over-exposure indefinitamente. Il rebalancing è un
+# "safety net" che bypassa la valutazione discrezionale del LLM.
+#
+# 35% è il threshold richiesto dall'utente; sotto viene tollerato anche se
+# concentrato perche' la concentrazione mirata e' una scelta valida.
+REBALANCE_THRESHOLD_PCT = 35.0
+
+# Cooldown tra rebalance trigger sullo stesso ticker. Senza questo, ogni
+# 5 minuti il watchdog farebbe partire un Decision per ribilanciare lo stesso
+# asset, esaurendo il budget di tool calls e creando rumore.
+REBALANCE_COOLDOWN_HOURS = 4
+
+# Urgenza assegnata ai trigger di rebalancing. Volutamente alta (8) per
+# garantire che superi sempre URGENCY_THRESHOLD e che il routing
+# dell'orchestrator non lo scarti.
+REBALANCE_URGENCY = 8
+# ───────────────────────────────────────────────────────────────────────────
+
 WATCHDOG_PROMPT = """You are a financial market watchdog. Your ONLY job is to decide in seconds
 whether current market conditions justify waking up the Decision Agent (expensive model).
 
@@ -260,6 +286,123 @@ def _get_portfolio_tickers(database) -> list[str]:
         return []
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# REBALANCING — controlla se una posizione eccede il REBALANCE_THRESHOLD_PCT
+# ═══════════════════════════════════════════════════════════════════════
+
+def _check_position_overweight(database) -> tuple[bool, str, float, list[str]]:
+    """
+    Controlla se una qualunque posizione eccede REBALANCE_THRESHOLD_PCT
+    del valore totale del portafoglio.
+
+    Output:
+        (needs_rebalance, ticker_overweight, pct_of_portfolio, all_overweight_tickers)
+
+    Per il calcolo del totale usa cash + Σ(qty × current_price). Se non c'è
+    current_price valido per una posizione, fallback ad avg_buy_price (cost
+    basis) — più conservativo ma stabile vs prezzi corrotti.
+
+    Best-effort: in caso di errore ritorna (False, "", 0.0, []) per non
+    bloccare il pipeline watchdog.
+    """
+    try:
+        portfolio = database.get_portfolio()
+        if not portfolio:
+            return False, "", 0.0, []
+        cash = float(portfolio.get("cash_balance") or 0)
+        positions = database.get_positions() or []
+        if not positions:
+            return False, "", 0.0, []
+
+        # Calcola il valore di mercato per posizione (resilient a prezzi nulli)
+        position_values = {}
+        total_pos_value = 0.0
+        for p in positions:
+            ticker = p.get("ticker") or ""
+            if not ticker:
+                continue
+            try:
+                qty = float(p.get("quantity") or 0)
+                if qty <= 0:
+                    continue
+                cur = float(p.get("current_price") or 0)
+                avg = float(p.get("avg_buy_price") or 0)
+                # Se il current_price e' invalido o assurdo (< 30% o > 300%
+                # dell'avg), usa avg per evitare di prendere decisioni di
+                # rebalance basate su prezzi corrotti.
+                if cur <= 0:
+                    cur = avg
+                elif avg > 0:
+                    ratio = cur / avg
+                    if ratio < 0.3 or ratio > 3.0:
+                        # Prezzo sospetto — usa l'avg come fallback safe.
+                        # Loggato in run_watchdog per audit.
+                        cur = avg
+                if cur <= 0:
+                    continue
+                value = cur * qty
+                position_values[ticker] = value
+                total_pos_value += value
+            except (TypeError, ValueError):
+                continue
+
+        total_value = cash + total_pos_value
+        if total_value <= 0:
+            return False, "", 0.0, []
+
+        # Trova tutte le posizioni overweight
+        overweight = []
+        for ticker, value in position_values.items():
+            pct = (value / total_value) * 100
+            if pct > REBALANCE_THRESHOLD_PCT:
+                overweight.append((ticker, pct))
+
+        if not overweight:
+            return False, "", 0.0, []
+
+        # Ordina per concentrazione decrescente, prendi il piu' grande
+        overweight.sort(key=lambda x: x[1], reverse=True)
+        top_ticker, top_pct = overweight[0]
+        all_tickers = [t for t, _ in overweight]
+        return True, top_ticker, top_pct, all_tickers
+    except Exception as exc:
+        logger.warning("[WATCHDOG] _check_position_overweight error: %s", exc)
+        return False, "", 0.0, []
+
+
+def _is_rebalance_throttled(database, ticker: str) -> bool:
+    """
+    True se l'ultimo rebalance su QUESTO ticker è avvenuto entro
+    REBALANCE_COOLDOWN_HOURS. Evita di triggherare un Decision ogni 5 minuti
+    se il ticker resta sopra soglia.
+    """
+    if not ticker:
+        return False
+    try:
+        key = f"watchdog_rebalance_last_{ticker}"
+        last_iso = database.get_setting(key, "") or ""
+        if not last_iso:
+            return False
+        last_dt = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        elapsed_h = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+        return elapsed_h < REBALANCE_COOLDOWN_HOURS
+    except Exception:
+        return False
+
+
+def _record_rebalance_trigger(database, ticker: str) -> None:
+    """Salva il timestamp dell'ultimo rebalance trigger su questo ticker."""
+    if not ticker:
+        return
+    try:
+        key = f"watchdog_rebalance_last_{ticker}"
+        database.set_setting(key, datetime.now(timezone.utc).isoformat())
+    except Exception:
+        pass
+
+
 def _get_headlines_for_tickers(database, tickers: list[str], minutes: int = 60) -> list[str]:
     """
     Cerca nel buffer headlines che menzionano almeno uno dei ticker forniti.
@@ -376,6 +519,9 @@ async def _call_deepseek(context: str) -> dict:
 async def run_watchdog(run_id: str) -> dict:
     """
     Esegue il ciclo Watchdog:
+    0. REBALANCE CHECK: se una posizione > REBALANCE_THRESHOLD_PCT del NAV,
+       triggera Decision con urgenza alta SENZA chiamare DeepSeek (bypassa
+       throttle perche' e' una protezione del rischio, non discrezionale)
     1. Snapshot prezzi + headlines recenti
     2. DeepSeek mini-analisi
     3. Se trigger + non throttled → ritorna should_trigger=True
@@ -383,6 +529,63 @@ async def run_watchdog(run_id: str) -> dict:
     import database
 
     t0 = time.time()
+
+    # ─── 0. REBALANCE CHECK ────────────────────────────────────────────────
+    # Esegue PRIMA di tutto: se una posizione e' sopra-soglia, il rebalance
+    # e' una decisione di safety che non deve aspettare throttle/cost guard.
+    # NB: usa il proprio cooldown (REBALANCE_COOLDOWN_HOURS) per non spam-mare
+    # il Decision Agent quando il ticker rimane overweight.
+    try:
+        needs_reb, top_ticker, top_pct, all_tickers = await asyncio.to_thread(
+            _check_position_overweight, database
+        )
+        if needs_reb:
+            if _is_rebalance_throttled(database, top_ticker):
+                logger.debug(
+                    "[%s][WATCHDOG] Rebalance %s overweight %.1f%% ma throttled "
+                    "(<%dh dall'ultimo trigger su questo ticker)",
+                    run_id, top_ticker, top_pct, REBALANCE_COOLDOWN_HOURS,
+                )
+            else:
+                # Forza il trigger. Bypassa anche il cost guard mercato chiuso:
+                # il rebalance vale sia per crypto sia per equity (anche se
+                # equity verra' poi bloccato dall'orchestrator se mercato chiuso).
+                _record_rebalance_trigger(database, top_ticker)
+                reason = (
+                    f"REBALANCE: {top_ticker} a {top_pct:.1f}% del NAV (cap {REBALANCE_THRESHOLD_PCT:.0f}%) — "
+                    f"vendere parzialmente per ridurre concentrazione"
+                )
+                logger.warning(
+                    "[%s][WATCHDOG] REBALANCE TRIGGER (bypass throttle): %s "
+                    "(altri overweight: %s)",
+                    run_id, reason, [t for t in all_tickers if t != top_ticker] or "nessuno",
+                )
+                try:
+                    database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
+                        "event": "watchdog_rebalance_trigger",
+                        "ticker_overweight": top_ticker,
+                        "pct_of_portfolio": round(top_pct, 2),
+                        "threshold_pct": REBALANCE_THRESHOLD_PCT,
+                        "all_overweight": all_tickers,
+                        "trigger": True,
+                        "urgency": REBALANCE_URGENCY,
+                        "bypass_throttle": True,
+                    }))
+                except Exception:
+                    pass
+                return {
+                    "should_trigger": True,
+                    "urgency": REBALANCE_URGENCY,
+                    "reason": reason,
+                    "focus_tickers": [top_ticker],
+                    "elapsed_seconds": round(time.time() - t0, 2),
+                    "rebalance": True,
+                }
+    except Exception as exc:
+        # Best-effort: il rebalance check non deve mai bloccare il watchdog.
+        logger.warning("[%s][WATCHDOG] Rebalance check error (skip, continue normal flow): %s",
+                       run_id, exc)
+    # ────────────────────────────────────────────────────────────────────────
 
     # 1. Controlla throttle prima di fare qualsiasi altra cosa
     if _is_throttled(database, throttle_minutes=60):

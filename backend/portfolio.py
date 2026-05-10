@@ -36,16 +36,88 @@ except ImportError:
         return []
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# COMMISSIONI / SLIPPAGE per il bot Live
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Il bot Live ora simula un costo di transazione per ogni BUY/SELL: senza
+# questo i backtest e il P&L apparente erano sempre leggermente "troppo
+# ottimistici" rispetto a quello che otterresti su un broker retail vero.
+#
+# Formula:
+#   fee = gross_value * (commission_bps / 10_000)
+#   - BUY:  total_cost = (quantity*price) + fee   → dedotti dal cash
+#   - SELL: net_proceeds = (quantity*price) - fee → accreditati al cash
+#
+# La rate e' configurabile dalla tabella settings ("commission_bps") con
+# default 10 bps (= 0.10%, livello tipico broker retail US azionario).
+# Settando 0 si simula esecuzione "perfect fill" per A/B testing.
+#
+# Tracciamento cumulativo: ogni trade aggiorna "total_commissions_paid"
+# nelle settings. Esposto via /api/portfolio per la UI.
+
+DEFAULT_COMMISSION_BPS = 10.0
+MAX_COMMISSION_BPS = 100.0   # sanity cap (1% per trade = piu' di qualunque broker)
+
+
+def _get_commission_bps() -> float:
+    """
+    Legge la rate di commissione configurata. Default 10 bps (0.10%).
+    Clamp [0, MAX] per safety: una rate negativa o assurda romperebbe la math.
+    """
+    try:
+        raw = get_setting("commission_bps", str(DEFAULT_COMMISSION_BPS))
+        bps = float(raw) if raw else DEFAULT_COMMISSION_BPS
+    except (TypeError, ValueError):
+        bps = DEFAULT_COMMISSION_BPS
+    if bps < 0:
+        return 0.0
+    if bps > MAX_COMMISSION_BPS:
+        return MAX_COMMISSION_BPS
+    return bps
+
+
+def _commission_amount(gross_value: float, bps: float | None = None) -> float:
+    """
+    Calcola la commissione in $ da un valore lordo (quantity * price).
+    bps None → usa la rate configurata.
+    """
+    if bps is None:
+        bps = _get_commission_bps()
+    return abs(float(gross_value)) * (float(bps) / 10_000.0)
+
+
+def _accrue_commission(amount: float) -> None:
+    """
+    Aggiunge l'importo al totale cumulativo "total_commissions_paid" nelle
+    settings. Best-effort: errori di DB non bloccano il trade.
+    """
+    if not amount or amount <= 0:
+        return
+    try:
+        from database import set_setting
+        prev = float(get_setting("total_commissions_paid", "0") or 0)
+        set_setting("total_commissions_paid", str(round(prev + amount, 2)))
+    except Exception as ex:
+        logger.debug("commissioni: accrue fallito (non critico): %s", ex)
+
+
 def calculate_total_value():
     """
     Ricalcola il valore totale del portafoglio (liquidita' + posizioni aperte).
 
-    Sanity check anti-bug: se il valore raw (cash + sum(qty*current_price))
-    devia di oltre il 30% dalla mediana degli ultimi 50 snapshot reali del
-    portafoglio_snapshots, c'e' quasi certamente un current_price gonfiato
-    in una position. In quel caso usiamo la mediana dello storico come
-    valore di display (allineato al grafico Equity Curve) e LOGGHIAMO
-    rumorosamente per investigare.
+    Difese a tre livelli (anti +67% spike / -25% drawdown bug):
+
+    1. Per-position cap: ogni posizione contribuisce con qty * SAFE_PRICE
+       dove SAFE_PRICE = current_price se entro [0.10x, 10x] dell'avg_buy_price
+       (cost basis), altrimenti avg_buy_price stesso. Cattura prezzi corrotti.
+
+    2. Median sanity (legacy): se raw_total devia >25% dalla mediana degli
+       ultimi 50 snapshot reali, ritorna la mediana invece del raw. Soglia
+       abbassata da 30% → 25% per essere piu' rigorosa.
+
+    3. Trimmed mean: la "mediana" usa IQR-based filter (Q1-Q3) per non
+       essere contaminata da snapshot estremi pre-esistenti.
 
     Questo evita il caso "portfolio segna $169k mentre il chart
     correttamente mostra $103k" senza richiedere intervento manuale.
@@ -57,15 +129,50 @@ def calculate_total_value():
     cash = portfolio["cash_balance"]
     positions = get_positions()
 
-    # Somma il valore di mercato di ogni posizione (raw)
-    positions_value = sum(
-        pos["current_price"] * pos["quantity"]
-        for pos in positions
-        if pos["current_price"] > 0
-    )
+    # ── 1. Per-position safe valuation ─────────────────────────────────
+    # Per ogni posizione, cap il prezzo di valutazione tra [0.1x, 10x]
+    # dell'avg_buy_price. Cattura corruzioni grossolane di current_price
+    # (es. decimal-shifted, ticker mismatch, NaN sneaking through).
+    positions_value = 0.0
+    for pos in positions:
+        try:
+            cp = float(pos.get("current_price") or 0)
+            avg = float(pos.get("avg_buy_price") or 0)
+            qty = float(pos.get("quantity") or 0)
+            if qty <= 0:
+                continue
+            ticker = pos.get("ticker", "")
+            is_crypto = (ticker.upper().startswith("X:") or
+                         (ticker.upper().endswith("-USD") and len(ticker) > 4))
+            outer_min = 0.05 if is_crypto else 0.10
+            outer_max = 20.0 if is_crypto else 10.0
+
+            if cp <= 0:
+                # No price available: usa cost basis per non perdere il valore
+                safe_price = avg
+            elif avg > 0:
+                ratio = cp / avg
+                if ratio < outer_min or ratio > outer_max:
+                    logger.warning(
+                        "calculate_total_value: %s current_price %.2f fuori range "
+                        "[%.1f×, %.1f×] vs avg %.2f. Uso cost basis per safety.",
+                        ticker, cp, outer_min, outer_max, avg,
+                    )
+                    safe_price = avg
+                else:
+                    safe_price = cp
+            else:
+                safe_price = cp
+
+            positions_value += safe_price * qty
+        except (TypeError, ValueError) as ex:
+            logger.warning("calculate_total_value: error sulla posizione %s: %s",
+                           pos.get("ticker"), ex)
+            continue
+
     raw_total = cash + positions_value
 
-    # Sanity check vs mediana storica degli snapshot recenti
+    # ── 2. Median sanity (con IQR filter) ──────────────────────────────
     safe_total = raw_total
     try:
         from database import get_portfolio_history
@@ -75,22 +182,30 @@ def calculate_total_value():
             float(r["total_value"]) for r in recent
             if r.get("total_value") and float(r["total_value"]) > 0
         )[-50:]
-        if len(recent_vals) >= 5:
-            mid = len(recent_vals) // 2
-            median_val = (
-                recent_vals[mid] if len(recent_vals) % 2 == 1
-                else (recent_vals[mid - 1] + recent_vals[mid]) / 2.0
-            )
-            if median_val > 0:
-                drift = abs(raw_total - median_val) / median_val
-                if drift > 0.30:
-                    logger.warning(
-                        "calculate_total_value: raw=%.2f devia %.0f%% dalla mediana "
-                        "recente %.2f (probabile current_price gonfiato in una posizione). "
-                        "Uso mediana storica come display value. Esegui audit per dettagli.",
-                        raw_total, drift * 100, median_val,
-                    )
-                    safe_total = median_val
+        if len(recent_vals) >= 8:
+            # IQR filter: rimuovi i primi 25% e gli ultimi 25% prima di
+            # calcolare la mediana, per non essere contaminati da snapshot
+            # spurri pre-esistenti.
+            n = len(recent_vals)
+            q1_idx = n // 4
+            q3_idx = (3 * n) // 4
+            trimmed = recent_vals[q1_idx:q3_idx + 1]
+            if trimmed:
+                mid = len(trimmed) // 2
+                median_val = (
+                    trimmed[mid] if len(trimmed) % 2 == 1
+                    else (trimmed[mid - 1] + trimmed[mid]) / 2.0
+                )
+                if median_val > 0:
+                    drift = abs(raw_total - median_val) / median_val
+                    # Soglia 25% (era 30%) — piu' stringente
+                    if drift > 0.25:
+                        logger.warning(
+                            "calculate_total_value: raw=%.2f devia %.0f%% dalla mediana "
+                            "trimmed (IQR) %.2f. Uso mediana per display. Audit positions.",
+                            raw_total, drift * 100, median_val,
+                        )
+                        safe_total = median_val
     except Exception as ex:
         logger.debug("calculate_total_value sanity check skipped: %s", ex)
 
@@ -136,6 +251,13 @@ def get_portfolio_state():
     pnl = total_value - initial_balance
     pnl_pct = (pnl / initial_balance * 100) if initial_balance > 0 else 0.0
 
+    # Commissioni cumulative (best-effort: se le settings non hanno il valore,
+    # lo trattiamo come 0 — lo show in UI scompare semplicemente).
+    try:
+        total_fees = float(get_setting("total_commissions_paid", "0") or 0)
+    except (TypeError, ValueError):
+        total_fees = 0.0
+
     return {
         "cash": p["cash_balance"],
         "positions": positions,
@@ -144,14 +266,20 @@ def get_portfolio_state():
         "pnl": round(pnl, 2),
         "pnl_pct": round(pnl_pct, 2),
         "open_positions_count": len(positions),
+        "commission_bps": _get_commission_bps(),
+        "total_commissions_paid": round(total_fees, 2),
     }
 
 
 def can_buy(ticker, quantity, price):
     """
-    Verifica se un acquisto e' possibile (solo controllo liquidita').
+    Verifica se un acquisto e' possibile (controllo liquidita' + commissioni).
     L'AI decide autonomamente dimensione e allocazione delle posizioni.
     Restituisce (consentito: bool, motivo: str).
+
+    NOTA: il check considera la commissione (default 0.10%): se cash copre
+    quantity*price ma non quantity*price*(1+commission_bps/10000), il trade
+    viene rifiutato. L'agente puo' ridurre quantity e ritentare.
     """
     p = get_portfolio()
     if p is None:
@@ -174,11 +302,14 @@ def can_buy(ticker, quantity, price):
     if p_float <= 0:
         return False, f"Price deve essere > 0 (ricevuto {price})"
 
-    cost = q_float * p_float
+    gross_cost = q_float * p_float
+    fee = _commission_amount(gross_cost)
+    total_cost = gross_cost + fee
 
-    if cost > p["cash_balance"]:
+    if total_cost > p["cash_balance"]:
         return False, (
-            f"Liquidita' insufficiente: necessari {cost:.2f}, "
+            f"Liquidita' insufficiente: necessari {total_cost:.2f} "
+            f"(prezzo {gross_cost:.2f} + commissione {fee:.2f}), "
             f"disponibili {p['cash_balance']:.2f}"
         )
 
@@ -193,17 +324,24 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
 
     Sanity checks: rifiuta quantity<=0, price<=0 (BUG: prima il bot poteva
     creare ordini fantasma con quantity=0 che inquinavano i log).
+
+    Commissioni: applicate al cash flow. cash -= (quantity*price + fee).
+    Il P&L "true" della posizione include la commissione: la posizione viene
+    aperta a "price" (non a "price + fee_per_unit") per semplicita' del cost
+    basis tracking; il fee diventa una perdita realizzata immediata.
     """
-    # Controllo liquidita' (include validation quantity/price > 0)
+    # Controllo liquidita' (include validation quantity/price > 0 + commissione)
     allowed, reason = can_buy(ticker, quantity, price)
     if not allowed:
         return {"success": False, "reason": reason}
 
     portfolio = get_portfolio()
-    cost = quantity * price
+    gross_cost = quantity * price
+    fee = _commission_amount(gross_cost)
+    total_cost = gross_cost + fee
 
     # Aggiorna la liquidita' — log error reale se il DB rifiuta
-    new_cash = portfolio["cash_balance"] - cost
+    new_cash = portfolio["cash_balance"] - total_cost
     try:
         update_portfolio(new_cash, portfolio["total_value"])
     except Exception as ex:
@@ -212,14 +350,18 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
         return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}",
                 "db_error": str(ex)[:500]}
 
-    # Aggiorna o crea la posizione — log error reale se il DB rifiuta
+    # Aggiorna o crea la posizione — log error reale se il DB rifiuta.
+    # Cost basis: usiamo SOLO gross_cost (quantity * price), senza la fee.
+    # Cosi' avg_buy_price riflette il "vero" prezzo di ingresso per la media
+    # ponderata; la fee e' contabilizzata come perdita realizzata immediata
+    # nel cash, non spalmata sulla posizione (piu' chiaro per la UI).
     existing = get_position(ticker)
     try:
         if existing is not None:
             # Media ponderata del prezzo di acquisto
             old_total = existing["avg_buy_price"] * existing["quantity"]
             new_quantity = existing["quantity"] + quantity
-            new_avg_price = (old_total + cost) / new_quantity
+            new_avg_price = (old_total + gross_cost) / new_quantity
             upsert_position(ticker, new_quantity, new_avg_price, price)
         else:
             upsert_position(ticker, quantity, price, price)
@@ -236,13 +378,19 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
 
     # Ricalcola il valore totale del portafoglio
     new_total = calculate_total_value()
+    # Accrual cumulativo commissioni
+    _accrue_commission(fee)
 
     # Registra l'operazione nel log delle transazioni — log error reale se DB rifiuta
+    # Append diagnostica fee al tech_reasoning per tracciabilita' senza
+    # cambiare schema DB.
+    fee_note = f" [fee=${fee:.2f} bps={_get_commission_bps():.1f}]"
     decision_text = f"BUY {quantity} {ticker} @ {price:.2f}"
     try:
         trade_id = insert_trade(
             ticker, "BUY", quantity, price,
-            geo_reasoning, tech_reasoning,
+            geo_reasoning,
+            (tech_reasoning or "") + fee_note,
             decision_text, confidence,
         )
     except Exception as ex:
@@ -257,7 +405,9 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
         "ticker": ticker,
         "quantity": quantity,
         "price": price,
-        "total_cost": round(cost, 2),
+        "gross_cost": round(gross_cost, 2),
+        "commission": round(fee, 2),
+        "total_cost": round(total_cost, 2),
         "remaining_cash": round(new_cash, 2),
         "portfolio_total_value": round(new_total, 2),
         "trade_id": trade_id,   # ID del trade per linkare al mirror status
@@ -312,10 +462,12 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
         }
 
     portfolio = get_portfolio()
-    proceeds = quantity * price
+    gross_proceeds = quantity * price
+    fee = _commission_amount(gross_proceeds)
+    net_proceeds = gross_proceeds - fee
 
     # Aggiorna la liquidita' — log error reale se il DB rifiuta
-    new_cash = portfolio["cash_balance"] + proceeds
+    new_cash = portfolio["cash_balance"] + net_proceeds
     try:
         update_portfolio(new_cash, portfolio["total_value"])
     except Exception as ex:
@@ -344,16 +496,20 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
 
     # Ricalcola il valore totale del portafoglio
     new_total = calculate_total_value()
+    _accrue_commission(fee)
 
-    # Calcolo P&L realizzato su questa vendita
-    realized_pnl = (price - existing["avg_buy_price"]) * quantity
+    # Calcolo P&L realizzato su questa vendita (al netto della fee)
+    realized_pnl = (price - existing["avg_buy_price"]) * quantity - fee
 
-    # Registra l'operazione nel log delle transazioni
+    # Registra l'operazione nel log delle transazioni (fee diagnostica nel
+    # tech_reasoning per back-compat schema DB)
+    fee_note = f" [fee=${fee:.2f} bps={_get_commission_bps():.1f}]"
     decision_text = f"SELL {quantity} {ticker} @ {price:.2f}"
     try:
         trade_id = insert_trade(
             ticker, "SELL", quantity, price,
-            geo_reasoning, tech_reasoning,
+            geo_reasoning,
+            (tech_reasoning or "") + fee_note,
             decision_text, confidence,
         )
     except Exception as ex:
@@ -368,7 +524,9 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
         "ticker": ticker,
         "quantity": quantity,
         "price": price,
-        "total_proceeds": round(proceeds, 2),
+        "gross_proceeds": round(gross_proceeds, 2),
+        "commission": round(fee, 2),
+        "total_proceeds": round(net_proceeds, 2),
         "realized_pnl": round(realized_pnl, 2),
         "remaining_cash": round(new_cash, 2),
         "portfolio_total_value": round(new_total, 2),
@@ -675,6 +833,10 @@ def update_prices(prices: dict):
     """
     Aggiorna i prezzi correnti di tutte le posizioni e ricalcola il P&L.
     Parametro prices: dizionario {ticker: prezzo_corrente}.
+
+    HARDENING: oltre al check NaN/zero, valida ogni prezzo contro
+    l'avg_buy_price (cost basis): rifiuta extreme outliers (>10x equity,
+    >20x crypto) per evitare contaminazione di current_price.
     """
     positions = get_positions()
     updated = []
@@ -694,10 +856,26 @@ def update_prices(prices: dict):
                 logger.warning("update_prices skip %s: prezzo non numerico %s",
                                ticker, new_price)
                 continue
-            update_position_price(ticker, new_price_f)
-            # Calcola il P&L aggiornato (guard contro avg_buy_price=0)
+
+            # Validazione vs cost basis (avg_buy_price): cattura extreme outliers
             avg = float(pos.get("avg_buy_price") or 0)
             qty = float(pos.get("quantity") or 0)
+            if avg > 0:
+                is_crypto = (ticker.upper().startswith("X:") or
+                             (ticker.upper().endswith("-USD") and len(ticker) > 4))
+                outer_min = 0.05 if is_crypto else 0.10
+                outer_max = 20.0 if is_crypto else 10.0
+                ratio = new_price_f / avg
+                if ratio < outer_min or ratio > outer_max:
+                    logger.warning(
+                        "update_prices REJECT %s: %.2f fuori [%.1f×, %.1f×] avg=%.2f "
+                        "(probabile bad data, current_price NON aggiornato)",
+                        ticker, new_price_f, outer_min, outer_max, avg,
+                    )
+                    continue
+
+            update_position_price(ticker, new_price_f)
+            # Calcola il P&L aggiornato (guard contro avg_buy_price=0)
             pnl = (new_price_f - avg) * qty if avg > 0 else 0
             pnl_pct = ((new_price_f - avg) / avg) * 100 if avg > 0 else 0
             updated.append({

@@ -446,7 +446,11 @@ def _fetch_yfinance_quotes(tickers: list[str]) -> dict[str, dict]:
                 if not prev_day_data.empty:
                     prev_close = float(prev_day_data["Close"].iloc[-1])
                 else:
-                    prev_close = float(tdf["Close"].iloc[0])
+                    # Fallback: NON usare il primo bar di oggi come prev_close
+                    # (defeats validation: ratio≈1 anche su spike intraday).
+                    # Meglio prev_close=0 → la validazione fa fallback a Tier 2
+                    # (vs old_current) che è più rigorosa.
+                    prev_close = 0.0
 
                 change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0
 
@@ -691,11 +695,179 @@ async def update_price_cache() -> dict:
     }
 
 
+# ════════════════════════════════════════════════════════════════════════
+# Soglie validazione prezzi — STRINGENTI per evitare i bug
+# +67% spike e -25% drawdown (snapshot equity curve corrotti).
+# ════════════════════════════════════════════════════════════════════════
+
+# Validation Tier 1: prev_close del quote vs new_price (dal feed)
+# Range accettabile: ±40% per equity, ±50% per crypto.
+_PREVCLOSE_MIN_RATIO_EQUITY = 0.60
+_PREVCLOSE_MAX_RATIO_EQUITY = 1.40
+_PREVCLOSE_MIN_RATIO_CRYPTO = 0.50
+_PREVCLOSE_MAX_RATIO_CRYPTO = 1.50
+
+# Validation Tier 2: vs old_current (cache precedente, max age ~10 min)
+# In 10 minuti il movimento massimo plausibile e' molto contenuto.
+_OLDCURRENT_MIN_RATIO_EQUITY = 0.92   # -8% in 10min = stop limit / circuit breaker
+_OLDCURRENT_MAX_RATIO_EQUITY = 1.08
+_OLDCURRENT_MIN_RATIO_CRYPTO = 0.85   # crypto piu' volatili ma -15% in 10min e' raro
+_OLDCURRENT_MAX_RATIO_CRYPTO = 1.15
+
+# Validation Tier 3: vs avg_buy_price (cost basis) — defensive, only extremes
+# Questo Tier blocca solo errori di feed GROSSOLANI (decimal-point shift,
+# ticker mismatch, zero-price). Range largo per non penalizzare big winners
+# legittimi (es. NVDA 5x dal 2023, BTC 6x da bear-market).
+_COSTBASIS_MIN_RATIO_EQUITY = 0.15    # -85% (extreme bear, flash crash)
+_COSTBASIS_MAX_RATIO_EQUITY = 8.00    # +700% (rare ma possibile multi-anno)
+_COSTBASIS_MIN_RATIO_CRYPTO = 0.08    # crypto può crollare 92% in cicli bear
+_COSTBASIS_MAX_RATIO_CRYPTO = 15.00   # crypto può x15 in bull cycle
+
+# Snapshot drift guard: blocca scrittura snapshot se total_value devia
+# troppo dall'ultimo snapshot recente, in assenza di trade.
+_SNAPSHOT_DRIFT_MAX_PCT_FAST = 12.0   # 12% in <=10min senza trade = corruzione
+_SNAPSHOT_DRIFT_MAX_PCT_SLOW = 25.0   # 25% in 1h senza trade = sospetto
+_SNAPSHOT_RECENT_TRADE_WINDOW_MIN = 5  # se trade negli ultimi 5min, drift accettato
+
+
+def _is_crypto_for_polling(ticker: str) -> bool:
+    """True se ticker è una crypto."""
+    if not ticker:
+        return False
+    t = ticker.upper().strip()
+    return t.startswith("X:") or (t.endswith("-USD") and len(t) > 4)
+
+
+def _validate_price_tiered(ticker: str, new_price: float, prev_close: float,
+                            old_current: float, avg: float,
+                            source: str = "?") -> tuple[bool, str]:
+    """
+    Validazione a 3 tier per il prezzo. Ritorna (accept, reject_reason).
+
+    Tier 1: vs prev_close (se disponibile dal quote source)
+    Tier 2: vs old_current (cache precedente)
+    Tier 3: vs avg_buy_price (cost basis) — solo extreme outliers
+
+    Tutti i tier devono passare. Tier 1 e 2 sono disgiunti (alternativi):
+    se prev_close > 0 usa Tier 1, altrimenti Tier 2 vs old_current. Tier 3
+    e' SEMPRE applicato.
+    """
+    if new_price <= 0:
+        return False, "prezzo nullo/negativo"
+    if new_price != new_price:  # NaN check
+        return False, "prezzo NaN"
+
+    is_crypto = _is_crypto_for_polling(ticker)
+
+    # Tier 1: prev_close dal quote (preferito quando disponibile)
+    if prev_close > 0:
+        ratio = new_price / prev_close
+        min_r = _PREVCLOSE_MIN_RATIO_CRYPTO if is_crypto else _PREVCLOSE_MIN_RATIO_EQUITY
+        max_r = _PREVCLOSE_MAX_RATIO_CRYPTO if is_crypto else _PREVCLOSE_MAX_RATIO_EQUITY
+        if ratio < min_r or ratio > max_r:
+            return False, (
+                f"vs prev_close: nuovo={new_price:.2f} prev={prev_close:.2f} "
+                f"ratio={ratio:.2f} (range {min_r:.2f}-{max_r:.2f}) [src={source}]"
+            )
+    elif old_current > 0:
+        # Tier 2: vs old_current — applicato solo se manca prev_close
+        ratio = new_price / old_current
+        min_r = _OLDCURRENT_MIN_RATIO_CRYPTO if is_crypto else _OLDCURRENT_MIN_RATIO_EQUITY
+        max_r = _OLDCURRENT_MAX_RATIO_CRYPTO if is_crypto else _OLDCURRENT_MAX_RATIO_EQUITY
+        if ratio < min_r or ratio > max_r:
+            return False, (
+                f"vs old_current: nuovo={new_price:.2f} old={old_current:.2f} "
+                f"ratio={ratio:.2f} (range {min_r:.2f}-{max_r:.2f}, no prev_close) "
+                f"[src={source}]"
+            )
+
+    # Tier 3: vs cost basis (avg_buy_price) — SEMPRE applicato per extreme outliers
+    # Questo tier protegge da bug come "prezzo decimal-shifted" (es. 1500 → 15.00)
+    # o "wrong ticker" (mappato al simbolo sbagliato).
+    if avg > 0:
+        ratio_cost = new_price / avg
+        min_c = _COSTBASIS_MIN_RATIO_CRYPTO if is_crypto else _COSTBASIS_MIN_RATIO_EQUITY
+        max_c = _COSTBASIS_MAX_RATIO_CRYPTO if is_crypto else _COSTBASIS_MAX_RATIO_EQUITY
+        if ratio_cost < min_c or ratio_cost > max_c:
+            return False, (
+                f"vs cost basis: nuovo={new_price:.2f} avg={avg:.2f} "
+                f"ratio={ratio_cost:.2f} (range {min_c:.2f}-{max_c:.2f}) "
+                f"[src={source}, extreme outlier — probabile bad data]"
+            )
+
+    return True, ""
+
+
+def _was_recent_trade(database, minutes: int) -> bool:
+    """
+    True se c'e' stato un trade negli ultimi N minuti. Usato dal snapshot
+    drift guard per distinguere drift "legittimo" (post-trade) da
+    drift "corrotto" (prezzo bad data).
+    """
+    try:
+        client = database.get_client() if hasattr(database, "get_client") else None
+        if client:
+            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+            result = client.table("trades").select("id").gte("timestamp", cutoff).limit(1).execute()
+            return bool(result.data)
+        # Fallback SQLite
+        try:
+            with database.get_db() as conn:
+                row = conn.execute(
+                    "SELECT id FROM trades WHERE timestamp >= datetime('now', ?) LIMIT 1",
+                    (f"-{minutes} minutes",),
+                ).fetchone()
+                return row is not None
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return False
+
+
+def _get_last_snapshot(database) -> tuple[float, float, float] | None:
+    """
+    Ritorna (total_value, cash, age_minutes) dell'ULTIMO snapshot del
+    portfolio, oppure None se non disponibile.
+    """
+    try:
+        history = database.get_portfolio_history(days=1) or []
+        if not history:
+            return None
+        # Sort by timestamp desc
+        latest = max(
+            history,
+            key=lambda h: str(h.get("timestamp", "")),
+        )
+        prev_total = float(latest.get("total_value") or 0)
+        prev_cash = float(latest.get("cash_balance") or latest.get("cash") or 0)
+        ts_str = str(latest.get("timestamp", ""))
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_min = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+        except Exception:
+            age_min = 9999
+        if prev_total <= 0:
+            return None
+        return prev_total, prev_cash, age_min
+    except Exception:
+        return None
+
+
 def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bool]:
     """
     Per ogni posizione aperta aggiorna current_price + unrealized_pnl
     usando il prezzo dalla cache. Poi salva uno snapshot del portfolio totale.
     Ritorna (n_posizioni_aggiornate, snapshot_salvato).
+
+    HARDENING (anti-spike +67% / drawdown -25%):
+    - Validazione prezzi a 3 tier (prev_close + old_current + cost basis)
+    - Quando un quote viene rifiutato, fallback all'avg_buy_price (NON al
+      vecchio current_price che potrebbe essere contaminato)
+    - Snapshot drift guard: skip save se total_value devia troppo dall'ultimo
+      snapshot in assenza di trade recenti.
     """
     positions_updated = 0
     snapshot_saved = False
@@ -723,9 +895,9 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
         return 0, snapshot_saved
 
     # 1. Update current_price + pnl per ogni ticker con quote disponibile.
-    # Sanity check: rifiuta prezzi che si discostano >40% dal previous_close
-    # (probabile bad data: pre-market spike, fat-finger, ticker mismatch).
+    # 3-tier validation: prev_close, old_current, cost_basis.
     total_position_value = 0.0
+    rejected_count = 0
     for p in positions:
         ticker = p.get("ticker")
         qty = float(p.get("quantity", 0) or 0)
@@ -735,71 +907,67 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
             continue
         quote = all_quotes.get(ticker)
 
-        # Sanity check sul prezzo del quote PRIMA di usarlo
+        # Sanity check 3-tier sul prezzo del quote PRIMA di usarlo
+        accepted_price = None
         if quote and "price" in quote:
             new_price = float(quote.get("price") or 0)
             prev_close = float(quote.get("prev_close") or 0)
-            # Reference per il sanity check: prev_close dal quote ESCLUSIVAMENTE.
-            # BUG FIXATO: prima fallback a old_current creava un loop — il
-            # prezzo veniva confrontato contro se stesso, sempre validato
-            # anche se stale. Ora se prev_close manca, accetta solo se la
-            # variazione vs old_current e' < 10% (sanity light); oltre il
-            # 10% richiediamo prev_close del quote source.
-            if new_price <= 0:
-                logger.warning("[POLLING] Prezzo NULLO/NEGATIVO per %s: %.4f, scartato",
-                               ticker, new_price)
-                quote = None
-            elif prev_close > 0:
-                ratio = new_price / prev_close
-                if ratio < 0.6 or ratio > 1.4:
-                    logger.warning(
-                        "[POLLING] Prezzo IMPLAUSIBILE per %s: nuovo=%.2f vs prev_close=%.2f "
-                        "(ratio %.2f). RIFIUTATO. Source=%s",
-                        ticker, new_price, prev_close, ratio, quote.get("source", "?"),
-                    )
-                    quote = None
-            elif old_current > 0:
-                # Nessun prev_close → check soft: se varia < 10% accetta;
-                # se >10% rifiuta (potrebbe essere fat-finger)
-                ratio = new_price / old_current
-                if ratio < 0.9 or ratio > 1.1:
-                    logger.warning(
-                        "[POLLING] Prezzo SUSPECT per %s: nuovo=%.2f vs old_current=%.2f "
-                        "(ratio %.2f, no prev_close). RIFIUTATO per cautela.",
-                        ticker, new_price, old_current, ratio,
-                    )
-                    quote = None
-        if quote and "price" in quote:
-            current_price = float(quote["price"])
+            source = quote.get("source", "?")
+            ok, reason = _validate_price_tiered(
+                ticker, new_price, prev_close, old_current, avg, source=source,
+            )
+            if ok:
+                accepted_price = new_price
+            else:
+                logger.warning("[POLLING] %s prezzo RIFIUTATO: %s", ticker, reason)
+                rejected_count += 1
+
+        if accepted_price is not None:
+            current_price = accepted_price
             try:
                 import database
                 database.update_position_price(ticker, current_price)
                 positions_updated += 1
-                # Log esplicito quando il prezzo cambia significativamente — utile diagnostica
+                # Log esplicito quando il prezzo cambia significativamente
                 if old_current > 0:
                     delta_pct = ((current_price - old_current) / old_current) * 100
                     if abs(delta_pct) > 5:
                         logger.info("[POLLING] %s: %.2f → %.2f (%+.1f%%)",
                                     ticker, old_current, current_price, delta_pct)
             except Exception as e:
-                # Era debug, ora warning: vogliamo VEDERE i fallimenti DB
                 logger.warning("[POLLING] Errore update_position_price %s: %s", ticker, e)
             total_position_value += current_price * qty
         else:
-            # Quote non disponibile per questo ticker: usa l'ultimo current_price noto.
-            # Logghiamo se è > 24h che non si aggiorna (potenziale stale data).
-            cp = float(p.get("current_price") or avg)
+            # Quote rifiutato OPPURE non disponibile: usa una FALLBACK SAFE.
+            # NON usare old_current (potrebbe essere contaminato da run precedenti
+            # che hanno passato la validazione meno stringente).
+            # Strategia: se old_current e' "ragionevole" vs avg (entro 5x), usalo.
+            # Altrimenti usa avg_buy_price (cost basis — sempre safe).
+            cp = old_current
+            if avg > 0 and old_current > 0:
+                ratio = old_current / avg
+                # Se old_current e' fuori range plausibile vs avg, scarta.
+                # Soglia molto larga (10x) per non penalizzare moves legittimi
+                # multi-mese, ma cattura corruzioni grossolane.
+                is_crypto = _is_crypto_for_polling(ticker)
+                outer_min = 0.05 if is_crypto else 0.10
+                outer_max = 20.0 if is_crypto else 10.0
+                if ratio < outer_min or ratio > outer_max:
+                    logger.warning(
+                        "[POLLING] %s old_current=%.2f sospetto vs avg=%.2f "
+                        "(ratio %.2f). Uso avg per snapshot (safer).",
+                        ticker, old_current, avg, ratio,
+                    )
+                    cp = avg
+            if cp <= 0:
+                cp = avg if avg > 0 else 0
             total_position_value += cp * qty
-            logger.debug("[POLLING] %s: nessun quote, mantengo current_price=%.2f", ticker, cp)
+            if quote is None or "price" not in (quote or {}):
+                logger.debug("[POLLING] %s: nessun quote, fallback %.2f", ticker, cp)
 
-    # 2. AUTO-EXIT TRIGGER (CRITICAL FIX): controlla SL/TP e chiude le
-    # posizioni che hanno toccato i livelli. Bug precedente:
-    # `check_and_execute_auto_exits` non era mai chiamato → tutti gli SL/TP
-    # impostati dal Decision Agent erano DEAD letters (mai eseguiti).
-    # L'utente pensava di essere protetto e in realtà non lo era.
+    # 2. AUTO-EXIT TRIGGER: controlla SL/TP usando i prezzi del polling
     try:
         import portfolio as _portfolio
-        # Costruisce dict {ticker: price} dagli aggiornamenti appena fatti
         prices_for_exit: dict[str, float] = {}
         for ticker, q in (all_quotes or {}).items():
             try:
@@ -820,15 +988,60 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
     except Exception as e:
         logger.warning("[POLLING] check_and_execute_auto_exits failed: %s", e)
 
-    # 3. Salva snapshot del portfolio totale (cash + valore posizioni)
+    # 3. Salva snapshot del portfolio totale CON DRIFT GUARD
     try:
         import database
         portfolio = database.get_portfolio()
         if portfolio:
             cash = float(portfolio.get("cash_balance", portfolio.get("cash", 0)) or 0)
             total_value = cash + total_position_value
-            database.insert_portfolio_snapshot(round(total_value, 2), round(cash, 2))
-            snapshot_saved = True
+
+            # ── SNAPSHOT DRIFT GUARD ──────────────────────────────────────
+            # Confronta col precedente snapshot. Se devia troppo IN ASSENZA
+            # di trade recenti, e' sospetto → skip save (mantiene equity
+            # curve pulita) e logga per audit.
+            should_save = True
+            prev_info = _get_last_snapshot(database)
+            if prev_info is not None and total_value > 0:
+                prev_total, _prev_cash, age_min = prev_info
+                if prev_total > 0:
+                    drift_pct = abs(total_value - prev_total) / prev_total * 100
+                    has_trade = _was_recent_trade(database, _SNAPSHOT_RECENT_TRADE_WINDOW_MIN)
+
+                    # Drift fast (snapshot recente <= 10 min)
+                    if age_min <= 10 and drift_pct > _SNAPSHOT_DRIFT_MAX_PCT_FAST and not has_trade:
+                        logger.error(
+                            "[POLLING] DRIFT FAST anomalo: prev=%.2f → new=%.2f "
+                            "(%+.1f%% in %.0fmin, no trade). SKIP snapshot save per "
+                            "proteggere equity curve. Posizioni rejected_quotes=%d.",
+                            prev_total, total_value, drift_pct, age_min, rejected_count,
+                        )
+                        try:
+                            database.insert_agent_log(
+                                "price_polling", "ERROR",
+                                json.dumps({
+                                    "event": "snapshot_drift_rejected",
+                                    "prev_total": round(prev_total, 2),
+                                    "new_total": round(total_value, 2),
+                                    "drift_pct": round(drift_pct, 2),
+                                    "age_min": round(age_min, 1),
+                                    "rejected_quotes": rejected_count,
+                                }),
+                            )
+                        except Exception:
+                            pass
+                        should_save = False
+                    # Drift slow (1h+) — solo warning, non blocca
+                    elif drift_pct > _SNAPSHOT_DRIFT_MAX_PCT_SLOW and not has_trade:
+                        logger.warning(
+                            "[POLLING] Drift SOSPETTO snapshot: prev=%.2f → new=%.2f "
+                            "(%+.1f%% in %.0fmin, no trade). Snapshot salvato ma indagare.",
+                            prev_total, total_value, drift_pct, age_min,
+                        )
+
+            if should_save:
+                database.insert_portfolio_snapshot(round(total_value, 2), round(cash, 2))
+                snapshot_saved = True
     except Exception as e:
         logger.debug("Errore insert portfolio_snapshot: %s", e)
 

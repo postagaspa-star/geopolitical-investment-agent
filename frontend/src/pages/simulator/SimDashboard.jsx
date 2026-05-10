@@ -1,35 +1,97 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Play, Zap, RefreshCw } from "lucide-react";
+import { Play, Zap, RefreshCw, Activity, BookOpen, Cpu, Bot,
+         Bitcoin, TrendingUp, AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
 
 const API = window.location.origin;
 
 /**
- * Home Simulator: KPI aggregati + ultimi run + toggle modalità automatica.
+ * Home Simulator: KPI aggregati + ultimi run + toggle modalità automatica
+ * + Win Rate per Scenario + Sentiment Drift (top advice & Sharpe rolling).
  */
 export default function SimDashboard() {
   const nav = useNavigate();
   const [kpi, setKpi] = useState(null);
   const [recent, setRecent] = useState([]);
   const [autoMode, setAutoMode] = useState({ enabled: false, daily_cap: 5, runs_today: 0 });
+  const [winByScenario, setWinByScenario] = useState(null);
+  const [drift, setDrift] = useState(null);
+  const [activeRuns, setActiveRuns] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const reload = async () => {
     setLoading(true);
     try {
-      const [k, r, a] = await Promise.all([
+      const [k, r, a, w, d] = await Promise.all([
         fetch(`${API}/api/simulator/kpi`).then(r => r.ok ? r.json() : null),
         fetch(`${API}/api/simulator/runs?limit=10`).then(r => r.ok ? r.json() : []),
         fetch(`${API}/api/simulator/auto-mode`).then(r => r.ok ? r.json() : null),
+        fetch(`${API}/api/simulator/win-by-scenario`).then(r => r.ok ? r.json() : null),
+        fetch(`${API}/api/simulator/sentiment-drift`).then(r => r.ok ? r.json() : null),
       ]);
       if (k) setKpi(k);
       if (Array.isArray(r)) setRecent(r);
       if (a) setAutoMode(a);
+      if (w) setWinByScenario(w);
+      if (d) setDrift(d);
     } catch {}
     setLoading(false);
   };
 
   useEffect(() => { reload(); }, []);
+
+  // Polling adattivo per i run in corso: 4s quando ce ne sono di attivi,
+  // 15s quando idle. Implementato con setTimeout ricorsivo (no setInterval)
+  // cosi' il period si auto-aggiusta dinamicamente in base al return value
+  // di pollOnce, senza dover ricreare l'effect ad ogni cambio di stato.
+  // Evita anche di dover dichiarare deps che farebbero scattare il warning
+  // "exhaustive-deps" che su Render con CI=true diventa error.
+  useEffect(() => {
+    let alive = true;
+    let timeoutId = null;
+
+    const pollOnce = async () => {
+      try {
+        const res = await fetch(`${API}/api/simulator/active-runs?include_recent=true`);
+        if (!res.ok) return false;
+        const data = await res.json();
+        const runs = data.runs || [];
+        setActiveRuns(runs);
+        // Se uno dei run e' appena passato a completed (entro gli ultimi
+        // 8s), ricarica KPI/recent/winBy in background senza loading flag.
+        const justCompleted = runs.some(r => r.status === "completed"
+                                              && r.seconds_since_update < 8);
+        if (justCompleted) {
+          try {
+            const [k, r, w] = await Promise.all([
+              fetch(`${API}/api/simulator/kpi`).then(r => r.ok ? r.json() : null),
+              fetch(`${API}/api/simulator/runs?limit=10`).then(r => r.ok ? r.json() : []),
+              fetch(`${API}/api/simulator/win-by-scenario`).then(r => r.ok ? r.json() : null),
+            ]);
+            if (k) setKpi(k);
+            if (Array.isArray(r)) setRecent(r);
+            if (w) setWinByScenario(w);
+          } catch {}
+        }
+        return runs.some(x => x.status !== "completed" && x.status !== "error");
+      } catch {
+        return false;
+      }
+    };
+
+    const tick = async () => {
+      if (!alive) return;
+      const hasRunning = await pollOnce();
+      if (!alive) return;
+      timeoutId = setTimeout(tick, hasRunning ? 4000 : 15000);
+    };
+
+    tick();   // immediate first call
+    return () => {
+      alive = false;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, []);
 
   const toggleAuto = async () => {
     try {
@@ -56,6 +118,15 @@ export default function SimDashboard() {
 
   return (
     <div>
+      {/* Keyframes globali per il polling LIVE indicator */}
+      <style>{`
+        @keyframes ar-pulse {
+          0% { transform: scale(1); opacity: 1; }
+          50% { transform: scale(1.5); opacity: 0.45; }
+          100% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
       <div style={S.header}>
         <h1 style={S.h1}>GeoInvest AI Simulator</h1>
         <button style={S.refreshBtn} onClick={reload} disabled={loading}>
@@ -66,6 +137,9 @@ export default function SimDashboard() {
       <p style={S.sub}>
         Stato complessivo sui run completati. Clicca su uno scenario per vedere il dettaglio.
       </p>
+
+      {/* RUN IN CORSO — sezione live (polling 4s quando attivi, 15s idle) */}
+      <ActiveRunsSection runs={activeRuns} nav={nav} />
 
       {/* KPI ROW */}
       <div style={S.kpiRow}>
@@ -83,6 +157,39 @@ export default function SimDashboard() {
       <div style={S.card}>
         <div style={S.cardTitle}>Win rate per categoria</div>
         <CategoryBars data={kpi?.win_by_category} />
+      </div>
+
+      {/* Win rate per Scenario specifico (NON solo categoria) */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>
+          <Activity size={14} style={{ display: "inline", marginRight: 6, color: "#a78bfa" }} />
+          Win Rate per Scenario
+        </div>
+        <div style={S.subText}>
+          In quali scenari l'AI è più "intelligente". Solo scenari con almeno 1 run.
+          Cliccare su una riga per vedere il primo run di quello scenario.
+        </div>
+        <ScenarioWinTable
+          data={winByScenario}
+          onPickScenario={(sid) => {
+            // Naviga al runner pre-selezionando questo scenario
+            nav(`/simulator/runner?scenario=${sid}`);
+          }}
+        />
+      </div>
+
+      {/* Sentiment Drift: Top advice + Sharpe rolling */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>
+          <BookOpen size={14} style={{ display: "inline", marginRight: 6, color: "#06b6d4" }} />
+          Sentiment Drift (evoluzione strategia)
+        </div>
+        <div style={S.subText}>
+          I 3 advice più applicati dall'Advisor + come è evoluto lo Sharpe rolling
+          nei run V2. Aiuta a capire se il "sapere accumulato" sta producendo
+          risultati migliori.
+        </div>
+        <SentimentDriftView data={drift} />
       </div>
 
       {/* Pulsanti azione */}
@@ -190,6 +297,412 @@ function OutcomeDot({ outcome }) {
                         background: colors[outcome] || "#475569" }} />;
 }
 
+// ─── Active Runs Section (real-time progress) ─────────────────────────────
+
+function ActiveRunsSection({ runs, nav }) {
+  // Mostra sempre la sezione, anche vuota: l'utente sa dove guardare
+  // quando lancia un run. Niente layout shift ad ogni nuovo run.
+  const hasRunning = runs.some(r => r.status !== "completed" && r.status !== "error");
+
+  return (
+    <div style={S.activeCard}>
+      <div style={S.activeHeader}>
+        <div style={S.cardTitle}>
+          <Activity size={14} style={{ display: "inline", marginRight: 6,
+                                         color: hasRunning ? "#10b981" : "#64748b" }} />
+          Run in corso
+          {hasRunning && (
+            <span style={S.liveDot}>
+              <span style={S.liveDotInner} />
+              LIVE
+            </span>
+          )}
+        </div>
+        <div style={S.activeSub}>
+          {runs.length === 0 ? "Nessun run attivo"
+            : `${runs.length} ${runs.length === 1 ? "run" : "run"} in elenco`}
+        </div>
+      </div>
+
+      {runs.length === 0 ? (
+        <div style={S.activeEmpty}>
+          Quando lanci uno scenario manuale o quando l'auto-mode esegue un run,
+          lo vedrai qui in tempo reale.
+        </div>
+      ) : (
+        <div style={S.activeList}>
+          {runs.map((r) => (
+            <ActiveRunCard key={r.run_id} run={r} nav={nav} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function ActiveRunCard({ run, nav }) {
+  const total = run.total_steps || 1;
+  const cur = Math.max(0, Math.min(total, run.current_step + 1));
+  const pct = run.status === "completed" ? 100
+            : run.status === "error" ? Math.max(2, (cur / total) * 100)
+            : Math.max(2, (cur / total) * 100);
+
+  const isCrypto = run.engine === "v2_crypto";
+  const isAuto = run.mode === "auto";
+  const EngineIcon = isCrypto ? Bitcoin : TrendingUp;
+
+  // Status display
+  const statusInfo = STATUS_MAP[run.status] || STATUS_MAP.starting;
+  const StatusIcon = statusInfo.icon;
+  const stepUnit = isCrypto ? "2 giorni" : "1 settimana";
+
+  // Click → naviga al risultato se completed e abbiamo persisted_run_id
+  const onClick = () => {
+    if (run.status === "completed" && run.persisted_run_id) {
+      nav(`/simulator/result/${run.persisted_run_id}`);
+    }
+  };
+  const clickable = run.status === "completed" && run.persisted_run_id;
+
+  return (
+    <div style={{ ...S.runCard, ...(clickable ? S.runCardClickable : {}),
+                   borderLeftColor: statusInfo.color }}
+         onClick={onClick}>
+      {/* Top row: titolo scenario + badge mode */}
+      <div style={{ display: "flex", justifyContent: "space-between",
+                     alignItems: "flex-start", gap: 10, marginBottom: 6 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={S.runTitle}>
+            <EngineIcon size={13} style={{ marginRight: 5,
+                                            color: isCrypto ? "#fbbf24" : "#06b6d4",
+                                            verticalAlign: "text-top" }} />
+            {run.scenario_title || run.scenario_id || "Scenario"}
+          </div>
+          <div style={S.runMeta}>
+            <span style={S.runMetaTag}>{run.category}</span>
+            <span style={S.runMetaSep}>·</span>
+            <span style={{ ...S.runMetaTag,
+                            color: isAuto ? "#fbbf24" : "#a78bfa",
+                            background: isAuto ? "rgba(251,191,36,0.10)" : "rgba(167,139,250,0.10)",
+                            border: `1px solid ${isAuto ? "rgba(251,191,36,0.3)" : "rgba(167,139,250,0.3)"}`,
+                          }}>
+              {isAuto ? <><Bot size={9} style={{ marginRight: 3, verticalAlign: "middle" }} /> AUTO</>
+                       : <><Cpu size={9} style={{ marginRight: 3, verticalAlign: "middle" }} /> MANUAL</>}
+            </span>
+            <span style={S.runMetaSep}>·</span>
+            <span style={S.runMetaTag}>
+              {total} step × {stepUnit}
+            </span>
+          </div>
+        </div>
+        {/* Status badge */}
+        <div style={{ ...S.statusBadge, color: statusInfo.color,
+                       background: statusInfo.bg, borderColor: statusInfo.border }}>
+          <StatusIcon size={11} className={statusInfo.spin ? "ar-spin" : ""}
+                      style={{ marginRight: 4 }} />
+          {statusInfo.label}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={S.progressWrap}>
+        <div style={{ ...S.progressBar, width: `${pct}%`,
+                       background: statusInfo.color,
+                       opacity: run.status === "completed" ? 1 : 0.85 }} />
+        {/* Shimmer overlay for running */}
+        {run.status !== "completed" && run.status !== "error" && (
+          <div style={S.shimmer} />
+        )}
+      </div>
+
+      {/* Bottom row: step counter + elapsed + outcome (se completato) */}
+      <div style={S.runBottom}>
+        <span style={S.runStep}>
+          Step{" "}
+          <strong style={{ color: "#e2e8f0" }}>
+            {run.status === "completed" ? total : cur}
+          </strong>
+          {" / "}
+          <span style={{ color: "#94a3b8" }}>{total}</span>
+        </span>
+        <span style={S.runStep}>
+          <span style={{ color: "#64748b" }}>Tempo:</span>{" "}
+          <strong style={{ color: "#cbd5e1", fontVariantNumeric: "tabular-nums" }}>
+            {formatElapsed(run.elapsed_seconds || 0)}
+          </strong>
+        </span>
+        {run.status === "completed" && run.pnl_pct != null && (
+          <span style={{ ...S.runStep,
+                          color: run.pnl_pct >= 0 ? "#10b981" : "#ef4444" }}>
+            P&L: <strong>{run.pnl_pct >= 0 ? "+" : ""}{run.pnl_pct.toFixed(2)}%</strong>
+            {run.outcome && (
+              <span style={{ marginLeft: 6, fontSize: 11 }}>
+                ({outcomeBadge(run.outcome)})
+              </span>
+            )}
+          </span>
+        )}
+        {run.status === "error" && (
+          <span style={{ ...S.runStep, color: "#fca5a5",
+                          maxWidth: 360, overflow: "hidden",
+                          textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {run.error_msg || "errore"}
+          </span>
+        )}
+        {clickable && (
+          <span style={{ marginLeft: "auto", fontSize: 11, color: "#a78bfa" }}>
+            Apri risultato →
+          </span>
+        )}
+      </div>
+
+      {/* CSS shimmer/spin (scoped) */}
+      <style>{`
+        @keyframes ar-shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+        @keyframes ar-spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+        .ar-spin { animation: ar-spin 1.1s linear infinite; }
+      `}</style>
+    </div>
+  );
+}
+
+
+// Map status → label + colore + icona
+const STATUS_MAP = {
+  starting:        { label: "Avvio",            color: "#94a3b8", bg: "rgba(148,163,184,0.10)", border: "rgba(148,163,184,0.3)", icon: Loader2, spin: true },
+  stepping:        { label: "Step in corso",    color: "#06b6d4", bg: "rgba(6,182,212,0.10)",   border: "rgba(6,182,212,0.3)",   icon: Loader2, spin: true },
+  calling_ai:      { label: "Decision Agent",   color: "#a78bfa", bg: "rgba(167,139,250,0.10)", border: "rgba(167,139,250,0.3)", icon: Loader2, spin: true },
+  applying_trades: { label: "Applico trade",    color: "#06b6d4", bg: "rgba(6,182,212,0.10)",   border: "rgba(6,182,212,0.3)",   icon: Loader2, spin: true },
+  finalizing:      { label: "Finalizing",       color: "#fbbf24", bg: "rgba(251,191,36,0.10)",  border: "rgba(251,191,36,0.3)",  icon: Loader2, spin: true },
+  completed:       { label: "Completato",       color: "#10b981", bg: "rgba(16,185,129,0.10)",  border: "rgba(16,185,129,0.3)",  icon: CheckCircle2, spin: false },
+  error:           { label: "Errore",           color: "#ef4444", bg: "rgba(239,68,68,0.10)",   border: "rgba(239,68,68,0.3)",   icon: AlertCircle, spin: false },
+};
+
+
+function formatElapsed(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return `${m}m ${String(rs).padStart(2, "0")}s`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return `${h}h ${String(rm).padStart(2, "0")}m`;
+}
+
+function outcomeBadge(outcome) {
+  if (outcome === "green") return "verde";
+  if (outcome === "red") return "rosso";
+  return "neutro";
+}
+
+// ─── Scenario Win Rate Table ──────────────────────────────────────────────
+
+function ScenarioWinTable({ data, onPickScenario }) {
+  if (!data || !data.scenarios || data.scenarios.length === 0) {
+    return (
+      <div style={S.empty}>
+        Nessuno scenario giocato finora. Avvia almeno un Scenario Manuale.
+      </div>
+    );
+  }
+  // Cap a 12 righe top per non gonfiare la UI
+  const rows = data.scenarios.slice(0, 12);
+  return (
+    <table style={S.table}>
+      <thead>
+        <tr>
+          <th style={{ textAlign: "left" }}>Scenario</th>
+          <th>Categoria</th>
+          <th>Run</th>
+          <th>Win rate</th>
+          <th>P&L 1M</th>
+          <th>Sharpe</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(s => {
+          const winColor = s.win_rate >= 0.7 ? "#10b981"
+                         : s.win_rate >= 0.4 ? "#fbbf24"
+                         : "#ef4444";
+          return (
+            <tr key={s.scenario_id} onClick={() => onPickScenario && onPickScenario(s.scenario_id)}
+                style={S.row}>
+              <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis",
+                            whiteSpace: "nowrap" }}>
+                {s.title || s.scenario_id}
+              </td>
+              <td style={{ fontSize: 11, color: "#94a3b8" }}>{s.category}</td>
+              <td>{s.n_runs}</td>
+              <td>
+                <span style={{ color: winColor, fontWeight: 600 }}>
+                  {(s.win_rate * 100).toFixed(0)}%
+                </span>
+                <span style={{ fontSize: 10, color: "#64748b", marginLeft: 4 }}>
+                  ({s.n_green}/{s.n_runs})
+                </span>
+              </td>
+              <td style={{ color: s.avg_pnl_1m == null ? "#94a3b8"
+                            : s.avg_pnl_1m >= 0 ? "#10b981" : "#ef4444" }}>
+                {s.avg_pnl_1m == null ? "—"
+                  : `${s.avg_pnl_1m >= 0 ? "+" : ""}${(s.avg_pnl_1m * 100).toFixed(2)}%`}
+              </td>
+              <td style={{ color: s.avg_sharpe == null ? "#94a3b8"
+                            : s.avg_sharpe >= 1 ? "#10b981"
+                            : s.avg_sharpe >= 0 ? "#fbbf24" : "#ef4444" }}>
+                {s.avg_sharpe == null ? "—" : s.avg_sharpe.toFixed(2)}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+
+// ─── Sentiment Drift View ─────────────────────────────────────────────────
+
+function SentimentDriftView({ data }) {
+  if (!data) {
+    return <div style={S.empty}>Caricamento sentiment drift...</div>;
+  }
+  const top = data.top_advice || [];
+  const series = data.sharpe_evolution || [];
+
+  return (
+    <div>
+      {/* Top 3 advice */}
+      {top.length === 0 ? (
+        <div style={S.subText}>
+          Nessun advice salvato finora. Apri il "Risultato" di un run e usa
+          "Analizza & Migliora" per estrarre le prime lezioni dall'AI.
+        </div>
+      ) : (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 8,
+                         textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            Top 3 Advice (per applicazioni)
+          </div>
+          {top.map((a, i) => (
+            <div key={a.id || i} style={{ background: "#0f172a",
+                                            padding: "10px 14px", borderRadius: 6,
+                                            marginBottom: 6, border: "1px solid #1a2030" }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span style={{ fontSize: 11, color: "#a78bfa", fontWeight: 600 }}>
+                  #{i + 1}
+                </span>
+                <span style={{ flex: 1, fontSize: 13, color: "#e2e8f0", fontWeight: 600 }}>
+                  {a.title || "(senza titolo)"}
+                </span>
+                <span style={{ fontSize: 11, color: "#fbbf24", fontWeight: 600 }}>
+                  ×{a.apply_count} apply
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 4 }}>
+                {a.scenario_category}
+              </div>
+              <div style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6,
+                              lineHeight: 1.5 }}>
+                {a.text}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Sharpe rolling chart */}
+      {series.length === 0 ? (
+        <div style={S.subText}>
+          Servono almeno alcuni run V2 (Simulator multi-step con metriche)
+          per visualizzare l'evoluzione dello Sharpe.
+        </div>
+      ) : (
+        <SharpeRollingChart data={series} window={data.rolling_window} />
+      )}
+    </div>
+  );
+}
+
+
+function SharpeRollingChart({ data, window: rollWindow }) {
+  const w = 800, h = 200, padL = 50, padR = 30, padT = 20, padB = 35;
+  const innerW = w - padL - padR, innerH = h - padT - padB;
+
+  const sharpes = data.map(d => d.sharpe);
+  const rollings = data.map(d => d.rolling_mean_sharpe);
+  const all = [...sharpes, ...rollings, 0];
+  let minV = Math.min(...all), maxV = Math.max(...all);
+  const pad = Math.max(0.3, (maxV - minV) * 0.1);
+  minV -= pad; maxV += pad;
+  const range = maxV - minV || 1;
+  const n = data.length;
+
+  const xToPx = (i) => padL + (i / Math.max(1, n - 1)) * innerW;
+  const yToPx = (v) => padT + innerH - ((v - minV) / range) * innerH;
+
+  const sharpePts = data.map((d, i) => `${xToPx(i)},${yToPx(d.sharpe)}`).join(" ");
+  const rollPts = data.map((d, i) => `${xToPx(i)},${yToPx(d.rolling_mean_sharpe)}`).join(" ");
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 14, marginBottom: 8, fontSize: 11 }}>
+        <span style={{ color: "#475569" }}>
+          <span style={{ display: "inline-block", width: 10, height: 2, background: "#475569",
+                          marginRight: 4, verticalAlign: "middle" }} />
+          Sharpe per run
+        </span>
+        <span style={{ color: "#a78bfa" }}>
+          <span style={{ display: "inline-block", width: 10, height: 2, background: "#a78bfa",
+                          marginRight: 4, verticalAlign: "middle" }} />
+          Rolling {rollWindow}-run mean
+        </span>
+      </div>
+      <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: "block" }}>
+        {/* Linea zero */}
+        <line x1={padL} y1={yToPx(0)} x2={w - padR} y2={yToPx(0)}
+              stroke="#475569" strokeWidth={1} strokeDasharray="3 3" opacity={0.6} />
+        {/* Linea Sharpe=1 e Sharpe=2 (riferimenti "buono" e "eccellente") */}
+        {[1, 2].map(t => {
+          if (t > maxV || t < minV) return null;
+          return (
+            <g key={t}>
+              <line x1={padL} y1={yToPx(t)} x2={w - padR} y2={yToPx(t)}
+                    stroke={t === 2 ? "#10b981" : "#84cc16"}
+                    strokeWidth={1} strokeDasharray="2 4" opacity={0.4} />
+              <text x={w - padR - 24} y={yToPx(t) - 2} fill={t === 2 ? "#10b981" : "#84cc16"}
+                    fontSize={9}>{t === 2 ? "ECCELLENTE" : "BUONO"}</text>
+            </g>
+          );
+        })}
+        {/* Y axis labels */}
+        {[0, 0.5, 1].map((t, i) => {
+          const v = minV + t * range;
+          return (
+            <text key={i} x={padL - 6} y={yToPx(v) + 4} fill="#64748b" fontSize={10}
+                  textAnchor="end" fontFamily="monospace">{v.toFixed(1)}</text>
+          );
+        })}
+        {/* Linea Sharpe per-run (sottile, grigia) */}
+        <polyline points={sharpePts} fill="none" stroke="#475569" strokeWidth={1.2} />
+        {/* Linea rolling mean (spessa, viola) */}
+        <polyline points={rollPts} fill="none" stroke="#a78bfa" strokeWidth={2.5} />
+        {/* Punti */}
+        {data.map((d, i) => (
+          <circle key={i} cx={xToPx(i)} cy={yToPx(d.sharpe)} r={2.5}
+                  fill="#475569" />
+        ))}
+        {/* Asse X */}
+        <text x={padL} y={h - 8} fill="#64748b" fontSize={10}>run #1</text>
+        <text x={w - padR} y={h - 8} fill="#64748b" fontSize={10} textAnchor="end">
+          run #{n}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
 const S = {
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
   h1: { margin: 0, fontSize: "1.8rem", fontWeight: 600 },
@@ -206,6 +719,7 @@ const S = {
   card: { background: "#111827", border: "1px solid #1f2937", padding: 20,
           borderRadius: 8, marginBottom: 20 },
   cardTitle: { fontSize: 14, fontWeight: 600, color: "#e2e8f0", marginBottom: 14 },
+  subText: { fontSize: 12, color: "#94a3b8", marginBottom: 14, lineHeight: 1.55 },
   empty: { padding: 24, textAlign: "center", color: "#64748b", fontSize: 13 },
   actionsRow: { display: "flex", gap: 16, alignItems: "center", marginBottom: 24, flexWrap: "wrap" },
   btnPrimary: { background: "#a78bfa", color: "#0a0e1a", border: 0, padding: "10px 18px",
@@ -220,4 +734,93 @@ const S = {
   autoStat: { color: "#a78bfa", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4 },
   table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
   row: { cursor: "pointer", borderBottom: "1px solid #1f2937" },
+
+  // ── Active Runs section ──
+  activeCard: {
+    background: "linear-gradient(180deg, rgba(17,24,39,0.95) 0%, rgba(17,24,39,1) 100%)",
+    border: "1px solid #1f2937",
+    borderRadius: 12, padding: 18, marginBottom: 24,
+  },
+  activeHeader: {
+    display: "flex", justifyContent: "space-between",
+    alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap",
+  },
+  activeSub: { fontSize: 12, color: "#64748b" },
+  activeEmpty: {
+    background: "#0a1018", border: "1px dashed rgba(255,255,255,0.06)",
+    color: "#64748b", fontSize: 12.5, padding: "16px 20px",
+    borderRadius: 8, lineHeight: 1.55,
+  },
+  activeList: { display: "flex", flexDirection: "column", gap: 10 },
+
+  liveDot: {
+    display: "inline-flex", alignItems: "center", gap: 5,
+    fontSize: 9, color: "#10b981", letterSpacing: "0.12em",
+    background: "rgba(16,185,129,0.10)", border: "1px solid rgba(16,185,129,0.3)",
+    padding: "2px 8px", borderRadius: 999, marginLeft: 10,
+    fontWeight: 700,
+  },
+  liveDotInner: {
+    display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+    background: "#10b981", boxShadow: "0 0 6px #10b981",
+    animation: "ar-pulse 1.6s ease-in-out infinite",
+  },
+
+  runCard: {
+    background: "#0f172a",
+    border: "1px solid rgba(255,255,255,0.05)",
+    borderLeft: "3px solid #06b6d4",
+    padding: "12px 14px", borderRadius: 8,
+    transition: "background 0.15s ease",
+    position: "relative",
+  },
+  runCardClickable: {
+    cursor: "pointer",
+  },
+  runTitle: {
+    fontSize: 13.5, color: "#e2e8f0", fontWeight: 600,
+    overflow: "hidden", textOverflow: "ellipsis",
+    whiteSpace: "nowrap", marginBottom: 4,
+  },
+  runMeta: {
+    display: "flex", alignItems: "center", gap: 6, fontSize: 11,
+    color: "#94a3b8", flexWrap: "wrap",
+  },
+  runMetaTag: {
+    background: "rgba(255,255,255,0.04)", padding: "2px 7px",
+    borderRadius: 999, fontFamily: "monospace", fontSize: 10,
+    border: "1px solid rgba(255,255,255,0.06)", whiteSpace: "nowrap",
+  },
+  runMetaSep: { color: "#475569" },
+
+  statusBadge: {
+    display: "inline-flex", alignItems: "center",
+    fontSize: 10.5, fontWeight: 600, letterSpacing: "0.04em",
+    padding: "4px 9px", borderRadius: 999,
+    border: "1px solid", whiteSpace: "nowrap",
+    textTransform: "uppercase",
+  },
+
+  progressWrap: {
+    height: 6, background: "rgba(255,255,255,0.05)",
+    borderRadius: 999, overflow: "hidden", margin: "10px 0 8px",
+    position: "relative",
+  },
+  progressBar: {
+    height: "100%", borderRadius: 999,
+    transition: "width 0.5s ease",
+  },
+  shimmer: {
+    position: "absolute", top: 0, bottom: 0, width: "30%",
+    background: "linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.15) 50%, rgba(255,255,255,0) 100%)",
+    animation: "ar-shimmer 1.6s ease-in-out infinite",
+  },
+
+  runBottom: {
+    display: "flex", alignItems: "center", gap: 14,
+    fontSize: 11.5, color: "#94a3b8", flexWrap: "wrap",
+  },
+  runStep: {
+    fontVariantNumeric: "tabular-nums",
+  },
 };

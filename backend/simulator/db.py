@@ -333,7 +333,7 @@ def ensure_schema():
             logger.error("[SIM] Errore creazione schema SQLite: %s", exc, exc_info=True)
             return
 
-    # Supabase: usa l'auto-migration via psycopg2 (stesso pattern di cs_mirror)
+    # Supabase: usa l'auto-migration via psycopg2 (stesso pattern dello schema globale)
     import os
     db_url = os.environ.get("DATABASE_URL", "").strip()
     if not db_url:

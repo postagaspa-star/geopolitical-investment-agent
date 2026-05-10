@@ -3,7 +3,7 @@ Scenari storici reali del mondo crypto per il Simulator V2 Crypto.
 
 Differenze vs scenarios.py (equity):
   - Universe ESCLUSIVAMENTE crypto (ticker formato yfinance "BTC-USD")
-  - Compatibili con i 14 ticker ClawStreet: BTC, ETH, SOL, DOGE, AVAX,
+  - Compatibili con i 14 ticker crypto supportati: BTC, ETH, SOL, DOGE, AVAX,
     ADA, XRP, LTC, DOT, LINK, UNI, ATOM, MATIC, NEAR
   - Period_start scelto su eventi crypto-specifici (halving, ETF,
     hack, bull/bear cicli, depeg, exchange collapse)

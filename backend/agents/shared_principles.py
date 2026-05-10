@@ -80,7 +80,7 @@ ERRORI POSSIBILI:
 Il tool ritorna un dict con `analyses` per i ticker che hanno funzionato e
 `errors_per_ticker` per quelli che NON sono stati analizzati. Possibili motivi
 di errore: ticker non disponibile su yfinance, no data points sufficienti,
-DeepSeek-V3 timeout, ticker fuori universo ClawStreet. SE il Technical
+DeepSeek-V3 timeout, ticker fuori dall'universo investibile. SE il Technical
 ritorna errore per un ticker che ti serviva, NON inventare i dati: o cambia
 ticker, o usa do_nothing motivando la mancanza di dati tecnici.
 """
