@@ -781,23 +781,66 @@ def start_scheduler() -> AsyncIOScheduler:
     # ── Crypto pipeline: CRON ogni ora a :00, 24/7 ──
     # Schedule cron-fisso (non interval). Se watchdog triggera crypto a 14:35,
     # il prossimo cron resta alle 15:00 — la cadenza non viene sballata.
-    _scheduler.add_job(
-        _crypto_pipeline_job,
-        trigger=CronTrigger(minute=0),   # ogni ora a :00
+    #
+    # FIX deploy-frequenti: con CronTrigger puro, ogni pod restart attende il
+    # prossimo :00. Se i deploy avvengono nel range [:01–:59] in modo
+    # consecutivo (oggi: 4 deploy in 3 ore), il job non gira MAI perche'
+    # ogni :00 cade durante una transizione del pod. Soluzione: leggiamo
+    # l'ultimo timestamp `last_decision_crypto_run_at` e, se >65min fa,
+    # forziamo un run anticipato 90s dopo il boot. Il cron normale prosegue.
+    crypto_first_run = None
+    try:
+        last_crypto = database.get_setting("last_decision_crypto_run_at", "")
+        if last_crypto:
+            from datetime import datetime as _dt
+            last_dt = _dt.fromisoformat(last_crypto.replace("Z", "+00:00"))
+            elapsed_min = (now_utc - last_dt).total_seconds() / 60.0
+            if elapsed_min > 65:
+                crypto_first_run = now_utc + timedelta(seconds=90)
+                logger.info("Crypto pipeline: ultimo run %.0fmin fa (>65), "
+                            "schedulo first_run a +90s dal boot", elapsed_min)
+        else:
+            # Mai eseguito → schedula subito
+            crypto_first_run = now_utc + timedelta(seconds=90)
+            logger.info("Crypto pipeline: mai eseguito, first_run a +90s dal boot")
+    except Exception as exc:
+        logger.debug("Crypto first_run check fallito: %s", exc)
+
+    crypto_kwargs = dict(
+        trigger=CronTrigger(minute=0),
         id="crypto_pipeline_job",
         name="Crypto pipeline (cron :00, 24/7, V3+R1)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
     )
+    if crypto_first_run is not None:
+        crypto_kwargs["next_run_time"] = crypto_first_run
+    _scheduler.add_job(_crypto_pipeline_job, **crypto_kwargs)
 
     # ── Standard pipeline (Tech + Decision Sonnet): CRON solo NYSE hours ──
     # 14, 16, 18, 20 UTC (= 10:00, 12:00, 14:00, 16:00 ET) Lun-Ven.
     # NYSE apre 13:30 UTC, chiude 20:00 UTC → primo run a 14:00, ultimo a 20:00.
     # Skip auto se mercato chiuso (festività). Watchdog può comunque triggerare
     # extra runs durante NYSE hours.
-    _scheduler.add_job(
-        _standard_pipeline_job,
+    # Stesso fix deploy-frequenti del crypto pipeline: se ultimo run >2h e
+    # NYSE attualmente aperta, schedula run anticipato 120s dal boot.
+    standard_first_run = None
+    try:
+        last_sonnet = database.get_setting("last_decision_sonnet_run_at", "")
+        if last_sonnet and is_market_open():
+            from datetime import datetime as _dt
+            last_dt = _dt.fromisoformat(last_sonnet.replace("Z", "+00:00"))
+            elapsed_min = (now_utc - last_dt).total_seconds() / 60.0
+            if elapsed_min > 125:   # >2h05min (cron a 14/16/18/20 = ogni 2h)
+                standard_first_run = now_utc + timedelta(seconds=120)
+                logger.info("Standard pipeline: ultimo run %.0fmin fa (>125) "
+                            "+ NYSE aperta, schedulo first_run a +120s",
+                            elapsed_min)
+    except Exception as exc:
+        logger.debug("Standard first_run check fallito: %s", exc)
+
+    standard_kwargs = dict(
         trigger=CronTrigger(hour="14,16,18,20", minute=0,
                             day_of_week="mon-fri"),
         id="standard_pipeline_job",
@@ -806,12 +849,36 @@ def start_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
     )
+    if standard_first_run is not None:
+        standard_kwargs["next_run_time"] = standard_first_run
+    _scheduler.add_job(_standard_pipeline_job, **standard_kwargs)
 
     # ── Coach Cards weekly synthesis: ogni Lunedi' alle 06:00 UTC ──
     # Legge la memoria del Sim Advisor e produce 3-5 Coach Cards per il
     # Decision Live. Cheap (~$0.001 per run via DeepSeek-V3).
-    _scheduler.add_job(
-        _coach_cards_weekly_job,
+    #
+    # FIX backfill: se non e' mai stato eseguito (o l'ultimo synth e' >7gg
+    # fa) facciamo girare subito al boot per chiudere il loop Sim → Live
+    # senza dover aspettare il prossimo Lunedi'.
+    cc_first_run = None
+    try:
+        from agents import coach_cards as _cc_mod
+        last_synth = _cc_mod._settings_get("_coach_card::last_synth_at", "")
+        if not last_synth:
+            cc_first_run = now_utc + timedelta(minutes=3)
+            logger.info("Coach Cards: mai sintetizzato, first_run a +3min dal boot")
+        else:
+            from datetime import datetime as _dt
+            last_dt = _dt.fromisoformat(last_synth.replace("Z", "+00:00"))
+            elapsed_d = (now_utc - last_dt).total_seconds() / 86400.0
+            if elapsed_d > 7:
+                cc_first_run = now_utc + timedelta(minutes=3)
+                logger.info("Coach Cards: ultimo synth %.1fgg fa (>7), "
+                            "first_run a +3min dal boot", elapsed_d)
+    except Exception as exc:
+        logger.debug("Coach Cards first_run check fallito: %s", exc)
+
+    cc_kwargs = dict(
         trigger=CronTrigger(day_of_week="mon", hour=6, minute=0),
         id="coach_cards_weekly",
         name="Coach Cards weekly synthesis (Mon 06:00 UTC)",
@@ -819,6 +886,9 @@ def start_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
     )
+    if cc_first_run is not None:
+        cc_kwargs["next_run_time"] = cc_first_run
+    _scheduler.add_job(_coach_cards_weekly_job, **cc_kwargs)
 
     # ── Simulator AUTO-MODE: ogni 30 minuti ──────────────────────────────
     # No-op se auto_mode_enabled = false. Quando abilitato, fa girare un

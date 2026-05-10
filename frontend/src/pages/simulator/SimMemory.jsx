@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { BookOpen, Trash2, Sparkles, Loader2, RefreshCw, AlertCircle } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { BookOpen, Trash2, Sparkles, Loader2, RefreshCw, AlertCircle,
+         Search, X, Bot, User, ArrowUpDown } from "lucide-react";
 
 const API = window.location.origin;
 
@@ -19,6 +20,16 @@ export default function SimMemory() {
   const [error, setError] = useState(null);
   const [stats, setStats] = useState({ category_count: 0, total_advices: 0 });
   const [expandedKeys, setExpandedKeys] = useState({});
+
+  // ── Filtri ────────────────────────────────────────────────────────────
+  // search: testo libero su title/text/rationale
+  // categoryFilter: "all" | category_key specifica (es. "macro__bear")
+  // sourceFilter: "all" | "auto" (auto-saved da finalize_run) | "manual"
+  // sortBy: "recent" | "applied_count_desc" | "title"
+  const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [sortBy, setSortBy] = useState("recent");
 
   const fetchMemory = async () => {
     setLoading(true);
@@ -106,7 +117,61 @@ export default function SimMemory() {
     );
   }
 
-  const categoryKeys = Object.keys(groups).sort();
+  // Filtraggio + ordinamento applicati ai gruppi.
+  // Applico:
+  //  - search: case-insensitive su title/text/rationale
+  //  - categoryFilter: tiene solo il gruppo selezionato
+  //  - sourceFilter: tiene solo advice con scenario_tags.auto == true (Auto)
+  //                  o == false (Manual)
+  //  - sortBy: ordina i singoli items dentro ogni gruppo
+  const filteredGroups = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filterAdvice = (a) => {
+      // Source filter (auto vs manual)
+      if (sourceFilter !== "all") {
+        const isAuto = !!(a.scenario_tags && a.scenario_tags.auto);
+        if (sourceFilter === "auto" && !isAuto) return false;
+        if (sourceFilter === "manual" && isAuto) return false;
+      }
+      // Search testo
+      if (q) {
+        const blob = `${a.title || ""}\n${a.text || ""}\n${a.rationale || ""}`.toLowerCase();
+        if (!blob.includes(q)) return false;
+      }
+      return true;
+    };
+    const sortAdvice = (a, b) => {
+      if (sortBy === "applied_count_desc") {
+        return (b.apply_count || 0) - (a.apply_count || 0);
+      }
+      if (sortBy === "title") {
+        return (a.title || "").localeCompare(b.title || "");
+      }
+      // default: recent
+      return (b.created_at || "").localeCompare(a.created_at || "");
+    };
+
+    const out = {};
+    for (const [key, items] of Object.entries(groups)) {
+      if (categoryFilter !== "all" && key !== categoryFilter) continue;
+      const filtered = (items || []).filter(filterAdvice).sort(sortAdvice);
+      if (filtered.length > 0) out[key] = filtered;
+    }
+    return out;
+  }, [groups, search, categoryFilter, sourceFilter, sortBy]);
+
+  const categoryKeys = Object.keys(filteredGroups).sort();
+  const allCategoryKeys = Object.keys(groups).sort();
+  const filteredCount = Object.values(filteredGroups)
+                              .reduce((s, items) => s + items.length, 0);
+  const hasActiveFilters = !!(search || categoryFilter !== "all"
+                               || sourceFilter !== "all"
+                               || sortBy !== "recent");
+
+  const clearFilters = () => {
+    setSearch(""); setCategoryFilter("all");
+    setSourceFilter("all"); setSortBy("recent");
+  };
 
   return (
     <div>
@@ -127,24 +192,133 @@ export default function SimMemory() {
         </button>
       </div>
 
-      {categoryKeys.length === 0 && (
-        <div style={S.emptyState}>
-          Nessun consiglio salvato. Per archiviarne uno, completa un run nel
-          Simulator e usa la tab <strong>Analizza & Migliora</strong> sulla
-          pagina del risultato.
+      {/* ── Barra filtri ────────────────────────────────────────────── */}
+      {stats.total_advices > 0 && (
+        <div style={S.filterBar}>
+          {/* Search */}
+          <div style={S.searchWrap}>
+            <Search size={14} style={{ color: "#64748b" }} />
+            <input
+              type="text"
+              placeholder="Cerca in titolo, testo, razionale..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={S.searchInput}
+            />
+            {search && (
+              <button style={S.searchClear} onClick={() => setSearch("")}
+                       aria-label="Pulisci ricerca">
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
+          {/* Categoria (dropdown) */}
+          <select value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  style={S.select}>
+            <option value="all">Tutte le categorie ({allCategoryKeys.length})</option>
+            {allCategoryKeys.map(k => (
+              <option key={k} value={k}>
+                {k} ({(groups[k] || []).length})
+              </option>
+            ))}
+          </select>
+
+          {/* Source filter: Auto vs Manual */}
+          <div style={S.toggleGroup}>
+            <button
+              style={{ ...S.toggleBtn,
+                       ...(sourceFilter === "all" ? S.toggleBtnActive : {}) }}
+              onClick={() => setSourceFilter("all")}
+            >
+              Tutti
+            </button>
+            <button
+              style={{ ...S.toggleBtn,
+                       ...(sourceFilter === "auto" ? S.toggleBtnActive : {}) }}
+              onClick={() => setSourceFilter("auto")}
+              title="Solo i consigli salvati automaticamente al termine del run"
+            >
+              <Bot size={12} style={{ marginRight: 4, verticalAlign: "middle" }} />
+              Auto
+            </button>
+            <button
+              style={{ ...S.toggleBtn,
+                       ...(sourceFilter === "manual" ? S.toggleBtnActive : {}) }}
+              onClick={() => setSourceFilter("manual")}
+              title="Solo i consigli salvati manualmente via 'Analizza & Migliora'"
+            >
+              <User size={12} style={{ marginRight: 4, verticalAlign: "middle" }} />
+              Manuale
+            </button>
+          </div>
+
+          {/* Sort */}
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}
+                  style={{ ...S.select, paddingLeft: 26 }}
+                  title="Ordina i consigli">
+            <option value="recent">↓ Più recenti</option>
+            <option value="applied_count_desc">↓ Più applicati</option>
+            <option value="title">A → Z</option>
+          </select>
+
+          {/* Reset */}
+          {hasActiveFilters && (
+            <button style={S.resetBtn} onClick={clearFilters}>
+              <X size={12} /> Reset
+            </button>
+          )}
+
+          {/* Risultati */}
+          <div style={S.filterCount}>
+            <strong style={{ color: "#e2e8f0" }}>{filteredCount}</strong>
+            <span style={{ color: "#64748b" }}> / {stats.total_advices}</span>
+            {hasActiveFilters && (
+              <span style={{ color: "#a78bfa", marginLeft: 6, fontSize: 11 }}>
+                · filtrati
+              </span>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Lista gruppi */}
+      {stats.total_advices === 0 && (
+        <div style={S.emptyState}>
+          Nessun consiglio salvato. Per archiviarne uno, completa un run nel
+          Simulator (auto-saved automaticamente) o usa la tab
+          <strong> Analizza & Migliora</strong> sulla pagina del risultato.
+        </div>
+      )}
+
+      {stats.total_advices > 0 && categoryKeys.length === 0 && (
+        <div style={S.emptyState}>
+          Nessun consiglio corrisponde ai filtri selezionati.
+          <button style={{ ...S.btnSecondary, marginLeft: 12 }}
+                   onClick={clearFilters}>
+            <X size={12} /> Pulisci filtri
+          </button>
+        </div>
+      )}
+
+      {/* Lista gruppi (filtrati) */}
       {categoryKeys.map((key) => {
-        const items = groups[key] || [];
-        const expanded = expandedKeys[key];
+        const items = filteredGroups[key] || [];
+        const expanded = expandedKeys[key] !== false;   // default true
         return (
           <div key={key} style={S.group}>
             <div style={S.groupHeader} onClick={() => toggleGroup(key)}>
               <div>
                 <span style={S.categoryBadge}>{key}</span>
-                <span style={S.groupCount}>{items.length} consigli</span>
+                <span style={S.groupCount}>
+                  {items.length}
+                  {items.length !== (groups[key] || []).length && (
+                    <span style={{ color: "#64748b" }}>
+                      {" / "}{(groups[key] || []).length}
+                    </span>
+                  )}
+                  {" consigli"}
+                </span>
               </div>
               <span style={S.toggleIcon}>{expanded ? "−" : "+"}</span>
             </div>
@@ -167,6 +341,7 @@ export default function SimMemory() {
 }
 
 function AdviceCard({ advice, onDelete }) {
+  const isAuto = !!(advice.scenario_tags && advice.scenario_tags.auto);
   return (
     <div style={S.advice}>
       <div style={S.adviceHeader}>
@@ -175,6 +350,17 @@ function AdviceCard({ advice, onDelete }) {
           {advice.title || "(senza titolo)"}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {isAuto ? (
+            <span style={S.autoBadge} title="Salvato automaticamente al termine del run">
+              <Bot size={10} style={{ marginRight: 3, verticalAlign: "middle" }} />
+              AUTO
+            </span>
+          ) : (
+            <span style={S.manualBadge} title="Salvato manualmente via Analizza & Migliora">
+              <User size={10} style={{ marginRight: 3, verticalAlign: "middle" }} />
+              MANUAL
+            </span>
+          )}
           <span style={S.applyBadge}>iniettato {advice.apply_count || 0}×</span>
           <button style={S.deleteBtn} onClick={onDelete} title="Elimina">
             <Trash2 size={12} />
@@ -261,6 +447,66 @@ const S = {
     fontSize: 10, color: "#fbbf24", background: "rgba(251,191,36,0.12)",
     border: "1px solid rgba(251,191,36,0.3)",
     padding: "3px 8px", borderRadius: 999, whiteSpace: "nowrap",
+  },
+  autoBadge: {
+    fontSize: 10, color: "#a78bfa", background: "rgba(167,139,250,0.10)",
+    border: "1px solid rgba(167,139,250,0.30)",
+    padding: "3px 8px", borderRadius: 999, whiteSpace: "nowrap",
+    fontWeight: 600, letterSpacing: "0.04em",
+  },
+  manualBadge: {
+    fontSize: 10, color: "#06b6d4", background: "rgba(6,182,212,0.10)",
+    border: "1px solid rgba(6,182,212,0.30)",
+    padding: "3px 8px", borderRadius: 999, whiteSpace: "nowrap",
+    fontWeight: 600, letterSpacing: "0.04em",
+  },
+
+  // Barra filtri
+  filterBar: {
+    display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center",
+    background: "#0f172a", border: "1px solid #1f2937",
+    padding: "10px 14px", borderRadius: 10, marginBottom: 18,
+  },
+  searchWrap: {
+    position: "relative", display: "inline-flex", alignItems: "center", gap: 6,
+    background: "#0a1018", border: "1px solid #1f2937",
+    borderRadius: 6, padding: "5px 10px", minWidth: 260, flex: "1 1 260px",
+  },
+  searchInput: {
+    background: "transparent", border: 0, color: "#e2e8f0",
+    fontSize: 13, outline: "none", flex: 1, fontFamily: "inherit",
+  },
+  searchClear: {
+    background: "transparent", border: 0, color: "#64748b",
+    cursor: "pointer", padding: 2, display: "inline-flex",
+  },
+  select: {
+    background: "#0a1018", border: "1px solid #1f2937", color: "#e2e8f0",
+    fontSize: 12, padding: "7px 10px", borderRadius: 6,
+    fontFamily: "inherit", cursor: "pointer", minWidth: 180,
+  },
+  toggleGroup: {
+    display: "inline-flex", border: "1px solid #1f2937",
+    borderRadius: 6, overflow: "hidden",
+  },
+  toggleBtn: {
+    background: "transparent", border: 0, color: "#94a3b8",
+    fontSize: 12, padding: "7px 12px", cursor: "pointer",
+    fontFamily: "inherit", fontWeight: 500,
+    borderRight: "1px solid #1f2937",
+  },
+  toggleBtnActive: {
+    background: "rgba(167,139,250,0.15)", color: "#c4b5fd",
+  },
+  resetBtn: {
+    background: "transparent", border: "1px solid rgba(239,68,68,0.30)",
+    color: "#fca5a5", padding: "6px 10px", borderRadius: 6,
+    cursor: "pointer", fontSize: 11.5, fontFamily: "inherit",
+    display: "inline-flex", alignItems: "center", gap: 4,
+  },
+  filterCount: {
+    marginLeft: "auto", fontSize: 12, color: "#94a3b8",
+    fontFamily: "monospace",
   },
   deleteBtn: {
     background: "transparent", border: "1px solid rgba(239,68,68,0.3)",
