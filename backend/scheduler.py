@@ -170,6 +170,48 @@ def is_weekend():
     return datetime.now(pytz.utc).weekday() >= 5
 
 
+def is_standard_agent_active() -> bool:
+    """
+    True se l'agente Decision Standard puo' essere triggerato per gestire
+    asset equity (NYSE/LSE/XETRA).
+
+    A differenza di is_market_open() (che richiede l'orario di apertura
+    di almeno una borsa), questa controlla solo:
+      - Non e' weekend (sabato/domenica)
+      - Non e' festivita' di NESSUNA delle 3 borse target
+
+    Razionale: durante un giorno feriale non festivo, anche pre-market o
+    after-hours, l'agente Standard e' "attivo" — puo' essere triggerato
+    da un rebalance e l'orchestrator decidera' se eseguire subito o
+    attendere l'apertura. Durante weekend e festivita', invece, NON
+    deve partire (non avrebbe modo di eseguire trade equity).
+    """
+    now_utc = datetime.now(pytz.utc)
+    if now_utc.weekday() >= 5:
+        return False
+    today_et = now_utc.astimezone(pytz.timezone('America/New_York')).strftime("%Y-%m-%d")
+    today_uk = now_utc.astimezone(pytz.timezone('Europe/London')).strftime("%Y-%m-%d")
+    today_de = now_utc.astimezone(pytz.timezone('Europe/Berlin')).strftime("%Y-%m-%d")
+    # Festivita' su tutte e 3 le borse target → standard agent NON attivo
+    if (today_et in NYSE_HOLIDAYS
+            and today_uk in LSE_HOLIDAYS
+            and today_de in XETRA_HOLIDAYS):
+        return False
+    # Festivita' US specifica + non altre: per asset US-listed (la maggior
+    # parte) l'agente non puo' eseguire. Conservatively: skip.
+    if today_et in NYSE_HOLIDAYS:
+        return False
+    return True
+
+
+def is_crypto_agent_active() -> bool:
+    """
+    True sempre. Il Decision Crypto opera 24/7/365 — i mercati crypto
+    non hanno chiusure di weekend ne' festivita'.
+    """
+    return True
+
+
 def get_current_mode():
     """Determina la modalita' corrente dell'agente."""
     if is_weekend():

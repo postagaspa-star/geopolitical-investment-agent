@@ -102,10 +102,12 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
     equity_focus = [t for t in (focus_tickers or []) if not _is_crypto_ticker(t)]
 
     try:
-        from scheduler import is_market_open
+        from scheduler import is_market_open, is_standard_agent_active
         market_open = is_market_open()
+        standard_active = is_standard_agent_active()
     except Exception:
         market_open = False
+        standard_active = False
 
     # ─── ROUTE 1: Trigger crypto → Decision Crypto (R1) ───
     # Quando il watchdog include crypto nei focus_tickers, ESCLUSIVAMENTE
@@ -163,17 +165,32 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
             "duration_seconds": round(time.time() - start, 2),
         }
 
-    # ─── ROUTE 2: equity ticker — richiede mercato aperto ───
-    if not market_open:
-        if _should_emit_block_log("market_closed"):
-            logger.info("[%s][ORCHESTRATOR] Mercato chiuso — Decision standard skip "
-                        "(focus equity: %s)", run_id, equity_focus or focus_tickers)
+    # ─── ROUTE 2: equity ticker — richiede AGENTE STANDARD ATTIVO + MERCATO APERTO ───
+    # Il Decision Standard puo' partire SOLO se:
+    #   - is_standard_agent_active() True (weekday + non festivita' NYSE)
+    #   - is_market_open() True (almeno una borsa target attualmente aperta)
+    # Allineato al filtro del Watchdog rebalance: stessi vincoli per evitare
+    # disallineamenti che causerebbero spam (watchdog triggera, orchestrator skippa).
+    if not (standard_active and market_open):
+        block_kind = ("standard_agent_inactive"
+                      if not standard_active else "market_closed")
+        block_msg = ("Decision Standard non attivo (weekend o festivita' US)"
+                     if not standard_active
+                     else "Mercato chiuso (orari NYSE/LSE/XETRA)")
+        if _should_emit_block_log(block_kind):
+            logger.info("[%s][ORCHESTRATOR] %s — Decision standard skip "
+                        "(focus equity: %s)", run_id, block_msg,
+                        equity_focus or focus_tickers)
             try:
                 database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
-                    "event": "decision_skipped_market_closed",
+                    "event": ("decision_skipped_agent_inactive"
+                              if not standard_active
+                              else "decision_skipped_market_closed"),
                     "urgency": urgency,
                     "reason": reason,
                     "equity_focus": equity_focus or focus_tickers,
+                    "standard_agent_active": standard_active,
+                    "market_open": market_open,
                 }))
             except Exception:
                 pass
@@ -182,7 +199,7 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
             "triggered": False,
             "urgency": urgency,
             "reason": reason,
-            "blocked": "market_closed",
+            "blocked": block_kind,
             "duration_seconds": round(time.time() - start, 2),
         }
 

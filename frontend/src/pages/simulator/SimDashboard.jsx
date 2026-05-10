@@ -206,37 +206,10 @@ export default function SimDashboard() {
       `}</style>
       <div style={S.header}>
         <h1 style={S.h1}>GeoInvest AI Simulator</h1>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            style={{
-              ...S.refreshBtn,
-              opacity: (pdfBusy || !kpi || (kpi.total ?? 0) === 0) ? 0.5 : 1,
-              cursor: (pdfBusy || !kpi || (kpi.total ?? 0) === 0) ? "not-allowed" : "pointer",
-            }}
-            onClick={handleDownloadGlobalPDF}
-            disabled={pdfBusy || !kpi || (kpi.total ?? 0) === 0}
-            title={
-              !kpi || (kpi.total ?? 0) === 0
-                ? "Avvia almeno un run prima di scaricare il report"
-                : "Scarica un PDF con il riepilogo globale di tutte le simulazioni"
-            }
-          >
-            {pdfBusy ? (
-              <>
-                <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
-                Generazione…
-              </>
-            ) : (
-              <>
-                <Download size={14} /> Scarica PDF
-              </>
-            )}
-          </button>
-          <button style={S.refreshBtn} onClick={reload} disabled={loading}>
-            <RefreshCw size={14} style={loading ? { animation: "spin 1s linear infinite" } : {}} />
-            {loading ? "..." : "Aggiorna"}
-          </button>
-        </div>
+        <button style={S.refreshBtn} onClick={reload} disabled={loading}>
+          <RefreshCw size={14} style={loading ? { animation: "spin 1s linear infinite" } : {}} />
+          {loading ? "..." : "Aggiorna"}
+        </button>
       </div>
       <p style={S.sub}>
         Stato complessivo sui run completati. Clicca su uno scenario per vedere il dettaglio.
@@ -376,6 +349,60 @@ export default function SimDashboard() {
       )}
 
       </div>{/* /sim-dashboard-pdf */}
+
+      {/* ─── FLOATING DOWNLOAD PDF BUTTON (fixed bottom-right) ──────────
+         Pulsante sempre visibile, indipendente dallo scroll della pagina. */}
+      <button
+        onClick={handleDownloadGlobalPDF}
+        disabled={pdfBusy || !kpi || (kpi.total ?? 0) === 0}
+        title={
+          !kpi || (kpi.total ?? 0) === 0
+            ? "Avvia almeno un run prima di scaricare il report"
+            : "Scarica un PDF con il riepilogo globale di tutte le simulazioni"
+        }
+        style={{
+          position: "fixed",
+          bottom: 24, right: 24,
+          zIndex: 9999,
+          background: pdfBusy ? "#475569" : "#a78bfa",
+          color: "#0a0e1a",
+          border: 0,
+          padding: "14px 22px",
+          borderRadius: 999,
+          fontWeight: 700,
+          fontSize: 14,
+          fontFamily: "inherit",
+          cursor: (pdfBusy || !kpi || (kpi.total ?? 0) === 0) ? "not-allowed" : "pointer",
+          opacity: (!kpi || (kpi.total ?? 0) === 0) ? 0.55 : 1,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 8,
+          boxShadow: "0 6px 24px rgba(167,139,250,0.45), 0 2px 8px rgba(0,0,0,0.4)",
+          transition: "transform 0.15s ease, box-shadow 0.15s ease",
+        }}
+        onMouseEnter={(e) => {
+          if (!e.currentTarget.disabled) {
+            e.currentTarget.style.transform = "translateY(-2px)";
+            e.currentTarget.style.boxShadow = "0 10px 32px rgba(167,139,250,0.6), 0 4px 12px rgba(0,0,0,0.5)";
+          }
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.transform = "translateY(0)";
+          e.currentTarget.style.boxShadow = "0 6px 24px rgba(167,139,250,0.45), 0 2px 8px rgba(0,0,0,0.4)";
+        }}
+      >
+        {pdfBusy ? (
+          <>
+            <Loader2 size={18} style={{ animation: "spin 1s linear infinite" }} />
+            Generazione PDF…
+          </>
+        ) : (
+          <>
+            <Download size={18} />
+            Scarica PDF Globale
+          </>
+        )}
+      </button>
     </div>
   );
 }

@@ -631,49 +631,70 @@ async def run_watchdog(run_id: str) -> dict:
             _check_position_overweight, database
         )
         if needs_reb:
-            # ── MARKET-AWARE FILTERING ─────────────────────────────────────
-            # Il Decision standard puo' modificare posizioni equity SOLO durante
-            # market hours. Se NVDA e' overweight di sabato, triggherare e' inutile:
-            # l'orchestrator skipperebbe l'esecuzione, ma il global cooldown 15-min
-            # sarebbe gia' stato settato → blocchiamo anche eventuali trigger crypto.
-            # Filtra gli overweight tenendo solo quelli ATTUABILI dato lo stato
-            # del mercato. Il Decision Crypto e' 24/7 quindi i ticker crypto sono
-            # sempre attuabili.
+            # ── PER-ASSET AGENT-AWARE FILTERING ────────────────────────────
+            # Filtro per-asset: ogni overweight viene tenuto SOLO se l'agente
+            # che lo gestisce (Standard o Crypto) e' attivo nel momento del check.
+            #
+            #   - CRYPTO (BTC, ETH, ...) → gestito da Decision Crypto, attivo 24/7.
+            #     Sempre actionable, anche di notte/weekend/festivita'. Sparte subito.
+            #
+            #   - EQUITY (AAPL, NVDA, ...) → gestito da Decision Standard. Attuabile
+            #     SOLO se BOTH:
+            #       · is_standard_agent_active(): weekday + non-US-holiday
+            #         (esclude weekend e festivita' NYSE — su queste finestre
+            #         l'agente standard NON deve partire).
+            #       · is_market_open(): almeno una borsa target attualmente aperta
+            #         (NYSE/LSE/XETRA) — necessario perche' l'orchestrator e il
+            #         portfolio executor non possono eseguire trade su mercati chiusi.
+            #     Combinare i due check evita lo spam: durante weekday-off-hours
+            #     non-festivi l'orchestrator skipperebbe (mercato chiuso) settando
+            #     un cooldown 15-min che bloccherebbe anche i trigger crypto.
             try:
+                from scheduler import is_standard_agent_active as _std_active
                 from scheduler import is_market_open as _market_check
+                _standard_on = _std_active()
                 _market_open = _market_check()
             except Exception:
+                _standard_on = True
                 _market_open = True
 
-            if _market_open:
-                actionable = list(all_overweight)
-            else:
-                actionable = [(t, p) for t, p in all_overweight if _is_crypto_ticker(t)]
+            equity_actionable = _standard_on and _market_open
+
+            actionable = [
+                (t, p) for t, p in all_overweight
+                if _is_crypto_ticker(t) or equity_actionable
+            ]
 
             if not actionable:
-                # Tutti overweight sono equity ma il mercato e' chiuso: skip.
-                # La posizione restera' sopra soglia, ricontrolleremo alla
-                # riapertura. Nessun cooldown viene settato → quando il mercato
-                # riapre il rebalance trigger fara' subito.
-                logger.info(
-                    "[%s][WATCHDOG] Rebalance skip: %s overweight %.1f%% MA mercato "
-                    "chiuso e nessun overweight crypto attuabile (Decision standard "
-                    "non puo' girare). Aspetto la riapertura.",
-                    run_id, top_ticker, top_pct,
-                )
+                # Tutti overweight sono equity ma equity_actionable=False:
+                #   - _standard_on=False → weekend o festivita' NYSE
+                #   - _market_open=False → fuori orario di mercato (anche weekday)
+                # Skip senza cooldown globale: ricontrolleremo al prossimo
+                # tick. Quando entrambe le condizioni saranno True il
+                # rebalance trigger partira' subito.
+                if not _standard_on:
+                    skip_reason = (
+                        f"Decision Standard non attivo (weekend o festivita' US): "
+                        f"{top_ticker} ({top_pct:.1f}% NAV) e' equity, skip "
+                        f"fino al prossimo giorno feriale non-festivo."
+                    )
+                else:
+                    skip_reason = (
+                        f"Mercato chiuso (orario fuori NYSE/LSE/XETRA): "
+                        f"{top_ticker} ({top_pct:.1f}% NAV) e' equity, "
+                        f"skip fino alla riapertura."
+                    )
+                logger.info("[%s][WATCHDOG] Rebalance skip: %s", run_id, skip_reason)
                 try:
                     database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
                         "event": "watchdog_rebalance_skipped",
-                        "reason": (
-                            f"Mercato chiuso: {top_ticker} ({top_pct:.1f}% NAV) "
-                            f"e' equity, il Decision standard non puo' girare. "
-                            f"Aspettiamo la riapertura."
-                        ),
+                        "reason": skip_reason,
                         "ticker_overweight": top_ticker,
                         "pct_of_portfolio": round(top_pct, 2),
                         "all_overweight": [t for t, _ in all_overweight],
                         "is_crypto": False,
-                        "market_open": False,
+                        "standard_agent_active": _standard_on,
+                        "market_open": _market_open,
                     }))
                 except Exception:
                     pass
@@ -719,8 +740,9 @@ async def run_watchdog(run_id: str) -> dict:
                     other_ow = [t for t, _ in all_overweight if t != act_ticker]
                     logger.warning(
                         "[%s][WATCHDOG] REBALANCE TRIGGER: %s | altri overweight: %s "
-                        "| market_open=%s",
-                        run_id, reason, other_ow or "nessuno", _market_open,
+                        "| asset_kind=%s | standard_active=%s | market_open=%s",
+                        run_id, reason, other_ow or "nessuno", asset_kind,
+                        _standard_on, _market_open,
                     )
                     try:
                         database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
@@ -731,6 +753,7 @@ async def run_watchdog(run_id: str) -> dict:
                             "threshold_pct": threshold_used,
                             "is_crypto": is_cry,
                             "all_overweight": [t for t, _ in all_overweight],
+                            "standard_agent_active": _standard_on,
                             "market_open": _market_open,
                             "trigger": True,
                             "urgency": REBALANCE_URGENCY,
