@@ -455,6 +455,45 @@ async def _crypto_pipeline_job():
         logger.error("Errore crypto pipeline: %s", e, exc_info=True)
 
 
+async def _crypto_monitor_job():
+    """
+    CryptoMonitor — ogni 15 minuti, 24/7.
+
+    Sorveglianza intelligente delle posizioni crypto aperte: legge le
+    ultime ~25 candele 15-min per ogni asset e chiede a DeepSeek-V3 di
+    valutare se il trend di entrata e' ancora sano oppure mostra segnali
+    di esaurimento / inversione. Su REVERSAL_CONFIRMED triggera alert +
+    (opzionale) restringe lo stop-loss.
+
+    Costo: ~$0.0001/run × 96 run/giorno = ~$0.01/giorno.
+    No-op se non ci sono posizioni crypto aperte.
+    """
+    try:
+        from agents.crypto_monitor import run_crypto_monitor
+        from uuid import uuid4
+        run_id = str(uuid4())[:8]
+        result = await run_crypto_monitor(run_id=run_id)
+        if result.get("skipped"):
+            logger.debug("[%s] CryptoMonitor skipped: %s",
+                         run_id, result.get("reason", "?"))
+        else:
+            n_alerts = len(result.get("alerts", []))
+            n_tightened = len(result.get("tightened_sl", []))
+            if n_alerts or n_tightened:
+                logger.info(
+                    "[%s] CryptoMonitor: %d analizzate, %d alert, %d SL tightened",
+                    run_id, result.get("positions_analyzed", 0),
+                    n_alerts, n_tightened,
+                )
+            else:
+                logger.debug(
+                    "[%s] CryptoMonitor: %d analizzate, tutte HEALTHY",
+                    run_id, result.get("positions_analyzed", 0),
+                )
+    except Exception as e:
+        logger.error("Errore CryptoMonitor: %s", e, exc_info=True)
+
+
 async def _standard_pipeline_job():
     """
     Standard pipeline (Technical + Decision Sonnet) — cron a ore precise.
@@ -787,9 +826,28 @@ def start_scheduler() -> AsyncIOScheduler:
     # AGG_8H / AGG_4D / AGG_3W (vedi backend/agents/scout.py).
     now_utc = datetime.now(pytz.utc)
 
-    # 8H — ogni 8 ore. Primo run dopo 10 min dal restart.
-    # Il job stesso fa un check anti-double-run leggendo l'ultimo AGG_8H
-    # dal buffer (skip se < 6h fa, evita spreco token su deploy frequenti).
+    # BACKFILL: se l'ultimo AGG_8H e' > 12h fa (es. weekend in cui non e'
+    # girato) facciamo girare il job in modo "force" subito al boot.
+    # Stesso per AGG_4D se > 5 giorni.
+    scout_8h_first_run = now_utc + timedelta(minutes=10)
+    scout_4d_first_run = now_utc + timedelta(minutes=15)
+    try:
+        from agents.scout import _last_aggregated_age_hours, TIER_8H, TIER_4D
+        last_8h_age = _last_aggregated_age_hours(database, TIER_8H)
+        if last_8h_age is None or last_8h_age > 12:
+            scout_8h_first_run = now_utc + timedelta(minutes=2)
+            logger.info("Scout 8H backfill: ultimo report %s, forzo first_run a +2min",
+                        f"{last_8h_age:.1f}h fa" if last_8h_age else "mai eseguito")
+        last_4d_age = _last_aggregated_age_hours(database, TIER_4D)
+        if last_4d_age is None or last_4d_age > 24 * 5:  # > 5 giorni
+            scout_4d_first_run = now_utc + timedelta(minutes=4)
+            logger.info("Scout 4D backfill: ultimo report %s, forzo first_run a +4min",
+                        f"{last_4d_age/24:.1f}gg fa" if last_4d_age else "mai eseguito")
+    except Exception as exc:
+        logger.debug("Scout backfill check fallito: %s", exc)
+
+    # 8H — ogni 8 ore. Il job stesso fa un check anti-double-run leggendo
+    # l'ultimo AGG_8H dal buffer (skip se < 6h fa).
     _scheduler.add_job(
         _scout_8h_report_job,
         trigger="interval",
@@ -799,14 +857,11 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        next_run_time=now_utc + timedelta(minutes=10),
+        next_run_time=scout_8h_first_run,
     )
 
-    # 4D — ogni 4 giorni. Primo run dopo 15 min dal restart.
-    # PRIMA: next_run = now + 24h → ogni deploy resettava il timer e il
-    # job non girava mai. Dopo 5 giorni di running con deploy frequenti
-    # avevamo 17 AGG_8H ma 0 AGG_4D. Fix: schedula presto, e il job stesso
-    # fa skip se l'ultimo AGG_4D è < 3 giorni fa.
+    # 4D — ogni 4 giorni. Il job stesso fa skip se l'ultimo AGG_4D è
+    # < 3 giorni fa.
     _scheduler.add_job(
         _scout_4d_report_job,
         trigger="interval",
@@ -816,7 +871,7 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        next_run_time=now_utc + timedelta(minutes=15),
+        next_run_time=scout_4d_first_run,
     )
 
 
@@ -859,6 +914,29 @@ def start_scheduler() -> AsyncIOScheduler:
     if crypto_first_run is not None:
         crypto_kwargs["next_run_time"] = crypto_first_run
     _scheduler.add_job(_crypto_pipeline_job, **crypto_kwargs)
+
+    # ── CryptoMonitor: ogni 15 minuti, 24/7 ──────────────────────────────
+    # Sorveglianza trend-health delle posizioni crypto aperte tramite
+    # DeepSeek-V3. Vede 25 candele 15-min per ogni asset e classifica:
+    # HEALTHY / WARNING / REVERSAL_CONFIRMED. Su REVERSAL_CONFIRMED logga
+    # alert + (se auto_tighten enabled) restringe lo SL. NON esegue trade
+    # autonomi — alza la bandiera e lascia decidere al Decision Crypto.
+    #
+    # No-op se non ci sono posizioni crypto aperte → costo zero quando
+    # non e' rilevante. Per disabilitare in toto: set
+    # crypto_monitor_enabled=false in settings.
+    _scheduler.add_job(
+        _crypto_monitor_job,
+        trigger="interval",
+        minutes=15,
+        id="crypto_monitor_job",
+        name="CryptoMonitor 15min (DeepSeek-V3 trend health)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        # Avvia 60s dopo il boot per dare tempo al price polling
+        next_run_time=now_utc + timedelta(seconds=60),
+    )
 
     # ── Standard pipeline (Tech + Decision Sonnet): CRON solo NYSE hours ──
     # 14, 16, 18, 20 UTC (= 10:00, 12:00, 14:00, 16:00 ET) Lun-Ven.

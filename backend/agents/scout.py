@@ -723,7 +723,13 @@ async def run_8h_report(run_id: str) -> dict:
         output_source_type=TIER_8H,
         window_hours=8,
         prompt=REPORT_8H_PROMPT,
-        min_records=3,  # almeno 3 micro-cards (= 1 ciclo Scout 20min)
+        # min_records=1: storicamente era 3 (= 1 ciclo Scout 20min) ma nei
+        # weekend / festivi di mercati calmi lo Scout produce 0-2 micro-cards
+        # e l'8H skippa con "insufficient_records" → nessuna intelligence
+        # aggregata viene scritta per tutto il weekend. Con min=1 anche un
+        # singolo segnale (es. notizia geopolitica del sabato) genera un
+        # report 8H, garantendo continuita' nell'intelligence cascade.
+        min_records=1,
         log_phase="SCOUT_8H",
     )
 

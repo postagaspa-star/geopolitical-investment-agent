@@ -1085,9 +1085,17 @@ def _exec_action_set_stop_loss(action: dict) -> dict:
         sl_price = float(action["stop_loss_price"])
     else:
         pct = float(action.get("stop_loss_pct", 0))
-        entry = float(pos.get("avg_entry_price") or pos.get("entry_price") or 0)
+        # FIX: la colonna effettiva nelle posizioni e' `avg_buy_price`
+        # (vedi db_sqlite/db_supabase schema). I fallback su avg_entry_price /
+        # entry_price restano per compat con eventuali payload diversi.
+        entry = float(
+            pos.get("avg_buy_price")
+            or pos.get("avg_entry_price")
+            or pos.get("entry_price")
+            or 0
+        )
         if entry <= 0:
-            return {"ok": False, "error": "avg_entry_price non disponibile"}
+            return {"ok": False, "error": "prezzo medio di carico non disponibile"}
         # pct negativo per BUY (long), positivo per SHORT — qui assumiamo long
         sl_price = round(entry * (1 + pct / 100.0), 4)
 
@@ -1119,9 +1127,15 @@ def _exec_action_set_take_profit(action: dict) -> dict:
         tp_price = float(action["take_profit_price"])
     else:
         pct = float(action.get("take_profit_pct", 0))
-        entry = float(pos.get("avg_entry_price") or pos.get("entry_price") or 0)
+        # FIX: usa avg_buy_price (campo reale schema), fallback su alias
+        entry = float(
+            pos.get("avg_buy_price")
+            or pos.get("avg_entry_price")
+            or pos.get("entry_price")
+            or 0
+        )
         if entry <= 0:
-            return {"ok": False, "error": "avg_entry_price non disponibile"}
+            return {"ok": False, "error": "prezzo medio di carico non disponibile"}
         tp_price = round(entry * (1 + pct / 100.0), 4)
 
     if tp_price <= 0:
@@ -4215,6 +4229,148 @@ async def trigger_scout_run(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_do)
     return {"status": "started", "run_id": run_id}
+
+
+@app.post("/api/scout/force-8h-report")
+async def force_8h_report(background_tasks: BackgroundTasks):
+    """
+    Forza un run del Scout 8H Report adesso, in background. Utile per
+    recuperare l'intelligence di un weekend in cui il job e' stato
+    saltato per insufficient_records.
+    """
+    import uuid as _uuid
+    run_id = str(_uuid.uuid4())
+
+    async def _do():
+        try:
+            from agents.scout import run_8h_report
+            result = await run_8h_report(run_id)
+            logger.info("Manual 8H report %s: skipped=%s, bias=%s",
+                        run_id, result.get("skipped"), result.get("macro_bias"))
+        except Exception as e:
+            logger.error("Manual 8H report failed: %s", e, exc_info=True)
+
+    background_tasks.add_task(_do)
+    return {"status": "started", "run_id": run_id, "tier": "8H"}
+
+
+@app.post("/api/scout/force-4d-report")
+async def force_4d_report(background_tasks: BackgroundTasks):
+    """
+    Forza un run del Scout 4D Report adesso. Aggrega gli ultimi report
+    8H in un singolo report 4D. Da usare quando manca l'intelligence
+    settimanale e si vuole rigenerarla on-demand.
+    """
+    import uuid as _uuid
+    run_id = str(_uuid.uuid4())
+
+    async def _do():
+        try:
+            from agents.scout import run_4d_report
+            result = await run_4d_report(run_id)
+            logger.info("Manual 4D report %s: skipped=%s, bias=%s",
+                        run_id, result.get("skipped"), result.get("macro_bias"))
+        except Exception as e:
+            logger.error("Manual 4D report failed: %s", e, exc_info=True)
+
+    background_tasks.add_task(_do)
+    return {"status": "started", "run_id": run_id, "tier": "4D"}
+
+
+@app.post("/api/crypto-monitor/run")
+async def trigger_crypto_monitor(background_tasks: BackgroundTasks):
+    """
+    Lancia subito un singolo run del CryptoMonitor in background.
+    Utile per testare il monitor o forzare un check dopo aver aperto
+    una nuova posizione crypto. No-op se non ci sono posizioni crypto.
+    """
+    import uuid as _uuid
+    run_id = str(_uuid.uuid4())[:8]
+
+    async def _do():
+        try:
+            from agents.crypto_monitor import run_crypto_monitor
+            result = await run_crypto_monitor(run_id=run_id)
+            logger.info("Manual CryptoMonitor run %s: %s", run_id, {
+                k: v for k, v in result.items() if k != "alerts"
+            })
+        except Exception as e:
+            logger.error("Manual CryptoMonitor failed: %s", e, exc_info=True)
+
+    background_tasks.add_task(_do)
+    return {"status": "started", "run_id": run_id}
+
+
+@app.get("/api/crypto-monitor/status")
+async def get_crypto_monitor_status():
+    """
+    Stato del CryptoMonitor: enabled flag, auto_tighten flag, ultimi
+    alert dal agent_logs (max 20). Per la UI di management.
+    """
+    try:
+        enabled_raw = (database.get_setting("crypto_monitor_enabled", "true") or "").strip().lower()
+        enabled = enabled_raw not in ("0", "false", "no", "off")
+        tighten_raw = (database.get_setting("crypto_monitor_auto_tighten_sl", "false") or "").strip().lower()
+        auto_tighten = tighten_raw in ("1", "true", "yes", "on")
+
+        # Recupera ultimi alert (best-effort)
+        recent_alerts: list = []
+        try:
+            client = database.get_client() if hasattr(database, "get_client") else None
+            if client:
+                r = (client.table("agent_logs")
+                     .select("*")
+                     .eq("phase", "CRYPTO_MONITOR_ALERT")
+                     .order("timestamp", desc=True)
+                     .limit(20)
+                     .execute())
+                for row in (r.data or []):
+                    try:
+                        content = row.get("content", "")
+                        if isinstance(content, str):
+                            import json as _j
+                            payload = _j.loads(content)
+                        else:
+                            payload = content
+                        recent_alerts.append({
+                            "timestamp": row.get("timestamp"),
+                            **(payload if isinstance(payload, dict) else {}),
+                        })
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.debug("crypto_monitor recent alerts read fail: %s", e)
+
+        return {
+            "enabled": enabled,
+            "auto_tighten_sl": auto_tighten,
+            "recent_alerts": recent_alerts,
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class CryptoMonitorSettingsPayload(BaseModel):
+    enabled: bool | None = None
+    auto_tighten_sl: bool | None = None
+
+
+@app.post("/api/crypto-monitor/settings")
+async def update_crypto_monitor_settings(payload: CryptoMonitorSettingsPayload):
+    """Aggiorna i flag del CryptoMonitor (enabled / auto_tighten_sl)."""
+    try:
+        updated = {}
+        if payload.enabled is not None:
+            database.set_setting("crypto_monitor_enabled",
+                                 "true" if payload.enabled else "false")
+            updated["enabled"] = payload.enabled
+        if payload.auto_tighten_sl is not None:
+            database.set_setting("crypto_monitor_auto_tighten_sl",
+                                 "true" if payload.auto_tighten_sl else "false")
+            updated["auto_tighten_sl"] = payload.auto_tighten_sl
+        return {"updated": updated}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/api/portfolio/history")
