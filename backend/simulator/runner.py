@@ -132,19 +132,32 @@ PROCEDURA OBBLIGATORIA (4 sezioni nominate, in ordine, NESSUNA OMISSIONE):
     Scegli ESATTAMENTE UNA categoria e dichiarala in chiaro
     (es. "Regime: [LATERAL]"):
 
-      [TREND-UP]    trend rialzista (breadth ampia, momentum positivo,
-                    risk-on diffuso, no catalyst macro avverso imminente)
+      [TREND-UP]    trend rialzista NON esplosivo (breadth 60-70%,
+                    momentum positivo, mosse giornaliere 0.5-1.5%,
+                    no catalyst macro avverso imminente)
       [TREND-DOWN]  trend ribassista (breadth stretta, momentum negativo,
                     risk-off, deterioramento macro/earnings)
       [LATERAL]     range-bound, low conviction, no edge direzionale
                     (volumi compressi, news non decisive, no catalyst forte)
-      [MACRO]       finestra di evento macro / event-driven binario
-                    (FOMC, CPI, NFP, evento geopolitico in attesa di esito)
+      [MACRO]       finestra di evento macro SCHEDULATO
+                    (FOMC, CPI, NFP, GDP — eventi macro CONTINUI)
       [CRASH-RALLY] shock di volatilita' (crash) o rebound da capitulation
                     (mosse > 3% in un giorno, panic flows o relief rally)
+      [GEOPOLITICAL] evento geopolitico attivo / supply chain shock
+                    (conflitto armato, sanzioni, disruption supply chain,
+                    escalation tensione geopolitica). 63% win rate storico.
+      [REGULATORY-EVENT] decisione regolatoria BINARIA pendente
+                    (SEC ETF approval/reject, antitrust major, ban,
+                    vote politici con outcome binario). P&L medio storico
+                    Sim: -0.21% (rischio sell-the-news alto).
+      [BULL-CYCLE]  bull market ESPLOSIVO / parabolico (mosse > 3% daily
+                    ricorrenti, breadth > 70%, volumi crescenti, sentiment
+                    retail very-bullish ma NON euforia da bolla. Distinto
+                    da TREND-UP per intensita' del movimento)
 
     PROFILO OPERATIVO PER REGIME (vincoli di processo, non opzionali):
-      - [TREND-UP] / [TREND-DOWN] / [CRASH-RALLY]:
+      - [TREND-UP] / [TREND-DOWN] / [CRASH-RALLY] / [GEOPOLITICAL] /
+        [BULL-CYCLE]:
           puoi tradare normalmente, conviction da BASSA ad ALTA,
           sizing standard.
       - [LATERAL] / [MACRO]:
@@ -153,6 +166,11 @@ PROCEDURA OBBLIGATORIA (4 sezioni nominate, in ordine, NESSUNA OMISSIONE):
           il risk/reward e' asimmetrico. Inoltre la conviction puo'
           essere SOLO "ALTA" (no MEDIA/BASSA) se decidi di entrare,
           e lo stop_loss_target deve essere obbligatoriamente popolato.
+      - [REGULATORY-EVENT]:
+          conviction OBBLIGATORIAMENTE ALTA per mantenere/aprire posizione
+          durante l'evento. Allocazione asymmetric (no over-sizing — il
+          downside e' binario). Se l'asset ha gia' corso > 30% sull'
+          aspettativa, considera SELL parziale (50%) PRIMA dell'annuncio.
 
     STRATEGIA TATTICA PER REGIME (il "COME" tradare, non solo "SE"):
     Derivata dall'analisi dei run storici. Mindset diverso per regime —
@@ -197,13 +215,66 @@ PROCEDURA OBBLIGATORIA (4 sezioni nominate, in ordine, NESSUNA OMISSIONE):
           NON tradare asset CONTRO il driver macro identificato (es. non
           comprare growth-tech con Fed hawkish surprise nelle headline).
 
-      [CRASH-RALLY] Focus: quality + capitulation reversal.
-          Crash (VIX shock, mosse > 3%): quality + cash, evita ciclici
-          e leverage. NON prendere il primo coltello — attendi un bar di
-          stabilizzazione. Capitulation rebound: cerca settori 'battuti
-          peggio' che mostrano primi segnali reversal (high-beta: Tech
-          growth, Small caps IWM). Size piccola, stop_loss_target SEMPRE
-          popolato, exit_strategy = trailing_atr o level_target.
+      [CRASH-RALLY] Focus: CONVEXITY & SPEED — emozione domina.
+          In questo regime domina paura/FOMO. La razionalita' svanisce.
+          NON cercare di comprare il minimo o vendere il massimo.
+            • In CRASH (VIX shock, selloff > 3%): attendi segnali di
+              CAPITOLAZIONE (volumi estremi, sentiment estremo Reddit/X,
+              put/call ratio > 1.2) PRIMA di chiudere long o invertire
+              short. Non prendere il primo coltello.
+            • In RALLY (relief rebound): exit_strategy = trailing_atr
+              MOLTO STRETTO. NON fissare take_profit_target statico:
+              usa exit_strategy = "trailing_atr" o "discretionary" e
+              lascia correre finche' il momentum non inverte chiaramente.
+          Quality come baseline (XLU/XLP). In rebound, settori 'battuti
+          peggio' (high-beta: Tech growth, Small caps IWM). Size piccola,
+          stop_loss_target SEMPRE popolato.
+
+      [GEOPOLITICAL] Focus: EVENT-DRIVEN ARBITRAGE — analista intelligence.
+          Win-rate storico: 63%. E' il campo favorevole del bot.
+          Il prezzo qui e' guidato da PERCEZIONE del rischio + SUPPLY
+          CHAIN, non bilanci.
+            • Safe havens: GLD, TLT, UUP (dollaro forte risk-off).
+            • Sensitive: Energy (XLE, XOM), Defense (LMT, RTX, NOC, ITA),
+              Cybersecurity (CIBR).
+            • Soffrono: EM (EEM, VWO), Aerei (JETS), Tech supply chain
+              Asia (SOXX).
+          Velocita' d'entrata > precisione. stop_loss_target inizialmente
+          LARGO per assorbire volatilita'; quando il trade e' in profitto
+          +3% considera muovere mentalmente a break-even (= rivaluta al
+          turno successivo in modalita' MULTI-STEP).
+          Ignora oscillazioni tecniche se la tesi geopolitica resta valida.
+
+      [REGULATORY-EVENT] Focus: BINARY OUTCOME — asymmetric sizing.
+          P&L medio storico Sim: -0.21%. Alto rischio sell-the-news.
+            • Conviction OBBLIGATORIAMENTE ALTA per mantenere durante
+              evento. Se la tua conviction non e' ALTA, action = HOLD.
+            • Allocazione asymmetric: NO over-sizing su asset binari.
+              In MULTI-STEP, se hai gia' una posizione su un asset in
+              attesa di regulatory event e l'asset ha rallied > 30%
+              sull'aspettativa, action = SELL parziale 50% PRIMA dell'
+              annuncio (la news e' gia' prezzata).
+            • exit_strategy = "level_target" con stop_loss_target stretto.
+            • Hedge: opzionalmente long su correlato inverso (es. short
+              XLK come hedge su antitrust Big Tech).
+            • Post-event (turno successivo MULTI-STEP): muoviti veloce,
+              il primo bar definisce il trend dei giorni successivi.
+
+      [BULL-CYCLE] Focus: AGGRESSIVE COMPOUNDING — opportunity risk.
+          Nei test storici (es. Q1 2021), il bot e' stato troppo timido:
+          ha perso il move per scaling-out troppo precoce. In bull cycle
+          esplosivo, il rischio maggiore e' essere SOTTO-esposti.
+            • Aumenta allocazione sui VINCITORI gia' identificati:
+              advisor dice 'aumentare allocazione in vincitori'. Settori
+              tipici leader: Tech growth (XLK, IWF), Small caps (IWM),
+              Discretionary (XLY), Semis (SOXX).
+            • Conviction ALTA su trend supportati da volumi crescenti.
+            • exit_strategy = "trailing_atr" o "discretionary", NON
+              "level_target" con TP statico (perdi la coda del move).
+            • Scaling-UP sui leader (in MULTI-STEP, RAFFORZA su pullback
+              sani), NON scaling-out per 'prendere profitto'.
+            • Esci solo se: divergenza volumi + breakdown tecnico +
+              news macro avversa confermata. Non per 'sembra tirato'.
 
     Questa classificazione chiude il gap diagnosticato dai run storici
     del Simulator: 0% win-rate in regimi LATERAL/MACRO. Non saltare
@@ -223,6 +294,12 @@ PROCEDURA OBBLIGATORIA (4 sezioni nominate, in ordine, NESSUNA OMISSIONE):
     - SE regime [LATERAL] o [MACRO] e action != HOLD:
         scrivi "Deroga dal HOLD-default perche': (a) catalyst = ...,
         (b) conviction ALTA giustificata da ..., (c) SL sostenibile a ...".
+    - SE regime [REGULATORY-EVENT] e action = BUY o HOLD (mantenere):
+        scrivi "Mantengo posizione regulatory perche': (a) conviction
+        ALTA giustificata da ..., (b) sizing asymmetric (allocazione
+        contenuta), (c) sell-the-news risk valutato (asset rallied
+        X% pre-event, quindi: sell 50% parziale OR mantengo perche'
+        non ha ancora corso)."
 
 [3] DECISIONE
     Output STRUTTURATO sotto forma di JSON. Puoi prendere UNA o PIÙ azioni
