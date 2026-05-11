@@ -5,6 +5,7 @@ all'orario e al giorno (weekend / pre-market / mercato aperto).
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -29,6 +30,37 @@ _scheduler: AsyncIOScheduler | None = None
 
 # Stato corrente della modalita' agente
 current_mode: str = "idle"  # idle | weekend | pre_market | full
+
+# ────────────────────────────────────────────────────────────────────────────
+# Lock di serializzazione "live pipeline".
+# Crypto pipeline (CronTrigger minute=0, 24/7) e Standard pipeline
+# (CronTrigger hour=14,16,18,20 minute=0) si SOVRAPPONGONO 4 volte al
+# giorno (alle :00). Entrambe girano nello stesso event loop e fanno
+# decine di chiamate sync a Supabase + sync Anthropic SDK wrapped in
+# to_thread. Con due pipeline parallele:
+#   - contesa sulla cache OHLCV in-memory
+#   - rate-limit Anthropic per Sonnet sotto pressione
+#   - thread pool default di asyncio (5+N_CPU workers) saturato dalle
+#     chiamate sync di entrambe le pipeline
+#   - log inserts sync che bloccano l'event loop a turno
+# Risultato osservato: il Decision Standard si stalla 13+ min e il
+# Technical Standard non compare nei log.
+#
+# Fix: queste due pipeline acquisiscono lo STESSO asyncio.Lock prima di
+# partire. La prima che arriva blocca la seconda. La seconda aspetta
+# fino a `_LIVE_PIPELINE_LOCK_TIMEOUT` secondi e se non riesce a entrare,
+# skippa il proprio run (logga il motivo).
+_live_pipeline_lock: "asyncio.Lock | None" = None
+_LIVE_PIPELINE_LOCK_TIMEOUT = 8 * 60   # 8 minuti
+
+
+def _get_live_pipeline_lock():
+    """Lazy init dell'asyncio.Lock — deve essere creato dentro l'event loop."""
+    global _live_pipeline_lock
+    if _live_pipeline_lock is None:
+        import asyncio as _asyncio
+        _live_pipeline_lock = _asyncio.Lock()
+    return _live_pipeline_lock
 
 
 # ============================================================
@@ -438,19 +470,48 @@ async def _crypto_pipeline_job():
 
     Schedule cron-fisso (non interval): se il watchdog/run extra triggera
     una crypto run alle 14:35, il prossimo cron run è comunque alle 15:00.
+
+    Serializzazione: acquisisce il live_pipeline_lock per evitare run
+    sovrapposti con la standard pipeline. Timeout 8 min (vedi nota lock).
     """
+    import asyncio as _asyncio
+    lock = _get_live_pipeline_lock()
     try:
-        from agents.orchestrator import run_crypto_pipeline
-        from uuid import uuid4
-        run_id = str(uuid4())
-        result = await run_crypto_pipeline(run_id=run_id)
-        if result.get("skipped"):
-            logger.debug("[%s] Crypto pipeline skipped: %s",
-                         run_id, result["skipped"])
-        else:
-            logger.info("[%s] Crypto pipeline OK: %s, trades=%d",
-                        run_id, result.get("decision", "?"),
-                        len(result.get("trades", [])))
+        try:
+            await _asyncio.wait_for(lock.acquire(), timeout=_LIVE_PIPELINE_LOCK_TIMEOUT)
+        except _asyncio.TimeoutError:
+            logger.warning("Crypto pipeline: live_pipeline_lock occupato da >%dmin, skip "
+                           "(probabile standard pipeline lunga). Prossimo cron tra 1h.",
+                           _LIVE_PIPELINE_LOCK_TIMEOUT // 60)
+            return
+        try:
+            from agents.orchestrator import run_crypto_pipeline
+            from uuid import uuid4
+            run_id = str(uuid4())
+            # Timeout interno alla pipeline: 12 min max, hard-kill via wait_for
+            try:
+                result = await _asyncio.wait_for(
+                    run_crypto_pipeline(run_id=run_id),
+                    timeout=12 * 60,
+                )
+            except _asyncio.TimeoutError:
+                logger.error("[%s] Crypto pipeline TIMEOUT (>12min), abort", run_id)
+                try:
+                    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+                        "event": "crypto_pipeline_timeout", "limit_min": 12,
+                    }))
+                except Exception:
+                    pass
+                return
+            if result.get("skipped"):
+                logger.debug("[%s] Crypto pipeline skipped: %s",
+                             run_id, result["skipped"])
+            else:
+                logger.info("[%s] Crypto pipeline OK: %s, trades=%d",
+                            run_id, result.get("decision", "?"),
+                            len(result.get("trades", [])))
+        finally:
+            lock.release()
     except Exception as e:
         logger.error("Errore crypto pipeline: %s", e, exc_info=True)
 
@@ -499,8 +560,12 @@ async def _standard_pipeline_job():
     Standard pipeline (Technical + Decision Sonnet) — cron a ore precise.
 
     Triggera SEMPRE alle ore programmate (non interval da avvio scheduler):
-    13:00, 15:00, 17:00, 19:00, 21:00 UTC = 9:00, 11:00, 13:00, 15:00, 17:00 ET
-    Lunedì-Venerdì, solo se mercati aperti.
+    14:02, 16:02, 18:02, 20:02 UTC Lun-Ven, solo se mercati aperti.
+
+    Il :02 invece di :00 e' deliberato: la crypto pipeline gira a :00 e
+    serializziamo tramite live_pipeline_lock. Lo shift di 2 min permette
+    alla crypto di partire per prima (acquisire il lock) e ridurre la
+    finestra di contention all'avvio.
 
     Bypassa il watchdog: gira a tempo fisso. Le esecuzioni extra del watchdog
     su eventi urgenti restano possibili (con throttle 60min) ma NON spostano
@@ -528,13 +593,43 @@ async def _standard_pipeline_job():
         except Exception:
             pass
 
-        from agents.orchestrator import run_full_pipeline
-        from uuid import uuid4
-        run_id = str(uuid4())
-        result = await run_full_pipeline(run_id=run_id)
-        logger.info("[%s] Standard pipeline (cron) OK: %s, trades=%d",
-                    run_id, result.get("decision", "?"),
-                    len(result.get("trades", [])))
+        lock = _get_live_pipeline_lock()
+        # Try to acquire con timeout. Se la crypto e' ancora in corso oltre
+        # 8 min (improbabile ma possibile), skippa questo run: il prossimo
+        # cron alle :02 della prossima ora gestira' il caso.
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=_LIVE_PIPELINE_LOCK_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning("Standard pipeline: live_pipeline_lock occupato da >%dmin, skip "
+                           "(crypto in corso). Prossimo cron tra 2h.",
+                           _LIVE_PIPELINE_LOCK_TIMEOUT // 60)
+            return
+        try:
+            from agents.orchestrator import run_full_pipeline
+            from uuid import uuid4
+            run_id = str(uuid4())
+            # Hard timeout 12 min: oltre questa soglia il run e' patologico
+            # (probabile hang di Anthropic SDK su rate-limit retries) e
+            # bloccherebbe la prossima crypto :00. Kill via wait_for.
+            try:
+                result = await asyncio.wait_for(
+                    run_full_pipeline(run_id=run_id),
+                    timeout=12 * 60,
+                )
+            except asyncio.TimeoutError:
+                logger.error("[%s] Standard pipeline TIMEOUT (>12min), abort", run_id)
+                try:
+                    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+                        "event": "standard_pipeline_timeout", "limit_min": 12,
+                    }))
+                except Exception:
+                    pass
+                return
+            logger.info("[%s] Standard pipeline (cron) OK: %s, trades=%d",
+                        run_id, result.get("decision", "?"),
+                        len(result.get("trades", [])))
+        finally:
+            lock.release()
     except Exception as e:
         logger.error("Errore standard pipeline: %s", e, exc_info=True)
 
@@ -960,11 +1055,16 @@ def start_scheduler() -> AsyncIOScheduler:
     except Exception as exc:
         logger.debug("Standard first_run check fallito: %s", exc)
 
+    # CRITICO: minute=2 (non 0). La crypto pipeline gira a :00 24/7 e le
+    # due si serializzano via live_pipeline_lock (vedi nota in cima al file).
+    # Shift di 2 min permette alla crypto di partire prima e ridurre la
+    # finestra di contesa al boot. La differenza percepita dall'utente e'
+    # trascurabile (2 min su orari aperti).
     standard_kwargs = dict(
-        trigger=CronTrigger(hour="14,16,18,20", minute=0,
+        trigger=CronTrigger(hour="14,16,18,20", minute=2,
                             day_of_week="mon-fri"),
         id="standard_pipeline_job",
-        name="Standard pipeline (cron 14/16/18/20 UTC L-V, V3+Sonnet, NYSE-only)",
+        name="Standard pipeline (cron 14:02/16:02/18:02/20:02 UTC L-V)",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
