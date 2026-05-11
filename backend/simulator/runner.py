@@ -154,6 +154,57 @@ PROCEDURA OBBLIGATORIA (4 sezioni nominate, in ordine, NESSUNA OMISSIONE):
           essere SOLO "ALTA" (no MEDIA/BASSA) se decidi di entrare,
           e lo stop_loss_target deve essere obbligatoriamente popolato.
 
+    STRATEGIA TATTICA PER REGIME (il "COME" tradare, non solo "SE"):
+    Derivata dall'analisi dei run storici. Mindset diverso per regime —
+    se ignori questa parte, ricadi negli stessi pattern di perdita.
+
+      [TREND-UP] Focus: RELATIVE STRENGTH (alpha relativo, non assoluto).
+          Non cercare il crollo prossimo: il trend e' la migliore
+          informazione che hai. Identifica i LEADER di settore vs SPY
+          e cavalca il trend. Tassi stabili/in calo → Tech (XLK, IWF).
+          Economia solida (PMI > 50, jobs ok) → Value/Industrials
+          (XLI, XLF). Earnings season positiva → sovrappesa beneficiari.
+          Se NON vedi forza relativa chiara vs SPY, HOLD: non aggiungere
+          posizioni contrarian sperando 'ormai e' tirato'.
+
+      [TREND-DOWN] Focus: DIFESA + relative weakness.
+          Privilegia difensivi (XLU Utilities, XLP Staples, XLV
+          Healthcare) e TLT se selloff growth-driven. NON aggiungere
+          ciclici/growth sperando nel rimbalzo. Short selling solo su
+          weakness confermata, mai contro-trend.
+
+      [LATERAL] Focus: MEAN REVERSION (NON breakout).
+          DATO CRITICO dai run: i breakout in regime laterale falliscono
+          nel ~70% dei casi. Hai perso sistematicamente comprando rotture
+          che rientrano. Strategia corretta:
+            • Compra SOLO vicino ai supporti del range.
+            • Vendi SOLO vicino alle resistenze.
+            • Logica contrarian, non momentum.
+            • Take-profit AGGRESSIVI sull'altra estremita' del range
+              (non aspettare il 'breakout vero').
+            • Stop-loss STRETTI: se il supporto cede, esci subito.
+            • Size piu' piccola del normale (conviction MEDIA non basta:
+              o ALTA con setup chiaro, o HOLD).
+          Se il prezzo e' a META' range, UNICA azione = HOLD.
+
+      [MACRO] Focus: CORRELAZIONI macro (driver > ticker).
+          I ticker singoli contano meno dei driver globali (CPI, Fed,
+          dollaro, geo). Prima di ogni trade, verifica la correlazione:
+            • Tassi previsti in CALO → TLT, Growth (XLK, IWF), VNQ.
+            • Inflazione persistente → GLD, Energy (XLE, XOM), DBC, TIPS.
+            • Dollaro forte → evita EM (EEM, VWO) e commodity USD.
+            • Risk-off geopolitico → Difesa (LMT, RTX, NOC), Oro.
+          NON tradare asset CONTRO il driver macro identificato (es. non
+          comprare growth-tech con Fed hawkish surprise nelle headline).
+
+      [CRASH-RALLY] Focus: quality + capitulation reversal.
+          Crash (VIX shock, mosse > 3%): quality + cash, evita ciclici
+          e leverage. NON prendere il primo coltello — attendi un bar di
+          stabilizzazione. Capitulation rebound: cerca settori 'battuti
+          peggio' che mostrano primi segnali reversal (high-beta: Tech
+          growth, Small caps IWM). Size piccola, stop_loss_target SEMPRE
+          popolato, exit_strategy = trailing_atr o level_target.
+
     Questa classificazione chiude il gap diagnosticato dai run storici
     del Simulator: 0% win-rate in regimi LATERAL/MACRO. Non saltare
     questo step e non inventare ibridi. Una sola etichetta.
