@@ -209,6 +209,14 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
     except Exception:
         risk_block = ""
 
+    # 2b. Risk state live (recovery mode, dd 24h, WR, concentration)
+    risk_state_block = ""
+    try:
+        import risk_state as _rs
+        risk_state_block = _rs.build_risk_state_prompt_block()
+    except Exception as e:
+        logger.debug("[DEC-CRYPTO] risk_state block fail: %s", e)
+
     # 3. Regime Protocol (asset_class=crypto): forza la classificazione
     #    del regime e aggiunge default NO_TRADE per LATERAL/MACRO.
     #    Per crypto i regimi LATERAL e MACRO sono particolarmente
@@ -257,11 +265,12 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        text = (directives_block + risk_block + regime_block + coach_section
-                + recent_section + base + "\n\n" + "═" * 60 + "\n" + shared)
+        text = (directives_block + risk_block + risk_state_block + regime_block
+                + coach_section + recent_section + base
+                + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        text = (directives_block + risk_block + regime_block + coach_section
-                + recent_section + base)
+        text = (directives_block + risk_block + risk_state_block + regime_block
+                + coach_section + recent_section + base)
     return text, coach_card_ids
 
 

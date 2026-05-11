@@ -4211,6 +4211,59 @@ async def scout_sources_health():
     }
 
 
+@app.get("/api/risk-state")
+async def get_risk_state():
+    """
+    Snapshot dello stato di rischio live: recovery mode, drawdown 24h,
+    win rate ultime 10 chiusure, concentration risk. Usato dalla UI e
+    dai diagnostici. Il dato e' lo stesso iniettato nel system prompt
+    del Decision Agent ad ogni run.
+    """
+    try:
+        import risk_state
+        snapshot = risk_state.build_risk_state_snapshot()
+        return snapshot
+    except Exception as e:
+        logger.error("get_risk_state: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "type": type(e).__name__},
+        )
+
+
+@app.post("/api/risk-state/exit-recovery")
+async def force_exit_recovery_mode():
+    """
+    Uscita manuale dal recovery mode (per casi in cui il sistema di
+    auto-exit non riconosce il ritorno al balance iniziale, es. dopo
+    deposit/withdraw manuali). Usare con cautela.
+    """
+    try:
+        import risk_state
+        result = risk_state.exit_recovery_mode(reason="manual_admin_override")
+        return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/risk-state/force-circuit-breaker-check")
+async def force_circuit_breaker_check(background_tasks: BackgroundTasks):
+    """
+    Forza un check immediato del circuit breaker 24h (e applica lock-in
+    + trailing stop). Stesso codice del scheduler job ogni 5 min, ma
+    triggerabile on-demand per testing/diagnosi.
+    """
+    async def _do():
+        try:
+            from scheduler import _risk_safety_job
+            await _risk_safety_job()
+        except Exception as e:
+            logger.error("manual risk_safety check failed: %s", e, exc_info=True)
+
+    background_tasks.add_task(_do)
+    return {"status": "started"}
+
+
 @app.post("/api/scout/run")
 async def trigger_scout_run(background_tasks: BackgroundTasks):
     """

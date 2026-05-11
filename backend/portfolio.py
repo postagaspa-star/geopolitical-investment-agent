@@ -733,6 +733,83 @@ def set_take_profit(ticker: str, target_price: float, run_id: str = "") -> dict:
     }
 
 
+def liquidate_all_positions(reason: str = "circuit_breaker",
+                              prices: dict | None = None) -> list:
+    """
+    Vende TUTTE le posizioni aperte al prezzo corrente. Utilizzato dal
+    circuit breaker 24h (risk_state.is_circuit_breaker_triggered).
+
+    Args:
+        reason: motivo descrittivo per audit (geo_reasoning del trade).
+        prices: dict {ticker: current_price} fresh dal price polling.
+                Se None, usa current_price salvato sulla posizione.
+
+    Ritorna lista di trade eseguiti (uno per ticker).
+    """
+    import database
+    executed: list[dict] = []
+    try:
+        positions = get_positions() or []
+    except Exception as e:
+        logger.error("liquidate_all_positions read fail: %s", e)
+        return executed
+
+    for p in positions:
+        ticker = p.get("ticker")
+        qty = float(p.get("quantity") or 0)
+        if not ticker or qty <= 0:
+            continue
+
+        # Prezzo: prima dal dict fresh, poi dalla posizione (salvato)
+        cur = None
+        if prices and ticker in prices:
+            try:
+                cur = float(prices[ticker])
+            except (TypeError, ValueError):
+                cur = None
+        if cur is None or cur <= 0:
+            try:
+                cur = float(p.get("current_price") or p.get("avg_buy_price") or 0)
+            except (TypeError, ValueError):
+                cur = 0
+        if cur <= 0:
+            logger.warning("liquidate_all_positions skip %s: no valid price",
+                           ticker)
+            continue
+
+        try:
+            result = execute_sell(
+                ticker, qty, cur,
+                geo_reasoning=f"CIRCUIT_BREAKER_LIQUIDATE: {reason}",
+                tech_reasoning=f"(forced sell, qty={qty}, price={cur:.4f})",
+                confidence=100,
+            )
+            executed.append({
+                "ticker": ticker, "qty": qty, "price": cur,
+                "result": result,
+            })
+        except Exception as e:
+            logger.error("liquidate %s failed: %s", ticker, e)
+            executed.append({"ticker": ticker, "error": str(e)})
+
+    # Log evento per audit
+    try:
+        import json as _json
+        database.insert_agent_log(
+            "circuit_breaker", "RISK_STATE_LIQUIDATE",
+            _json.dumps({
+                "event": "liquidate_all",
+                "reason": reason,
+                "positions_liquidated": len(executed),
+                "tickers": [e.get("ticker") for e in executed],
+            }, default=str),
+        )
+    except Exception:
+        pass
+
+    return executed
+
+
 def check_and_execute_auto_exits(prices: dict | None = None) -> list:
     """
     Per ogni posizione con SL/TP impostato, controlla se il prezzo corrente

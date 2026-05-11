@@ -1086,6 +1086,18 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
     # 2. Risk profile (subito sotto le direttive, hard constraints)
     risk_block = _build_risk_block(asset_class="equity")
 
+    # 2b. Risk STATE LIVE: variabili stateful aggiornate ad ogni run.
+    #     Recovery mode, drawdown 24h, win rate ultime 10 chiusure,
+    #     concentration risk. Il sistema applica gia' automaticamente
+    #     lock-in 0.5% e trailing stop — qui solo info per orientare il
+    #     reasoning del Decision Agent.
+    risk_state_block = ""
+    try:
+        import risk_state as _rs
+        risk_state_block = _rs.build_risk_state_prompt_block()
+    except Exception as e:
+        logger.debug("[DEC] risk_state block fail: %s", e)
+
     # 3. Regime Protocol: framework decisionale obbligatorio.
     #    Forza l'agente a classificare il regime PRIMA di decidere.
     #    Aggiunge il default NO_TRADE per regimi LATERAL/MACRO con
@@ -1135,11 +1147,12 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        text = (directives_block + risk_block + regime_block + coach_section
-                + recent_section + base_prompt + "\n\n" + "═" * 60 + "\n" + shared)
+        text = (directives_block + risk_block + risk_state_block + regime_block
+                + coach_section + recent_section + base_prompt
+                + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        text = (directives_block + risk_block + regime_block + coach_section
-                + recent_section + base_prompt)
+        text = (directives_block + risk_block + risk_state_block + regime_block
+                + coach_section + recent_section + base_prompt)
     return text, coach_card_ids
 
 

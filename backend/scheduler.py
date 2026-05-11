@@ -534,6 +534,159 @@ async def _crypto_pipeline_job():
         logger.debug("Crypto pipeline job: flag cleared")
 
 
+async def _risk_safety_job():
+    """
+    Risk Safety job — ogni 5 minuti, 24/7.
+
+    Applica le 5 regole stateful di risk management che il Decision Agent
+    da solo non puo' enforce-are (richiedono persistenza + dati storici):
+
+      1. 24h drawdown circuit breaker: se DD > 5% in 24h → liquida tutto
+         + entra in recovery mode (SL ≤ 5%, confidence ≥ 0.75).
+      2. Recovery mode exit: se portafoglio torna >= initial → esce auto.
+      3. Lock-in 0.5%: su posizioni a +5% di profitto, imposta SL a
+         entry + 0.5% per proteggere il profitto minimo.
+      4. Trailing stop dinamico 3-4%: su posizioni vincenti, aggiorna lo
+         SL al max(SL corrente, peak_price * 0.96) — sale, mai scende.
+      5. Concentration check: log se una posizione supera il 35% del NAV
+         (l'azione di rebalance la prende il Decision Agent al prossimo run).
+
+    Tutte le operazioni sono idempotenti e safe-by-default: niente effetti
+    se il portafoglio e' vuoto, prezzi non disponibili, ecc.
+    """
+    tick_ts = datetime.now(pytz.utc).strftime("%H:%M:%S UTC")
+    logger.debug("Risk safety job: TICK %s", tick_ts)
+    try:
+        import risk_state
+
+        # 1. Circuit breaker check + entry into recovery mode
+        try:
+            triggered, dd_pct = risk_state.is_circuit_breaker_triggered()
+            if triggered and not risk_state.is_in_recovery_mode():
+                logger.warning(
+                    "Risk safety: CIRCUIT BREAKER TRIGGERED (DD 24h = %.2f%%) "
+                    "→ liquidating all positions + entering recovery mode",
+                    dd_pct,
+                )
+                # Liquida tutto PRIMA di entrare in recovery (cosi' il flag
+                # cattura il fatto del trigger)
+                try:
+                    import portfolio
+                    executed = portfolio.liquidate_all_positions(
+                        reason=f"24h_drawdown_{dd_pct:.2f}pct",
+                    )
+                    logger.info("Risk safety: liquidated %d positions",
+                                len([e for e in executed if not e.get("error")]))
+                except Exception as e:
+                    logger.error("Risk safety liquidate failed: %s", e, exc_info=True)
+                # Entra in recovery
+                info = risk_state.enter_recovery_mode(
+                    reason=f"24h_drawdown_{dd_pct:.2f}pct",
+                )
+                logger.info("Risk safety: entered recovery mode: %s", info)
+        except Exception as e:
+            logger.error("Risk safety circuit breaker check failed: %s", e,
+                         exc_info=True)
+
+        # 2. Recovery mode exit (idempotente, no-op se non in recovery)
+        try:
+            exited = risk_state.check_recovery_exit_condition()
+            if exited:
+                logger.info("Risk safety: EXITED recovery mode (portfolio recovered)")
+        except Exception as e:
+            logger.error("Risk safety recovery exit check failed: %s", e)
+
+        # 3-4. Lock-in 0.5% + trailing stop dinamico sulle posizioni aperte.
+        # Itera SOLO sulle posizioni con PnL > 5% (altrimenti niente da fare).
+        try:
+            import database
+            positions = database.get_positions() or []
+            lock_in_applied = 0
+            trailing_applied = 0
+            for p in positions:
+                try:
+                    avg = float(p.get("avg_buy_price") or 0)
+                    cur = float(p.get("current_price") or 0)
+                    if avg <= 0 or cur <= 0:
+                        continue
+                    pnl_pct = (cur - avg) / avg * 100.0
+                    if pnl_pct < 5.0:
+                        continue   # niente da fare
+
+                    # 3. Lock-in 0.5% (priority: viene applicato per primo
+                    #    al primo passaggio sopra +5%)
+                    lock_res = risk_state.apply_lock_in_protection(p, current_price=cur)
+                    if lock_res.get("applied"):
+                        lock_in_applied += 1
+                        logger.info(
+                            "Risk safety lock-in: %s → SL=%.4f (PnL=%.1f%%)",
+                            p.get("ticker"), lock_res["new_stop_loss"], pnl_pct,
+                        )
+                        # Re-read position dopo update per il trailing check
+                        try:
+                            p = database.get_position(p.get("ticker")) or p
+                        except Exception:
+                            pass
+
+                    # 4. Trailing stop dinamico (solo se PnL >= 10% per
+                    #    evitare di sostituire prematuramente lo SL lock-in
+                    #    a 0.5% — il trailing 4% e' meno protettivo finche'
+                    #    il prezzo non e' decisamente in profitto).
+                    if pnl_pct >= 10.0:
+                        trail_res = risk_state.apply_trailing_stop_if_needed(
+                            p, trailing_pct=4.0, min_profit_pct=10.0,
+                        )
+                        if trail_res.get("applied"):
+                            trailing_applied += 1
+                            logger.info(
+                                "Risk safety trailing: %s → SL=%.4f "
+                                "(peak=%.4f, prev SL=%.4f)",
+                                p.get("ticker"), trail_res["new_stop_loss"],
+                                trail_res["peak_price"], trail_res["previous_sl"],
+                            )
+                except Exception as e:
+                    logger.debug("Risk safety per-position fail %s: %s",
+                                 p.get("ticker"), e)
+                    continue
+
+            if lock_in_applied or trailing_applied:
+                logger.info(
+                    "Risk safety: lock-in=%d, trailing=%d posizioni aggiornate",
+                    lock_in_applied, trailing_applied,
+                )
+        except Exception as e:
+            logger.error("Risk safety lock-in/trailing failed: %s", e, exc_info=True)
+
+        # 5. Concentration check (solo log + agent_log per visibilita')
+        try:
+            conc = risk_state.compute_position_concentration()
+            if conc["max_concentration_pct"] > risk_state.DEFAULT_CONCENTRATION_TRIGGER_PCT:
+                logger.warning(
+                    "Risk safety: CONCENTRATION TRIGGER — %s al %.1f%% NAV "
+                    "(soglia %.0f%%)",
+                    conc["max_ticker"], conc["max_concentration_pct"],
+                    risk_state.DEFAULT_CONCENTRATION_TRIGGER_PCT,
+                )
+                try:
+                    database.insert_agent_log(
+                        "risk_safety", "RISK_CONCENTRATION_ALERT",
+                        json.dumps({
+                            "event": "concentration_trigger",
+                            "ticker": conc["max_ticker"],
+                            "pct_nav": conc["max_concentration_pct"],
+                            "threshold": risk_state.DEFAULT_CONCENTRATION_TRIGGER_PCT,
+                            "total_nav": conc["total_nav"],
+                        }, default=str),
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("Risk safety concentration check failed: %s", e)
+
+    except Exception as e:
+        logger.error("Risk safety job error: %s", e, exc_info=True)
+
+
 async def _crypto_monitor_job():
     """
     CryptoMonitor — ogni 15 minuti, 24/7.
@@ -1057,6 +1210,26 @@ def start_scheduler() -> AsyncIOScheduler:
         coalesce=True,
         # Avvia 60s dopo il boot per dare tempo al price polling
         next_run_time=now_utc + timedelta(seconds=60),
+    )
+
+    # ── Risk Safety: ogni 5 minuti, 24/7 ────────────────────────────────
+    # Applica le regole stateful di risk management:
+    #   - 24h drawdown circuit breaker (liquida tutto + recovery mode)
+    #   - Recovery mode exit (auto quando torna >= initial balance)
+    #   - Lock-in 0.5% sui posizioni a +5% di profitto
+    #   - Trailing stop dinamico 4% dal picco su posizioni > +10%
+    #   - Concentration trigger log (alert se posizione > 35% NAV)
+    # No-op se portafoglio vuoto o prezzi non aggiornati.
+    _scheduler.add_job(
+        _risk_safety_job,
+        trigger="interval",
+        minutes=5,
+        id="risk_safety_job",
+        name="Risk Safety 5min (circuit breaker + lock-in + trailing)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=now_utc + timedelta(seconds=90),
     )
 
     # ── Standard pipeline (Tech + Decision Sonnet): CRON solo NYSE hours ──
