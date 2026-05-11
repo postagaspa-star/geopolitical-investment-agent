@@ -488,11 +488,11 @@ function PnlByTickerCard({ closedTrades }) {
 
 // Esposizione attuale per ticker (concentrazione del portafoglio)
 function ExposurePieCard({ positions, portfolio }) {
-  // Estrai la liquidità dal portfolio (cash_balance / cash). Se assente
-  // (es. endpoint non risponde), il pie mostra solo le posizioni.
-  const cash = Number(
-    portfolio?.cash_balance ?? portfolio?.cash ?? 0
-  ) || 0;
+  // Estrai la liquidità dal portfolio. Supporta cash_balance (schema DB)
+  // E cash (chiave restituita da /api/portfolio via get_portfolio_state).
+  const cashRaw = portfolio?.cash_balance ?? portfolio?.cash ?? 0;
+  const cash = Number(cashRaw);
+  const cashValid = Number.isFinite(cash) && cash > 0;
 
   // Esposizione per posizione aperta
   const positionData = (positions ?? [])
@@ -505,9 +505,10 @@ function ExposurePieCard({ positions, portfolio }) {
     .filter((d) => d.value > 0)
     .sort((a, b) => b.value - a.value);
 
-  // Slice Liquidità in fondo (color grigio per distinguerla dalle posizioni)
+  // Slice Liquidità in fondo (color grigio per distinguerla dalle posizioni).
+  // Threshold abbassato a > 0 (qualsiasi cash positivo) — prima era > 0.5.
   const data = [...positionData];
-  if (cash > 0.5) {
+  if (cashValid) {
     data.push({
       name: "Liquidità",
       value: cash,
@@ -516,48 +517,91 @@ function ExposurePieCard({ positions, portfolio }) {
     });
   }
 
+  const positionsTotal = positionData.reduce((s, d) => s + d.value, 0);
+  const portfolioTotal = positionsTotal + (cashValid ? cash : 0);
+  const pctInvestito = portfolioTotal > 0
+    ? (positionsTotal / portfolioTotal) * 100
+    : 0;
+  const pctCash = portfolioTotal > 0
+    ? ((cashValid ? cash : 0) / portfolioTotal) * 100
+    : 0;
+
   if (!data.length) {
-    return <div className="empty-state">Nessuna posizione né liquidità</div>;
+    return (
+      <div className="empty-state">
+        Nessuna posizione e nessun cash rilevato dal portafoglio.
+      </div>
+    );
   }
 
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <PieChart>
-        <Pie
-          data={data}
-          cx="50%"
-          cy="50%"
-          innerRadius={55}
-          outerRadius={95}
-          paddingAngle={2}
-          dataKey="value"
-          label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-          labelLine={false}
-          fontSize={10}
-        >
-          {data.map((entry, i) => (
-            <Cell
-              key={entry.name}
-              // Cash sempre grigio neutro per non confonderlo con asset
-              fill={entry.isCash ? "#475569" : PALETTE[i % PALETTE.length]}
-            />
-          ))}
-        </Pie>
-        <Tooltip content={({ active, payload }) => {
-          if (!active || !payload?.length) return null;
-          const d = payload[0]?.payload;
-          return (
-            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
-              <div style={{ color: '#94a3b8' }}>{d.name}</div>
-              <div>{d.isCash ? "Cash disponibile" : "Esposizione"}: <strong>{fmtUsd(d.value)}</strong></div>
-              {!d.isCash && (
-                <div>P&L non realizzato: <strong style={{ color: d.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d.pnl)}</strong></div>
-              )}
-            </div>
-          );
-        }} />
-      </PieChart>
-    </ResponsiveContainer>
+    <div>
+      <ResponsiveContainer width="100%" height={220}>
+        <PieChart>
+          <Pie
+            data={data}
+            cx="50%"
+            cy="50%"
+            innerRadius={50}
+            outerRadius={88}
+            paddingAngle={2}
+            dataKey="value"
+            label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+            labelLine={false}
+            fontSize={10}
+          >
+            {data.map((entry, i) => (
+              <Cell
+                key={entry.name}
+                // Cash sempre grigio scuro per non confonderlo con asset
+                fill={entry.isCash ? "#64748b" : PALETTE[i % PALETTE.length]}
+                stroke={entry.isCash ? "#94a3b8" : undefined}
+                strokeWidth={entry.isCash ? 1 : 0}
+              />
+            ))}
+          </Pie>
+          <Tooltip content={({ active, payload }) => {
+            if (!active || !payload?.length) return null;
+            const d = payload[0]?.payload;
+            return (
+              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
+                <div style={{ color: '#94a3b8' }}>{d.name}</div>
+                <div>{d.isCash ? "Cash disponibile" : "Esposizione"}: <strong>{fmtUsd(d.value)}</strong></div>
+                {!d.isCash && (
+                  <div>P&L non realizzato: <strong style={{ color: d.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d.pnl)}</strong></div>
+                )}
+              </div>
+            );
+          }} />
+        </PieChart>
+      </ResponsiveContainer>
+
+      {/* Riepilogo testuale sotto il pie — sempre visibile anche se la slice */}
+      {/* fosse troppo piccola per essere notata. Garantisce che l'utente vede */}
+      {/* sempre cash + esposizione + totale, indipendentemente dal rendering pie. */}
+      <div style={{
+        marginTop: '0.6rem',
+        fontSize: '0.74rem',
+        color: '#94a3b8',
+        textAlign: 'center',
+        lineHeight: 1.55,
+        background: '#0f172a',
+        border: '1px solid #1e293b',
+        borderRadius: 6,
+        padding: '0.5rem 0.65rem',
+      }}>
+        <div>
+          Investito: <strong style={{ color: '#10b981' }}>{fmtUsd(positionsTotal)}</strong>
+          {' '}({pctInvestito.toFixed(0)}%)
+          {' · '}
+          Cash: <strong style={{ color: '#cbd5e1' }}>{fmtUsd(cashValid ? cash : 0)}</strong>
+          {' '}({pctCash.toFixed(0)}%)
+        </div>
+        <div style={{ marginTop: 2 }}>
+          Totale portafoglio: <strong style={{ color: '#f1f5f9' }}>{fmtUsd(portfolioTotal)}</strong>
+        </div>
+      </div>
+    </div>
   );
 }
 
