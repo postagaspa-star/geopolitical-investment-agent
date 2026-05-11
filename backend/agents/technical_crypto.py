@@ -260,7 +260,8 @@ def _filter_to_supported_crypto(tickers: list[str]) -> list[str]:
 
 
 
-async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) -> dict:
+async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
+                                log_phase: str = "TECH_CRYPTO") -> dict:
     """
     Esegue analisi tecnica crypto-only.
 
@@ -268,6 +269,12 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
         run_id: ID del run multi-agente
         tickers: lista ticker da analizzare. Se None, usa DEFAULT_CRYPTO_UNIVERSE
                  ridotto a 6 ticker top liquidità per contenere costi.
+        log_phase: phase con cui loggare gli eventi su agent_logs.
+                   Default "TECH_CRYPTO" (chiamata da crypto pipeline).
+                   Quando chiamato come side-call dal Decision Standard
+                   (es. portfolio ha BTC), il caller passa
+                   "TECH_CRYPTO_SIDECALL" per non inquinare la timeline
+                   del run Standard con eventi che sembrano crypto-pipeline.
 
     Returns:
         dict con campi: analyses[], engine, summary, filtered_count
@@ -288,7 +295,7 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
         msg = "Nessun ticker valido (crypto supportato) → skip Technical Crypto"
         logger.warning("[%s][TECH-CRYPTO] %s", run_id, msg)
         try:
-            database.insert_agent_log(run_id, "TECH_CRYPTO", json.dumps({
+            database.insert_agent_log(run_id, log_phase, json.dumps({
                 "event": "tech_crypto_skipped",
                 "reason": "no_valid_tickers",
                 "filtered_out": filtered_count,
@@ -322,7 +329,7 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
         logger.warning("[%s][TECH-CRYPTO] Nessun dato disponibile per i %d ticker. Errori: %s",
                        run_id, len(tickers), per_ticker_errors)
         try:
-            database.insert_agent_log(run_id, "TECH_CRYPTO", json.dumps({
+            database.insert_agent_log(run_id, log_phase, json.dumps({
                 "event": "tech_crypto_no_data",
                 "tickers_requested": tickers,
                 "per_ticker_errors": per_ticker_errors,
@@ -406,7 +413,7 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
     except Exception as exc:
         logger.error("[%s][TECH-CRYPTO] DeepSeek-V3 fallito: %s", run_id, exc)
         try:
-            database.insert_agent_log(run_id, "TECH_CRYPTO", json.dumps({
+            database.insert_agent_log(run_id, log_phase, json.dumps({
                 "event": "tech_crypto_error",
                 "error": str(exc)[:300],
             }))
@@ -459,7 +466,7 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None) ->
             "confidence": a.get("confidence"),
         })
     try:
-        database.insert_agent_log(run_id, "TECH_CRYPTO", json.dumps({
+        database.insert_agent_log(run_id, log_phase, json.dumps({
             "event": "tech_crypto_complete",
             "engine": engine,
             "tickers_analyzed": len(ticker_data),

@@ -88,16 +88,23 @@ def is_trailing_enabled() -> bool:
 
 def is_circuit_breaker_enabled() -> bool:
     """
-    Circuit breaker 24h attivo? Default True — e' la safety net principale,
-    serve a impedire drawdown catastrofici. Disabilitabile solo
-    esplicitamente da utente che sa cosa sta facendo.
+    Circuit breaker 24h attivo? Default False (opt-in).
+
+    DEPRECATO IL DEFAULT TRUE: il primo deploy aveva default True e
+    una corruzione di snapshot ha causato un trigger spurio con
+    liquidazione totale del portafoglio. Ora default OFF.
+
+    Anche quando ENABLED, il circuit breaker NON liquida piu' automatica-
+    mente: alza solo un alert ad alta priorita' (visible in agent_logs).
+    La liquidazione richiede chiamata esplicita a
+    POST /api/risk-state/manual-liquidate-all dall'utente.
     """
     try:
         import database
-        raw = (database.get_setting(SETTING_CIRCUIT_BREAKER_ENABLED, "true") or "").strip().lower()
-        return raw not in ("0", "false", "no", "off")
+        raw = (database.get_setting(SETTING_CIRCUIT_BREAKER_ENABLED, "false") or "").strip().lower()
+        return raw in ("1", "true", "yes", "on")
     except Exception:
-        return True
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════

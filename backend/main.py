@@ -4302,6 +4302,91 @@ async def clear_risk_state_auto_sls():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+class ManualLiquidatePayload(BaseModel):
+    """Conferma esplicita richiesta per liquidare tutte le posizioni."""
+    confirm: str   # deve essere esattamente "I_UNDERSTAND_LIQUIDATE_ALL"
+    reason: str | None = None
+
+
+@app.post("/api/risk-state/manual-liquidate-all")
+async def manual_liquidate_all(payload: ManualLiquidatePayload):
+    """
+    Liquidazione MANUALE di tutte le posizioni aperte. Richiede una
+    conferma testuale esplicita per evitare incidenti.
+
+    Il body deve contenere:
+      { "confirm": "I_UNDERSTAND_LIQUIDATE_ALL", "reason": "..." }
+
+    Questo endpoint NON viene mai chiamato automaticamente dal sistema:
+    il circuit breaker 24h ora alza solo un alert ma NON liquida da solo
+    (regressione bug deploy precedente, mai piu'). Se l'utente vuole
+    liquidare in risposta a un alert, deve chiamare manualmente questo
+    endpoint.
+    """
+    if payload.confirm != "I_UNDERSTAND_LIQUIDATE_ALL":
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "confirm token errato",
+                "expected": "I_UNDERSTAND_LIQUIDATE_ALL",
+                "received": payload.confirm,
+            },
+        )
+    try:
+        import portfolio as _portfolio
+        reason = (payload.reason or "manual_admin_action").strip()[:200]
+        executed = _portfolio.liquidate_all_positions(reason=f"MANUAL: {reason}")
+        ok_count = len([e for e in executed if not e.get("error")])
+        err_count = len([e for e in executed if e.get("error")])
+        return {
+            "executed": True,
+            "positions_liquidated": ok_count,
+            "errors": err_count,
+            "trades": executed,
+        }
+    except Exception as e:
+        logger.error("manual_liquidate_all: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/risk-state/emergency-stop-all-auto")
+async def emergency_stop_all_auto():
+    """
+    EMERGENCY STOP: disabilita TUTTI i meccanismi automatici di risk_state
+    in una sola chiamata. Utile dopo incidenti per essere sicuri che il
+    sistema non agisca piu' senza il consenso esplicito dell'utente.
+
+    Imposta:
+      - circuit_breaker_enabled = false
+      - lock_in_enabled = false
+      - trailing_enabled = false
+
+    Inoltre rimuove TUTTI gli SL settati da risk_state dalle posizioni
+    (chiama clear_risk_state_auto_sls internamente).
+
+    Il Risk Profile (validate_trade) e gli auto-exits sui SL settati
+    dall'agente non sono toccati — restano operativi.
+    """
+    try:
+        import risk_state
+        # Disabilita tutti i flag
+        database.set_setting(risk_state.SETTING_CIRCUIT_BREAKER_ENABLED, "false")
+        database.set_setting(risk_state.SETTING_LOCK_IN_ENABLED, "false")
+        database.set_setting(risk_state.SETTING_TRAILING_ENABLED, "false")
+        # Cleanup SL automatici
+        clear_result = risk_state.clear_risk_state_auto_sls()
+        return {
+            "flags_disabled": ["circuit_breaker", "lock_in", "trailing"],
+            "auto_sls_cleared": clear_result,
+            "note": ("Tutti i meccanismi automatici di risk_state disattivati. "
+                     "Solo le SL settate dal Decision Agent o dall'utente sono "
+                     "ancora attive (via auto-exits del price polling)."),
+        }
+    except Exception as e:
+        logger.error("emergency_stop_all_auto: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.post("/api/risk-state/force-circuit-breaker-check")
 async def force_circuit_breaker_check(background_tasks: BackgroundTasks):
     """

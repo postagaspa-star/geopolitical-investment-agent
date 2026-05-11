@@ -1755,11 +1755,20 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     for t in equity_tickers:
                         errors_per_ticker[t] = f"technical equity error: {exc}"
 
-            # Crypto branch (auto-routing al Technical Crypto)
+            # Crypto branch (auto-routing al Technical Crypto).
+            # IMPORTANTE: usa log_phase="TECH_CRYPTO_SIDECALL" per distinguere
+            # i log di questa chiamata side dal Technical Crypto vero (quello
+            # invocato dalla crypto pipeline standalone). Senza questa
+            # distinzione, la timeline del run Standard mostrava log
+            # "TECH_CRYPTO" che sembravano della crypto pipeline, creando
+            # confusione (mix apparente tra le due pipeline).
             if crypto_tickers:
                 try:
                     from agents.technical_crypto import run_crypto_technical
-                    cr_report = await run_crypto_technical(run_id, crypto_tickers)
+                    cr_report = await run_crypto_technical(
+                        run_id, crypto_tickers,
+                        log_phase="TECH_CRYPTO_SIDECALL",
+                    )
                     analyses_combined += (cr_report.get("analyses") or [])
                     if cr_report.get("engine"):
                         engines_used.append(f"crypto={cr_report['engine']}")

@@ -559,30 +559,38 @@ async def _risk_safety_job():
     try:
         import risk_state
 
-        # 1. Circuit breaker check + entry into recovery mode (default ON,
-        #    disabilitabile esplicitamente via setting).
+        # 1. Circuit breaker check — NO PIU' auto-liquidazione.
+        # Default DISATTIVO. Anche se ATTIVATO, alza solo un ALERT
+        # (agent_log + log warning). La liquidazione effettiva richiede
+        # chiamata esplicita a POST /api/risk-state/manual-liquidate-all.
+        #
+        # Rationale: una corruzione di snapshot puo' inflare il running_max
+        # del drawdown 24h e triggerare un falso positivo che liquida
+        # tutto il portafoglio. Mai piu'.
         if risk_state.is_circuit_breaker_enabled():
             try:
                 triggered, dd_pct = risk_state.is_circuit_breaker_triggered()
                 if triggered and not risk_state.is_in_recovery_mode():
                     logger.warning(
-                        "Risk safety: CIRCUIT BREAKER TRIGGERED (DD 24h = %.2f%%) "
-                        "→ liquidating all positions + entering recovery mode",
+                        "Risk safety: CIRCUIT BREAKER ALERT (DD 24h = %.2f%%) "
+                        "→ logging only, NO auto-liquidation. "
+                        "User must explicitly call /api/risk-state/manual-liquidate-all.",
                         dd_pct,
                     )
                     try:
-                        import portfolio
-                        executed = portfolio.liquidate_all_positions(
-                            reason=f"24h_drawdown_{dd_pct:.2f}pct",
+                        database.insert_agent_log(
+                            "risk_safety", "RISK_CIRCUIT_BREAKER_ALERT",
+                            json.dumps({
+                                "event": "circuit_breaker_alert",
+                                "drawdown_24h_pct": dd_pct,
+                                "threshold": risk_state.DEFAULT_CIRCUIT_BREAKER_24H_PCT,
+                                "action_taken": "ALERT_ONLY",
+                                "note": ("user-triggered liquidation required via "
+                                         "POST /api/risk-state/manual-liquidate-all"),
+                            }, default=str),
                         )
-                        logger.info("Risk safety: liquidated %d positions",
-                                    len([e for e in executed if not e.get("error")]))
-                    except Exception as e:
-                        logger.error("Risk safety liquidate failed: %s", e, exc_info=True)
-                    info = risk_state.enter_recovery_mode(
-                        reason=f"24h_drawdown_{dd_pct:.2f}pct",
-                    )
-                    logger.info("Risk safety: entered recovery mode: %s", info)
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.error("Risk safety circuit breaker check failed: %s", e,
                              exc_info=True)
