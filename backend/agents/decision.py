@@ -444,25 +444,63 @@ def get_user_directives_text() -> str:
         return ""
 
 
+def _get_recovery_review_directive() -> str:
+    """
+    Carica una direttiva TEMPORANEA "recovery review" che viene iniettata
+    in CIMA al blocco direttive utente. Settata da
+    POST /api/admin/recovery-review quando si vuole forzare una rilettura
+    del portafoglio dopo un bug/incidente (es. liquidazione spuria).
+
+    Setting key: 'recovery_review_directive'. Stringa libera. Vuota = nessuna
+    direttiva di recovery attiva.
+    """
+    try:
+        import database as _db
+        raw = _db.get_setting("recovery_review_directive", "")
+        if not isinstance(raw, str):
+            return ""
+        return raw.strip()
+    except Exception:
+        return ""
+
+
 def _build_directives_block() -> str:
     """
     Compone il blocco direttive utente da prependere al system prompt.
-    Ritorna stringa vuota se l'utente non ha configurato direttive.
+    Include due livelli:
+      1. RECOVERY REVIEW (se settato): direttiva temporanea ad altissima
+         priorita' per situazioni di anomalia (post-incidente, recovery).
+      2. DIRETTIVE UTENTE: configurate dall'utente in Settings.
+    Ritorna stringa vuota se nessuna direttiva e' attiva.
     """
+    recovery = _get_recovery_review_directive()
     text = get_user_directives_text()
-    if not text:
+
+    if not recovery and not text:
         return ""
 
-    return (
-        "█" * 60 + "\n"
-        "🔴 DIRETTIVE UTENTE — PRIORITÀ MASSIMA\n"
-        + "█" * 60 + "\n\n"
-        "Le seguenti istruzioni sono state configurate ESPLICITAMENTE dall'utente\n"
-        "e hanno la PRIORITÀ PIÙ ALTA. In caso di conflitto con altre regole del\n"
-        "sistema, queste prevalgono SEMPRE. Applicarle è OBBLIGATORIO.\n\n"
-        + text + "\n\n"
-        + "█" * 60 + "\n\n"
-    )
+    block = ""
+    if recovery:
+        block += (
+            "█" * 60 + "\n"
+            "🚨 RECOVERY REVIEW — CONTESTO STRAORDINARIO\n"
+            + "█" * 60 + "\n\n"
+            "Stai operando in modalita' RECOVERY REVIEW. Leggi attentamente:\n\n"
+            + recovery + "\n\n"
+            + "█" * 60 + "\n\n"
+        )
+    if text:
+        block += (
+            "█" * 60 + "\n"
+            "🔴 DIRETTIVE UTENTE — PRIORITÀ MASSIMA\n"
+            + "█" * 60 + "\n\n"
+            "Le seguenti istruzioni sono state configurate ESPLICITAMENTE dall'utente\n"
+            "e hanno la PRIORITÀ PIÙ ALTA. In caso di conflitto con altre regole del\n"
+            "sistema, queste prevalgono SEMPRE. Applicarle è OBBLIGATORIO.\n\n"
+            + text + "\n\n"
+            + "█" * 60 + "\n\n"
+        )
+    return block
 
 
 def _build_risk_block(asset_class: str = "equity") -> str:

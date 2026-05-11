@@ -4349,6 +4349,356 @@ async def manual_liquidate_all(payload: ManualLiquidatePayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# ADMIN — Recovery delle posizioni liquidate dal bug del circuit breaker
+# ──────────────────────────────────────────────────────────────────────────
+
+class RecoverPositionsItem(BaseModel):
+    ticker: str
+    quantity: float
+
+
+class RecoverLiquidatedPayload(BaseModel):
+    """
+    Recovery delle posizioni liquidate. Modalita':
+      - auto-discovery: positions=None, il sistema legge gli ultimi SELL
+        marcati come CIRCUIT_BREAKER_LIQUIDATE nelle ultime `lookback_hours`.
+      - manuale: positions=[{ticker, quantity}], lista esplicita fornita
+        dall'utente (sovrascrive l'auto-discovery se presente).
+    Aggiungi dry_run=true per simulare senza eseguire i BUY.
+    """
+    positions: list[RecoverPositionsItem] | None = None
+    lookback_hours: int = 48
+    dry_run: bool = False
+
+
+@app.post("/api/admin/recover-liquidated-positions")
+async def recover_liquidated_positions(payload: RecoverLiquidatedPayload):
+    """
+    Riacquista le posizioni che sono state liquidate dal circuit breaker.
+
+    Modalita' default (positions=None):
+      1. Legge gli ultimi SELL con geo_reasoning che inizia con
+         "CIRCUIT_BREAKER_LIQUIDATE" nelle ultime lookback_hours.
+      2. Per ogni ticker liquidato, recupera la quantita' venduta.
+      3. Esegue BUY al prezzo corrente con quella quantita'.
+
+    Modalita' manuale: passa positions=[{ticker, quantity}, ...] esplicita
+    e quel content sovrascrive l'auto-discovery.
+
+    Se cash insufficiente per riacquistare tutto, il sistema scala la
+    quantita' proporzionalmente. Logga tutto in agent_logs con phase
+    "RECOVERY_BUY".
+    """
+    try:
+        import portfolio as _portfolio
+        import data_fetchers as _df
+        from datetime import datetime, timezone, timedelta
+
+        # 1. Determina la lista di ticker+qty da ricomprare
+        targets: dict[str, float] = {}
+        source_summary = []
+
+        if payload.positions:
+            for p in payload.positions:
+                t = (p.ticker or "").upper().strip()
+                if not t:
+                    continue
+                qty = float(p.quantity)
+                if qty <= 0:
+                    continue
+                targets[t] = qty
+            source_summary.append(f"manual_list({len(targets)})")
+        else:
+            # Auto-discovery: leggi trades recenti con CIRCUIT_BREAKER_LIQUIDATE
+            try:
+                trades = database.get_trades(limit=500) or []
+            except Exception as e:
+                return JSONResponse(status_code=500, content={
+                    "error": f"impossibile leggere trades: {e}",
+                })
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=payload.lookback_hours)
+            found = []
+            for t in trades:
+                action = (t.get("action") or "").upper()
+                if action != "SELL":
+                    continue
+                geo = (t.get("geopolitical_reasoning") or "")
+                if "CIRCUIT_BREAKER" not in geo.upper():
+                    continue
+                ts_str = str(t.get("timestamp") or "")
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        continue
+                except Exception:
+                    pass
+                ticker = (t.get("ticker") or "").upper().strip()
+                qty = float(t.get("quantity") or 0)
+                if not ticker or qty <= 0:
+                    continue
+                # Somma su ticker (se ci sono state piu' sell)
+                targets[ticker] = targets.get(ticker, 0) + qty
+                found.append({"ticker": ticker, "qty_sold": qty,
+                              "timestamp": ts_str})
+            source_summary.append(f"auto_discovery({len(found)} sell events, "
+                                  f"{len(targets)} unique tickers, "
+                                  f"lookback {payload.lookback_hours}h)")
+
+        if not targets:
+            return {
+                "ok": False,
+                "error": "no_targets",
+                "source": source_summary,
+                "message": ("Nessuna liquidazione trovata. Verifica lookback_hours "
+                            "o passa positions manualmente."),
+            }
+
+        # 2. Per ogni ticker, prendi il prezzo corrente e prova a comprare
+        recovered = []
+        skipped = []
+        errors = []
+        total_cost = 0.0
+
+        # Cash disponibile iniziale (controllo solo cumulativo)
+        try:
+            port = database.get_portfolio() or {}
+            cash_available = float(port.get("cash_balance") or 0)
+        except Exception:
+            cash_available = 0.0
+
+        for ticker, qty in targets.items():
+            # Prezzo corrente
+            cur_price = None
+            try:
+                md = _df.fetch_market_data(ticker, period_days=2)
+                if md and md.get("data"):
+                    cur_price = float(md["data"][-1].get("close") or 0)
+            except Exception as e:
+                errors.append({"ticker": ticker, "error": f"fetch price: {e}"})
+                continue
+            if not cur_price or cur_price <= 0:
+                errors.append({"ticker": ticker, "error": "no_current_price"})
+                continue
+
+            # Costo
+            need = qty * cur_price
+            qty_to_buy = qty
+
+            # Scaling se cash insufficiente
+            if need > cash_available:
+                if cash_available <= 1.0:
+                    skipped.append({"ticker": ticker, "qty_requested": qty,
+                                    "current_price": cur_price,
+                                    "reason": "no_cash_left"})
+                    continue
+                # Quanta qty riusciamo a coprire con il cash residuo
+                qty_to_buy = round(cash_available / cur_price, 6)
+                if qty_to_buy <= 0:
+                    skipped.append({"ticker": ticker, "qty_requested": qty,
+                                    "current_price": cur_price,
+                                    "reason": "qty_zero_after_scale"})
+                    continue
+                need = qty_to_buy * cur_price
+
+            if payload.dry_run:
+                recovered.append({
+                    "ticker": ticker,
+                    "qty": qty_to_buy,
+                    "price": cur_price,
+                    "cost": round(need, 2),
+                    "dry_run": True,
+                })
+                cash_available -= need
+                total_cost += need
+                continue
+
+            # Esegui BUY
+            try:
+                geo_reasoning = (
+                    f"ADMIN_RECOVERY: ripristino posizione liquidata dal "
+                    f"circuit breaker bug (qty originale {qty}, qty acquistata "
+                    f"{qty_to_buy} al prezzo {cur_price:.4f})"
+                )
+                tech_reasoning = "(recovery manuale via /api/admin/recover-liquidated-positions)"
+                result = _portfolio.execute_buy(
+                    ticker, qty_to_buy, cur_price,
+                    geo_reasoning, tech_reasoning, 100,
+                )
+                if result and result.get("success"):
+                    cash_available -= need
+                    total_cost += need
+                    recovered.append({
+                        "ticker": ticker,
+                        "qty": qty_to_buy,
+                        "price": cur_price,
+                        "cost": round(need, 2),
+                        "trade_id": result.get("trade_id"),
+                    })
+                else:
+                    errors.append({
+                        "ticker": ticker,
+                        "error": (result or {}).get("reason", "buy_failed"),
+                        "result": result,
+                    })
+            except Exception as e:
+                errors.append({"ticker": ticker, "error": f"execute_buy: {e}"})
+
+        # 3. Log audit
+        try:
+            import json as _json
+            database.insert_agent_log(
+                "admin_recovery", "RECOVERY_BUY",
+                _json.dumps({
+                    "event": "recovery_liquidated_positions",
+                    "dry_run": payload.dry_run,
+                    "source": source_summary,
+                    "recovered_count": len(recovered),
+                    "skipped_count": len(skipped),
+                    "errors_count": len(errors),
+                    "total_cost": round(total_cost, 2),
+                    "cash_remaining": round(cash_available, 2),
+                    "tickers_recovered": [r["ticker"] for r in recovered],
+                }, default=str),
+            )
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "dry_run": payload.dry_run,
+            "source": source_summary,
+            "recovered": recovered,
+            "skipped": skipped,
+            "errors": errors,
+            "total_cost": round(total_cost, 2),
+            "cash_remaining": round(cash_available, 2),
+        }
+
+    except Exception as e:
+        logger.error("recover_liquidated_positions: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class RecoveryReviewPayload(BaseModel):
+    """Trigger forced run dei Decision agents con contesto di recovery."""
+    custom_directive: str | None = None   # se None, usa default
+    trigger_standard: bool = True
+    trigger_crypto: bool = True
+
+
+@app.post("/api/admin/recovery-review")
+async def recovery_review(payload: RecoveryReviewPayload,
+                          background_tasks: BackgroundTasks):
+    """
+    Forza una run dei Decision Agent (Standard + Crypto) con un blocco
+    di contesto esplicito sul bug e sul recovery.
+
+    Sequenza:
+      1. Imposta `recovery_review_directive` in settings (iniettata in
+         cima ai prompt da `_build_directives_block`).
+      2. Lancia in background run_full_pipeline (Standard) + run_crypto_pipeline.
+      3. La direttiva resta attiva finche' l'utente non la rimuove via
+         POST /api/admin/recovery-review/clear.
+
+    Il Decision Agent vedra' la direttiva e capira' di dover valutare
+    ogni posizione (mantenere, ridurre, aumentare) in modo esplicito.
+    """
+    default_directive = (
+        "ATTENZIONE — RECOVERY POST-BUG DEL CIRCUIT BREAKER\n"
+        "\n"
+        "Il sistema ha avuto un bug grave: il circuit breaker 24h era ATTIVO\n"
+        "di default e ha liquidato AUTOMATICAMENTE tutte le posizioni del\n"
+        "portafoglio, anche se i Decision Agent non avevano richiesto vendite.\n"
+        "Causa probabile: corruzione di snapshot del portafoglio (running_max\n"
+        "inflato) che ha triggerato un falso positivo sul drawdown 24h.\n"
+        "\n"
+        "Il bug e' stato risolto:\n"
+        "  - Circuit breaker default DISATTIVO.\n"
+        "  - Anche se attivato, NON liquida piu' (solo alert).\n"
+        "  - Lock-in e trailing stop NON sovrascrivono piu' SL agent/user.\n"
+        "\n"
+        "Le posizioni che vedi adesso nel portafoglio sono state RICOSTITUITE\n"
+        "manualmente con la stessa quantita' originale ma a un prezzo di\n"
+        "carico potenzialmente diverso (al prezzo di mercato del momento del\n"
+        "recovery, non al prezzo originale di entrata).\n"
+        "\n"
+        "COMPITO PER QUESTO RUN:\n"
+        "Per OGNI posizione attualmente in portafoglio, decidi esplicitamente:\n"
+        "  (a) MANTIENI: la tesi originale e' ancora valida, lasciare cosi'.\n"
+        "  (b) AUMENTA: il setup tecnico/macro e' migliorato, vale la pena\n"
+        "      aggiungere capitale (rispettando i cap del Risk Profile).\n"
+        "  (c) RIDUCI/CHIUDI: la tesi non e' piu' valida o il regime e'\n"
+        "      cambiato, meglio uscire o ridurre l'esposizione.\n"
+        "\n"
+        "Usa request_technical_analysis per rivedere indicatori freschi su\n"
+        "ogni ticker. Spiega la tesi (mantieni/aumenta/riduci) per ognuna\n"
+        "in modo esplicito nel reasoning prima di execute_trade.\n"
+        "\n"
+        "NOTA: il prezzo medio di carico nel portafoglio NON e' quello\n"
+        "originale ma quello del recovery. Tienine conto: una posizione\n"
+        "leggermente in negativo NON significa che la tesi originale era\n"
+        "sbagliata, solo che il mercato si e' mosso tra liquidazione e\n"
+        "recovery. Concentrati sui fondamentali tecnici e macro correnti."
+    )
+    directive = payload.custom_directive or default_directive
+
+    try:
+        database.set_setting("recovery_review_directive", directive)
+    except Exception as e:
+        logger.error("set recovery_review_directive: %s", e)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    # Triggera le pipeline in background
+    import uuid as _uuid
+
+    async def _do_recovery_run():
+        from agents.orchestrator import run_full_pipeline, run_crypto_pipeline
+        if payload.trigger_standard:
+            try:
+                rid = str(_uuid.uuid4())
+                logger.info("[%s] Recovery review: avvio run_full_pipeline (standard)", rid)
+                result = await run_full_pipeline(run_id=rid)
+                logger.info("[%s] Recovery standard completato: %s", rid, result.get("decision"))
+            except Exception as e:
+                logger.error("Recovery review standard failed: %s", e, exc_info=True)
+        if payload.trigger_crypto:
+            try:
+                rid = str(_uuid.uuid4())
+                logger.info("[%s] Recovery review: avvio run_crypto_pipeline", rid)
+                result = await run_crypto_pipeline(run_id=rid)
+                logger.info("[%s] Recovery crypto completato: %s", rid, result.get("decision"))
+            except Exception as e:
+                logger.error("Recovery review crypto failed: %s", e, exc_info=True)
+
+    background_tasks.add_task(_do_recovery_run)
+
+    return {
+        "ok": True,
+        "status": "started",
+        "directive_set": True,
+        "directive_preview": directive[:300] + "..." if len(directive) > 300 else directive,
+        "pipelines_triggered": {
+            "standard": payload.trigger_standard,
+            "crypto": payload.trigger_crypto,
+        },
+        "note": ("La direttiva di recovery e' attiva finche' non la rimuovi "
+                 "con POST /api/admin/recovery-review/clear"),
+    }
+
+
+@app.post("/api/admin/recovery-review/clear")
+async def recovery_review_clear():
+    """Rimuove la direttiva di recovery (la pipeline torna al comportamento normale)."""
+    try:
+        database.set_setting("recovery_review_directive", "")
+        return {"ok": True, "cleared": True}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.post("/api/risk-state/emergency-stop-all-auto")
 async def emergency_stop_all_auto():
     """
