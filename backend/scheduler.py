@@ -32,35 +32,50 @@ _scheduler: AsyncIOScheduler | None = None
 current_mode: str = "idle"  # idle | weekend | pre_market | full
 
 # ────────────────────────────────────────────────────────────────────────────
-# Lock di serializzazione "live pipeline".
-# Crypto pipeline (CronTrigger minute=0, 24/7) e Standard pipeline
-# (CronTrigger hour=14,16,18,20 minute=0) si SOVRAPPONGONO 4 volte al
-# giorno (alle :00). Entrambe girano nello stesso event loop e fanno
-# decine di chiamate sync a Supabase + sync Anthropic SDK wrapped in
-# to_thread. Con due pipeline parallele:
-#   - contesa sulla cache OHLCV in-memory
-#   - rate-limit Anthropic per Sonnet sotto pressione
-#   - thread pool default di asyncio (5+N_CPU workers) saturato dalle
-#     chiamate sync di entrambe le pipeline
-#   - log inserts sync che bloccano l'event loop a turno
-# Risultato osservato: il Decision Standard si stalla 13+ min e il
-# Technical Standard non compare nei log.
+# Serializzazione "live pipeline" — versione semplice via boolean flag.
 #
-# Fix: queste due pipeline acquisiscono lo STESSO asyncio.Lock prima di
-# partire. La prima che arriva blocca la seconda. La seconda aspetta
-# fino a `_LIVE_PIPELINE_LOCK_TIMEOUT` secondi e se non riesce a entrare,
-# skippa il proprio run (logga il motivo).
-_live_pipeline_lock: "asyncio.Lock | None" = None
-_LIVE_PIPELINE_LOCK_TIMEOUT = 8 * 60   # 8 minuti
+# Crypto pipeline (CronTrigger minute=0, 24/7) e Standard pipeline
+# (CronTrigger hour=14,16,18,20 minute=2) potrebbero sovrapporsi se la
+# crypto sfora i 2 min. Entrambe girano nello stesso event loop e fanno
+# decine di chiamate sync a Supabase + Anthropic SDK wrapped in to_thread.
+# Senza serializzazione il Decision Standard si stalla per contention.
+#
+# PRIMA VERSIONE (rimossa): asyncio.Lock con wait_for(lock.acquire(), timeout).
+# Problema noto: il pattern wait_for + Lock.acquire() ha race conditions su
+# cancel (Python issue #45098) che possono lasciare il Lock "stuck", e in
+# caso di crash di una pipeline il Lock non viene rilasciato — la pipeline
+# successiva aspetta 8 min e skippa, all'infinito. Sintomo osservato:
+# "i due agenti cripto non partono piu'".
+#
+# NUOVA VERSIONE: due boolean flag in-memory. Crypto pipeline imposta il
+# proprio flag a True quando inizia e a False quando finisce (sempre,
+# anche su exception, via finally). Standard pipeline polla il flag crypto
+# all'inizio: se True, aspetta polling-style (sleep 5s) fino a max 8 min,
+# poi se ancora True skippa quel run.
+# Vantaggi vs Lock:
+#   - Nessun rischio di "stuck lock" persistente: il flag e' read/write
+#     boolean, non ha stato di acquisition pending.
+#   - In caso di crash hard del processo, i flag si resettano automaticamente
+#     al riavvio (sono in-memory).
+#   - Codice piu' leggibile, meno gotcha asyncio.
+# Tradeoff: il polling consuma cycle dell'event loop ogni 5s, ma e' trascurabile.
+_crypto_pipeline_running: bool = False
+_standard_pipeline_running: bool = False
+_LIVE_PIPELINE_WAIT_MAX_SEC = 8 * 60   # max attesa standard per crypto: 8 min
 
 
-def _get_live_pipeline_lock():
-    """Lazy init dell'asyncio.Lock — deve essere creato dentro l'event loop."""
-    global _live_pipeline_lock
-    if _live_pipeline_lock is None:
-        import asyncio as _asyncio
-        _live_pipeline_lock = _asyncio.Lock()
-    return _live_pipeline_lock
+async def _wait_for_crypto_pipeline_done(max_wait_sec: int = _LIVE_PIPELINE_WAIT_MAX_SEC) -> bool:
+    """
+    Polling helper: aspetta che _crypto_pipeline_running torni False.
+    Ritorna True se completato in tempo, False se timeout.
+    """
+    if not _crypto_pipeline_running:
+        return True
+    waited = 0
+    while _crypto_pipeline_running and waited < max_wait_sec:
+        await asyncio.sleep(5)
+        waited += 5
+    return not _crypto_pipeline_running
 
 
 # ============================================================
@@ -471,49 +486,52 @@ async def _crypto_pipeline_job():
     Schedule cron-fisso (non interval): se il watchdog/run extra triggera
     una crypto run alle 14:35, il prossimo cron run è comunque alle 15:00.
 
-    Serializzazione: acquisisce il live_pipeline_lock per evitare run
-    sovrapposti con la standard pipeline. Timeout 8 min (vedi nota lock).
+    Serializzazione: imposta _crypto_pipeline_running=True all'inizio e
+    False alla fine (sempre, via finally). La standard pipeline al :02 polla
+    questo flag e aspetta se True.
+
+    NON aspetta nessun altro flag: la crypto pipeline parte sempre,
+    indipendentemente da cosa sta facendo la standard. Questo perche':
+      1. La crypto cron e' a :00 e standard a :02 (crypto parte sempre prima).
+      2. La crypto e' 24/7, standard solo NYSE hours.
+      3. Se la standard ha qualche problema, non vogliamo bloccare la crypto.
     """
-    import asyncio as _asyncio
-    lock = _get_live_pipeline_lock()
+    global _crypto_pipeline_running
+    tick_ts = datetime.now(pytz.utc).strftime("%H:%M:%S UTC")
+    logger.info("Crypto pipeline job: TICK %s", tick_ts)
+    _crypto_pipeline_running = True
     try:
+        from agents.orchestrator import run_crypto_pipeline
+        from uuid import uuid4
+        run_id = str(uuid4())
+        # Hard timeout 12 min: oltre questa soglia il run e' patologico
+        # (es. hang di Anthropic/DeepSeek SDK su rate-limit retries).
         try:
-            await _asyncio.wait_for(lock.acquire(), timeout=_LIVE_PIPELINE_LOCK_TIMEOUT)
-        except _asyncio.TimeoutError:
-            logger.warning("Crypto pipeline: live_pipeline_lock occupato da >%dmin, skip "
-                           "(probabile standard pipeline lunga). Prossimo cron tra 1h.",
-                           _LIVE_PIPELINE_LOCK_TIMEOUT // 60)
-            return
-        try:
-            from agents.orchestrator import run_crypto_pipeline
-            from uuid import uuid4
-            run_id = str(uuid4())
-            # Timeout interno alla pipeline: 12 min max, hard-kill via wait_for
+            result = await asyncio.wait_for(
+                run_crypto_pipeline(run_id=run_id),
+                timeout=12 * 60,
+            )
+        except asyncio.TimeoutError:
+            logger.error("[%s] Crypto pipeline TIMEOUT (>12min), abort", run_id)
             try:
-                result = await _asyncio.wait_for(
-                    run_crypto_pipeline(run_id=run_id),
-                    timeout=12 * 60,
-                )
-            except _asyncio.TimeoutError:
-                logger.error("[%s] Crypto pipeline TIMEOUT (>12min), abort", run_id)
-                try:
-                    database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
-                        "event": "crypto_pipeline_timeout", "limit_min": 12,
-                    }))
-                except Exception:
-                    pass
-                return
-            if result.get("skipped"):
-                logger.debug("[%s] Crypto pipeline skipped: %s",
-                             run_id, result["skipped"])
-            else:
-                logger.info("[%s] Crypto pipeline OK: %s, trades=%d",
-                            run_id, result.get("decision", "?"),
-                            len(result.get("trades", [])))
-        finally:
-            lock.release()
+                database.insert_agent_log(run_id, "ORCHESTRATOR", json.dumps({
+                    "event": "crypto_pipeline_timeout", "limit_min": 12,
+                }))
+            except Exception:
+                pass
+            return
+        if result.get("skipped"):
+            logger.info("[%s] Crypto pipeline skipped: %s",
+                        run_id, result["skipped"])
+        else:
+            logger.info("[%s] Crypto pipeline OK: %s, trades=%d",
+                        run_id, result.get("decision", "?"),
+                        len(result.get("trades", [])))
     except Exception as e:
         logger.error("Errore crypto pipeline: %s", e, exc_info=True)
+    finally:
+        _crypto_pipeline_running = False
+        logger.debug("Crypto pipeline job: flag cleared")
 
 
 async def _crypto_monitor_job():
@@ -529,6 +547,8 @@ async def _crypto_monitor_job():
     Costo: ~$0.0001/run × 96 run/giorno = ~$0.01/giorno.
     No-op se non ci sono posizioni crypto aperte.
     """
+    tick_ts = datetime.now(pytz.utc).strftime("%H:%M:%S UTC")
+    logger.debug("CryptoMonitor job: TICK %s", tick_ts)
     try:
         from agents.crypto_monitor import run_crypto_monitor
         from uuid import uuid4
@@ -563,9 +583,10 @@ async def _standard_pipeline_job():
     14:02, 16:02, 18:02, 20:02 UTC Lun-Ven, solo se mercati aperti.
 
     Il :02 invece di :00 e' deliberato: la crypto pipeline gira a :00 e
-    serializziamo tramite live_pipeline_lock. Lo shift di 2 min permette
-    alla crypto di partire per prima (acquisire il lock) e ridurre la
-    finestra di contention all'avvio.
+    questo job aspetta che la crypto finisca tramite poll del flag
+    `_crypto_pipeline_running`. Tipicamente al :02 la crypto e' gia'
+    completata (~2-3 min totali); se per qualche motivo e' ancora in
+    corso (es. R1 reasoning lungo), aspetta polling-style max 8 min.
 
     Bypassa il watchdog: gira a tempo fisso. Le esecuzioni extra del watchdog
     su eventi urgenti restano possibili (con throttle 60min) ma NON spostano
@@ -575,6 +596,9 @@ async def _standard_pipeline_job():
     Sonnet è girato negli ultimi 30 min (evita doppio run subito dopo un
     watchdog-trigger).
     """
+    global _standard_pipeline_running
+    tick_ts = datetime.now(pytz.utc).strftime("%H:%M:%S UTC")
+    logger.info("Standard pipeline job: TICK %s", tick_ts)
     try:
         if not is_market_open():
             logger.debug("Standard pipeline: mercato chiuso, skip")
@@ -593,24 +617,25 @@ async def _standard_pipeline_job():
         except Exception:
             pass
 
-        lock = _get_live_pipeline_lock()
-        # Try to acquire con timeout. Se la crypto e' ancora in corso oltre
-        # 8 min (improbabile ma possibile), skippa questo run: il prossimo
-        # cron alle :02 della prossima ora gestira' il caso.
-        try:
-            await asyncio.wait_for(lock.acquire(), timeout=_LIVE_PIPELINE_LOCK_TIMEOUT)
-        except asyncio.TimeoutError:
-            logger.warning("Standard pipeline: live_pipeline_lock occupato da >%dmin, skip "
-                           "(crypto in corso). Prossimo cron tra 2h.",
-                           _LIVE_PIPELINE_LOCK_TIMEOUT // 60)
-            return
+        # Aspetta che la crypto pipeline finisca (polling, max 8 min).
+        if _crypto_pipeline_running:
+            logger.info("Standard pipeline: crypto in corso, attendo polling-style max %dmin",
+                        _LIVE_PIPELINE_WAIT_MAX_SEC // 60)
+            done = await _wait_for_crypto_pipeline_done()
+            if not done:
+                logger.warning("Standard pipeline: crypto ancora in corso dopo %dmin, "
+                               "skip questo run. Prossimo cron tra 2h.",
+                               _LIVE_PIPELINE_WAIT_MAX_SEC // 60)
+                return
+            logger.info("Standard pipeline: crypto finita, procedo")
+
+        _standard_pipeline_running = True
         try:
             from agents.orchestrator import run_full_pipeline
             from uuid import uuid4
             run_id = str(uuid4())
             # Hard timeout 12 min: oltre questa soglia il run e' patologico
-            # (probabile hang di Anthropic SDK su rate-limit retries) e
-            # bloccherebbe la prossima crypto :00. Kill via wait_for.
+            # (probabile hang di Anthropic SDK su rate-limit retries).
             try:
                 result = await asyncio.wait_for(
                     run_full_pipeline(run_id=run_id),
@@ -629,7 +654,8 @@ async def _standard_pipeline_job():
                         run_id, result.get("decision", "?"),
                         len(result.get("trades", [])))
         finally:
-            lock.release()
+            _standard_pipeline_running = False
+            logger.debug("Standard pipeline job: flag cleared")
     except Exception as e:
         logger.error("Errore standard pipeline: %s", e, exc_info=True)
 
