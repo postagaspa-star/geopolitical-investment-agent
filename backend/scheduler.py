@@ -559,36 +559,38 @@ async def _risk_safety_job():
     try:
         import risk_state
 
-        # 1. Circuit breaker check + entry into recovery mode
-        try:
-            triggered, dd_pct = risk_state.is_circuit_breaker_triggered()
-            if triggered and not risk_state.is_in_recovery_mode():
-                logger.warning(
-                    "Risk safety: CIRCUIT BREAKER TRIGGERED (DD 24h = %.2f%%) "
-                    "→ liquidating all positions + entering recovery mode",
-                    dd_pct,
-                )
-                # Liquida tutto PRIMA di entrare in recovery (cosi' il flag
-                # cattura il fatto del trigger)
-                try:
-                    import portfolio
-                    executed = portfolio.liquidate_all_positions(
+        # 1. Circuit breaker check + entry into recovery mode (default ON,
+        #    disabilitabile esplicitamente via setting).
+        if risk_state.is_circuit_breaker_enabled():
+            try:
+                triggered, dd_pct = risk_state.is_circuit_breaker_triggered()
+                if triggered and not risk_state.is_in_recovery_mode():
+                    logger.warning(
+                        "Risk safety: CIRCUIT BREAKER TRIGGERED (DD 24h = %.2f%%) "
+                        "→ liquidating all positions + entering recovery mode",
+                        dd_pct,
+                    )
+                    try:
+                        import portfolio
+                        executed = portfolio.liquidate_all_positions(
+                            reason=f"24h_drawdown_{dd_pct:.2f}pct",
+                        )
+                        logger.info("Risk safety: liquidated %d positions",
+                                    len([e for e in executed if not e.get("error")]))
+                    except Exception as e:
+                        logger.error("Risk safety liquidate failed: %s", e, exc_info=True)
+                    info = risk_state.enter_recovery_mode(
                         reason=f"24h_drawdown_{dd_pct:.2f}pct",
                     )
-                    logger.info("Risk safety: liquidated %d positions",
-                                len([e for e in executed if not e.get("error")]))
-                except Exception as e:
-                    logger.error("Risk safety liquidate failed: %s", e, exc_info=True)
-                # Entra in recovery
-                info = risk_state.enter_recovery_mode(
-                    reason=f"24h_drawdown_{dd_pct:.2f}pct",
-                )
-                logger.info("Risk safety: entered recovery mode: %s", info)
-        except Exception as e:
-            logger.error("Risk safety circuit breaker check failed: %s", e,
-                         exc_info=True)
+                    logger.info("Risk safety: entered recovery mode: %s", info)
+            except Exception as e:
+                logger.error("Risk safety circuit breaker check failed: %s", e,
+                             exc_info=True)
+        else:
+            logger.debug("Risk safety: circuit breaker DISABLED via setting")
 
-        # 2. Recovery mode exit (idempotente, no-op se non in recovery)
+        # 2. Recovery mode exit (sempre attivo se in recovery — non blocca
+        #    l'uscita anche se il circuit breaker e' stato disabilitato dopo).
         try:
             exited = risk_state.check_recovery_exit_condition()
             if exited:
@@ -596,66 +598,75 @@ async def _risk_safety_job():
         except Exception as e:
             logger.error("Risk safety recovery exit check failed: %s", e)
 
-        # 3-4. Lock-in 0.5% + trailing stop dinamico sulle posizioni aperte.
-        # Itera SOLO sulle posizioni con PnL > 5% (altrimenti niente da fare).
-        try:
-            import database
-            positions = database.get_positions() or []
-            lock_in_applied = 0
-            trailing_applied = 0
-            for p in positions:
-                try:
-                    avg = float(p.get("avg_buy_price") or 0)
-                    cur = float(p.get("current_price") or 0)
-                    if avg <= 0 or cur <= 0:
-                        continue
-                    pnl_pct = (cur - avg) / avg * 100.0
-                    if pnl_pct < 5.0:
-                        continue   # niente da fare
+        # 3-4. Lock-in 0.5% + trailing stop dinamico — OPT-IN (default OFF).
+        # IMPORTANTE: anche se attivati, NON sovrascrivono mai SL settati
+        # da Decision Agent o utente (guard in risk_state.should_apply_lock_in
+        # e apply_trailing_stop_if_needed). Solo SL == 0 o SL settato da
+        # risk_state stesso possono essere aggiornati.
+        lock_in_on = risk_state.is_lock_in_enabled()
+        trailing_on = risk_state.is_trailing_enabled()
 
-                    # 3. Lock-in 0.5% (priority: viene applicato per primo
-                    #    al primo passaggio sopra +5%)
-                    lock_res = risk_state.apply_lock_in_protection(p, current_price=cur)
-                    if lock_res.get("applied"):
-                        lock_in_applied += 1
-                        logger.info(
-                            "Risk safety lock-in: %s → SL=%.4f (PnL=%.1f%%)",
-                            p.get("ticker"), lock_res["new_stop_loss"], pnl_pct,
-                        )
-                        # Re-read position dopo update per il trailing check
-                        try:
-                            p = database.get_position(p.get("ticker")) or p
-                        except Exception:
-                            pass
+        if lock_in_on or trailing_on:
+            try:
+                import database
+                positions = database.get_positions() or []
+                lock_in_applied = 0
+                trailing_applied = 0
+                for p in positions:
+                    try:
+                        avg = float(p.get("avg_buy_price") or 0)
+                        cur = float(p.get("current_price") or 0)
+                        if avg <= 0 or cur <= 0:
+                            continue
+                        pnl_pct = (cur - avg) / avg * 100.0
+                        if pnl_pct < 5.0:
+                            continue
 
-                    # 4. Trailing stop dinamico (solo se PnL >= 10% per
-                    #    evitare di sostituire prematuramente lo SL lock-in
-                    #    a 0.5% — il trailing 4% e' meno protettivo finche'
-                    #    il prezzo non e' decisamente in profitto).
-                    if pnl_pct >= 10.0:
-                        trail_res = risk_state.apply_trailing_stop_if_needed(
-                            p, trailing_pct=4.0, min_profit_pct=10.0,
-                        )
-                        if trail_res.get("applied"):
-                            trailing_applied += 1
-                            logger.info(
-                                "Risk safety trailing: %s → SL=%.4f "
-                                "(peak=%.4f, prev SL=%.4f)",
-                                p.get("ticker"), trail_res["new_stop_loss"],
-                                trail_res["peak_price"], trail_res["previous_sl"],
+                        # 3. Lock-in 0.5% (priority: applicato al primo
+                        #    passaggio sopra +5%)
+                        if lock_in_on:
+                            lock_res = risk_state.apply_lock_in_protection(p, current_price=cur)
+                            if lock_res.get("applied"):
+                                lock_in_applied += 1
+                                logger.info(
+                                    "Risk safety lock-in: %s → SL=%.4f (PnL=%.1f%%)",
+                                    p.get("ticker"), lock_res["new_stop_loss"], pnl_pct,
+                                )
+                                try:
+                                    p = database.get_position(p.get("ticker")) or p
+                                except Exception:
+                                    pass
+
+                        # 4. Trailing stop dinamico (solo se PnL >= 10%)
+                        if trailing_on and pnl_pct >= 10.0:
+                            trail_res = risk_state.apply_trailing_stop_if_needed(
+                                p, trailing_pct=4.0, min_profit_pct=10.0,
                             )
-                except Exception as e:
-                    logger.debug("Risk safety per-position fail %s: %s",
-                                 p.get("ticker"), e)
-                    continue
+                            if trail_res.get("applied"):
+                                trailing_applied += 1
+                                logger.info(
+                                    "Risk safety trailing: %s → SL=%.4f "
+                                    "(peak=%.4f, prev SL=%.4f)",
+                                    p.get("ticker"), trail_res["new_stop_loss"],
+                                    trail_res["peak_price"], trail_res["previous_sl"],
+                                )
+                    except Exception as e:
+                        logger.debug("Risk safety per-position fail %s: %s",
+                                     p.get("ticker"), e)
+                        continue
 
-            if lock_in_applied or trailing_applied:
-                logger.info(
-                    "Risk safety: lock-in=%d, trailing=%d posizioni aggiornate",
-                    lock_in_applied, trailing_applied,
-                )
-        except Exception as e:
-            logger.error("Risk safety lock-in/trailing failed: %s", e, exc_info=True)
+                if lock_in_applied or trailing_applied:
+                    logger.info(
+                        "Risk safety: lock-in=%d, trailing=%d posizioni aggiornate",
+                        lock_in_applied, trailing_applied,
+                    )
+            except Exception as e:
+                logger.error("Risk safety lock-in/trailing failed: %s", e, exc_info=True)
+        else:
+            logger.debug(
+                "Risk safety: lock-in/trailing DISABLED via setting "
+                "(no auto-SL updates)"
+            )
 
         # 5. Concentration check (solo log + agent_log per visibilita')
         try:

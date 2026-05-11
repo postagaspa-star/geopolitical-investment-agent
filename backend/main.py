@@ -4246,6 +4246,62 @@ async def force_exit_recovery_mode():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+class RiskStateSettingsPayload(BaseModel):
+    """Toggle dei feature flag del risk_state. Tutti i campi opzionali —
+    solo i campi forniti vengono aggiornati."""
+    lock_in_enabled: bool | None = None
+    trailing_enabled: bool | None = None
+    circuit_breaker_enabled: bool | None = None
+
+
+@app.post("/api/risk-state/settings")
+async def update_risk_state_settings(payload: RiskStateSettingsPayload):
+    """
+    Aggiorna i flag del modulo risk_state. Default attuali:
+      - circuit_breaker_enabled: TRUE (safety net)
+      - lock_in_enabled: FALSE (opt-in, evita auto-exit indesiderati)
+      - trailing_enabled: FALSE (opt-in, evita auto-exit indesiderati)
+    """
+    try:
+        import risk_state as _rs
+        updated = {}
+        if payload.lock_in_enabled is not None:
+            database.set_setting(_rs.SETTING_LOCK_IN_ENABLED,
+                                  "true" if payload.lock_in_enabled else "false")
+            updated["lock_in_enabled"] = payload.lock_in_enabled
+        if payload.trailing_enabled is not None:
+            database.set_setting(_rs.SETTING_TRAILING_ENABLED,
+                                  "true" if payload.trailing_enabled else "false")
+            updated["trailing_enabled"] = payload.trailing_enabled
+        if payload.circuit_breaker_enabled is not None:
+            database.set_setting(_rs.SETTING_CIRCUIT_BREAKER_ENABLED,
+                                  "true" if payload.circuit_breaker_enabled else "false")
+            updated["circuit_breaker_enabled"] = payload.circuit_breaker_enabled
+        return {"updated": updated}
+    except Exception as e:
+        logger.error("update_risk_state_settings: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/risk-state/clear-auto-sls")
+async def clear_risk_state_auto_sls():
+    """
+    Rimuove TUTTI gli stop-loss che sono stati settati automaticamente da
+    risk_state (lock_in / trailing). Le posizioni tornano libere — il
+    Decision Agent / utente puo' mettere il proprio SL al prossimo run.
+
+    Da usare dopo aver disabilitato lock_in/trailing per liberare le
+    posizioni che il sistema aveva "preso in gestione" prima del fix.
+    """
+    try:
+        import risk_state
+        result = risk_state.clear_risk_state_auto_sls()
+        return result
+    except Exception as e:
+        logger.error("clear_risk_state_auto_sls: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.post("/api/risk-state/force-circuit-breaker-check")
 async def force_circuit_breaker_check(background_tasks: BackgroundTasks):
     """

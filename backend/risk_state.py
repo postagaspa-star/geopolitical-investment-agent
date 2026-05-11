@@ -47,6 +47,58 @@ SETTING_RECOVERY_ENTERED_AT = "risk_recovery_mode_entered_at"
 SETTING_RECOVERY_INITIAL_BALANCE = "risk_recovery_initial_balance"
 SETTING_LAST_CB_TRIGGER_AT = "risk_last_cb_trigger_at"
 
+# ── Feature flags (default OFF per evitare side-effect non voluti) ──────────
+# Lock-in 0.5% e trailing stop dinamico sono OPT-IN: senza esplicita
+# attivazione utente, il sistema NON tocca le posizioni vincenti.
+# Razionale: il primo deploy ha generato chiusure automatiche di posizioni
+# che il Decision Agent voleva mantenere (auto-exit triggherato dallo SL
+# stretto del lock-in). Per default questi meccanismi sono spenti — il
+# Decision Agent resta l'unica autorita' sui SL/TP delle posizioni che
+# ha aperto.
+SETTING_LOCK_IN_ENABLED = "risk_state_lock_in_enabled"
+SETTING_TRAILING_ENABLED = "risk_state_trailing_enabled"
+SETTING_CIRCUIT_BREAKER_ENABLED = "risk_state_circuit_breaker_enabled"
+
+# Marker `auto_exit_set_by` salvati da risk_state per identificare gli SL
+# che possiamo aggiornare. Gli SL settati da altri non vengono mai toccati.
+SET_BY_LOCK_IN = "risk_state_lock_in"
+SET_BY_TRAILING = "risk_state_trailing_stop"
+RISK_STATE_SET_BY_MARKERS = (SET_BY_LOCK_IN, SET_BY_TRAILING)
+
+
+def is_lock_in_enabled() -> bool:
+    """Lock-in 0.5% attivo? Default False."""
+    try:
+        import database
+        raw = (database.get_setting(SETTING_LOCK_IN_ENABLED, "false") or "").strip().lower()
+        return raw in ("1", "true", "yes", "on")
+    except Exception:
+        return False
+
+
+def is_trailing_enabled() -> bool:
+    """Trailing stop dinamico attivo? Default False."""
+    try:
+        import database
+        raw = (database.get_setting(SETTING_TRAILING_ENABLED, "false") or "").strip().lower()
+        return raw in ("1", "true", "yes", "on")
+    except Exception:
+        return False
+
+
+def is_circuit_breaker_enabled() -> bool:
+    """
+    Circuit breaker 24h attivo? Default True — e' la safety net principale,
+    serve a impedire drawdown catastrofici. Disabilitabile solo
+    esplicitamente da utente che sa cosa sta facendo.
+    """
+    try:
+        import database
+        raw = (database.get_setting(SETTING_CIRCUIT_BREAKER_ENABLED, "true") or "").strip().lower()
+        return raw not in ("0", "false", "no", "off")
+    except Exception:
+        return True
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. Win rate ultime N chiusure (FIFO matching BUY → SELL)
@@ -344,7 +396,12 @@ def should_apply_lock_in(position: dict, current_price: float | None = None,
                          trigger_pct: float | None = None) -> bool:
     """
     True se la posizione ha raggiunto +trigger_pct% di unrealized e
-    NON ha ancora uno SL >= entry (= lock-in non ancora applicato).
+    NON ha ancora uno SL settato (o ha uno SL precedentemente settato
+    dal risk_state stesso che possiamo aggiornare).
+
+    GUARD CRITICO: NON sovrascrive mai SL settati da Decision Agent o
+    utente (set_by != risk_state markers). Questo evita che il sistema
+    chiuda automaticamente posizioni che l'agente vuole mantenere.
     """
     threshold = trigger_pct if trigger_pct is not None else DEFAULT_LOCK_IN_TRIGGER_PCT
     try:
@@ -357,10 +414,22 @@ def should_apply_lock_in(position: dict, current_price: float | None = None,
         pnl_pct = (cp - avg) / avg * 100.0
         if pnl_pct < threshold:
             return False
+
         existing_sl = float(position.get("stop_loss_price") or 0)
-        # Se gia' c'e' uno SL >= entry, il lock-in e' gia' attivo
-        if existing_sl >= avg * (1 + (DEFAULT_LOCK_IN_SL_PCT / 100.0)):
-            return False
+
+        # GUARD: se c'e' uno SL gia' settato da Decision Agent / utente,
+        # NON lo tocchiamo. Solo se l'SL e' 0 (mai settato) o e' stato
+        # settato da noi (risk_state) possiamo agire.
+        if existing_sl > 0:
+            set_by = (position.get("auto_exit_set_by") or "").strip()
+            if set_by not in RISK_STATE_SET_BY_MARKERS:
+                # SL settato da agent/user — non lo tocchiamo MAI.
+                return False
+            # SL settato da risk_state stesso: aggiorniamo solo se nuovo
+            # SL sarebbe piu' alto (proteggi di piu', mai meno).
+            if existing_sl >= avg * (1 + (DEFAULT_LOCK_IN_SL_PCT / 100.0)):
+                return False
+
         return True
     except (TypeError, ValueError):
         return False
@@ -392,7 +461,7 @@ def apply_lock_in_protection(position: dict, current_price: float | None = None)
     try:
         import database
         database.update_position_auto_exit(
-            ticker, stop_loss_price=new_sl, set_by="risk_state_lock_in",
+            ticker, stop_loss_price=new_sl, set_by=SET_BY_LOCK_IN,
         )
         return {
             "applied": True,
@@ -402,6 +471,43 @@ def apply_lock_in_protection(position: dict, current_price: float | None = None)
         }
     except Exception as e:
         return {"applied": False, "error": str(e)}
+
+
+def clear_risk_state_auto_sls() -> dict:
+    """
+    Rimuove TUTTI gli SL che sono stati settati automaticamente da
+    risk_state (lock-in o trailing). Le posizioni tornano a non avere
+    SL automatico — il Decision Agent / utente puo' rimettere il proprio.
+
+    Da chiamare DOPO aver disabilitato lock_in/trailing per liberare
+    le posizioni che il sistema aveva preso in gestione.
+
+    Ritorna {cleared: int, tickers: [str]}.
+    """
+    try:
+        import database
+        positions = database.get_positions() or []
+    except Exception as e:
+        return {"cleared": 0, "error": str(e)}
+
+    cleared_tickers: list[str] = []
+    for p in positions:
+        try:
+            set_by = (p.get("auto_exit_set_by") or "").strip()
+            if set_by in RISK_STATE_SET_BY_MARKERS:
+                ticker = p.get("ticker")
+                if not ticker:
+                    continue
+                # Reset SL a 0 (= no auto-exit). NON tocchiamo il TP.
+                database.update_position_auto_exit(
+                    ticker, stop_loss_price=0.0,
+                    set_by="risk_state_cleared",
+                )
+                cleared_tickers.append(ticker)
+        except Exception as e:
+            logger.debug("clear_risk_state_auto_sls per-position fail: %s", e)
+            continue
+    return {"cleared": len(cleared_tickers), "tickers": cleared_tickers}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -483,15 +589,24 @@ def apply_trailing_stop_if_needed(position: dict,
             return {"applied": False, "reason": "compute_failed"}
 
         existing_sl = float(position.get("stop_loss_price") or 0)
-        # Il trailing sale, non scende. Se l'SL attuale e' gia' piu' alto,
-        # NON sostituirlo (proteggi piu' del trailing standard).
-        if existing_sl > 0 and existing_sl >= new_sl:
-            return {"applied": False, "reason": "existing_sl_higher",
-                    "existing_sl": existing_sl, "proposed_trailing_sl": new_sl}
+
+        # GUARD CRITICO: non sovrascrivere mai SL settato da Decision Agent
+        # o utente. Solo SL settati da risk_state (o assenti) possono essere
+        # aggiornati.
+        if existing_sl > 0:
+            set_by = (position.get("auto_exit_set_by") or "").strip()
+            if set_by not in RISK_STATE_SET_BY_MARKERS:
+                return {"applied": False, "reason": "sl_set_by_agent_or_user",
+                        "set_by": set_by, "existing_sl": existing_sl}
+            # Il trailing sale, non scende. Se l'SL attuale e' gia' piu' alto,
+            # NON sostituirlo (proteggi piu' del trailing standard).
+            if existing_sl >= new_sl:
+                return {"applied": False, "reason": "existing_sl_higher",
+                        "existing_sl": existing_sl, "proposed_trailing_sl": new_sl}
 
         import database
         database.update_position_auto_exit(
-            ticker, stop_loss_price=new_sl, set_by="risk_state_trailing_stop",
+            ticker, stop_loss_price=new_sl, set_by=SET_BY_TRAILING,
         )
         return {
             "applied": True,
@@ -596,6 +711,12 @@ def build_risk_state_snapshot() -> dict:
         "max_concentration_ticker": conc["max_ticker"],
         "concentration_trigger_active": conc["max_concentration_pct"] > DEFAULT_CONCENTRATION_TRIGGER_PCT,
         "total_nav": conc["total_nav"],
+        # Feature flags correnti (per UI/diagnostica)
+        "flags": {
+            "lock_in_enabled": is_lock_in_enabled(),
+            "trailing_enabled": is_trailing_enabled(),
+            "circuit_breaker_enabled": is_circuit_breaker_enabled(),
+        },
         # Soglie correnti (per riferimento prompt)
         "thresholds": {
             "circuit_breaker_24h_pct": DEFAULT_CIRCUIT_BREAKER_24H_PCT,
@@ -652,16 +773,46 @@ def build_risk_state_prompt_block() -> str:
             f"⚠️  TRIGGER CONCENTRAZIONE: una posizione supera "
             f"{DEFAULT_CONCENTRATION_TRIGGER_PCT:.0f}% del NAV — valuta rebalance."
         )
+    # Stato dei feature flag (opt-in per default OFF)
+    try:
+        lock_in_on = is_lock_in_enabled()
+    except Exception:
+        lock_in_on = False
+    try:
+        trailing_on = is_trailing_enabled()
+    except Exception:
+        trailing_on = False
+    try:
+        cb_on = is_circuit_breaker_enabled()
+    except Exception:
+        cb_on = True
+
     lines.extend([
+        "",
+        "FEATURE FLAGS automatici (governano cosa il sistema fa SENZA chiederti):",
+        f"  - Circuit breaker 24h: {'ATTIVO' if cb_on else 'DISATTIVO'} "
+        f"(liquida tutto se DD 24h > {abs(DEFAULT_CIRCUIT_BREAKER_24H_PCT):.0f}%)",
+        f"  - Lock-in 0.5% automatico: {'ATTIVO' if lock_in_on else 'DISATTIVO (default)'}",
+        f"  - Trailing stop dinamico: {'ATTIVO' if trailing_on else 'DISATTIVO (default)'}",
         "",
         "USO NEI PROMPT:",
         f"  - Se win_rate_last_10 > 0.60 + cash > $20k + regime BULL-CYCLE/CRASH-RALLY",
         f"    → puoi usare il CAP PIENO del tuo Risk Profile (no riduzione regime).",
         f"  - Se SL proposto > {DEFAULT_HIGH_RISK_SL_THRESHOLD_PCT:.0f}% di distanza: confidence",
         f"    minima {DEFAULT_HIGH_RISK_CONFIDENCE_FLOOR:.2f} obbligatoria (no eccezioni).",
-        f"  - Lock-in 0.5% e trailing stop sono APPLICATI AUTOMATICAMENTE dal",
-        f"    sistema sulle posizioni vincenti — NON sovrascriverli con SL piu'",
-        f"    larghi tramite execute_trade (verrebbero rimossi al prossimo poll).",
+    ])
+    if lock_in_on or trailing_on:
+        lines.extend([
+            f"  - Lock-in/trailing AUTO sono attivi: il sistema potrebbe aggiornare lo SL",
+            f"    di una posizione VINCENTE (>+5% o >+10%) ma SOLO se lo SL non e' gia'",
+            f"    settato da te. I tuoi SL espliciti via execute_trade sono SEMPRE",
+            f"    rispettati e non vengono sovrascritti.",
+        ])
+    else:
+        lines.append(
+            "  - Lock-in/trailing AUTO DISATTIVATI: tu sei l'unica autorita' sui SL"
+        )
+    lines.extend([
         "═" * 60,
         "",
     ])
