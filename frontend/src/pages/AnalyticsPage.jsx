@@ -487,18 +487,38 @@ function PnlByTickerCard({ closedTrades }) {
 }
 
 // Esposizione attuale per ticker (concentrazione del portafoglio)
-function ExposurePieCard({ positions }) {
-  if (!positions?.length) {
-    return <div className="empty-state">Nessuna posizione aperta</div>;
-  }
+function ExposurePieCard({ positions, portfolio }) {
+  // Estrai la liquidità dal portfolio (cash_balance / cash). Se assente
+  // (es. endpoint non risponde), il pie mostra solo le posizioni.
+  const cash = Number(
+    portfolio?.cash_balance ?? portfolio?.cash ?? 0
+  ) || 0;
 
-  const data = positions
+  // Esposizione per posizione aperta
+  const positionData = (positions ?? [])
     .map((p) => ({
       name: p.ticker,
       value: Math.abs(Number(p.current_price ?? 0) * Number(p.quantity ?? 0)),
       pnl: Number(p.unrealized_pnl ?? 0),
+      isCash: false,
     }))
+    .filter((d) => d.value > 0)
     .sort((a, b) => b.value - a.value);
+
+  // Slice Liquidità in fondo (color grigio per distinguerla dalle posizioni)
+  const data = [...positionData];
+  if (cash > 0.5) {
+    data.push({
+      name: "Liquidità",
+      value: cash,
+      pnl: 0,
+      isCash: true,
+    });
+  }
+
+  if (!data.length) {
+    return <div className="empty-state">Nessuna posizione né liquidità</div>;
+  }
 
   return (
     <ResponsiveContainer width="100%" height={260}>
@@ -516,7 +536,11 @@ function ExposurePieCard({ positions }) {
           fontSize={10}
         >
           {data.map((entry, i) => (
-            <Cell key={entry.name} fill={PALETTE[i % PALETTE.length]} />
+            <Cell
+              key={entry.name}
+              // Cash sempre grigio neutro per non confonderlo con asset
+              fill={entry.isCash ? "#475569" : PALETTE[i % PALETTE.length]}
+            />
           ))}
         </Pie>
         <Tooltip content={({ active, payload }) => {
@@ -525,8 +549,10 @@ function ExposurePieCard({ positions }) {
           return (
             <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, padding: '0.5rem 0.85rem', fontSize: '0.78rem', color: '#f1f5f9' }}>
               <div style={{ color: '#94a3b8' }}>{d.name}</div>
-              <div>Esposizione: <strong>{fmtUsd(d.value)}</strong></div>
-              <div>P&L non realizzato: <strong style={{ color: d.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d.pnl)}</strong></div>
+              <div>{d.isCash ? "Cash disponibile" : "Esposizione"}: <strong>{fmtUsd(d.value)}</strong></div>
+              {!d.isCash && (
+                <div>P&L non realizzato: <strong style={{ color: d.pnl >= 0 ? '#10b981' : '#ef4444' }}>{fmtUsd(d.pnl)}</strong></div>
+              )}
             </div>
           );
         }} />
@@ -997,6 +1023,7 @@ export default function AnalyticsPage() {
   const [positions, setPositions] = useState([]);
   const [trades, setTrades] = useState([]);
   const [history, setHistory] = useState([]);
+  const [portfolio, setPortfolio] = useState(null);
   const [period, setPeriod] = useState("30d");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -1006,23 +1033,28 @@ export default function AnalyticsPage() {
       setLoading(true);
       setError(null);
       try {
-        const [posRes, tradeRes, histRes] = await Promise.all([
+        const [posRes, tradeRes, histRes, portRes] = await Promise.all([
           fetch(`${API}/api/positions`),
           // FIX: limit alto per non troncare le statistiche. Bug precedente:
           // default 50 → 80+ trade reali → KPI calcolati solo sugli ultimi 50.
           fetch(`${API}/api/trades?limit=1000`),
           fetch(`${API}/api/portfolio/history?period=${period}`),
+          // Portfolio per estrarre cash_balance e mostrare la Liquidità
+          // nel pie chart Esposizione Attuale.
+          fetch(`${API}/api/portfolio`),
         ]);
 
-        const [posData, tradeData, histData] = await Promise.all([
+        const [posData, tradeData, histData, portData] = await Promise.all([
           posRes.ok ? posRes.json() : Promise.resolve([]),
           tradeRes.ok ? tradeRes.json() : Promise.resolve([]),
           histRes.ok ? histRes.json() : Promise.resolve([]),
+          portRes.ok ? portRes.json() : Promise.resolve(null),
         ]);
 
         setPositions(Array.isArray(posData) ? posData : posData?.positions ?? []);
         setTrades(Array.isArray(tradeData) ? tradeData : tradeData?.trades ?? []);
         setHistory(Array.isArray(histData) ? histData : []);
+        setPortfolio(portData);
       } catch (err) {
         setError(err.message ?? 'Errore nel caricamento dei dati');
       } finally {
@@ -1168,7 +1200,7 @@ export default function AnalyticsPage() {
         </ChartCard>
 
         <ChartCard title="Tempo in Drawdown (Underwater)"
-                   description="Distanza in % dal precedente massimo del portafoglio (sempre ≤ 0). Mostra non solo quanto è profondo il drawdown, ma soprattutto QUANTO TEMPO il bot ci sta dentro. Un bot che passa il 70% del tempo underwater è da rivedere anche se la profondità è contenuta."
+                   description="Distanza in % dal MASSIMO STORICO del portafoglio (high-water mark), sempre ≤ 0. NB: anche se sei in profitto rispetto al capitale iniziale, sei 'underwater' finché non SUPERI il tuo massimo precedente. Esempio: parti da 100k, sali a 120k, scendi a 115k → underwater = -4.2% (non in perdita assoluta, ma sotto il picco). Mostra non solo la profondità del drawdown ma QUANTO TEMPO il bot ci sta dentro: un bot che passa il 70% del tempo sotto il picco è da rivedere anche se la profondità è contenuta."
                    subtitle={`Periodo: ${PERIOD_OPTIONS.find(o => o.key === period)?.label}`}>
           <UnderwaterChart history={history} />
         </ChartCard>
@@ -1192,9 +1224,9 @@ export default function AnalyticsPage() {
         </ChartCard>
 
         <ChartCard title="Esposizione Attuale"
-                   description="Quanto del portafoglio è investito in ogni asset (in % del valore totale delle posizioni aperte). Aiuta a vedere se sei concentrato o diversificato."
-                   subtitle={`${positions.length} posizioni aperte`}>
-          <ExposurePieCard positions={positions} />
+                   description="Composizione del portafoglio: % di ogni posizione + slice grigio Liquidità (cash non investito). Aiuta a vedere se sei concentrato/diversificato e quanto cash hai da redeployare."
+                   subtitle={`${positions.length} posizion${positions.length === 1 ? "e" : "i"} + cash`}>
+          <ExposurePieCard positions={positions} portfolio={portfolio} />
         </ChartCard>
       </div>
     </div>
