@@ -240,13 +240,34 @@ def list_active(include_recent: bool = True) -> list[dict]:
             keep = False
         elif status in ("starting", "stepping", "calling_ai", "applying_trades",
                          "finalizing") and elapsed_since_update > TTL_STALE_RUNNING_SECONDS:
-            # Probabile crash o pod restart: marca come error e tieni 1 round
+            # Probabile crash o pod restart: marca come error e tieni 1 round.
+            # BUG FIX: NON aggiorniamo last_update_at qui — manteniamo
+            # l'originale cosi' il TTL_ERROR si attiva correttamente al
+            # prossimo poll. Prima il last_update_at veniva resettato a
+            # _now_iso() e il record restava "fresco" all'infinito,
+            # facendo apparire run stuck per ore nella UI.
+            # Inoltre se l'errore esisteva gia' (es. error_msg gia' presente),
+            # non lo sovrascrive — preserva il primo errore osservato.
+            if not rec.get("error_msg"):
+                rec["error_msg"] = (
+                    f"Stale: nessun aggiornamento da "
+                    f"{int(elapsed_since_update / 60)}min"
+                )
             rec["status"] = "error"
-            rec["error_msg"] = (rec.get("error_msg")
-                                or f"Stale: nessun aggiornamento da {int(elapsed_since_update / 60)}min")
-            rec["last_update_at"] = _now_iso()
+            # Memorizza il "first_stale_marker_at" per countdown TTL preciso
+            if not rec.get("first_stale_marker_at"):
+                rec["first_stale_marker_at"] = _now_iso()
             _save_record(run_id, rec)
-            # keep=True: viene mostrato come 'error' al prossimo poll
+            # keep=True: viene mostrato come 'error' al prossimo poll, e
+            # poi sara' rimosso quando first_stale_marker_at + TTL_ERROR e' passato.
+
+        # Secondo controllo TTL_ERROR usando first_stale_marker_at se presente
+        if status in ("starting", "stepping", "calling_ai", "applying_trades",
+                       "finalizing") and rec.get("first_stale_marker_at"):
+            # Run stuck originariamente, ora marcato error
+            elapsed_since_marker = _seconds_since(rec["first_stale_marker_at"])
+            if elapsed_since_marker > TTL_ERROR_SECONDS:
+                keep = False
 
         if not keep:
             _delete_record(run_id)
@@ -284,3 +305,68 @@ def get(run_id: str) -> Optional[dict]:
         return None
     rec["elapsed_seconds"] = int(_seconds_since(rec.get("started_at", "")))
     return rec
+
+
+def dismiss(run_id: str) -> dict:
+    """
+    Rimuove FORZATAMENTE un run dal registro active_runs. Da usare per:
+      - run stuck (status=error o running) che non rispondono al TTL
+      - cleanup manuale post-incidente
+
+    Rimuove sia dall'index sia il record. Non tocca la tabella sim_runs
+    (se il run e' stato gia' persistito in DB resta li' come dato storico).
+
+    Ritorna {removed: bool, was_present: bool, prev_status: str | None}.
+    """
+    idx = _load_index()
+    was_present = run_id in idx
+    prev_rec = _load_record(run_id)
+    prev_status = (prev_rec or {}).get("status")
+
+    # Rimuovi dall'index
+    if was_present:
+        new_idx = [r for r in idx if r != run_id]
+        _save_index(new_idx)
+
+    # Rimuovi il record
+    _delete_record(run_id)
+
+    return {
+        "removed": True,
+        "was_present": was_present,
+        "prev_status": prev_status,
+        "run_id": run_id,
+    }
+
+
+def dismiss_all_stuck() -> dict:
+    """
+    Rimuove TUTTI i run con status='error' o stale (running ma senza
+    update da > TTL_STALE_RUNNING_SECONDS). Utile per cleanup massivo.
+
+    Ritorna {removed: int, run_ids: [str]}.
+    """
+    idx = _load_index()
+    removed_ids: list[str] = []
+    for run_id in list(idx):
+        rec = _load_record(run_id)
+        if not rec:
+            # Orfani: pulisci sempre
+            removed_ids.append(run_id)
+            continue
+        status = rec.get("status", "")
+        last_update = rec.get("last_update_at", rec.get("started_at", ""))
+        elapsed = _seconds_since(last_update)
+        is_stuck = (
+            status == "error"
+            or (status in ("starting", "stepping", "calling_ai",
+                            "applying_trades", "finalizing")
+                and elapsed > TTL_STALE_RUNNING_SECONDS)
+        )
+        if is_stuck:
+            _delete_record(run_id)
+            removed_ids.append(run_id)
+    keep = [r for r in idx if r not in removed_ids]
+    if len(keep) != len(idx):
+        _save_index(keep)
+    return {"removed": len(removed_ids), "run_ids": removed_ids}

@@ -1919,6 +1919,40 @@ async def sim_v2_crypto_advisor(req: SimV2CryptoAdvisorReq):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/api/simulator/active-runs/dismiss-stuck")
+async def sim_dismiss_stuck_runs():
+    """
+    Cleanup: rimuove dal registro active_runs TUTTI i run con status=error
+    o stale (running ma senza update da > 15 min). Usato dopo incidenti
+    in cui i task background asyncio sono morti col sleep di Render free
+    tier, lasciando run "fantasma" visibili nella SimDashboard.
+
+    NON tocca la tabella sim_runs: i run completati restano nel DB.
+    """
+    try:
+        from simulator import active_runs as _ar
+        result = _ar.dismiss_all_stuck()
+        return result
+    except Exception as e:
+        logger.error("[SIM] dismiss-stuck error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/simulator/active-runs/{run_id}/dismiss")
+async def sim_dismiss_run(run_id: str):
+    """
+    Rimuove FORZATAMENTE un singolo run dal registro active_runs.
+    Da usare per run stuck che bloccano la UI o per cleanup mirato.
+    """
+    try:
+        from simulator import active_runs as _ar
+        result = _ar.dismiss(run_id)
+        return result
+    except Exception as e:
+        logger.error("[SIM] dismiss run %s error: %s", run_id, e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/simulator/active-runs")
 async def sim_active_runs(include_recent: bool = Query(default=True)):
     """
