@@ -1816,7 +1816,7 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     pte = cr_report.get("per_ticker_errors") or []
                     for t in crypto_tickers:
                         if t not in analyzed_cr:
-                            err = "non analizzato (crypto out of universe / no data)"
+                            err = "non analizzato (dati yfinance non disponibili o ticker invalido)"
                             for ent in pte:
                                 if isinstance(ent, dict) and ent.get("ticker") == t:
                                     err = ent.get("error", err)

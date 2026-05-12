@@ -2,11 +2,14 @@
 Technical Crypto Agent — DeepSeek-V3, focus ESCLUSIVO crypto 24/7.
 
 Differenze rispetto a technical.py:
-  - Universo HARD-LIMITED ai 14 ticker crypto supportati
-    (BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD,
-    LTC-USD, DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD)
-  - Ogni ticker richiesto viene validato contro questa lista PRIMA di
-    chiamare DeepSeek; ticker non-crypto / non-supportati → skip
+  - Universo APERTO: qualsiasi crypto in formato yfinance (-USD) o
+    Polygon-compatible (X:TICKER) e' analizzabile. Nessuna whitelist
+    hardcoded — il Decision Agent decide i ticker su base liquidita',
+    tesi, e disponibilita' dati. DEFAULT_CRYPTO_UNIVERSE sotto e' solo
+    una lista di DEFAULT/seed (top-14 liquidita') per i run senza
+    Watchdog focus.
+  - L'unico vincolo runtime e' la PRESENZA di dati OHLCV (yfinance fetch).
+    Ticker senza dati restituiscono error, ticker validi vengono analizzati.
   - Prompt specializzato su tecnica crypto: volumi 24h, funding rate,
     on-chain flow, wallet activity, sentiment retail (X/Reddit), non gap
     di apertura, alta sensibilità a sentiment regulatorio.
@@ -30,8 +33,11 @@ logger = logging.getLogger(__name__)
 DEEPSEEK_MODEL = "deepseek-chat"   # V3
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# Hard-limit dei 14 ticker crypto supportati. Default per i run senza
-# Watchdog focus. La validazione runtime usa la stessa lista.
+# DEFAULT (NON whitelist): top-14 crypto liquidita' usati come lista
+# di partenza quando un run non specifica focus_tickers (es. cron orario
+# senza watchdog trigger). NON e' un vincolo: qualsiasi ticker -USD
+# o X:TICKER puo' essere analizzato passandolo esplicitamente a
+# `run_crypto_technical(run_id, tickers=[...])`.
 DEFAULT_CRYPTO_UNIVERSE = [
     "BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "AVAX-USD",
     "ADA-USD", "XRP-USD", "LTC-USD", "DOT-USD", "LINK-USD",
@@ -244,17 +250,32 @@ async def _call_deepseek(context: str, max_retries: int = 2) -> tuple[str, str]:
 
 def _filter_to_supported_crypto(tickers: list[str]) -> list[str]:
     """
-    Filtra una lista di ticker tenendo solo le crypto (suffisso -USD o
-    prefisso X:). Validazione contro l'universo hard-coded
-    DEFAULT_CRYPTO_UNIVERSE per evitare ticker inventati dal LLM.
+    Filtra una lista di ticker tenendo SOLO crypto: suffisso -USD o
+    prefisso X:. Nessuna whitelist hardcoded.
+
+    Prima questa funzione validava contro DEFAULT_CRYPTO_UNIVERSE (14
+    ticker) e scartava qualsiasi altro. Ora accetta qualsiasi crypto in
+    formato standard — la validita' effettiva e' demandata al fetch dati
+    (yfinance): ticker senza dati restituiscono error e vengono saltati
+    da run_crypto_technical, ma NON sono bloccati pre-emptive.
+
+    Filtri applicati:
+      - rimuove duplicati (case-insensitive)
+      - rimuove equity / ETF (non hanno -USD ne' X:)
+      - normalizza a uppercase
     """
-    valid = set(DEFAULT_CRYPTO_UNIVERSE)
     out = []
-    for t in tickers:
-        t_up = t.upper()
+    seen: set[str] = set()
+    for t in tickers or []:
+        if not t:
+            continue
+        t_up = str(t).upper().strip()
+        if not t_up or t_up in seen:
+            continue
         is_crypto = t_up.endswith("-USD") or t_up.startswith("X:")
-        if is_crypto and t_up in valid:
+        if is_crypto:
             out.append(t_up)
+            seen.add(t_up)
     return out
 
 
@@ -286,13 +307,14 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
         tickers = ["BTC-USD", "ETH-USD", "SOL-USD",
                    "DOGE-USD", "AVAX-USD", "LINK-USD"]
 
-    # Pre-validation: solo crypto supportate (universo hard-coded a 14 ticker)
+    # Pre-validation: rimuove ticker non-crypto (equity, ETF). Qualsiasi
+    # crypto (-USD / X:) e' ACCETTATA, no whitelist.
     original_count = len(tickers)
     tickers = _filter_to_supported_crypto(tickers)
     filtered_count = original_count - len(tickers)
 
     if not tickers:
-        msg = "Nessun ticker valido (crypto supportato) → skip Technical Crypto"
+        msg = "Nessun ticker crypto valido (richiesti -USD o X:) → skip Technical Crypto"
         logger.warning("[%s][TECH-CRYPTO] %s", run_id, msg)
         try:
             database.insert_agent_log(run_id, log_phase, json.dumps({

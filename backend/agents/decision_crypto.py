@@ -5,8 +5,10 @@ Riceve l'output di technical_crypto.py + buffer intelligence + report aggregati
 + documenti specifici crypto. Decide se eseguire trade su crypto.
 
 Differenze rispetto a decision.py:
-  - SOLO crypto: pre-validation hard-fails su qualunque ticker non nel
-    subset crypto supportato (14 ticker)
+  - SOLO crypto: opera esclusivamente su ticker in formato -USD o X:
+    (qualsiasi crypto liquida via yfinance/Polygon). NESSUNA whitelist
+    hardcoded: l'agente sceglie i ticker su base liquidita', tesi e
+    disponibilita' dati.
   - Documenti separati: carica solo doc con category='crypto' (non i doc
     generici dei mercati equity)
   - Prompt specializzato su rischio crypto: leverage, liquidation, depeg,
@@ -58,12 +60,24 @@ CRYPTO_COOLDOWN_SECONDS = 50 * 60   # 50 min: lascia 10 min di margine vs schedu
 
 CRYPTO_DECISION_PROMPT_DEFAULT = """Sei il Decision Agent CRYPTO di GeoInvest AI — sistema autonomo focalizzato ESCLUSIVAMENTE sui mercati crypto (BTC, ETH, SOL, ecc.).
 
-UNIVERSO INVESTIBILE — VINCOLO RIGIDO:
-Solo i 14 ticker crypto supportati (formato yfinance):
-  BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD,
-  LTC-USD, DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD.
+UNIVERSO INVESTIBILE — APERTO:
+Qualsiasi crypto liquida in formato yfinance (suffisso -USD) o Polygon
+(prefisso X:). NESSUNA whitelist hardcoded: hai liberta' di scegliere il
+ticker su base liquidita', tesi, e disponibilita' dati.
 
-NON tradare crypto fuori da questa lista (BNB, SHIB, AAVE, PEPE, ecc.).
+Esempi di ticker comunemente liquidi e ben coperti dai feed:
+  BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD,
+  LTC-USD, DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD,
+  BNB-USD, SHIB-USD, AAVE-USD, ARB-USD, OP-USD, INJ-USD, ...
+
+REGOLE per la scelta del ticker:
+  - Verifica liquidita': preferisci market cap > $500M per posizioni
+    significative (slippage contenuto).
+  - Conferma disponibilita' dati: se request_crypto_technical_analysis
+    ritorna error sul ticker, e' probabile che yfinance non lo copra in
+    modo affidabile — riprova con un alternativo.
+  - Per memecoin / asset low-cap, riduci dimensione e tieni SL piu' stretti.
+
 NON tradare equity (azioni/ETF) — quelli sono dominio del Decision normale.
 
 CONTESTO CHE RICEVI:
