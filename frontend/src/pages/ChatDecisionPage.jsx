@@ -615,30 +615,35 @@ export default function ChatDecisionPage() {
 
   const agent = AGENT_TYPES.find((a) => a.id === agentType) || AGENT_TYPES[0];
 
-  // Load history on agent type change
+  // Load history on agent type change.
+  // NON svuotiamo i messaggi prima del fetch — lascia visibili i precedenti
+  // finche' non arriva la nuova lista. Evita il flash "chat vuota" durante
+  // lo switch standard <-> crypto.
   useEffect(() => {
-    let cancelled = false;
+    const ac = new AbortController();
     setLoading(true);
     setError(null);
-    setMessages([]);
     (async () => {
       try {
-        const res = await fetch(`${API}/api/chat-decision/history/${agentType}`);
+        const res = await fetch(`${API}/api/chat-decision/history/${agentType}`,
+                                 { signal: ac.signal });
+        if (ac.signal.aborted) return;
         const data = await res.json();
-        if (cancelled) return;
+        if (ac.signal.aborted) return;
         if (!res.ok) {
           setError(data.error || `HTTP ${res.status}`);
-          setMessages([]);
+          // NON cancellare i messaggi precedenti: l'errore e' visibile sopra
         } else {
           setMessages(data.messages || []);
         }
       } catch (e) {
-        if (!cancelled) setError(String(e));
+        if (e.name === "AbortError") return;
+        setError(String(e));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!ac.signal.aborted) setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { ac.abort(); };
   }, [agentType]);
 
   // Auto-scroll to bottom on new message
@@ -654,8 +659,9 @@ export default function ChatDecisionPage() {
     setSending(true);
     setError(null);
     // Optimistic update — aggiungi il msg utente subito
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const tempUserMsg = {
-      id: `temp-${Date.now()}`,
+      id: tempId,
       role: "user",
       content: msg,
       created_at: new Date().toISOString(),
@@ -672,15 +678,41 @@ export default function ChatDecisionPage() {
       if (!res.ok) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      // Refresh full history (per avere ID definitivi e proposed_trade serializzati)
-      const histRes = await fetch(`${API}/api/chat-decision/history/${agentType}`);
-      const hist = await histRes.json();
-      if (histRes.ok) {
-        setMessages(hist.messages || []);
-      }
+      // FIX RACE CONDITION: invece di GET history (che puo' tornare vuoto
+      // se l'INSERT in DB e' fallito ma il fallback non e' ancora popolato),
+      // costruiamo i nuovi messaggi DIRETTAMENTE dalla response del send.
+      // Cosi' anche se la history-fetch dovesse arrivare in ritardo o
+      // restituire un set incompleto, la chat resta consistente.
+      setMessages((prev) => {
+        // 1) Rimuovi TUTTI i temp- (potrebbero essercene altri orfani)
+        const cleaned = prev.filter((m) => !String(m.id || "").startsWith("temp-"));
+        // 2) Aggiungi il msg utente con ID reale del backend (se disponibile)
+        const userMsg = {
+          id: data.user_message_id || tempId,
+          role: "user",
+          content: msg,
+          created_at: tempUserMsg.created_at,
+        };
+        // 3) Aggiungi il msg assistant dalla response
+        const assistantMsg = {
+          id: data.assistant_message_id,
+          role: "assistant",
+          content: data.text,
+          proposed_trade: data.proposed_trade,
+          proposed_actions: data.proposed_actions || [],
+          created_at: new Date().toISOString(),
+        };
+        // 4) Evita duplicati per ID (es. user_message_id gia' presente)
+        const ids = new Set(cleaned.map((m) => m.id));
+        const out = [...cleaned];
+        if (!ids.has(userMsg.id)) out.push(userMsg);
+        if (!ids.has(assistantMsg.id)) out.push(assistantMsg);
+        return out;
+      });
     } catch (e) {
+      // Rimuovi solo il msg ottimistico fallito (NON gli altri)
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setError(String(e.message || e));
-      // Rimuovi il msg ottimistico se fallisce, ma lascia un placeholder errore
     } finally {
       setSending(false);
     }
@@ -703,12 +735,12 @@ export default function ChatDecisionPage() {
         throw new Error(data.error || data.reason || `HTTP ${res.status}`);
       }
       setLastExecutedId(data.trade_id);
-      // Refresh history per vedere lo stato "eseguito"
-      const histRes = await fetch(`${API}/api/chat-decision/history/${agentType}`);
-      const hist = await histRes.json();
-      if (histRes.ok) {
-        setMessages(hist.messages || []);
-      }
+      // FIX: invece di GET history, aggiorna direttamente il msg in place
+      // per riflettere lo stato eseguito.
+      setMessages((prev) => prev.map((m) => {
+        if (m.id !== messageId) return m;
+        return { ...m, executed_trade_id: data.trade_id };
+      }));
     } catch (e) {
       setError(`Esecuzione fallita: ${e.message || e}`);
     } finally {
@@ -716,7 +748,7 @@ export default function ChatDecisionPage() {
     }
   };
 
-  // Nuova UI: esegue una singola proposed_action (trade/stop-loss/take-profit/direttiva)
+  // Esegue una singola proposed_action (trade/stop-loss/take-profit/direttiva)
   // indicizzata dal suo posto nell'array proposed_actions del messaggio.
   const executeAction = async (messageId, actionIndex) => {
     if (!window.confirm(
@@ -735,12 +767,17 @@ export default function ChatDecisionPage() {
       if (!res.ok && !data.result) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
-      // Refresh history per vedere il nuovo executed_action_results
-      const histRes = await fetch(`${API}/api/chat-decision/history/${agentType}`);
-      const hist = await histRes.json();
-      if (histRes.ok) {
-        setMessages(hist.messages || []);
-      }
+      // FIX: aggiorna direttamente lo state del msg con il nuovo
+      // executed_action_results per indice — niente piu' GET history
+      // che potrebbe sovrascrivere altri messaggi.
+      setMessages((prev) => prev.map((m) => {
+        if (m.id !== messageId) return m;
+        const ear = (m.executed_action_results && typeof m.executed_action_results === "object")
+                     ? { ...m.executed_action_results }
+                     : {};
+        ear[String(actionIndex)] = data.result || { ok: true };
+        return { ...m, executed_action_results: ear };
+      }));
       if (data.result && data.result.ok === false) {
         setError(`Azione fallita: ${data.result.error || "errore sconosciuto"}`);
       }

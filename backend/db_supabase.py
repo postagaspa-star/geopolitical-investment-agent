@@ -1316,10 +1316,51 @@ def insert_decision_chat_message(
         return None
 
 
+def _dec_chat_read_fallback_msgs(conversation_id: int, limit: int = 100) -> list:
+    """
+    Lettura unificata dei messaggi dal fallback settings store.
+    Decodifica i campi JSON-string in dict/list per il frontend.
+    """
+    try:
+        key = _DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=conversation_id)
+        msgs_str = get_setting(key, "[]")
+        msgs = json.loads(msgs_str) if msgs_str else []
+        if not isinstance(msgs, list):
+            return []
+        # Decodifica eventuali campi JSON-string (in caso di edge legacy)
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            for key_name in ("proposed_trade", "proposed_actions",
+                              "executed_action_results"):
+                v = m.get(key_name)
+                if v and isinstance(v, str):
+                    try:
+                        m[key_name] = json.loads(v)
+                    except Exception:
+                        pass
+        return msgs[-limit:]
+    except Exception:
+        return []
+
+
 def get_decision_chat_messages(conversation_id: int, limit: int = 100) -> list:
-    """Ritorna i messaggi di una conversazione, ordine cronologico."""
+    """
+    Ritorna i messaggi di una conversazione, ordine cronologico.
+
+    BUG FIX: se la tabella DB ritorna lista vuota MA il fallback store ha
+    messaggi per questa conversation, ritorna i fallback. Questo evita
+    che la chat appaia "vuota" quando i messaggi vivono in fallback store
+    (es. l'INSERT su decision_chat_messages e' fallito ma il SELECT
+    sulla tabella ritorna ok=[] perche' la conversation esiste ma e' vuota).
+
+    Inoltre se ENTRAMBI hanno messaggi (caso edge post-recovery), unisce
+    e ordina per timestamp — evitando perdita di history.
+    """
     global _DECISION_CHAT_FALLBACK_MODE
     client = _get_client()
+    db_rows: list = []
+    db_ok = False
     if not _DECISION_CHAT_FALLBACK_MODE:
         try:
             result = (client.table("decision_chat_messages")
@@ -1328,26 +1369,43 @@ def get_decision_chat_messages(conversation_id: int, limit: int = 100) -> list:
                       .order("created_at", desc=False)
                       .limit(limit)
                       .execute())
-            rows = result.data or []
-            # Decode JSON-string fields → dict/list
-            for r in rows:
+            db_rows = result.data or []
+            for r in db_rows:
                 _dec_chat_decode_row(r)
-            return rows
+            db_ok = True
         except Exception as e:
             if _dec_chat_should_fallback(e):
                 _DECISION_CHAT_FALLBACK_MODE = True
             else:
                 logger.warning("get_decision_chat_messages fallita: %s", e)
-                return []
 
-    # Fallback
-    try:
-        key = _DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=conversation_id)
-        msgs_str = get_setting(key, "[]")
-        msgs = json.loads(msgs_str) if msgs_str else []
-        return msgs[-limit:]
-    except Exception:
-        return []
+    # Leggi anche il fallback store: se ha messaggi che il DB NON ha
+    # (perche' insert e' fallito), li includiamo.
+    fallback_msgs = _dec_chat_read_fallback_msgs(conversation_id, limit)
+
+    if db_ok and not fallback_msgs:
+        return db_rows
+    if not db_ok and fallback_msgs:
+        return fallback_msgs
+    if db_ok and fallback_msgs:
+        # Merge: unisci ed ordina per (created_at | id), evitando dup
+        seen_ids: set = set()
+        merged: list = []
+        for m in db_rows + fallback_msgs:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("id")
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            merged.append(m)
+        # Sort by created_at se disponibile, altrimenti per id
+        def _sortkey(x):
+            return (str(x.get("created_at") or ""), x.get("id") or 0)
+        merged.sort(key=_sortkey)
+        return merged[-limit:]
+    # Entrambi vuoti
+    return []
 
 
 def clear_decision_chat(agent_type: str) -> bool:
