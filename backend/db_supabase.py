@@ -1489,34 +1489,69 @@ def _dec_chat_fallback_find_message(message_id: int) -> tuple[dict | None, int, 
     Usato quando la tabella decision_chat_messages non e' disponibile e i
     messaggi vivono in settings (key "dec_chat_msgs_{cid}").
 
-    Iter su tutte le conversation_id conosciute (settings key
-    "decision_chat_list_fallback") per trovare il messaggio.
+    Strategia: il fallback conv_id e' un timestamp-based (int(time.time()*1000)),
+    NON in range piccolo. Devo recuperarlo dai settings "dec_chat_conv_{aid}"
+    per ogni agent_type noto (standard, crypto).
+
+    Anche scansiona la lista di conv_id stored in
+    _DEC_CHAT_FALLBACK_KEY_LIST se presente.
     """
+    candidate_cids: list[int] = []
+    seen: set[int] = set()
+
+    # Strategia 1: leggi i conv_id correnti per ogni agent_type known
+    for agent_type in ("standard", "crypto"):
+        try:
+            key = _DEC_CHAT_FALLBACK_KEY_CONV.format(aid=agent_type)
+            v = get_setting(key, "") or ""
+            if v:
+                try:
+                    cid = int(v)
+                    if cid not in seen:
+                        candidate_cids.append(cid)
+                        seen.add(cid)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Strategia 2: lista esplicita dei conv_id (se presente)
     try:
         list_raw = get_setting(_DEC_CHAT_FALLBACK_KEY_LIST, "[]") or "[]"
         try:
-            conv_ids = json.loads(list_raw) or []
-        except Exception:
-            conv_ids = []
-
-        # Fallback list potrebbe non esistere — provo conversation 1..50
-        if not conv_ids:
-            conv_ids = list(range(1, 100))
-
-        for cid in conv_ids:
-            try:
-                key = _DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=cid)
-                msgs_str = get_setting(key, "[]") or "[]"
-                msgs = json.loads(msgs_str) if msgs_str else []
-                if not isinstance(msgs, list):
+            for cid in json.loads(list_raw) or []:
+                try:
+                    cid_int = int(cid)
+                    if cid_int not in seen:
+                        candidate_cids.append(cid_int)
+                        seen.add(cid_int)
+                except Exception:
                     continue
-                for m in msgs:
-                    if isinstance(m, dict) and m.get("id") == message_id:
-                        return m, cid, msgs
-            except Exception:
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Strategia 3: fallback su range piccolo (compat con conv_id sequenziali
+    # da prima del fallback timestamp-based)
+    for cid in range(1, 50):
+        if cid not in seen:
+            candidate_cids.append(cid)
+            seen.add(cid)
+
+    # Cerca il messaggio nelle conversation in ordine di probabilita'
+    for cid in candidate_cids:
+        try:
+            key = _DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=cid)
+            msgs_str = get_setting(key, "[]") or "[]"
+            msgs = json.loads(msgs_str) if msgs_str else []
+            if not isinstance(msgs, list):
                 continue
-    except Exception as e:
-        logger.debug("_dec_chat_fallback_find_message err: %s", e)
+            for m in msgs:
+                if isinstance(m, dict) and m.get("id") == message_id:
+                    return m, cid, msgs
+        except Exception:
+            continue
     return None, 0, []
 
 
