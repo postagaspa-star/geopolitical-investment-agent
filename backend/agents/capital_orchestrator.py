@@ -542,6 +542,31 @@ async def request_capital(
             "duration_seconds": round(time.time() - start, 2),
         }
 
+    # ── Pre-check 0: feature flag enabled? Default OFF post-bug ──────────
+    try:
+        import database as _db
+        raw_enabled = (_db.get_setting("capital_orchestrator_enabled", "false") or "").strip().lower()
+        if raw_enabled not in ("1", "true", "yes", "on"):
+            msg = ("Capital Orchestrator DISABILITATO via setting. "
+                   "Il Decision Agent deve scalare il trade o aspettare cash.")
+            _log_orchestrator_event(run_id, "request_skipped_disabled", {
+                "requesting_agent": requesting_agent, "ticker": ticker,
+            })
+            return {
+                "approved": False, "amount_freed": 0.0, "actions_executed": [],
+                "directive": None, "reasoning": msg,
+                "skipped": "feature_disabled",
+                "duration_seconds": round(time.time() - start, 2),
+            }
+    except Exception:
+        # Se non posso leggere il flag, fallback safe: skip
+        return {
+            "approved": False, "amount_freed": 0.0, "actions_executed": [],
+            "directive": None, "reasoning": "Capital Orchestrator check failed",
+            "skipped": "flag_read_error",
+            "duration_seconds": round(time.time() - start, 2),
+        }
+
     gap = max(0.0, float(amount_needed) - float(amount_available))
 
     # ── Pre-check 1: conviction sufficiente ──────────────────────────────

@@ -4737,38 +4737,111 @@ async def recovery_review_clear():
 @app.post("/api/risk-state/emergency-stop-all-auto")
 async def emergency_stop_all_auto():
     """
-    EMERGENCY STOP: disabilita TUTTI i meccanismi automatici di risk_state
-    in una sola chiamata. Utile dopo incidenti per essere sicuri che il
-    sistema non agisca piu' senza il consenso esplicito dell'utente.
+    EMERGENCY STOP TOTALE: disabilita TUTTI i meccanismi automatici che
+    possono fare SELL senza esplicita autorizzazione utente, in una sola
+    chiamata. Da chiamare dopo qualsiasi incidente di liquidazione spuria.
 
-    Imposta:
-      - circuit_breaker_enabled = false
-      - lock_in_enabled = false
-      - trailing_enabled = false
+    Imposta DISABILITATI:
+      - circuit_breaker_enabled    (no auto-liquidate 24h DD)
+      - lock_in_enabled            (no auto SL su +5%)
+      - trailing_enabled           (no trailing stop auto)
+      - auto_exits_enabled         (no SL/TP trigger automatico price polling)
+      - capital_orchestrator_enabled (no cross-agent liquidation)
 
-    Inoltre rimuove TUTTI gli SL settati da risk_state dalle posizioni
-    (chiama clear_risk_state_auto_sls internamente).
+    Inoltre rimuove TUTTI gli SL settati da risk_state dalle posizioni.
 
-    Il Risk Profile (validate_trade) e gli auto-exits sui SL settati
-    dall'agente non sono toccati — restano operativi.
+    Il Risk Profile (validate_trade) e i SL settati dal Decision Agent /
+    utente restano nel DB ma NON saranno piu' eseguiti automaticamente:
+    devono essere chiusi manualmente dall'utente o dal Decision Agent al
+    prossimo run.
     """
     try:
         import risk_state
-        # Disabilita tutti i flag
+        # Disabilita TUTTI i flag automatici
         database.set_setting(risk_state.SETTING_CIRCUIT_BREAKER_ENABLED, "false")
         database.set_setting(risk_state.SETTING_LOCK_IN_ENABLED, "false")
         database.set_setting(risk_state.SETTING_TRAILING_ENABLED, "false")
-        # Cleanup SL automatici
+        # Auto-exits SL/TP (era la causa della perdita NVDA 143 oggi)
+        database.set_setting("auto_exits_enabled", "false")
+        database.set_setting("auto_exits_alert_only", "true")
+        # Capital orchestrator (cross-agent liquidation)
+        database.set_setting("capital_orchestrator_enabled", "false")
+        # Cleanup SL automatici settati da risk_state
         clear_result = risk_state.clear_risk_state_auto_sls()
         return {
-            "flags_disabled": ["circuit_breaker", "lock_in", "trailing"],
+            "flags_disabled": [
+                "circuit_breaker", "lock_in", "trailing",
+                "auto_exits", "capital_orchestrator",
+            ],
             "auto_sls_cleared": clear_result,
-            "note": ("Tutti i meccanismi automatici di risk_state disattivati. "
-                     "Solo le SL settate dal Decision Agent o dall'utente sono "
-                     "ancora attive (via auto-exits del price polling)."),
+            "note": ("EMERGENCY STOP TOTALE attivo. Nessun meccanismo automatico "
+                     "puo' eseguire SELL/BUY senza esplicita autorizzazione del "
+                     "Decision Agent o dell'utente. Per riattivare singoli "
+                     "meccanismi: POST /api/risk-state/settings o "
+                     "/api/auto-exits/settings."),
         }
     except Exception as e:
         logger.error("emergency_stop_all_auto: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ── Auto-exits SL/TP configuration ──────────────────────────────────────
+
+class AutoExitsSettingsPayload(BaseModel):
+    """Configurazione auto-exits SL/TP del price polling."""
+    enabled: bool | None = None
+    alert_only: bool | None = None
+    sell_pct: float | None = None    # 1-100, % della quantita' da vendere
+    margin_pct: float | None = None  # >=0, margine sicurezza sopra/sotto target
+
+
+@app.get("/api/auto-exits/settings")
+async def get_auto_exits_settings():
+    """Stato corrente della config auto-exits."""
+    try:
+        import portfolio
+        return portfolio._get_auto_exits_config()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/auto-exits/settings")
+async def update_auto_exits_settings(payload: AutoExitsSettingsPayload):
+    """
+    Aggiorna i flag degli auto-exits SL/TP.
+
+    Default safe (post-bug NVDA): enabled=false. Quando enabled=true,
+    il default alert_only=true emette solo log, non esegue SELL.
+
+    Per riattivare auto-exits con safety:
+      enabled=true, alert_only=false, sell_pct=50, margin_pct=1
+      → solo se il prezzo supera target di 1%, vende il 50% della posizione
+        (resto resta aperto fino al prossimo hit).
+
+    Per auto-exits aggressivi tipo legacy:
+      enabled=true, alert_only=false, sell_pct=100, margin_pct=0
+      → vende TUTTO appena tocca il target (sconsigliato).
+    """
+    try:
+        updated = {}
+        if payload.enabled is not None:
+            database.set_setting("auto_exits_enabled",
+                                  "true" if payload.enabled else "false")
+            updated["enabled"] = payload.enabled
+        if payload.alert_only is not None:
+            database.set_setting("auto_exits_alert_only",
+                                  "true" if payload.alert_only else "false")
+            updated["alert_only"] = payload.alert_only
+        if payload.sell_pct is not None:
+            pct = max(1.0, min(100.0, float(payload.sell_pct)))
+            database.set_setting("auto_exits_sell_pct", str(pct))
+            updated["sell_pct"] = pct
+        if payload.margin_pct is not None:
+            mp = max(0.0, float(payload.margin_pct))
+            database.set_setting("auto_exits_margin_pct", str(mp))
+            updated["margin_pct"] = mp
+        return {"updated": updated}
+    except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

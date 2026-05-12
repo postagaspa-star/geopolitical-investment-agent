@@ -810,28 +810,90 @@ def liquidate_all_positions(reason: str = "circuit_breaker",
     return executed
 
 
+# ─── Auto-exits configuration (default safe) ──────────────────────────────
+SETTING_AUTO_EXITS_ENABLED = "auto_exits_enabled"   # default False (post-bug)
+SETTING_AUTO_EXITS_SELL_PCT = "auto_exits_sell_pct"  # % della qty da vendere
+SETTING_AUTO_EXITS_MARGIN_PCT = "auto_exits_margin_pct"  # margine sicurezza
+SETTING_AUTO_EXITS_ALERT_ONLY = "auto_exits_alert_only"  # se True, solo log
+
+DEFAULT_AUTO_EXITS_SELL_PCT = 50.0     # default: vendi 50%, non TUTTO
+DEFAULT_AUTO_EXITS_MARGIN_PCT = 1.0    # 1% margine sicurezza vs noise
+
+
+def _get_auto_exits_config() -> dict:
+    """Legge la config corrente. Default safe: disabilitato."""
+    try:
+        import database as _db
+        raw_enabled = (_db.get_setting(SETTING_AUTO_EXITS_ENABLED, "false") or "").strip().lower()
+        enabled = raw_enabled in ("1", "true", "yes", "on")
+        raw_alert = (_db.get_setting(SETTING_AUTO_EXITS_ALERT_ONLY, "true") or "").strip().lower()
+        alert_only = raw_alert in ("1", "true", "yes", "on")
+        try:
+            sell_pct = float(_db.get_setting(SETTING_AUTO_EXITS_SELL_PCT, "") or DEFAULT_AUTO_EXITS_SELL_PCT)
+        except (ValueError, TypeError):
+            sell_pct = DEFAULT_AUTO_EXITS_SELL_PCT
+        try:
+            margin_pct = float(_db.get_setting(SETTING_AUTO_EXITS_MARGIN_PCT, "") or DEFAULT_AUTO_EXITS_MARGIN_PCT)
+        except (ValueError, TypeError):
+            margin_pct = DEFAULT_AUTO_EXITS_MARGIN_PCT
+        return {
+            "enabled": enabled,
+            "alert_only": alert_only,
+            "sell_pct": max(1.0, min(100.0, sell_pct)),
+            "margin_pct": max(0.0, margin_pct),
+        }
+    except Exception:
+        return {
+            "enabled": False,
+            "alert_only": True,
+            "sell_pct": DEFAULT_AUTO_EXITS_SELL_PCT,
+            "margin_pct": DEFAULT_AUTO_EXITS_MARGIN_PCT,
+        }
+
+
 def check_and_execute_auto_exits(prices: dict | None = None) -> list:
     """
     Per ogni posizione con SL/TP impostato, controlla se il prezzo corrente
-    ha attivato l'exit automatico e in tal caso esegue execute_sell.
+    ha attivato l'exit automatico.
+
+    POST-BUG SAFETY HARDENING:
+    - Default DISABILITATO (auto_exits_enabled = "false"). Da quando il
+      sistema ha venduto autonomamente NVDA (auto_stop_loss + auto_take_profit
+      su tutta la posizione), il default e' off. L'utente o il Decision
+      Agent gestiscono le chiusure esplicitamente.
+    - Quando ENABLED:
+        * Margine sicurezza: il prezzo deve superare il target di
+          `auto_exits_margin_pct`% (default 1%) per triggerare, evitando
+          scatti su noise / wick.
+        * Vendita parziale: solo `auto_exits_sell_pct`% della quantita'
+          viene venduta (default 50%, non TUTTA). Il resto resta aperto.
+        * Alert-only mode: se `auto_exits_alert_only=true`, scrive solo
+          un log RISK_AUTO_EXIT_ALERT senza eseguire SELL.
 
     Args:
         prices: dict {ticker: current_price} aggiornato da price_polling.
-                Se None, usa il current_price gia' salvato sulla posizione.
 
-    Ritorna lista di dict con i trade eseguiti automaticamente.
+    Ritorna lista di dict con i trade eseguiti o gli alert generati.
     """
-    executed = []
+    cfg = _get_auto_exits_config()
+
+    executed: list = []
     try:
         positions = get_positions_with_auto_exits()
     except Exception:
         positions = []
+    if not positions:
+        return executed
+
+    if not cfg["enabled"]:
+        # Silenzioso: niente alert anche se SL/TP hit, l'utente ha
+        # esplicitamente disabilitato il sistema.
+        return executed
 
     for p in positions:
         ticker = p.get("ticker")
         if not ticker:
             continue
-        # Prezzo corrente: prima dal dict prices (fresh), poi dal DB
         cur_price = None
         if prices and ticker in prices:
             try:
@@ -845,44 +907,83 @@ def check_and_execute_auto_exits(prices: dict | None = None) -> list:
 
         sl = float(p.get("stop_loss_price") or 0)
         tp = float(p.get("take_profit_price") or 0)
-        # FIX: float (non int) per supportare crypto frazionarie (BTC 0.5 unità).
         qty = float(p.get("quantity") or 0)
         avg = float(p.get("avg_buy_price") or 0)
         if qty <= 0:
             continue
 
+        # Margine sicurezza: il prezzo deve superare il target di margin_pct%.
+        margin = cfg["margin_pct"] / 100.0
+        sl_trigger_price = sl * (1.0 - margin) if sl > 0 else 0
+        tp_trigger_price = tp * (1.0 + margin) if tp > 0 else 0
+
         trigger = None
-        if tp > 0 and cur_price >= tp:
+        target_price = None
+        if tp > 0 and cur_price >= tp_trigger_price:
             trigger = "take_profit"
-        elif sl > 0 and cur_price <= sl:
+            target_price = tp
+        elif sl > 0 and cur_price <= sl_trigger_price:
             trigger = "stop_loss"
+            target_price = sl
 
         if not trigger:
             continue
 
-        # Esegue la vendita auto. Reasoning include il trigger per audit.
+        # Vendita parziale: % della qty.
+        sell_qty = round(qty * cfg["sell_pct"] / 100.0, 6)
+        if sell_qty <= 0:
+            sell_qty = qty   # fallback safety
+
         reason = (
-            f"AUTO {trigger.upper()}: prezzo {cur_price:.4f} ha "
-            f"{'superato TP' if trigger == 'take_profit' else 'rotto SL'} "
-            f"a {(tp if trigger == 'take_profit' else sl):.4f} "
-            f"(carico {avg:.4f}, qty {qty})."
+            f"AUTO {trigger.upper()}: prezzo {cur_price:.4f} ha superato"
+            f" target {target_price:.4f} (+margin {cfg['margin_pct']:.1f}%)."
+            f" Sell qty {sell_qty} su {qty} ({cfg['sell_pct']:.0f}%, carico {avg:.4f})."
         )
+
+        # Alert-only mode: non eseguire trade, solo log
+        if cfg["alert_only"]:
+            try:
+                from database import insert_agent_log
+                import json as _json
+                insert_agent_log(
+                    "auto_exit", "RISK_AUTO_EXIT_ALERT",
+                    _json.dumps({
+                        "event": f"auto_{trigger}_alert_only",
+                        "ticker": ticker, "qty": qty,
+                        "trigger_price": target_price,
+                        "current_price": cur_price,
+                        "would_sell_qty": sell_qty,
+                        "avg_buy_price": avg,
+                        "note": "auto_exits_alert_only=true: no SELL eseguito",
+                    }, default=str),
+                )
+            except Exception:
+                pass
+            executed.append({
+                "ticker": ticker, "trigger": trigger,
+                "alert_only": True,
+                "trigger_price": target_price,
+                "current_price": cur_price,
+                "would_sell_qty": sell_qty,
+            })
+            continue
+
+        # Esegui SELL parziale (o totale se sell_pct=100)
         try:
             result = execute_sell(
-                ticker, qty, cur_price,
+                ticker, sell_qty, cur_price,
                 geo_reasoning=f"auto_{trigger}",
                 tech_reasoning=reason,
                 confidence=100,
             )
             executed.append({
-                "ticker": ticker,
-                "trigger": trigger,
-                "trigger_price": tp if trigger == "take_profit" else sl,
+                "ticker": ticker, "trigger": trigger,
+                "trigger_price": target_price,
                 "executed_price": cur_price,
-                "quantity": qty,
+                "quantity_sold": sell_qty, "quantity_remaining": qty - sell_qty,
+                "sell_pct": cfg["sell_pct"],
                 "result": result,
             })
-            # Log nel DB cosi' appare nelle dashboard
             try:
                 from database import insert_agent_log
                 import json as _json
@@ -890,10 +991,14 @@ def check_and_execute_auto_exits(prices: dict | None = None) -> list:
                     "auto_exit", "DECISION_AUTO_EXIT",
                     _json.dumps({
                         "event": f"auto_{trigger}",
-                        "ticker": ticker, "qty": qty,
-                        "trigger_price": tp if trigger == "take_profit" else sl,
+                        "ticker": ticker,
+                        "qty_sold": sell_qty,
+                        "qty_remaining": qty - sell_qty,
+                        "trigger_price": target_price,
                         "executed_price": cur_price,
                         "avg_buy_price": avg,
+                        "sell_pct": cfg["sell_pct"],
+                        "margin_pct": cfg["margin_pct"],
                     }, default=str),
                 )
             except Exception:
