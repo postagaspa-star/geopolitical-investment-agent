@@ -999,9 +999,12 @@ async def chat_decision_execute_trade(payload: ChatDecisionExecutePayload):
         current_price = None
         try:
             import data_fetchers as _df
-            md = _df.fetch_market_data(ticker, period_days=2)
-            if md and md.get("data"):
-                current_price = md["data"][-1].get("close")
+            current_price = _df.fetch_fresh_current_price(ticker)
+            if current_price is None:
+                # Fallback con cache se la fetch fresca fallisce
+                md = _df.fetch_market_data(ticker, period_days=2)
+                if md and md.get("data"):
+                    current_price = md["data"][-1].get("close")
         except Exception as e:
             logger.warning("fetch price for chat trade %s: %s", ticker, e)
 
@@ -1184,13 +1187,16 @@ async def _exec_action_execute_trade(action: dict) -> dict:
     if not ticker or act not in ("BUY", "SELL") or qty <= 0:
         return {"ok": False, "error": "parametri trade invalidi"}
 
-    # Prezzo corrente
+    # Prezzo corrente FRESCO (bypass cache, anti-stale)
     current_price = None
     try:
         import data_fetchers as _df
-        md = _df.fetch_market_data(ticker, period_days=2)
-        if md and md.get("data"):
-            current_price = md["data"][-1].get("close")
+        current_price = _df.fetch_fresh_current_price(ticker)
+        if current_price is None:
+            # Fallback con cache se la fetch fresca fallisce
+            md = _df.fetch_market_data(ticker, period_days=2)
+            if md and md.get("data"):
+                current_price = md["data"][-1].get("close")
     except Exception as e:
         logger.warning("fetch price for chat action trade %s: %s", ticker, e)
     if not current_price or current_price <= 0:
@@ -4371,6 +4377,169 @@ async def clear_risk_state_auto_sls():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+class FixEntryPricesPayload(BaseModel):
+    """
+    Riallinea l'avg_buy_price delle posizioni aperte al vero prezzo
+    storico al timestamp di apertura.
+    """
+    dry_run: bool = True
+    only_tickers: list[str] | None = None
+    # Soglia minima di delta% per applicare la correzione (evita micro-fix
+    # rumorosi). Default 0.1% — significa correggere solo se la differenza
+    # tra avg_buy_price e prezzo storico e' > 0.1%.
+    min_delta_pct: float = 0.1
+
+
+@app.post("/api/admin/fix-position-entry-prices")
+async def fix_position_entry_prices(payload: FixEntryPricesPayload):
+    """
+    Per ogni posizione aperta, recupera il prezzo storico INTRADAY al
+    timestamp di apertura (opened_at) e, se diverge da avg_buy_price oltre
+    min_delta_pct%, propone la correzione (dry_run=True) o l'applica
+    (dry_run=False).
+
+    Razionale: quando una posizione viene aperta con prezzo cached stale,
+    l'avg_buy_price salvato puo' essere off rispetto al prezzo reale di
+    mercato a quel timestamp. Il polling poi corregge il current_price
+    creando un PnL apparente fittizio. Riallineando avg_buy_price al
+    vero prezzo storico, il P&L torna realistico.
+
+    USAGE:
+      1) dry_run: POST con {"dry_run": true}
+         → ritorna proposte: posizione X, vecchio avg, nuovo avg, delta%
+      2) apply: POST con {"dry_run": false} (idempotente, applica i fix)
+      3) targeted: {"only_tickers": ["LINK-USD"]} per fixare solo specifici
+    """
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        import data_fetchers as _df
+
+        positions = database.get_positions() or []
+        if not positions:
+            return {"ok": True, "fixed": [], "no_positions": True}
+
+        filter_tickers = None
+        if payload.only_tickers:
+            filter_tickers = {t.upper().strip() for t in payload.only_tickers}
+
+        fixed: list[dict] = []
+        skipped: list[dict] = []
+        errors: list[dict] = []
+
+        for pos in positions:
+            ticker = (pos.get("ticker") or "").upper()
+            if filter_tickers and ticker not in filter_tickers:
+                continue
+            opened_at_str = pos.get("opened_at") or ""
+            old_avg = float(pos.get("avg_buy_price") or 0)
+            if not ticker or not opened_at_str or old_avg <= 0:
+                skipped.append({
+                    "ticker": ticker, "reason": "missing_data",
+                    "opened_at": opened_at_str, "old_avg": old_avg,
+                })
+                continue
+            try:
+                opened_at = _dt.fromisoformat(opened_at_str.replace("Z", "+00:00"))
+                if opened_at.tzinfo is None:
+                    opened_at = opened_at.replace(tzinfo=_tz.utc)
+            except Exception:
+                errors.append({"ticker": ticker, "error": f"opened_at parse: {opened_at_str}"})
+                continue
+
+            hist = _df.fetch_historical_price_at(ticker, opened_at)
+            if not hist or not hist.get("price"):
+                errors.append({
+                    "ticker": ticker,
+                    "error": "no_historical_data",
+                    "opened_at": opened_at_str,
+                })
+                continue
+
+            new_avg = float(hist["price"])
+            delta_pct = abs((new_avg - old_avg) / old_avg * 100.0) if old_avg > 0 else 0
+            if delta_pct < payload.min_delta_pct:
+                skipped.append({
+                    "ticker": ticker,
+                    "old_avg": old_avg,
+                    "new_avg": new_avg,
+                    "delta_pct": round(delta_pct, 4),
+                    "reason": "delta_below_threshold",
+                })
+                continue
+
+            entry = {
+                "ticker": ticker,
+                "opened_at": opened_at_str,
+                "old_avg_buy_price": old_avg,
+                "new_avg_buy_price": new_avg,
+                "delta_pct": round(delta_pct, 3),
+                "candle_time": hist.get("candle_time"),
+                "candle_open": hist.get("candle_open"),
+                "candle_close": hist.get("candle_close"),
+                "interval": hist.get("interval"),
+                "delta_seconds_from_target": hist.get("delta_seconds"),
+            }
+
+            if payload.dry_run:
+                entry["dry_run"] = True
+                fixed.append(entry)
+                continue
+
+            # Applica la correzione al DB
+            try:
+                qty = float(pos.get("quantity") or 0)
+                cur_price = float(pos.get("current_price") or new_avg)
+                new_pnl = (cur_price - new_avg) * qty if qty > 0 else 0
+                # Aggiorna direttamente positions via upsert
+                if hasattr(database, "upsert_position"):
+                    database.upsert_position(ticker, qty, new_avg, cur_price)
+                    entry["applied"] = True
+                    entry["new_unrealized_pnl"] = round(new_pnl, 2)
+                else:
+                    entry["applied"] = False
+                    entry["error"] = "upsert_position non disponibile"
+                fixed.append(entry)
+                # Audit log
+                try:
+                    import json as _json
+                    database.insert_agent_log(
+                        "admin_fix_prices", "ADMIN_FIX_ENTRY_PRICE",
+                        _json.dumps({
+                            "event": "fix_entry_price",
+                            "ticker": ticker,
+                            "old_avg": old_avg,
+                            "new_avg": new_avg,
+                            "delta_pct": delta_pct,
+                            "opened_at": opened_at_str,
+                            "source": "yfinance_intraday",
+                        }, default=str),
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                errors.append({
+                    "ticker": ticker,
+                    "error": f"apply_failed: {e}",
+                    "proposed_new_avg": new_avg,
+                })
+
+        return {
+            "ok": True,
+            "dry_run": payload.dry_run,
+            "fixed_count": len(fixed),
+            "skipped_count": len(skipped),
+            "errors_count": len(errors),
+            "fixed": fixed,
+            "skipped": skipped,
+            "errors": errors,
+            "note": ("dry_run=true: mostra cosa farebbe senza modificare. "
+                     "Per applicare: stesso body con dry_run=false."),
+        }
+    except Exception as e:
+        logger.error("fix_position_entry_prices: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 class ManualLiquidatePayload(BaseModel):
     """Conferma esplicita richiesta per liquidare tutte le posizioni."""
     confirm: str   # deve essere esattamente "I_UNDERSTAND_LIQUIDATE_ALL"
@@ -4539,12 +4708,14 @@ async def recover_liquidated_positions(payload: RecoverLiquidatedPayload):
             cash_available = 0.0
 
         for ticker, qty in targets.items():
-            # Prezzo corrente
+            # Prezzo corrente FRESCO (bypass cache anti-stale)
             cur_price = None
             try:
-                md = _df.fetch_market_data(ticker, period_days=2)
-                if md and md.get("data"):
-                    cur_price = float(md["data"][-1].get("close") or 0)
+                cur_price = _df.fetch_fresh_current_price(ticker)
+                if cur_price is None:
+                    md = _df.fetch_market_data(ticker, period_days=2)
+                    if md and md.get("data"):
+                        cur_price = float(md["data"][-1].get("close") or 0)
             except Exception as e:
                 errors.append({"ticker": ticker, "error": f"fetch price: {e}"})
                 continue

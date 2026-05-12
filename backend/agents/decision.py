@@ -1583,28 +1583,44 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                 }))
                 return json.dumps({"error": error_msg, "rejected": True})
 
-            # Ottieni prezzo corrente — preferisci la cache price_quotes (60s fresh)
-            # per evitare hit a yfinance ogni volta
+            # Ottieni prezzo corrente FRESCO (bypass cache, anti-stale).
+            # PRIMA: usava price_quotes cache con TTL 700s che poteva dare
+            # prezzi stale fino a 11 min causando entry/exit a prezzi
+            # sbagliati → PnL apparente subito dopo il polling. FIX: forza
+            # un fetch live al provider primario per ogni execute_trade.
+            current_price = None
             try:
-                from price_polling import get_cached_prices_bulk
-                # TTL 700s = polling rate (600s) + margine. Bug precedente:
-                # 120s → cache miss garantito 4/5 volte → fallback yfinance
-                # bloccante in thread. 700s allinea al ciclo di polling.
-                cached = get_cached_prices_bulk([ticker], max_age_seconds=700)
-                if cached.get(ticker):
-                    price_data = {"data": [{"close": cached[ticker]["price"]}]}
-                else:
-                    raise RuntimeError("not in cache")
-            except Exception:
-                # Fallback a yfinance via thread-pool
                 loop = asyncio.get_running_loop()
-                price_data = await loop.run_in_executor(
-                    None, data_fetchers.fetch_market_data, ticker, 5
+                current_price = await loop.run_in_executor(
+                    None, data_fetchers.fetch_fresh_current_price, ticker
                 )
-            if not price_data.get("data"):
+            except Exception as exc:
+                logger.warning("[%s][DEC] fetch_fresh %s fail: %s",
+                               run_id, ticker, exc)
+            if current_price is None:
+                # Fallback ultimo: cache price_quotes (per non bloccare il trade
+                # se i provider esterni sono down) — accetta fino a 700s di
+                # staleness solo come fallback estremo.
+                try:
+                    from price_polling import get_cached_prices_bulk
+                    cached = get_cached_prices_bulk([ticker], max_age_seconds=700)
+                    if cached.get(ticker):
+                        current_price = float(cached[ticker]["price"])
+                except Exception:
+                    pass
+            if current_price is None:
+                # Ultimissimo fallback: cache OHLCV (puo' essere fino a 5 min stale)
+                try:
+                    loop = asyncio.get_running_loop()
+                    price_data = await loop.run_in_executor(
+                        None, data_fetchers.fetch_market_data, ticker, 5
+                    )
+                    if price_data and price_data.get("data"):
+                        current_price = float(price_data["data"][-1]["close"])
+                except Exception:
+                    pass
+            if not current_price or current_price <= 0:
                 return json.dumps({"error": f"Impossibile ottenere prezzo per {ticker}"})
-
-            current_price = price_data["data"][-1]["close"]
 
             # ── Risk Profile validation (HARD CONSTRAINTS) ─────────────────
             # Solo per BUY (SELL = chiusura, non vincolato dal cap allocation).

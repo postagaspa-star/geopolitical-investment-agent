@@ -615,7 +615,147 @@ def _is_ohlcv_corrupted(records: List[Dict[str, Any]]) -> bool:
 # ------------------------------------------------------------
 # Recupero dati di mercato (cascade Polygon → Massive → yfinance)
 # ------------------------------------------------------------
-def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
+def fetch_historical_price_at(ticker: str, target_dt: "datetime") -> dict | None:
+    """
+    Recupera il prezzo storico INTRADAY di un ticker al timestamp dato.
+    Usa yfinance con interval 5m (default) o 15m per copertura ~60 giorni.
+    Ritorna {price, candle_open, candle_close, candle_time, source} oppure
+    None se nessun dato disponibile.
+
+    Usato dall'endpoint admin /api/admin/fix-position-entry-prices per
+    ricostruire i prezzi di apertura corretti delle posizioni gia' aperte
+    (basandosi su opened_at) quando il prezzo nel DB risulta sbagliato.
+
+    Strategia: fetcha le candele 5m delle ultime 60 giorni, trova quella
+    piu' vicina a target_dt, ritorna il close (= prezzo a fine candela,
+    proxy del prezzo effettivo durante quella finestra).
+    """
+    try:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+        # Normalizza target_dt a UTC
+        if target_dt.tzinfo is None:
+            target_dt = target_dt.replace(tzinfo=_tz.utc)
+
+        now = _dt.now(_tz.utc)
+        days_back = (now - target_dt).days + 2
+
+        # yfinance interval 5m supporta fino a 60 giorni
+        if days_back > 60:
+            # Fallback a 1h (730 giorni) per posizioni piu' vecchie
+            interval = "1h"
+            period_days = min(days_back + 5, 720)
+        elif days_back > 7:
+            interval = "15m"
+            period_days = min(days_back + 2, 60)
+        else:
+            interval = "5m"
+            period_days = min(days_back + 2, 60)
+
+        # Estraggo intraday — uso yfinance direttamente (Polygon free tier
+        # non da intraday su crypto e equity in modo affidabile)
+        start_date = (target_dt - _td(hours=4)).strftime("%Y-%m-%d")
+        end_date = (target_dt + _td(hours=4)).strftime("%Y-%m-%d")
+
+        df = yfinance.download(
+            ticker,
+            start=start_date,
+            end=end_date,
+            interval=interval,
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+        if df is None or df.empty:
+            # Tenta un range piu' ampio
+            df = yfinance.download(
+                ticker,
+                period=f"{min(period_days, 60)}d",
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+        if df is None or df.empty:
+            logger.warning("fetch_historical_price_at %s @ %s: no data (interval %s)",
+                           ticker, target_dt.isoformat(), interval)
+            return None
+
+        # MultiIndex columns case (multi-ticker download)
+        if hasattr(df.columns, "levels"):
+            try:
+                df = df[ticker]
+            except KeyError:
+                pass
+
+        # Trova la candela piu' vicina a target_dt
+        target_ts = target_dt.timestamp()
+        best_idx = None
+        best_diff = None
+        for idx in df.index:
+            try:
+                cand_dt = idx.to_pydatetime()
+                if cand_dt.tzinfo is None:
+                    cand_dt = cand_dt.replace(tzinfo=_tz.utc)
+                diff = abs((cand_dt - target_dt).total_seconds())
+                if best_diff is None or diff < best_diff:
+                    best_diff = diff
+                    best_idx = idx
+            except Exception:
+                continue
+
+        if best_idx is None:
+            return None
+
+        row = df.loc[best_idx]
+        c_open = float(row.get("Open", 0) or 0)
+        c_close = float(row.get("Close", 0) or 0)
+        # Prezzo "rappresentativo": media open+close (proxy del prezzo medio
+        # durante la candela). In alternativa si potrebbe usare close.
+        price = (c_open + c_close) / 2.0 if (c_open > 0 and c_close > 0) else c_close
+        return {
+            "price": round(price, 6),
+            "candle_open": round(c_open, 6),
+            "candle_close": round(c_close, 6),
+            "candle_time": best_idx.to_pydatetime().replace(tzinfo=_tz.utc).isoformat(),
+            "interval": interval,
+            "delta_seconds": int(best_diff),
+            "source": "yfinance",
+        }
+    except Exception as exc:
+        logger.warning("fetch_historical_price_at %s failed: %s", ticker, exc)
+        return None
+
+
+def fetch_fresh_current_price(ticker: str) -> float | None:
+    """
+    Helper specializzato per execute_buy / execute_sell: forza il fetch
+    fresco di un prezzo corrente, bypassando la cache di 5 min. Ritorna
+    il close della candela piu' recente, oppure None se nessun feed
+    risponde.
+
+    Razionale: senza questo, una BUY/SELL puo' essere eseguita al prezzo
+    cached (stale fino a 5 min). Se nel frattempo il prezzo si e' mosso,
+    si crea un avg_buy_price disallineato dalla realta' → P&L immediato
+    artificiale (positivo o negativo). Caso documentato: LINK-USD aperta
+    a prezzo cached, subito dopo il polling aggiorna il current_price,
+    appare una perdita/profitto inesistente.
+    """
+    try:
+        md = fetch_market_data(ticker, period_days=2, bypass_cache=True)
+        if md and md.get("data"):
+            data = md["data"]
+            last = data[-1]
+            price = last.get("close")
+            if price and float(price) > 0:
+                return round(float(price), 6)
+    except Exception as exc:
+        logger.warning("fetch_fresh_current_price %s failed: %s", ticker, exc)
+    return None
+
+
+def fetch_market_data(ticker: str, period_days: int = 90,
+                      bypass_cache: bool = False) -> Dict[str, Any]:
     """
     Scarica i dati OHLCV per un singolo ticker.
     Cascade: Polygon.io → Massive → yfinance (con corruption check).
@@ -625,14 +765,20 @@ def fetch_market_data(ticker: str, period_days: int = 90) -> Dict[str, Any]:
     Parametri:
         ticker: simbolo del titolo (es. "XOM")
         period_days: numero di giorni di storico da recuperare (default 90)
+        bypass_cache: se True, FORZA il fetch ignorando la cache.
+            Usato per esecuzioni di trade reali dove serve il prezzo
+            piu' fresco possibile (evita scoperte di entry/exit con
+            prezzo cached stale di 1-5 min, che possono produrre
+            PnL apparente fittizio se il prezzo si e' mosso tra la
+            decisione e l'esecuzione).
 
     Restituisce un dizionario con:
         - ticker, data, fetched_at, error, source
     """
-    # Controlla la cache (chiave indipendente da fonte)
+    # Controlla la cache (chiave indipendente da fonte) — saltata se bypass
     cache_key = f"{ticker}:{period_days}"
     now = time.time()
-    if cache_key in _yfinance_cache:
+    if not bypass_cache and cache_key in _yfinance_cache:
         cached_time, cached_result = _yfinance_cache[cache_key]
         if now - cached_time < _YFINANCE_CACHE_TTL:
             logger.debug("OHLCV cache hit per %s (source=%s)",

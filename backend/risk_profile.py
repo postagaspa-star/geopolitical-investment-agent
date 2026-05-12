@@ -45,6 +45,8 @@ PROFILES: dict[str, dict] = {
         # Common
         "min_confidence": 0.80,
         "max_open_positions": 3,
+        # Crypto-specific position cap (override del generale)
+        "max_open_positions_crypto": 2,
         "max_portfolio_drawdown_pct": 6.0,
         "news_freshness_min_hours": 1,
     },
@@ -60,6 +62,7 @@ PROFILES: dict[str, dict] = {
         "sl_max_pct_crypto": 25.0,
         "min_confidence": 0.65,
         "max_open_positions": 6,
+        "max_open_positions_crypto": 3,
         "max_portfolio_drawdown_pct": 12.0,
         "news_freshness_min_hours": 3,
     },
@@ -75,6 +78,7 @@ PROFILES: dict[str, dict] = {
         "sl_max_pct_crypto": 40.0,
         "min_confidence": 0.50,
         "max_open_positions": 10,
+        "max_open_positions_crypto": 5,
         "max_portfolio_drawdown_pct": 20.0,
         "news_freshness_min_hours": 6,
     },
@@ -142,6 +146,9 @@ def build_risk_block(asset_class: str = "equity") -> str:
     primary_sl_min = p["sl_min_pct_crypto"] if is_crypto else p["sl_min_pct_equity"]
     primary_sl_max = p["sl_max_pct_crypto"] if is_crypto else p["sl_max_pct_equity"]
 
+    # Cap posizioni per asset class
+    cap_crypto = p.get("max_open_positions_crypto", p["max_open_positions"])
+
     lines = [
         "█" * 60,
         f"⚖️  RISK PROFILE — {p['label'].upper()}  (HARD CONSTRAINTS)",
@@ -156,7 +163,8 @@ def build_risk_block(asset_class: str = "equity") -> str:
         f"  • Max allocazione singolo trade: {primary_pos:.1f}% del cash disponibile",
         f"  • Confidence minima per eseguire: {p['min_confidence']:.2f}",
         f"  • Stop Loss obbligatorio nel range: {primary_sl_min:.1f}%–{primary_sl_max:.1f}% dall'entry",
-        f"  • Posizioni aperte simultanee (totale portfolio): max {p['max_open_positions']}",
+        f"  • Posizioni aperte (totale portfolio): max {p['max_open_positions']}",
+        f"  • Posizioni CRYPTO aperte (sub-cap dedicato): max {cap_crypto}",
         f"  • Stop portfolio: drawdown max {p['max_portfolio_drawdown_pct']:.1f}% dall'high",
         f"  • Freshness news per usarle come catalyst: max {p['news_freshness_min_hours']}h fa",
         "",
@@ -165,6 +173,10 @@ def build_risk_block(asset_class: str = "equity") -> str:
         "",
         "Se l'allocazione richiesta SUPERA il cap → riduci la size, non saltare",
         "il trade (a meno che non scenda sotto la min_confidence).",
+        "",
+        f"IMPORTANTE per crypto: il sub-cap di {cap_crypto} posizioni e' uno",
+        "stretto, non un suggerimento. Anche se il cap globale e' piu' alto,",
+        "le crypto hanno volatilita' tale da giustificare un limite separato.",
         "█" * 60,
         "",
     ]
@@ -222,15 +234,28 @@ def validate_trade(
         except (TypeError, ValueError):
             pass
 
-    # 3. Max open positions
+    # 3. Max open positions: per crypto usiamo il cap specifico (piu' stretto),
+    # per equity il generale. NB: open_positions_count deve essere il count
+    # specifico per la asset_class (vedi orchestrator).
     if open_positions_count is not None:
         try:
             n = int(open_positions_count)
-            if n >= p["max_open_positions"]:
-                return False, (
-                    f"Già {n} posizioni aperte; il profilo {p['label']} "
-                    f"limita a {p['max_open_positions']}. Chiudi prima."
-                )
+            if is_crypto:
+                # Crypto cap dedicato (Conservativo 2 / Moderato 3 / Aggressivo 5)
+                cap = int(p.get("max_open_positions_crypto", p["max_open_positions"]))
+                if n >= cap:
+                    return False, (
+                        f"Già {n} posizioni CRYPTO aperte; il profilo "
+                        f"{p['label']} limita a {cap} posizioni crypto. "
+                        f"Chiudine una prima di aprirne un'altra."
+                    )
+            else:
+                # Equity/ETF: cap generale
+                if n >= p["max_open_positions"]:
+                    return False, (
+                        f"Già {n} posizioni aperte; il profilo {p['label']} "
+                        f"limita a {p['max_open_positions']}. Chiudi prima."
+                    )
         except (TypeError, ValueError):
             pass
 

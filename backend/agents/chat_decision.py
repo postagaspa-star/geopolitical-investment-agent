@@ -112,6 +112,24 @@ Rispondi SEMPRE con un JSON valido di questa forma:
   "proposed_actions": []
 }
 
+OPZIONALE — Se per rispondere bene servono dati tecnici aggiornati
+(RSI, MACD, livelli S/R, trend MTF) su uno o piu' ticker, includi
+INVECE di "text" il campo "needs_technical_analysis":
+
+{
+  "needs_technical_analysis": {
+    "tickers": ["NVDA", "SPY"],
+    "reason": "L'utente chiede analisi tecnica su NVDA, mi servono indicatori freschi"
+  }
+}
+
+Il backend chiamera' il Technical Agent (DeepSeek-V3, dati live yfinance/Polygon)
+e ti ri-passera' i risultati nel contesto. Tu allora produrrai la risposta
+testuale interpretando i dati ricevuti. NON inserire mai numeri inventati
+nel "text" senza prima averli ottenuti via needs_technical_analysis.
+Esempi di domande che richiedono technical: "qual e' il livello chiave?",
+"come sta NVDA tecnicamente?", "RSI di SPY?", "fai un'analisi tecnica".
+
 Se l'utente chiede esplicitamente di fare qualcosa (es. "imposta stop-loss
 a -5% su NVDA", "metti una direttiva no-tech", "compra 5 NVDA") oppure se
 TU vedi un'opportunita' chiara, popola proposed_actions[] con una o piu'
@@ -158,6 +176,23 @@ Rispondi SEMPRE con un JSON valido di questa forma (eventuale reasoning
   "text": "messaggio per l'utente in italiano (markdown ok)",
   "proposed_actions": []
 }
+
+OPZIONALE — Se per rispondere servono dati tecnici crypto aggiornati
+(RSI, funding rate, Fibonacci, candle pattern) su uno o piu' ticker
+crypto, includi INVECE di "text" il campo "needs_technical_analysis":
+
+{
+  "needs_technical_analysis": {
+    "tickers": ["BTC-USD", "ETH-USD"],
+    "reason": "L'utente vuole l'analisi tecnica fresca su BTC, serve indicatori live"
+  }
+}
+
+Il backend chiamera' il Technical Crypto Agent (DeepSeek-V3, dati yfinance
+live + funding rate + on-chain) e ti ri-passera' i risultati nel contesto.
+Tu allora produrrai la risposta testuale interpretando i dati ricevuti.
+NON inserire mai numeri inventati nel "text" senza prima averli ottenuti
+via needs_technical_analysis.
 
 Se l'utente chiede di fare qualcosa o se vedi un setup chiaro, popola
 proposed_actions[] con una o piu' azioni nei formati descritti sotto.
@@ -567,10 +602,24 @@ def _parse_response(raw_text: str) -> dict:
             if not already:
                 actions.append(v)
 
+    # ── needs_technical_analysis (opzionale) ────────────────────────────
+    # Se il modello chiede dati tecnici, il backend fa il second-round
+    # con il technical agent.
+    needs_ta = parsed.get("needs_technical_analysis")
+    ta_request = None
+    if isinstance(needs_ta, dict):
+        tickers = needs_ta.get("tickers") or []
+        if isinstance(tickers, list) and tickers:
+            ta_request = {
+                "tickers": [str(t).upper().strip() for t in tickers if t][:6],
+                "reason": str(needs_ta.get("reason", ""))[:300],
+            }
+
     return {
         "text": user_text,
         "proposed_trade": converted_pt,
         "proposed_actions": actions,
+        "needs_technical_analysis": ta_request,
     }
 
 
@@ -652,6 +701,101 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
     text = parsed["text"] or "(nessuna risposta dal modello)"
     proposed = parsed["proposed_trade"]
     proposed_actions = parsed.get("proposed_actions") or []
+    ta_request = parsed.get("needs_technical_analysis")
+
+    # 6b. SECOND-ROUND: se il modello ha richiesto un'analisi tecnica
+    # in background, eseguiamo il technical agent (standard o crypto in
+    # base ad agent_type), iniettiamo i risultati nel contesto e
+    # ri-chiamiamo il modello per la risposta finale. Il decisional
+    # resta l'unico a "parlare" all'utente — il technical lavora dietro.
+    ta_summary_for_ctx: str | None = None
+    if ta_request and ta_request.get("tickers"):
+        try:
+            ta_tickers = ta_request["tickers"]
+            logger.info("[CHAT-DEC] %s richiede technical analysis su %s (%s)",
+                        agent_type, ta_tickers, ta_request.get("reason", "")[:100])
+            from uuid import uuid4 as _uuid4
+            ta_run_id = f"chat-{str(_uuid4())[:8]}"
+            ta_report: dict = {}
+            if agent_type == "crypto":
+                # Solo ticker crypto
+                crypto_only = [t for t in ta_tickers
+                               if t.endswith("-USD") or t.startswith("X:")]
+                if crypto_only:
+                    from agents.technical_crypto import run_crypto_technical
+                    ta_report = await run_crypto_technical(
+                        ta_run_id, crypto_only,
+                        log_phase="TECH_CRYPTO_CHAT",
+                    )
+            else:
+                # Standard: equity/ETF
+                from agents.technical import run_technical_analysis
+                eq_only = [t for t in ta_tickers
+                           if not (t.endswith("-USD") or t.startswith("X:"))]
+                if eq_only:
+                    ta_report = await run_technical_analysis(ta_run_id, eq_only)
+            # Formatta il report in un blocco testuale leggibile
+            analyses = (ta_report or {}).get("analyses") or []
+            if analyses:
+                lines = ["═" * 60,
+                          "📊 DATI TECHNICAL AGENT (fresh fetch)",
+                          "═" * 60, ""]
+                for a in analyses[:10]:
+                    if not isinstance(a, dict):
+                        continue
+                    tkr = a.get("ticker", "?")
+                    sig = a.get("signal", a.get("trend", "?"))
+                    conf = a.get("confidence", "")
+                    rsi = a.get("rsi_14", a.get("rsi", ""))
+                    supp = a.get("support", "")
+                    res = a.get("resistance", "")
+                    sl = a.get("stop_loss_pct", "")
+                    reasoning = (a.get("reasoning") or "")[:280]
+                    lines.append(f"[{tkr}] signal={sig} conf={conf}")
+                    if rsi: lines.append(f"  RSI: {rsi}  Support: {supp}  Resistance: {res}  SL%: {sl}")
+                    if reasoning: lines.append(f"  Reasoning: {reasoning}")
+                    lines.append("")
+                summary_txt = (ta_report.get("summary") or "")[:400]
+                if summary_txt:
+                    lines.append(f"Summary: {summary_txt}")
+                lines.append("═" * 60)
+                ta_summary_for_ctx = "\n".join(lines)
+            elif ta_report.get("error") or ta_report.get("skipped"):
+                ta_summary_for_ctx = (
+                    f"⚠️ Technical Agent: {ta_report.get('error') or ta_report.get('summary', 'no data')}"
+                )
+        except Exception as ta_exc:
+            logger.warning("[CHAT-DEC] technical agent failed: %s", ta_exc)
+            ta_summary_for_ctx = f"⚠️ Technical Agent fail: {str(ta_exc)[:200]}"
+
+        # 6c. Se abbiamo i dati, ri-chiama il modello con contesto arricchito
+        if ta_summary_for_ctx:
+            enriched_context = (context_block or "") + "\n\n" + ta_summary_for_ctx
+            # Aggiungi una nota istruzione al system prompt per il second-round
+            second_round_hint = (
+                "\n\nNOTA: hai gia' chiesto un'analisi tecnica. Ora vedi i dati "
+                "freschi nel contesto sopra. ELABORA la risposta testuale "
+                "interpretando questi dati. NON chiedere altra TA — rispondi "
+                "all'utente direttamente nel campo 'text'."
+            )
+            enriched_system = system_prompt + second_round_hint
+            try:
+                if agent_type == "crypto":
+                    raw_response = await _call_deepseek_r1(
+                        enriched_system, history, user_message, enriched_context,
+                    )
+                else:
+                    raw_response = await _call_claude(
+                        enriched_system, history, user_message, enriched_context,
+                    )
+                parsed = _parse_response(raw_response)
+                text = parsed["text"] or text
+                proposed = parsed["proposed_trade"] or proposed
+                proposed_actions = parsed.get("proposed_actions") or proposed_actions
+            except Exception as e2:
+                logger.warning("[CHAT-DEC] second-round failed: %s", e2)
+                # Tieni il primo round con un hint che la TA e' fallita
+                text = text or "Ho richiesto l'analisi tecnica ma il second-round ha fallito. Riprova."
 
     # 7. Salva messaggio assistant (con entrambi i campi: legacy + nuovo)
     asst_id = database.insert_decision_chat_message(
@@ -667,5 +811,6 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
         "text": text,
         "proposed_trade": proposed,
         "proposed_actions": proposed_actions,
+        "technical_used": bool(ta_summary_for_ctx),
         "model": model_used,
     }

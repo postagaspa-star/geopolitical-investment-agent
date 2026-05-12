@@ -654,28 +654,40 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                     "rejected": True,
                 })
 
-            # Ottieni current_price: prima la cache price_quotes (TTL ~60s),
-            # poi fallback a fetch_market_data via thread-pool.
-            # FIX: max_age 120s (era 700s = 11 min). Su crypto 24/7 ad alta
-            # vola un prezzo vecchio 11 minuti puo' essere off di 1-3% →
-            # execute_buy a prezzo stale, poi update_prices con prezzo nuovo
-            # rifiuta la posizione se la 3-tier validation considera il delta
-            # un outlier. Costruivamo trade su dati spurri.
+            # Ottieni current_price FRESCO (bypass cache, anti-stale).
+            # PRIMA: cache price_quotes 120s + fallback fetch_market_data
+            # CACHED 5min → su crypto 24/7 a volatilita' alta un prezzo
+            # vecchio anche di 1-2 min puo' essere off di 0.5-2%. Caso
+            # LINK-USD documentato: BUY a prezzo cached, polling subito
+            # dopo aggiorna current_price, P&L apparente fittizio.
+            # FIX: fetch live via fetch_fresh_current_price (bypass_cache=True).
             current_price = None
             try:
-                from price_polling import get_cached_prices_bulk
-                cached = get_cached_prices_bulk([ticker], max_age_seconds=120)
-                if cached.get(ticker):
-                    current_price = float(cached[ticker]["price"])
-            except Exception:
-                pass
-            if not current_price:
+                loop = asyncio.get_running_loop()
+                current_price = await loop.run_in_executor(
+                    None, data_fetchers.fetch_fresh_current_price, ticker
+                )
+            except Exception as exc:
+                logger.warning("[%s][DEC-CRYPTO] fetch_fresh %s fail: %s",
+                               run_id, ticker, exc)
+            if current_price is None:
+                # Fallback 1: cache price_quotes (TTL 120s, accetta solo
+                # se i provider esterni sono down)
+                try:
+                    from price_polling import get_cached_prices_bulk
+                    cached = get_cached_prices_bulk([ticker], max_age_seconds=120)
+                    if cached.get(ticker):
+                        current_price = float(cached[ticker]["price"])
+                except Exception:
+                    pass
+            if current_price is None:
+                # Fallback 2: cache OHLCV (5 min stale al massimo)
                 try:
                     loop = asyncio.get_running_loop()
                     price_data = await loop.run_in_executor(
                         None, data_fetchers.fetch_market_data, ticker, 5
                     )
-                    if price_data.get("data"):
+                    if price_data and price_data.get("data"):
                         current_price = float(price_data["data"][-1]["close"])
                 except Exception as exc:
                     logger.warning("[%s][DEC-CRYPTO] price fetch failed for %s: %s",
@@ -690,8 +702,16 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                     import risk_profile as _rp
                     pstate = portfolio.get_portfolio_state()
                     cash = float(pstate.get("cash", 0) or 0)
-                    open_count = int(pstate.get("open_positions_count",
-                                                len(pstate.get("positions") or [])) or 0)
+                    # FIX: per il cap crypto-specifico (max_open_positions_crypto)
+                    # serve contare SOLO le posizioni crypto in essere, non il
+                    # totale generale (che include equity).
+                    positions_all = pstate.get("positions") or []
+                    crypto_count = 0
+                    for _pos in positions_all:
+                        _t = (_pos.get("ticker") or "").upper()
+                        if _t.endswith("-USD") or _t.startswith("X:"):
+                            crypto_count += 1
+                    open_count = crypto_count
                     trade_value = float(quantity) * float(current_price)
                     alloc_pct = (trade_value / cash * 100.0) if cash > 0 else 999.0
                     conf_norm = float(confidence) / 100.0 if confidence and confidence > 1 else float(confidence or 0)
