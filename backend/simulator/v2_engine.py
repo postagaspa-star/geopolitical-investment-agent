@@ -1375,20 +1375,62 @@ def _build_benchmark_value_series(
 
 
 def _classify_outcome(valuation: dict, benchmark_pct: Optional[float]) -> str:
-    """Verde/giallo/rosso in base a P&L vs benchmark."""
-    pnl = valuation.get("total_pnl_pct", 0)
+    """
+    Verde/giallo/rosso in base a P&L e P&L vs benchmark.
+
+    REGOLE (in ordine di priorita'):
+
+    VERDE — qualsiasi di queste condizioni:
+      - pnl >= 3.0%                            (performance assoluta forte)
+      - pnl > 0 AND delta_vs_benchmark >= 0.5  (batte benchmark con margine)
+      - pnl > 0 AND benchmark e' None (no benchmark: basta positivo)
+
+    ROSSO — qualsiasi di queste condizioni:
+      - pnl <= -3.0%                           (perdita significativa)
+      - delta_vs_benchmark <= -2.0             (lontano sotto benchmark)
+
+    GIALLO — tutto il resto (tipicamente: pnl basso, o positivo ma vicino
+    al benchmark, o leggermente negativo).
+
+    RAZIONALE FIX: la versione precedente richiedeva
+    delta > 1.0% AND pnl > 0 per essere verde. Una simulazione con
+    pnl = +2.86%, benchmark = +1.84% (delta = +1.02%) era classificata
+    yellow se delta veniva computato con piccole differenze di precisione
+    (es. 0.99 vs 1.01) — soglia troppo stretta. La nuova logica:
+      • Da' peso a performance assoluta forte (>=3% green indipendentemente)
+      • Soglia delta abbassata a 0.5% (margine ragionevole vs benchmark)
+      • Mantiene la simmetria red sotto -3% o delta -2%
+    """
+    pnl = float(valuation.get("total_pnl_pct", 0) or 0)
+    delta = None
     if benchmark_pct is not None:
-        delta = pnl - benchmark_pct
-        if delta > 1.0 and pnl > 0:
-            return "green"
-        if delta < -2.0 or pnl < -5:
-            return "red"
-        return "yellow"
-    # No benchmark: solo absolute
-    if pnl > 3:
+        delta = pnl - float(benchmark_pct)
+
+    # ── Casi GREEN (priorita' alla performance assoluta) ────────────────
+    # 1) Performance assoluta forte: >= 3% e' oggettivamente buono
+    #    indipendentemente dal benchmark.
+    if pnl >= 3.0:
         return "green"
-    if pnl < -3:
+
+    # 2) Batte benchmark con margine ragionevole (>= 0.5%) E pnl positivo.
+    if pnl > 0 and delta is not None and delta >= 0.5:
+        return "green"
+
+    # 3) No benchmark + pnl positivo qualsiasi.
+    if pnl > 0 and delta is None:
+        return "green"
+
+    # ── Casi RED (gravita' assoluta — pnl > 0 NON e' mai red) ───────────
+    # Un bot con pnl positivo non viene mai marcato red anche se ha
+    # sotto-performato il benchmark. Sotto-performance vs benchmark con
+    # pnl positivo e' yellow.
+    if pnl <= -3.0:
         return "red"
+    # Sotto-performance vs benchmark, ma solo se pnl < 0 (bot in perdita)
+    if pnl < 0 and delta is not None and delta <= -2.0:
+        return "red"
+
+    # ── Tutto il resto: giallo ──────────────────────────────────────────
     return "yellow"
 
 

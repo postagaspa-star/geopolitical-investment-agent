@@ -78,7 +78,7 @@ PROFILES: dict[str, dict] = {
         "sl_max_pct_crypto": 40.0,
         "min_confidence": 0.50,
         "max_open_positions": 10,
-        "max_open_positions_crypto": 5,
+        "max_open_positions_crypto": 7,
         "max_portfolio_drawdown_pct": 20.0,
         "news_freshness_min_hours": 6,
     },
