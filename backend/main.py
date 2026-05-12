@@ -4283,6 +4283,41 @@ async def update_risk_state_settings(payload: RiskStateSettingsPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/api/risk-state/reset-drawdown-baseline")
+async def reset_drawdown_baseline_endpoint():
+    """
+    Resetta manualmente la baseline del calcolo drawdown 24h al momento
+    attuale. Da usare DOPO eventi anomali (bug del circuit breaker,
+    deposit/withdraw manuali, manutenzione) in cui gli snapshot precedenti
+    riflettono stati "fantasma" del portafoglio.
+
+    Effetto: il running_max usato per compute_24h_drawdown verra' calcolato
+    solo sugli snapshot DOPO il momento di questo reset, evitando falsi
+    drawdown estremi che bloccherebbero il Decision Agent.
+
+    Auto-detect: il sistema rileva anche automaticamente eventi
+    RECOVERY_BUY e RISK_STATE_LIQUIDATE in agent_logs e li usa come
+    baseline. Questo endpoint serve per casi non coperti dall'auto-detect
+    (es. deposit / withdraw manuali).
+    """
+    try:
+        import risk_state
+        result = risk_state.reset_drawdown_baseline(reason="admin_manual_endpoint")
+        return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/risk-state/clear-drawdown-baseline-override")
+async def clear_drawdown_baseline_override_endpoint():
+    """Rimuove l'override manuale del baseline. Auto-detect torna attivo."""
+    try:
+        import risk_state
+        return risk_state.clear_drawdown_baseline_override()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.post("/api/risk-state/clear-auto-sls")
 async def clear_risk_state_auto_sls():
     """

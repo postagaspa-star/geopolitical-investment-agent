@@ -217,15 +217,85 @@ def get_recent_win_rate(limit: int = 10) -> dict:
 # 2. 24h drawdown + circuit breaker
 # ═══════════════════════════════════════════════════════════════════════
 
+SETTING_DD_BASELINE_RESET_AT = "risk_dd_baseline_reset_at"
+
+
+def _find_last_anomaly_event_ts() -> "datetime | None":
+    """
+    Cerca eventi di "anomalia" che invalidano gli snapshot precedenti per
+    il calcolo del drawdown:
+      - RECOVERY_BUY (recovery posizioni post-liquidazione)
+      - RISK_STATE_LIQUIDATE (circuit breaker che ha liquidato)
+      - Manual baseline reset via endpoint admin
+
+    Ritorna il timestamp piu' recente di uno di questi eventi, o None se
+    nessun evento di anomalia negli ultimi 7 giorni. Il drawdown 24h verra'
+    calcolato usando come baseline il piu' recente tra
+    (now - 24h) e (questo timestamp).
+
+    Rationale: se c'e' stata una liquidazione spuria e una recovery, gli
+    snapshot pre-evento riflettono uno stato "fantasma" del portfolio
+    (valore artificiale) che NON deve influenzare il drawdown calcolato.
+    """
+    try:
+        import database
+        # 1. Manual baseline reset (priorita' max)
+        manual_iso = database.get_setting(SETTING_DD_BASELINE_RESET_AT, "") or ""
+        if manual_iso:
+            try:
+                manual_ts = datetime.fromisoformat(manual_iso.replace("Z", "+00:00"))
+                if manual_ts.tzinfo is None:
+                    manual_ts = manual_ts.replace(tzinfo=timezone.utc)
+                # Considera solo se nelle ultime 7 giorni
+                if (datetime.now(timezone.utc) - manual_ts).total_seconds() < 7 * 24 * 3600:
+                    return manual_ts
+            except Exception:
+                pass
+
+        # 2. Auto-detect RECOVERY_BUY / RISK_STATE_LIQUIDATE in agent_logs
+        client = database.get_client() if hasattr(database, "get_client") else None
+        if not client:
+            return None
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        r = (client.table("agent_logs")
+             .select("timestamp, phase")
+             .in_("phase", ["RECOVERY_BUY", "RISK_STATE_LIQUIDATE"])
+             .gte("timestamp", since)
+             .order("timestamp", desc=True)
+             .limit(1)
+             .execute())
+        if r.data:
+            ts_str = r.data[0].get("timestamp")
+            if ts_str:
+                ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return ts
+        return None
+    except Exception as e:
+        logger.debug("_find_last_anomaly_event_ts fail: %s", e)
+        return None
+
+
 def compute_24h_drawdown() -> dict:
     """
-    Ritorna {dd_pct: float, running_max: float, current_value: float,
-             snapshots_in_window: int}.
+    Ritorna {dd_pct, running_max, current_value, snapshots_in_window,
+             cutoff_source}.
 
-    dd_pct e' NEGATIVO se il portafoglio e' sotto il running max delle
-    ultime 24h, 0 se al picco o sopra. Sempre <= 0.
+    dd_pct e' NEGATIVO se il portafoglio e' sotto il running max nella
+    finestra di calcolo, 0 se al picco o sopra. Sempre <= 0.
 
-    Se non ci sono snapshot, ritorna dd_pct=0 (niente da misurare).
+    BUG FIX: la finestra di calcolo non e' piu' "ultime 24h" hard-coded.
+    Se c'e' stato un evento di anomalia (RECOVERY_BUY, RISK_STATE_LIQUIDATE,
+    o reset manuale) negli ultimi 7 giorni, la baseline parte da DOPO
+    quell'evento. Questo evita che snapshot pre-bug del portfolio (con
+    valori inflated da corruzione) inflino il running_max e diano un
+    drawdown apparente che non riflette la realta'.
+
+    Esempio: portfolio era a $107k pre-bug, dopo bug+recovery e' a $107k
+    di nuovo. Senza fix, gli snapshot del crash (a $20k o simili) +
+    running_max pre-bug a $107k davano un drawdown -22% spurio. Ora il
+    cutoff parte dalla recovery → running_max = current = drawdown 0%.
     """
     try:
         import database
@@ -233,13 +303,25 @@ def compute_24h_drawdown() -> dict:
     except Exception as e:
         logger.warning("compute_24h_drawdown: history read fail: %s", e)
         return {"dd_pct": 0.0, "running_max": 0.0,
-                "current_value": 0.0, "snapshots_in_window": 0}
+                "current_value": 0.0, "snapshots_in_window": 0,
+                "cutoff_source": "error"}
 
     if not history:
         return {"dd_pct": 0.0, "running_max": 0.0,
-                "current_value": 0.0, "snapshots_in_window": 0}
+                "current_value": 0.0, "snapshots_in_window": 0,
+                "cutoff_source": "no_history"}
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    # Cutoff = max(24h_ago, ultimo_evento_anomalia + 1s).
+    # Se evento di anomalia recente, baseline parte da li' (non da 24h fa).
+    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+    anomaly_ts = _find_last_anomaly_event_ts()
+    if anomaly_ts and anomaly_ts > cutoff_24h:
+        cutoff = anomaly_ts + timedelta(seconds=1)
+        cutoff_source = f"anomaly_event_at_{anomaly_ts.isoformat()}"
+    else:
+        cutoff = cutoff_24h
+        cutoff_source = "24h_default"
+
     in_window: list[float] = []
     for h in history:
         ts_str = h.get("timestamp")
@@ -262,7 +344,8 @@ def compute_24h_drawdown() -> dict:
 
     if not in_window:
         return {"dd_pct": 0.0, "running_max": 0.0,
-                "current_value": 0.0, "snapshots_in_window": 0}
+                "current_value": 0.0, "snapshots_in_window": 0,
+                "cutoff_source": cutoff_source}
 
     running_max = max(in_window)
     current = in_window[-1]
@@ -272,7 +355,33 @@ def compute_24h_drawdown() -> dict:
         "running_max": round(running_max, 2),
         "current_value": round(current, 2),
         "snapshots_in_window": len(in_window),
+        "cutoff_source": cutoff_source,
     }
+
+
+def reset_drawdown_baseline(reason: str = "manual_admin_reset") -> dict:
+    """
+    Resetta manualmente la baseline del drawdown 24h al momento attuale.
+    Gli snapshot precedenti vengono ignorati nel calcolo del running_max.
+    Utile dopo eventi anomali (bug, deposit/withdraw, manutenzione).
+    """
+    try:
+        import database
+        now_iso = datetime.now(timezone.utc).isoformat()
+        database.set_setting(SETTING_DD_BASELINE_RESET_AT, now_iso)
+        return {"ok": True, "baseline_reset_at": now_iso, "reason": reason}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def clear_drawdown_baseline_override() -> dict:
+    """Rimuove l'override manuale del baseline (auto-detect riprende)."""
+    try:
+        import database
+        database.set_setting(SETTING_DD_BASELINE_RESET_AT, "")
+        return {"ok": True, "cleared": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def is_circuit_breaker_triggered(threshold_pct: float | None = None) -> tuple[bool, float]:
