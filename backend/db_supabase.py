@@ -1483,12 +1483,53 @@ def mark_decision_chat_trade_executed(message_id: int, trade_id: int) -> bool:
     return True
 
 
+def _dec_chat_fallback_find_message(message_id: int) -> tuple[dict | None, int, list]:
+    """
+    Cerca un messaggio nel fallback settings store. Ritorna (msg, conv_id, msgs_list).
+    Usato quando la tabella decision_chat_messages non e' disponibile e i
+    messaggi vivono in settings (key "dec_chat_msgs_{cid}").
+
+    Iter su tutte le conversation_id conosciute (settings key
+    "decision_chat_list_fallback") per trovare il messaggio.
+    """
+    try:
+        list_raw = get_setting(_DEC_CHAT_FALLBACK_KEY_LIST, "[]") or "[]"
+        try:
+            conv_ids = json.loads(list_raw) or []
+        except Exception:
+            conv_ids = []
+
+        # Fallback list potrebbe non esistere — provo conversation 1..50
+        if not conv_ids:
+            conv_ids = list(range(1, 100))
+
+        for cid in conv_ids:
+            try:
+                key = _DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=cid)
+                msgs_str = get_setting(key, "[]") or "[]"
+                msgs = json.loads(msgs_str) if msgs_str else []
+                if not isinstance(msgs, list):
+                    continue
+                for m in msgs:
+                    if isinstance(m, dict) and m.get("id") == message_id:
+                        return m, cid, msgs
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug("_dec_chat_fallback_find_message err: %s", e)
+    return None, 0, []
+
+
 def mark_decision_chat_action_executed(message_id: int, action_index: int,
                                        result: dict) -> bool:
     """
     Salva il risultato dell'esecuzione di una proposed_action della chat
     (stop-loss, take-profit, direttiva). I risultati sono indicizzati per
     posizione nell'array proposed_actions (key = action_index string).
+
+    Supporta fallback mode: se il message_id non e' un id reale del DB
+    (es. timestamp-based perche' la tabella ha rifiutato l'INSERT), cerca
+    nei settings store e aggiorna in place.
     """
     global _DECISION_CHAT_FALLBACK_MODE
     client = _get_client()
@@ -1499,8 +1540,8 @@ def mark_decision_chat_action_executed(message_id: int, action_index: int,
                  .eq("id", message_id)
                  .limit(1)
                  .execute())
-            current = {}
             if r.data:
+                current = {}
                 ear = r.data[0].get("executed_action_results")
                 if ear and isinstance(ear, str):
                     try:
@@ -1509,22 +1550,56 @@ def mark_decision_chat_action_executed(message_id: int, action_index: int,
                         current = {}
                 elif isinstance(ear, dict):
                     current = ear
-            current[str(action_index)] = result
-            client.table("decision_chat_messages").update({
-                "executed_action_results": json.dumps(current),
-            }).eq("id", message_id).execute()
-            return True
+                current[str(action_index)] = result
+                client.table("decision_chat_messages").update({
+                    "executed_action_results": json.dumps(current),
+                }).eq("id", message_id).execute()
+                return True
+            # Message NON trovato in tabella → potrebbe essere in fallback
+            # (message_id timestamp-based). Cadiamo sotto.
         except Exception as e:
             if _dec_chat_should_fallback(e):
                 _DECISION_CHAT_FALLBACK_MODE = True
             else:
                 logger.warning("mark_decision_chat_action_executed fallita: %s", e)
-                return False
-    return True
+                # NON return False: prova comunque il fallback
+
+    # Fallback: cerca il messaggio nei settings store e aggiorna in place.
+    msg, cid, msgs = _dec_chat_fallback_find_message(message_id)
+    if msg is None or not msgs:
+        logger.warning("mark_decision_chat_action_executed: msg %s non trovato "
+                       "ne' in tabella ne' in fallback", message_id)
+        return False
+    try:
+        current = msg.get("executed_action_results") or {}
+        if isinstance(current, str):
+            try:
+                current = json.loads(current) or {}
+            except Exception:
+                current = {}
+        if not isinstance(current, dict):
+            current = {}
+        current[str(action_index)] = result
+        # Aggiorna l'entry e ri-scrive l'intero array nella setting
+        for m in msgs:
+            if isinstance(m, dict) and m.get("id") == message_id:
+                m["executed_action_results"] = current
+                break
+        key = _DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=cid)
+        set_setting(key, json.dumps(msgs[-200:]))
+        return True
+    except Exception as e:
+        logger.warning("mark_decision_chat_action_executed fallback err: %s", e)
+        return False
 
 
 def get_decision_chat_message(message_id: int) -> dict | None:
-    """Ritorna un singolo messaggio per ID (usato da execute-trade endpoint)."""
+    """
+    Ritorna un singolo messaggio per ID. Supporta sia la tabella DB sia
+    il fallback settings store: se il message_id e' un timestamp-based
+    (assistant_message_id quando l'insert table e' fallito), lo trova
+    cercando in tutte le conversation fallback dei settings.
+    """
     global _DECISION_CHAT_FALLBACK_MODE
     client = _get_client()
     if not _DECISION_CHAT_FALLBACK_MODE:
@@ -1536,14 +1611,29 @@ def get_decision_chat_message(message_id: int) -> dict | None:
                  .execute())
             if r.data:
                 return _dec_chat_decode_row(r.data[0])
-            return None
+            # NON found in table: cadiamo nel fallback search sotto
         except Exception as e:
             if _dec_chat_should_fallback(e):
                 _DECISION_CHAT_FALLBACK_MODE = True
             else:
                 logger.warning("get_decision_chat_message fallita: %s", e)
-                return None
-    # Fallback: scan settings (slow but rare)
+
+    # Fallback: cerca nei settings store (anche se non in fallback mode, per
+    # gestire il caso "tabella ha rifiutato l'INSERT ma non sa di esserlo")
+    msg, _cid, _msgs = _dec_chat_fallback_find_message(message_id)
+    if msg is not None:
+        # Decodifica eventuali campi JSON-string se presenti
+        if isinstance(msg.get("proposed_actions"), str):
+            try:
+                msg["proposed_actions"] = json.loads(msg["proposed_actions"])
+            except Exception:
+                pass
+        if isinstance(msg.get("executed_action_results"), str):
+            try:
+                msg["executed_action_results"] = json.loads(msg["executed_action_results"])
+            except Exception:
+                pass
+        return msg
     return None
 
 
