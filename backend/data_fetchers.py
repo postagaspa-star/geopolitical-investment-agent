@@ -629,10 +629,33 @@ def fetch_historical_price_at(ticker: str, target_dt: "datetime") -> dict | None
     Strategia: fetcha le candele 5m delle ultime 60 giorni, trova quella
     piu' vicina a target_dt, ritorna il close (= prezzo a fine candela,
     proxy del prezzo effettivo durante quella finestra).
-    """
-    try:
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
 
+    Robusto a sistemi con clock simulato (date "future"): in tal caso o
+    quando yfinance non ha dati, fallback al prezzo corrente.
+    """
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    def _fallback_current(reason: str = "fallback") -> dict | None:
+        """Helper: ritorna current price come proxy con metadata coerenti."""
+        cur = fetch_fresh_current_price(ticker)
+        if cur is None:
+            return None
+        try:
+            _now = _dt.now(_tz.utc)
+        except Exception:
+            _now = target_dt
+        return {
+            "price": round(float(cur), 6),
+            "candle_open": round(float(cur), 6),
+            "candle_close": round(float(cur), 6),
+            "candle_time": _now.isoformat(),
+            "interval": "current_proxy",
+            "delta_seconds": int(abs((_now - target_dt).total_seconds())),
+            "source": "fresh_current_price_fallback",
+            "note": reason,
+        }
+
+    try:
         # Normalizza target_dt a UTC
         if target_dt.tzinfo is None:
             target_dt = target_dt.replace(tzinfo=_tz.utc)
@@ -645,19 +668,12 @@ def fetch_historical_price_at(ticker: str, target_dt: "datetime") -> dict | None
         # spostato avanti. yfinance non ha dati "futuri". Fallback al prezzo
         # corrente come proxy ragionevole (meglio di nessun dato).
         if days_back < -1 or target_dt > now + _td(hours=1):
-            cur = fetch_fresh_current_price(ticker)
-            if cur is None:
-                return None
-            return {
-                "price": round(float(cur), 6),
-                "candle_open": round(float(cur), 6),
-                "candle_close": round(float(cur), 6),
-                "candle_time": now.isoformat(),
-                "interval": "current_proxy",
-                "delta_seconds": int(abs((now - target_dt).total_seconds())),
-                "source": "fresh_current_price_fallback",
-                "note": "opened_at e' nel futuro o troppo recente; uso prezzo corrente come proxy",
-            }
+            result = _fallback_current(
+                "opened_at e' nel futuro o troppo recente; uso prezzo corrente come proxy"
+            )
+            if result is not None:
+                return result
+            return None
         days_back = max(days_back, 0) + 2
 
         # yfinance interval 5m supporta fino a 60 giorni
@@ -697,26 +713,11 @@ def fetch_historical_price_at(ticker: str, target_dt: "datetime") -> dict | None
                 threads=False,
             )
         if df is None or df.empty:
-            # Ultimo fallback: prezzo corrente (meglio che restituire None
-            # quando dobbiamo correggere un avg_buy_price)
-            cur = fetch_fresh_current_price(ticker)
-            if cur is not None:
-                logger.info("fetch_historical_price_at %s: no intraday %s data, "
-                            "fallback to current price %s",
-                            ticker, interval, cur)
-                return {
-                    "price": round(float(cur), 6),
-                    "candle_open": round(float(cur), 6),
-                    "candle_close": round(float(cur), 6),
-                    "candle_time": now.isoformat(),
-                    "interval": "current_proxy",
-                    "delta_seconds": int(abs((now - target_dt).total_seconds())),
-                    "source": "fresh_current_price_fallback",
-                    "note": f"yfinance {interval} ha restituito empty; uso prezzo corrente",
-                }
-            logger.warning("fetch_historical_price_at %s @ %s: no data (interval %s)",
-                           ticker, target_dt.isoformat(), interval)
-            return None
+            logger.info("fetch_historical_price_at %s: no intraday %s data, fallback to current",
+                        ticker, interval)
+            return _fallback_current(
+                f"yfinance {interval} ha restituito empty per range richiesto; uso prezzo corrente"
+            )
 
         # MultiIndex columns case (multi-ticker download)
         if hasattr(df.columns, "levels"):
@@ -760,8 +761,17 @@ def fetch_historical_price_at(ticker: str, target_dt: "datetime") -> dict | None
             "source": "yfinance",
         }
     except Exception as exc:
-        logger.warning("fetch_historical_price_at %s failed: %s", ticker, exc)
-        return None
+        logger.warning("fetch_historical_price_at %s failed: %s — fallback to current price", ticker, exc)
+        # Anche su exception non sollevata altrove, tentiamo il fallback
+        # al prezzo corrente. Cosi' l'endpoint admin puo' procedere a
+        # ricostruire avg_buy_price anche quando yfinance lancia per
+        # qualche motivo (es. date "future" in ambiente simulato).
+        try:
+            return _fallback_current(
+                f"yfinance ha lanciato eccezione ({type(exc).__name__}); uso prezzo corrente"
+            )
+        except Exception:
+            return None
 
 
 def fetch_fresh_current_price(ticker: str) -> float | None:
