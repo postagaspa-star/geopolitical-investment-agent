@@ -2189,6 +2189,57 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         pass
     context_loaded["documents"] = len(docs) > 0
 
+    # ═══════════════════════════════════════════════════════════════════
+    # EARLY-SKIP: salta la chiamata LLM se il contesto e' INVARIATO dal
+    # run precedente. Save ~$0.10/run risparmiato (no input/output token,
+    # no tool loop). Si applica solo quando NULLA giustifica una nuova
+    # valutazione:
+    #   - no watchdog trigger
+    #   - nessun nuovo report 8H/4D
+    #   - buffer L0 invariato
+    #   - portfolio invariato (no posizioni nuove/chiuse, cash invariato)
+    #   - nessun commitment in scadenza entro 6h
+    # ═══════════════════════════════════════════════════════════════════
+    current_signature = _compute_context_signature(
+        portfolio_state, rep_8h, rep_4d, recent_buffer,
+    )
+    skip_run, skip_reason = _should_skip_decision_run(
+        current_signature=current_signature,
+        watchdog_reason=watchdog_reason,
+        focus_tickers=focus_tickers,
+        agent_type="standard",
+    )
+    if skip_run:
+        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        try:
+            database.insert_agent_log(run_id, "DECISION_SKIPPED", json.dumps({
+                "event": "decision_skipped",
+                "reason": skip_reason,
+                "signature": current_signature[:12],
+                "duration_seconds": round(duration, 1),
+                "context_loaded": context_loaded,
+            }, default=str))
+        except Exception:
+            pass
+        _save_checkpoint(run_id, "decision", "SKIPPED", {"reason": skip_reason})
+        # Salva la signature anche su skip (idempotent: continueremo
+        # a skippare finche' qualcosa di concreto cambia)
+        _save_decision_signature("standard", current_signature)
+        logger.info("[%s][DECISION] SKIP — %s (no LLM call, save ~10k tk)",
+                    run_id, skip_reason)
+        return {
+            "run_id": run_id,
+            "decision": "NO_TRADE",
+            "trades": [],
+            "no_trade_reasoning": f"Run skippato: {skip_reason}. Contesto invariato dal run precedente.",
+            "context_loaded": context_loaded,
+            "duration_seconds": duration,
+            "model": "skipped",
+            "iterations": 0,
+            "final_response": f"Skip: {skip_reason}",
+            "skipped": True,
+        }
+
     # --- Costruisci messaggio utente ---
     user_message = _build_context_message(
         rep_4d, rep_8h, recent_buffer, tech_report, portfolio_state, docs,
@@ -2250,6 +2301,8 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         _save_checkpoint(run_id, "decision", "COMPLETED", {
             "trades": len(trades_executed), "duration": duration,
         })
+        # Salva signature post-run (per early-skip al prossimo run se nulla cambia)
+        _save_decision_signature("standard", current_signature)
         logger.info("[%s][DECISION] [R1] Completato in %.1fs, %d trades, %d iterazioni",
                     run_id, duration, len(trades_executed), iteration)
         return {
@@ -2534,6 +2587,12 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         "trades": len(trades_executed),
         "duration": duration,
     })
+
+    # Salva signature post-run per early-skip al prossimo run identico.
+    # Salva ANCHE se ci sono stati trade: lo stato portfolio e' cambiato,
+    # quindi la signature del prossimo run sara' diversa → no skip
+    # accidentale. Il signature attuale resta comunque utile come baseline.
+    _save_decision_signature("standard", current_signature)
 
     logger.info("[%s][DECISION] === Completato in %.1fs, %d trades, %d iterazioni ===",
                 run_id, duration, len(trades_executed), iteration)
@@ -3003,3 +3062,118 @@ def _save_checkpoint(run_id: str, agent_name: str, status: str, data: dict):
             }).execute()
     except Exception:
         pass
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# EARLY-SKIP: identita' di contesto tra run consecutivi
+# ═════════════════════════════════════════════════════════════════════════
+# Razionale: se NULLA e' cambiato dal run precedente (no nuovi report,
+# buffer vuoto, portfolio invariato, nessun trigger esterno), e' inutile
+# chiamare il modello — restituisce sempre la stessa NO_TRADE. Skip diretto
+# senza spreco di token.
+#
+# Storage signature: settings table, key='decision_last_signature_<type>'.
+# Signature = hash(open_positions, cash, last_8h_ts, last_4d_ts, last_buf_ts,
+# buf_count). MD5 e' ok qui (non e' uso crittografico).
+
+def _compute_context_signature(portfolio_state: dict,
+                               rep_8h: list,
+                               rep_4d: list,
+                               recent_buffer: list) -> str:
+    """Hash deterministico del contesto attuale per detect cambiamenti."""
+    import hashlib
+    try:
+        positions = portfolio_state.get("positions") or []
+        # Tickers ordinati + quantita' per detect chiusura/apertura/SL update
+        pos_summary = sorted([
+            f"{p.get('ticker','?')}:{round(float(p.get('quantity', 0) or 0), 4)}"
+            for p in positions
+        ])
+        rep_8h_ts = max([str(r.get("timestamp") or "") for r in rep_8h], default="")
+        rep_4d_ts = max([str(r.get("timestamp") or "") for r in rep_4d], default="")
+        buf_ts = max([str(b.get("created_at") or "") for b in recent_buffer], default="")
+        sig_input = {
+            "positions": pos_summary,
+            "cash": round(float(portfolio_state.get("cash", 0) or 0), 2),
+            "rep_8h_ts": rep_8h_ts,
+            "rep_4d_ts": rep_4d_ts,
+            "buf_ts": buf_ts,
+            "buf_count": len(recent_buffer),
+        }
+        as_str = json.dumps(sig_input, sort_keys=True, default=str)
+        return hashlib.md5(as_str.encode("utf-8")).hexdigest()
+    except Exception as e:
+        logger.debug("signature compute fail: %s", e)
+        # Fallback: timestamp → no skip possibile (signature sempre diversa)
+        return f"err_{datetime.now(timezone.utc).timestamp()}"
+
+
+def _should_skip_decision_run(
+    *,
+    current_signature: str,
+    watchdog_reason: str | None,
+    focus_tickers: list | None,
+    agent_type: str = "standard",
+) -> tuple[bool, str]:
+    """
+    Decide se skippare il run del Decision Agent.
+
+    Ritorna (skip: bool, reason: str). Skip == True solo se TUTTE le
+    condizioni di stabilita' sono soddisfatte.
+
+    NON skippa MAI se:
+      - Watchdog trigger attivo
+      - Focus tickers (movimenti anomali rilevati)
+      - Commitment attivo che scade entro 6h
+      - Nessuna signature precedente (primo run)
+      - Signature precedente diversa (qualcosa e' cambiato)
+    """
+    # 1. Trigger esterni forzano sempre run
+    if watchdog_reason and watchdog_reason.strip():
+        return False, f"watchdog: {watchdog_reason[:60]}"
+    if focus_tickers:
+        return False, f"focus tickers: {','.join(focus_tickers[:5])}"
+
+    # 2. Commitment in scadenza
+    try:
+        import database
+        if hasattr(database, "get_active_agent_commitments"):
+            commits = database.get_active_agent_commitments(agent_type, limit=30) or []
+            now = datetime.now(timezone.utc)
+            for c in commits:
+                exp = c.get("expires_at")
+                if not exp:
+                    continue
+                try:
+                    exp_dt = datetime.fromisoformat(str(exp).replace("Z", "+00:00"))
+                    hrs_left = (exp_dt - now).total_seconds() / 3600.0
+                    if 0 < hrs_left < 6:
+                        return False, f"commitment {str(c.get('id'))[:8]} scade in {hrs_left:.1f}h"
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 3. Confronta signature
+    try:
+        import database
+        key = f"decision_last_signature_{agent_type}"
+        prev_sig = database.get_setting(key, "") or ""
+        if not prev_sig:
+            return False, "primo run (no signature precedente)"
+        if prev_sig.strip() == current_signature.strip():
+            return True, "contesto invariato dal run precedente"
+        return False, "contesto cambiato"
+    except Exception as e:
+        logger.debug("signature read fail: %s", e)
+        return False, f"signature read error: {e}"
+
+
+def _save_decision_signature(agent_type: str, signature: str) -> None:
+    """Persiste la signature corrente per il prossimo confronto."""
+    try:
+        import database
+        key = f"decision_last_signature_{agent_type}"
+        database.set_setting(key, signature)
+    except Exception as e:
+        logger.debug("signature save fail: %s", e)

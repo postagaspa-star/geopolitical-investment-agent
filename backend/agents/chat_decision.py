@@ -32,7 +32,18 @@ logger = logging.getLogger(__name__)
 
 # ─── Engine config ──────────────────────────────────────────────────────────
 
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+# Engine standard (chat decision equity): Claude Haiku 3.5
+# Switch da Sonnet 4 → Haiku 3.5 (-75% costi).
+# Pricing: $0.80/M input vs $3/M (3.75x piu' economico),
+#          $4/M output vs $15/M (3.75x piu' economico).
+# Haiku 3.5 supporta tool use + caching come Sonnet, sufficiente per
+# rispondere a domande sul portfolio, eseguire ordini via chat e
+# fare analisi tecniche on-demand. Per ragionamento profondo su
+# crypto si usa gia' DeepSeek-R1 (non Sonnet).
+CLAUDE_MODEL = "claude-3-5-haiku-20241022"
+# Fallback a Sonnet 4 se Haiku throw o sembra non gestire un caso.
+# Usato manualmente cambiando CLAUDE_MODEL via env var se serve.
+CLAUDE_MODEL_FALLBACK = "claude-sonnet-4-20250514"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_R1_MODEL = "deepseek-reasoner"
 
@@ -713,7 +724,9 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
             model_used = "deepseek-r1"
         else:
             raw_response = await _call_claude(system_prompt, history, user_message, context_block)
-            model_used = "claude-sonnet-4.5"
+            # Log il vero modello (variabile, cosi' se in futuro si torna a Sonnet
+            # via CLAUDE_MODEL il log resta corretto). Haiku 3.5 di default.
+            model_used = CLAUDE_MODEL
     except Exception as e:
         logger.error("[CHAT-DEC] %s engine failed: %s", agent_type, e, exc_info=True)
         # Salva un messaggio di errore come assistant per mantenere consistenza
