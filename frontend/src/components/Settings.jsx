@@ -103,10 +103,35 @@ function Settings({ onBack, onDataRefresh }) {
       { key: "db",        url: "/api/settings/test-db" },
     ];
 
+    // Parser robusto: prima check res.ok, poi tenta JSON con fallback testo.
+    // Bug precedente: res.json() su body vuoto/HTML lanciava
+    // "Failed to execute 'json' on 'Response': Unexpected end of JSON input"
+    // mascherando lo status code reale (500/502/CORS).
+    const safeFetchJson = async (url) => {
+      const res = await fetch(`${API}${url}`);
+      if (!res.ok) {
+        // Prova a leggere il body per messaggio di errore utile
+        let detail = "";
+        try {
+          const txt = await res.text();
+          detail = txt ? ` — ${txt.slice(0, 120)}` : "";
+        } catch (_) { /* ignore */ }
+        throw new Error(`HTTP ${res.status}${detail}`);
+      }
+      const txt = await res.text();
+      if (!txt || !txt.trim()) {
+        throw new Error(`Risposta vuota (HTTP ${res.status})`);
+      }
+      try {
+        return JSON.parse(txt);
+      } catch (_) {
+        throw new Error(`Risposta non JSON (HTTP ${res.status}): ${txt.slice(0, 100)}`);
+      }
+    };
+
     await Promise.all(tests.map(async ({ key, url }) => {
       try {
-        const res = await fetch(`${API}${url}`);
-        const data = await res.json();
+        const data = await safeFetchJson(url);
         if (data.status === "ok") setDiagItem(key, "ok");
         else setDiagItem(key, "error", data.message || "Risposta non valida");
       } catch (err) {
@@ -116,8 +141,7 @@ function Settings({ onBack, onDataRefresh }) {
 
     // Scheduler
     try {
-      const res = await fetch(`${API}/api/agent/status`);
-      const data = await res.json();
+      const data = await safeFetchJson("/api/agent/status");
       const running = data.is_running || data.scheduler_running || data.status === "running";
       setDiagItem("scheduler", "ok", running ? "In esecuzione" : "Attivo (idle)");
     } catch (err) {
