@@ -1101,14 +1101,36 @@ def _build_run_data(run_id: str, state: dict) -> dict:
     delta_sector = perf_1m - perf_sector_1m if perf_1m is not None else None
     delta_monkey = perf_1m - perf_monkey_1m if perf_1m is not None else None
 
+    # ── OUTCOME: allineato a v2_engine._classify_outcome (scala decimale) ──
+    # Stessa logica del V2 engine, valori in decimali (0.03 = 3%).
+    #
+    # VERDE — una qualsiasi di queste:
+    #   pnl >= 3%                           (performance assoluta forte)
+    #   pnl > 0 AND delta_sp >= 0.5%        (batte S&P con margine ragionevole)
+    #   pnl > 0 AND no benchmark            (positivo senza termine di confronto)
+    #
+    # ROSSO — una qualsiasi (MAI se pnl > 0):
+    #   pnl <= -3%                          (perdita significativa)
+    #   pnl < 0 AND delta_sp <= -2%         (in perdita E molto sotto S&P)
+    #
+    # GIALLO — tutto il resto.
     if perf_1m is None:
         outcome = "yellow"
-    elif delta_sp and delta_sp > 0.005 and delta_sector and delta_sector > 0:
-        outcome = "green"
-    elif delta_sp and delta_sp < -0.01:
-        outcome = "red"
     else:
-        outcome = "yellow"
+        _pnl = float(perf_1m)
+        _delta = float(delta_sp) if delta_sp is not None else None
+        if _pnl >= 0.03:
+            outcome = "green"
+        elif _pnl > 0 and _delta is not None and _delta >= 0.005:
+            outcome = "green"
+        elif _pnl > 0 and _delta is None:
+            outcome = "green"
+        elif _pnl <= -0.03:
+            outcome = "red"
+        elif _pnl < 0 and _delta is not None and _delta <= -0.02:
+            outcome = "red"
+        else:
+            outcome = "yellow"
 
     period_start = scenario.get("period_start", "?")
     period_end = scenario.get("period_end", "?")
