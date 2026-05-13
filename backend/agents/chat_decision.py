@@ -363,7 +363,13 @@ def _build_context_block(agent_type: str, live_ohlcv: dict) -> str:
 
 async def _call_claude(system_prompt: str, history: list, user_message: str,
                        context_block: str) -> str:
-    """Claude Sonnet 4.5 con system prompt + context iniettato. History compatibile."""
+    """Claude Sonnet 4 con prompt caching.
+
+    Ottimizzazioni costi:
+      - system_prompt (statico, ~3k tk) → cached con TTL 1h
+      - context_block (live: portfolio, posizioni) → no cache, cambia ogni chat
+      - max_tokens 1800 (era 2500) — risposte chat tipicamente brevi
+    """
     from anthropic import Anthropic
 
     api_key = _get_anthropic_key()
@@ -371,7 +377,20 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
         raise ValueError("ANTHROPIC_API_KEY non configurata")
 
     client = Anthropic(api_key=api_key)
-    full_system = system_prompt + "\n\n═══════════════ CONTESTO LIVE ═══════════════\n\n" + context_block
+
+    # System come lista di blocchi: STATIC (cacheable) + DYNAMIC (no cache).
+    # Cache hit = 10% del prezzo input → save grande perché chat e' frequente.
+    system_blocks = [
+        {
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": "\n\n═══════════════ CONTESTO LIVE ═══════════════\n\n" + (context_block or ""),
+        },
+    ]
 
     messages = []
     for h in history:
@@ -384,8 +403,8 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
     def _sync():
         return client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=2500,
-            system=full_system,
+            max_tokens=1800,
+            system=system_blocks,
             messages=messages,
         )
 
@@ -394,6 +413,20 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
     for block in response.content:
         if hasattr(block, "text"):
             text += block.text
+    # Log cache stats (best-effort)
+    try:
+        usage = getattr(response, "usage", None)
+        if usage:
+            cr = getattr(usage, "cache_read_input_tokens", 0) or 0
+            cc = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            it = getattr(usage, "input_tokens", 0) or 0
+            ot = getattr(usage, "output_tokens", 0) or 0
+            logger.info(
+                "[CHAT-DECISION] tokens: input=%d output=%d cache_read=%d cache_create=%d",
+                it, ot, cr, cc,
+            )
+    except Exception:
+        pass
     return text
 
 

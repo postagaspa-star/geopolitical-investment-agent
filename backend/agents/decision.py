@@ -1175,7 +1175,8 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
     #    rifaceva le stesse tesi inutilmente in mercati laterali/macro,
     #    senza mai convergere su un approccio diverso.
     try:
-        recent_block = _build_recent_decisions_block(agent_type="standard", limit=12)
+        # Limit 6 (era 12): bastano per il feedback loop senza inflare input.
+        recent_block = _build_recent_decisions_block(agent_type="standard", limit=6)
     except Exception as exc:
         logger.debug("recent decisions block failed: %s", exc)
         recent_block = ""
@@ -1192,6 +1193,96 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
         text = (directives_block + risk_block + risk_state_block + regime_block
                 + coach_section + recent_section + base_prompt)
     return text, coach_card_ids
+
+
+def _get_decision_prompt_split(engine: str | None = None) -> tuple[str, str, list[str]]:
+    """
+    Versione 'split' del system prompt per abilitare Anthropic prompt caching.
+
+    Ritorna (static_block, dynamic_block, coach_card_ids) dove:
+      - static_block: contenuto che cambia RARAMENTE → cacheable con TTL 1h.
+        Include: risk_block, regime_block, coach_section (settimanale),
+        base_prompt, shared_principles.
+      - dynamic_block: contenuto che cambia OGNI RUN → no cache.
+        Include: directives_block (chat user), risk_state_block (live
+        drawdown/recovery), recent_section (ultime 12 decisioni).
+
+    Cache hit = 10% del prezzo input normale (90% di sconto) → save
+    sostanzioso visto che lo static è ~7-8k token su ~10k totali system.
+
+    NB: l'ordine logico nel messaggio finale al modello e' static→dynamic
+    (le hard constraints e il workflow restano all'inizio, le info live
+    arrivano dopo).
+    """
+    if engine is None:
+        engine = _resolve_engine_for_run()
+
+    setting_key = "prompt_decision_r1" if engine == "deepseek-r1" else "prompt_decision"
+    default = DECISION_R1_SYSTEM_PROMPT_DEFAULT if engine == "deepseek-r1" else DECISION_SYSTEM_PROMPT_DEFAULT
+
+    base_prompt = default
+    try:
+        import database as _db
+        custom = _db.get_setting(setting_key, "")
+        if custom and isinstance(custom, str) and custom.strip():
+            base_prompt = custom
+    except Exception:
+        pass
+
+    # === DYNAMIC parts (no cache) ===
+    directives_block = _build_directives_block()
+
+    risk_state_block = ""
+    try:
+        import risk_state as _rs
+        risk_state_block = _rs.build_risk_state_prompt_block()
+    except Exception as e:
+        logger.debug("[DEC] risk_state block fail: %s", e)
+
+    try:
+        # Limit 6 (era 12): ultime 6 decisioni bastano per chiudere il
+        # feedback loop senza inflare il contesto. Save ~1k token/run.
+        recent_block = _build_recent_decisions_block(agent_type="standard", limit=6)
+    except Exception as exc:
+        logger.debug("recent decisions block failed: %s", exc)
+        recent_block = ""
+    recent_section = (recent_block + "\n" + "═" * 60 + "\n") if recent_block else ""
+
+    # === STATIC parts (cacheable) ===
+    risk_block = _build_risk_block(asset_class="equity")
+
+    try:
+        regime_block = _build_regime_protocol_block(asset_class="equity")
+    except Exception as exc:
+        logger.debug("regime protocol block failed: %s", exc)
+        regime_block = ""
+
+    coach_block = ""
+    coach_card_ids: list[str] = []
+    try:
+        from agents import coach_cards as _cc
+        coach_block = _cc.get_active_cards_block_for_decision() or ""
+        if coach_block:
+            for c in _cc.list_cards(active_only=True)[:10]:
+                cid = c.get("id")
+                if cid:
+                    coach_card_ids.append(cid)
+    except Exception as e:
+        logger.debug("coach cards block fallito: %s", e)
+
+    coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
+
+    try:
+        from agents.shared_principles import get_full_risk_block_for_live
+        shared = get_full_risk_block_for_live()
+        static_block = (risk_block + regime_block + coach_section + base_prompt
+                        + "\n\n" + "═" * 60 + "\n" + shared)
+    except Exception:
+        static_block = risk_block + regime_block + coach_section + base_prompt
+
+    dynamic_block = directives_block + risk_state_block + recent_section
+
+    return static_block, dynamic_block, coach_card_ids
 
 
 def _get_client() -> Anthropic:
@@ -2176,7 +2267,40 @@ async def run_decision_agent(run_id: str, tech_report: dict,
 
     model = _select_model()
     client = _get_client()
-    system_prompt, coach_card_ids_claude = _get_decision_prompt_with_meta("claude")
+    # ═══════════════════════════════════════════════════════════════════
+    # PROMPT CACHING (Anthropic): system prompt e tools splittati in
+    # blocco STATICO (cacheable, TTL 1h) e blocco DINAMICO (no cache).
+    # Cache hit costa il 10% del token normale → risparmio ~25-35% sui
+    # costi totali del Decision Agent.
+    #
+    # Static (~7-8k tk): risk_block + regime_block + coach + base + shared
+    # Dynamic (~2k tk):  directives + risk_state + recent_decisions
+    # Tools (~2.7k tk):  cachati via cache_control sull'ultimo tool
+    # ═══════════════════════════════════════════════════════════════════
+    static_block, dynamic_block, coach_card_ids_claude = _get_decision_prompt_split("claude")
+
+    # Costruisci system come lista di blocchi typed per il cache.
+    # NB: l'ordine static→dynamic e' importante per il caching (i blocchi
+    # cacheable devono venire PRIMA di quelli che cambiano).
+    system_blocks: list[dict] = [
+        {
+            "type": "text",
+            "text": static_block,
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    if dynamic_block and dynamic_block.strip():
+        system_blocks.append({"type": "text", "text": dynamic_block})
+
+    # Tools: cache_control sull'ultimo tool marca TUTTI i tools come
+    # cacheable (regola Anthropic). I 12 tool DECISION_TOOLS sono ~2.7k
+    # token statici → ottimo candidato per il cache.
+    cached_tools: list[dict] = []
+    if DECISION_TOOLS:
+        cached_tools = list(DECISION_TOOLS[:-1])
+        last_tool = dict(DECISION_TOOLS[-1])
+        last_tool["cache_control"] = {"type": "ephemeral"}
+        cached_tools.append(last_tool)
 
     # CRITICO: Anthropic SDK è sincrono → wrap in asyncio.to_thread per non
     # bloccare l'event loop (evita di fermare polling, watchdog, ecc.).
@@ -2186,11 +2310,11 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         kwargs = dict(
             model=model_id,
             max_tokens=max_tokens,
-            system=system_prompt,
+            system=system_blocks,
             messages=messages,
         )
         if with_tools:
-            kwargs["tools"] = DECISION_TOOLS
+            kwargs["tools"] = cached_tools or DECISION_TOOLS
         return client.messages.create(**kwargs)
 
     # ═══════════════════════════════════════════════════════════════════
@@ -2203,7 +2327,10 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     workflow_state = WorkflowState()
 
     try:
-        response = await asyncio.to_thread(_create_message, model, 8000)
+        # max_tokens: 5000 (era 8000). Il workflow 4-fasi tipicamente
+        # genera 2-4k token totali; 5000 lascia margine senza sprecare
+        # budget. Output costa $15/M token → ogni 1000 tk = $0.015/run.
+        response = await asyncio.to_thread(_create_message, model, 5000)
         used_model = model
     except Exception as model_err:
         # Circuit breaker: se è un errore di auth/quota, NON tentare il
@@ -2227,10 +2354,28 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             logger.warning("[%s][DECISION] %s non disponibile (%s), fallback a %s",
                            run_id, DECISION_MODEL, model_err, DECISION_MODEL_FALLBACK)
             model = DECISION_MODEL_FALLBACK
-            response = await asyncio.to_thread(_create_message, model, 8192)
+            response = await asyncio.to_thread(_create_message, model, 5000)
             used_model = model
         else:
             raise
+
+    # Logga uso token + cache stats. Anthropic ritorna in usage:
+    #   input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+    # Cache hit = cache_read_input_tokens > 0 → save 90% sui token cacheati.
+    try:
+        usage = getattr(response, "usage", None)
+        if usage:
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            input_tk = getattr(usage, "input_tokens", 0) or 0
+            output_tk = getattr(usage, "output_tokens", 0) or 0
+            logger.info(
+                "[%s][DECISION] tokens: input=%d output=%d cache_read=%d cache_create=%d (cache hit ratio=%.0f%%)",
+                run_id, input_tk, output_tk, cache_read, cache_create,
+                (cache_read / max(cache_read + input_tk, 1)) * 100,
+            )
+    except Exception:
+        pass
 
     database.insert_agent_log(run_id, "DECISION_MODEL",
         json.dumps({"model": used_model, "initial_stop_reason": response.stop_reason}))
@@ -2311,8 +2456,10 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         messages.append({"role": "user", "content": tool_results})
 
         # Wrap in to_thread per non bloccare l'event loop durante il tool loop
-        # (15 iterazioni × ~10s = 2-3 min di blocking se non wrappato)
-        response = await asyncio.to_thread(_create_message, used_model, 16000)
+        # (15 iterazioni × ~10s = 2-3 min di blocking se non wrappato).
+        # max_tokens: 8000 (era 16000) — sufficienti per tool calls + reasoning
+        # finale; 16000 raramente saturato, era spreco di budget.
+        response = await asyncio.to_thread(_create_message, used_model, 8000)
 
     # Log finale workflow state per diagnostica
     database.insert_agent_log(run_id, "DECISION_WORKFLOW", json.dumps(
@@ -2776,9 +2923,12 @@ def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state,
     # === Buffer L0 recente (micro-cards ultimi 40 min) ===
     if buffer:
         buf_text = ""
-        for b in buffer[:15]:
+        # Limit 8 (era 15): le 8 micro-cards piu' recenti coprono i segnali
+        # caldi senza inflare l'input. Le restanti sono gia' sintetizzate
+        # nel report 8H. Save ~1.5k token/run.
+        for b in buffer[:8]:
             buf_text += f"\n[{b.get('source_type', '?')}] {b.get('micro_summary', b.get('raw_content', '')[:200])}"
-        parts.append(f"=== INTELLIGENCE BUFFER L0 (ultimi 40 min, {len(buffer)} micro-cards) ==={buf_text}")
+        parts.append(f"=== INTELLIGENCE BUFFER L0 (ultimi 40 min, {len(buffer)} micro-cards, top 8) ==={buf_text}")
     else:
         parts.append("=== INTELLIGENCE BUFFER L0 === Vuoto (ultime micro-cards consumate dal report 8H)")
 
