@@ -2335,11 +2335,18 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     # Costruisci system come lista di blocchi typed per il cache.
     # NB: l'ordine static→dynamic e' importante per il caching (i blocchi
     # cacheable devono venire PRIMA di quelli che cambiano).
+    #
+    # TTL extended 1h: cache_control con "ttl": "1h" mantiene viva la
+    # cache per un'ora intera invece di 5 minuti (default). Write cost
+    # +100% (vs +25% del default 5min), hit cost invariato (10% normale).
+    # Conviene quando i run sono distanziati di piu' di 5 min ma meno di 1h
+    # (caso tipico del nostro bot: pipeline ogni 20-30 min).
+    # Richiede beta header 'extended-cache-ttl-2025-04-11' (vedi _create_message).
     system_blocks: list[dict] = [
         {
             "type": "text",
             "text": static_block,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         },
     ]
     if dynamic_block and dynamic_block.strip():
@@ -2352,12 +2359,16 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     if DECISION_TOOLS:
         cached_tools = list(DECISION_TOOLS[:-1])
         last_tool = dict(DECISION_TOOLS[-1])
-        last_tool["cache_control"] = {"type": "ephemeral"}
+        last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
         cached_tools.append(last_tool)
 
     # CRITICO: Anthropic SDK è sincrono → wrap in asyncio.to_thread per non
     # bloccare l'event loop (evita di fermare polling, watchdog, ecc.).
     messages = [{"role": "user", "content": user_message}]
+
+    # Beta header per TTL extended 1h. Senza questo header il backend
+    # Anthropic ignora il campo "ttl" e usa il TTL default (5 min).
+    _BETA_HEADERS = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
 
     def _create_message(model_id: str, max_tokens: int, with_tools: bool = True):
         kwargs = dict(
@@ -2365,6 +2376,7 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             max_tokens=max_tokens,
             system=system_blocks,
             messages=messages,
+            extra_headers=_BETA_HEADERS,
         )
         if with_tools:
             kwargs["tools"] = cached_tools or DECISION_TOOLS

@@ -391,11 +391,14 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
 
     # System come lista di blocchi: STATIC (cacheable) + DYNAMIC (no cache).
     # Cache hit = 10% del prezzo input → save grande perché chat e' frequente.
+    #
+    # TTL extended 1h: utile per chat (l'utente spesso manda piu' messaggi
+    # nell'arco di 1h, ognuno hitta la cache → save ~90% sui token cachati).
     system_blocks = [
         {
             "type": "text",
             "text": system_prompt,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         },
         {
             "type": "text",
@@ -411,12 +414,17 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
             messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": user_message})
 
+    # Beta header: senza questo, il "ttl: 1h" viene ignorato dal backend
+    # Anthropic e si applica il default 5 minuti.
+    _BETA_HEADERS = {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
+
     def _sync():
         return client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=1800,
             system=system_blocks,
             messages=messages,
+            extra_headers=_BETA_HEADERS,
         )
 
     response = await asyncio.to_thread(_sync)
