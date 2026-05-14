@@ -53,8 +53,25 @@ GDELT_QUERY = (
     'theme:DEMOCRACY OR theme:ECON_STOCKMARKET'
 )
 
-NUM_SCENARIOS_TARGET = 3   # quanti scenari produrre/giorno
+# Target/run leggibile da env per consentire override da workflow_dispatch.
+# Default 5: leggermente sovrastimato per coprire rejection durante validazione
+# (target 5 → tipicamente 3-4 validi dopo validation rigorosa).
+NUM_SCENARIOS_TARGET = int(os.environ.get("NUM_SCENARIOS_TARGET", "5") or "5")
+
+# Guarantee minimo: se dopo validazione + retry abbiamo < di questo, exit fail.
+# Sotto questa soglia il run è considerato un fallimento perché non garantisce
+# nuovi scenari sufficienti per la giornata.
+MIN_VALID_SCENARIOS = int(os.environ.get("MIN_VALID_SCENARIOS", "2") or "2")
+
 NUM_NEWS_TO_PASS = 25      # news passate al modello come contesto
+
+# Categorie scenari per garantire diversificazione
+CATEGORY_THEMES = {
+    "normale": "movimento di mercato standard senza catalyst dominante",
+    "geopolitico": "shock geopolitico (conflitto/sanzioni/supply chain)",
+    "macro": "evento macro (CPI/Fed/NFP/GDP/payrolls)",
+    "crash_rally": "spike di volatilità (crash o relief rally)",
+}
 
 
 # ─── 1. Fetch news GDELT ────────────────────────────────────────────────────
@@ -330,70 +347,172 @@ async def post_scenarios(session: aiohttp.ClientSession,
     raise RuntimeError(f"POST fallito dopo 3 tentativi: {last_err}")
 
 
+async def _generate_and_validate(session: aiohttp.ClientSession,
+                                  news_text: str,
+                                  attempt_label: str) -> list[dict]:
+    """
+    Single generation+validation attempt. Ritorna la lista di scenari validi.
+    Separato in funzione per consentire retry con prompt rinforzato.
+    """
+    try:
+        raw_scenarios = await generate_scenarios_via_llm(session, news_text)
+    except Exception as e:
+        logger.error("[%s] Generazione LLM fallita: %s", attempt_label, e)
+        return []
+
+    valid: list[dict] = []
+    for i, s in enumerate(raw_scenarios):
+        try:
+            s = normalize_scenario(dict(s), i)
+            ok, err = validate_scenario(s)
+            if not ok:
+                logger.warning("[%s] Scenario #%d scartato: %s", attempt_label, i, err)
+                continue
+            valid.append(s)
+        except Exception as e:
+            logger.warning("[%s] Errore normalizzazione scenario #%d: %s",
+                            attempt_label, i, e)
+
+    logger.info("[%s] Validi: %d/%d (rejection rate %.0f%%)",
+                attempt_label, len(valid), len(raw_scenarios),
+                100 * (1 - len(valid) / max(1, len(raw_scenarios))))
+    return valid
+
+
+def _fallback_news_brief() -> str:
+    """
+    Fallback news context quando GDELT è giù o non risponde. Usa temi
+    macro/geo strutturali sempre rilevanti come "contesto sintetico" per
+    permettere al modello di generare scenari anche senza news fresche.
+    """
+    return (
+        "(GDELT non disponibile — usa i seguenti temi macro/geo strutturali "
+        "come base per scenari plausibili)\n"
+        "- Federal Reserve policy uncertainty (tassi, QT)\n"
+        "- US-China tech/trade tensions (semiconductor sanctions, Taiwan)\n"
+        "- Energy market volatility (OPEC+, Russia, Middle East)\n"
+        "- Inflation dynamics (CPI, PPI, energy passthrough)\n"
+        "- Geopolitical risk (Middle East, Eastern Europe, South China Sea)\n"
+        "- Tech sector rotation (AI capex, regulatory, antitrust)\n"
+        "- Banking sector stress (commercial real estate, deposits)\n"
+        "- Crypto regulatory (SEC actions, ETF flows, stablecoins)\n"
+    )
+
+
 # ─── Main ──────────────────────────────────────────────────────────────────
 
 async def main():
+    # Codici di uscita per diagnosi rapida nei log GitHub:
+    #   10 = config error (env vars mancanti)
+    #   20 = generation error (DeepSeek + retry falliti)
+    #   30 = upload error
+    #   40 = insufficient valid scenarios (< MIN_VALID_SCENARIOS)
     base_url = os.environ.get("GEOINVEST_API_BASE_URL", "").strip().rstrip("/")
     token = os.environ.get("SCENARIO_UPLOAD_TOKEN", "").strip()
 
     if not base_url:
         logger.error("GEOINVEST_API_BASE_URL non configurato")
-        sys.exit(1)
+        sys.exit(10)
     if not token:
         logger.error("SCENARIO_UPLOAD_TOKEN non configurato")
-        sys.exit(1)
+        sys.exit(10)
     if not os.environ.get("DEEPSEEK_API_KEY", "").strip():
         logger.error("DEEPSEEK_API_KEY non configurato")
-        sys.exit(1)
+        sys.exit(10)
+
+    logger.info("=" * 60)
+    logger.info("Scenario Generator avviato")
+    logger.info("  Target/run: %d", NUM_SCENARIOS_TARGET)
+    logger.info("  Min guarantee: %d", MIN_VALID_SCENARIOS)
+    logger.info("  Backend: %s", base_url)
+    logger.info("=" * 60)
 
     async with aiohttp.ClientSession() as session:
-        # 1. Fetch news
+        # ── 1. Fetch news (con fallback se GDELT vuoto/down) ─────────────
         articles = await fetch_gdelt_news(session)
-        news_text = _summarize_news(articles)
+        if articles:
+            news_text = _summarize_news(articles)
+            logger.info("GDELT OK: %d articoli, %d char contesto",
+                        len(articles), len(news_text))
+        else:
+            logger.warning("GDELT non disponibile — uso fallback news brief")
+            news_text = _fallback_news_brief()
 
-        # 2. Genera via LLM
-        try:
-            raw_scenarios = await generate_scenarios_via_llm(session, news_text)
-        except Exception as e:
-            logger.error("Generazione LLM fallita: %s", e)
-            sys.exit(1)
+        # ── 2. Prima generazione ─────────────────────────────────────────
+        valid = await _generate_and_validate(session, news_text, "attempt-1")
 
-        # 3. Valida e normalizza
-        valid: list[dict] = []
-        for i, s in enumerate(raw_scenarios):
-            try:
-                s = normalize_scenario(dict(s), i)
-                ok, err = validate_scenario(s)
-                if not ok:
-                    logger.warning("Scenario #%d scartato: %s", i, err)
-                    continue
-                valid.append(s)
-            except Exception as e:
-                logger.warning("Errore normalizzazione scenario #%d: %s", i, e)
+        # ── 3. Retry se sotto guarantee (con prompt rinforzato/contesto extra)
+        if len(valid) < MIN_VALID_SCENARIOS:
+            logger.warning(
+                "Sotto MIN_VALID_SCENARIOS (%d < %d) — retry con contesto rinforzato",
+                len(valid), MIN_VALID_SCENARIOS,
+            )
+            # Per il retry: combina news GDELT + fallback brief per dare al
+            # modello più materiale, e includi una richiesta esplicita di
+            # diversità categoriale.
+            reinforced = (
+                news_text + "\n\n" + _fallback_news_brief() +
+                "\n\nIMPORTANTE: l'attempt precedente ha prodotto pochi scenari "
+                "validi. Sii più rigoroso sullo schema: ogni scenario DEVE "
+                "avere asset_universe >= 5, market_data >= 5 con price_t0 > 0, "
+                "headlines >= 3, description_reveal >= 30 char. Diversifica "
+                "le categorie (normale/geopolitico/macro/crash_rally)."
+            )
+            extra = await _generate_and_validate(session, reinforced, "attempt-2")
+            # Dedup per id (improbabile collision ma safe)
+            existing_ids = {s["id"] for s in valid}
+            for s in extra:
+                if s["id"] not in existing_ids:
+                    valid.append(s)
+                    existing_ids.add(s["id"])
 
-        if not valid:
-            logger.error("Nessuno scenario valido generato — abort")
-            sys.exit(1)
+        if len(valid) == 0:
+            logger.error("Nessuno scenario valido generato dopo retry — abort")
+            sys.exit(20)
 
-        logger.info("%d scenari validi pronti per upload", len(valid))
+        if len(valid) < MIN_VALID_SCENARIOS:
+            logger.error(
+                "Solo %d scenari validi dopo retry, sotto guarantee %d — abort",
+                len(valid), MIN_VALID_SCENARIOS,
+            )
+            sys.exit(40)
 
-        # 4. POST
+        logger.info("✓ %d scenari validi pronti per upload (>= guarantee %d)",
+                    len(valid), MIN_VALID_SCENARIOS)
+
+        # ── 4. POST ────────────────────────────────────────────────────
         try:
             result = await post_scenarios(session, base_url, token, valid)
         except Exception as e:
             logger.error("Upload fallito: %s", e)
-            sys.exit(1)
+            sys.exit(30)
 
         accepted = result.get("accepted", 0)
         rejected = result.get("rejected", 0)
-        logger.info("Risultato: %d accettati, %d rifiutati", accepted, rejected)
+        logger.info("=" * 60)
+        logger.info("RISULTATO: %d accettati, %d rifiutati dal backend",
+                    accepted, rejected)
+        logger.info("=" * 60)
         if rejected:
             for r in result.get("rejected_reasons", []):
                 logger.warning("  rifiutato %s: %s", r.get("id"), r.get("reason"))
 
         if accepted == 0:
-            logger.error("Tutti gli scenari sono stati rifiutati dal backend")
-            sys.exit(1)
+            logger.error("Tutti gli scenari rifiutati dal backend (validazione server)")
+            sys.exit(30)
+
+        if accepted < MIN_VALID_SCENARIOS:
+            logger.warning(
+                "Solo %d accettati dal backend (sotto guarantee %d) "
+                "— il run ha aggiunto meno scenari del minimo richiesto",
+                accepted, MIN_VALID_SCENARIOS,
+            )
+            # Non sys.exit fail qui: ALMENO 1 scenario è stato aggiunto.
+            # Il workflow successivo sopperisce.
+
+        # Print degli ID accettati per audit nei log
+        for aid in result.get("accepted_ids", []):
+            logger.info("  ✓ %s", aid)
 
         logger.info("Generator completato con successo.")
 

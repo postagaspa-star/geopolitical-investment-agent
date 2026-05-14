@@ -1,21 +1,43 @@
-name: Daily Scenario Generator
+name: Scenario Generator (3x/day)
+
+# RAZIONALE FREQUENZA
+# Con ~40-50 run/giorno del Simulator, il pool di scenari dinamici si
+# consuma velocemente (scadenza default 30gg, cap 200). Per garantire
+# >= 2 nuovi scenari al giorno, schedulo 3 run/giorno a orari diversi:
+#   - 06:00 UTC  = mattina Europa (Asia close + news Asia notturne)
+#   - 14:00 UTC  = pre-open Wall Street (rotazione news USA/macro)
+#   - 22:00 UTC  = post-close USA (rotazione news Americas/Asia early)
+#
+# Ogni run target 5 scenari, con MIN_VALID_SCENARIOS=2 garantito (retry
+# se < 2 validi). 3 run × 5 target = ~15 scenari/giorno (best case),
+# almeno 2-3/giorno in caso di failures parziali su singole esecuzioni.
 
 on:
   schedule:
-    # Ogni giorno alle 06:00 UTC (08:00 Roma in inverno, 07:00 BST etc.)
-    - cron: '0 6 * * *'
-  workflow_dispatch:   # consente trigger manuale dalla UI GitHub
+    - cron: '0 6 * * *'     # 06:00 UTC — mattina Europa
+    - cron: '0 14 * * *'    # 14:00 UTC — pre-open Wall Street
+    - cron: '0 22 * * *'    # 22:00 UTC — post-close USA
+  workflow_dispatch:        # trigger manuale dalla UI GitHub
+    inputs:
+      target_scenarios:
+        description: 'Numero scenari da generare (default 5)'
+        required: false
+        default: '5'
 
 jobs:
   generate-scenarios:
     name: Genera scenari dinamici per il Simulator
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       SCENARIO_UPLOAD_TOKEN: ${{ secrets.SCENARIO_UPLOAD_TOKEN }}
       GEOINVEST_API_BASE_URL: ${{ secrets.GEOINVEST_API_BASE_URL }}
+      # Override target via workflow_dispatch input, default 5 per cron
+      TARGET_SCENARIOS: ${{ github.event.inputs.target_scenarios || '5' }}
+      # Min guarantee: lo script ritenta se < di questo (default 2)
+      MIN_VALID_SCENARIOS: '2'
 
     steps:
       - name: Checkout repository
@@ -32,21 +54,85 @@ jobs:
           pip install aiohttp==3.9.5
 
       - name: Verify env vars
+        id: verify_secrets
         run: |
-          if [ -z "$DEEPSEEK_API_KEY" ]; then echo "::error::DEEPSEEK_API_KEY mancante"; exit 1; fi
-          if [ -z "$SCENARIO_UPLOAD_TOKEN" ]; then echo "::error::SCENARIO_UPLOAD_TOKEN mancante"; exit 1; fi
-          if [ -z "$GEOINVEST_API_BASE_URL" ]; then echo "::error::GEOINVEST_API_BASE_URL mancante"; exit 1; fi
-          echo "Tutte le env vars configurate."
+          missing=()
+          [ -z "$DEEPSEEK_API_KEY" ] && missing+=("DEEPSEEK_API_KEY")
+          [ -z "$SCENARIO_UPLOAD_TOKEN" ] && missing+=("SCENARIO_UPLOAD_TOKEN")
+          [ -z "$GEOINVEST_API_BASE_URL" ] && missing+=("GEOINVEST_API_BASE_URL")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Secrets mancanti su GitHub: ${missing[*]}"
+            echo "Vai su Settings → Secrets and variables → Actions e configura:"
+            for m in "${missing[@]}"; do echo "  - $m"; done
+            exit 1
+          fi
+          echo "✓ Tutti e 3 i secrets configurati"
           echo "Backend target: $GEOINVEST_API_BASE_URL"
+          echo "Target scenari/run: $TARGET_SCENARIOS (min guarantee: $MIN_VALID_SCENARIOS)"
+
+      - name: Health check backend
+        id: health
+        run: |
+          # Ping endpoint GET pubblico per verificare che il backend sia raggiungibile
+          # PRIMA di buttare $$ in chiamate DeepSeek
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 15 \
+            "$GEOINVEST_API_BASE_URL/api/simulator/scenarios/dynamic" || echo "000")
+          echo "Backend health check HTTP: $http_code"
+          if [ "$http_code" = "000" ]; then
+            echo "::error::Backend non raggiungibile (timeout/network)"
+            exit 1
+          elif [ "$http_code" = "404" ]; then
+            echo "::error::Endpoint /api/simulator/scenarios/dynamic non esiste (404)"
+            exit 1
+          elif [ "$http_code" = "503" ]; then
+            echo "::warning::Backend risponde 503 (SCENARIO_UPLOAD_TOKEN non configurato server-side?)"
+          fi
+          echo "✓ Backend raggiungibile"
 
       - name: Run scenario generator
-        run: python backend/tools/build_scenarios.py
+        id: gen
+        env:
+          NUM_SCENARIOS_TARGET: ${{ env.TARGET_SCENARIOS }}
+          MIN_VALID_SCENARIOS: ${{ env.MIN_VALID_SCENARIOS }}
+        run: |
+          python backend/tools/build_scenarios.py
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
 
-      - name: Summary
+      - name: Query pool dimension after upload
+        if: always()
+        id: pool
+        run: |
+          response=$(curl -s --max-time 10 \
+            "$GEOINVEST_API_BASE_URL/api/simulator/scenarios/dynamic" || echo "")
+          if [ -n "$response" ]; then
+            # Estrai count (no jq disponibile di default)
+            count=$(echo "$response" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('count', 'n/a'))" 2>/dev/null || echo "parse-fail")
+            echo "Pool dinamico attuale: $count scenari attivi"
+            echo "active_count=$count" >> $GITHUB_OUTPUT
+          else
+            echo "active_count=unknown" >> $GITHUB_OUTPUT
+          fi
+
+      - name: GitHub Step Summary
         if: always()
         run: |
-          echo "## Daily Scenario Generator" >> $GITHUB_STEP_SUMMARY
-          echo "- **Run timestamp**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
-          echo "- **Trigger**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Backend**: ${{ env.GEOINVEST_API_BASE_URL }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Scenario Generator — Run Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valore |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp UTC | $(date -u +'%Y-%m-%d %H:%M:%S') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend | ${{ env.GEOINVEST_API_BASE_URL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target scenari | ${{ env.TARGET_SCENARIOS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Min guarantee | ${{ env.MIN_VALID_SCENARIOS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Job status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pool size dopo upload | ${{ steps.pool.outputs.active_count }} scenari attivi |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" = "failure" ]; then
+            echo "### ❌ Run fallito" >> $GITHUB_STEP_SUMMARY
+            echo "Controlla i log degli step sopra per la causa specifica." >> $GITHUB_STEP_SUMMARY
+            echo "Cause tipiche: secrets mancanti, backend down, DeepSeek API quota, GDELT non risponde." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ✓ Run completato" >> $GITHUB_STEP_SUMMARY
+          fi
