@@ -7,6 +7,56 @@ import {
 
 const API = window.location.origin;
 
+/**
+ * Safe fetch+parse JSON: gestisce response vuote, errori proxy (502/504 con
+ * body HTML), e response truncate da timeout backend.
+ *
+ * Bug originale: res.json() crash con "Unexpected end of JSON input" quando
+ * il backend taglia la response (timeout Cloudflare/Render dopo 30-60s) o
+ * il proxy ritorna pagina di errore HTML invece di JSON. Tipico con il
+ * second-round technical agent della chat decision che puo' prendere 20-30s.
+ *
+ * Ritorna { ok: bool, status: number, data: object | null, error?: string }.
+ */
+async function safeFetchJson(url, opts = {}, timeoutMs = 120000) {
+  const ctrl = new AbortController();
+  // Combina abort signal esterno con il timer interno
+  const externalSignal = opts.signal;
+  if (externalSignal) {
+    if (externalSignal.aborted) ctrl.abort();
+    else externalSignal.addEventListener("abort", () => ctrl.abort(), { once: true });
+  }
+  const timer = setTimeout(() => ctrl.abort(new Error("client timeout")), timeoutMs);
+  try {
+    const res = await fetch(url, { ...opts, signal: ctrl.signal });
+    const text = await res.text();
+    if (!text || !text.trim()) {
+      return {
+        ok: false, status: res.status, data: null,
+        error: `Risposta vuota dal server (HTTP ${res.status}). Probabile timeout backend o errore proxy.`,
+      };
+    }
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      // Body non-JSON (es. pagina HTML di errore proxy)
+      return {
+        ok: false, status: res.status, data: null,
+        error: `Risposta non valida (HTTP ${res.status}): ${text.slice(0, 100)}`,
+      };
+    }
+    return { ok: res.ok, status: res.status, data };
+  } catch (e) {
+    if (e.name === "AbortError") {
+      return { ok: false, status: 0, data: null, error: "Richiesta annullata (timeout o abort)" };
+    }
+    return { ok: false, status: 0, data: null, error: String(e.message || e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const AGENT_TYPES = [
   {
     id: "standard",
@@ -425,9 +475,8 @@ function CommitmentsPanel({ agentType, accentColor }) {
   const loadItems = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API}/api/commitments/${agentType}?status=active`);
-      const data = await res.json();
-      if (res.ok) setItems(data.items || []);
+      const r = await safeFetchJson(`${API}/api/commitments/${agentType}?status=active`);
+      if (r.ok && r.data) setItems(r.data.items || []);
     } catch {
       /* ignore */
     } finally {
@@ -624,24 +673,19 @@ export default function ChatDecisionPage() {
     setLoading(true);
     setError(null);
     (async () => {
-      try {
-        const res = await fetch(`${API}/api/chat-decision/history/${agentType}`,
-                                 { signal: ac.signal });
-        if (ac.signal.aborted) return;
-        const data = await res.json();
-        if (ac.signal.aborted) return;
-        if (!res.ok) {
-          setError(data.error || `HTTP ${res.status}`);
-          // NON cancellare i messaggi precedenti: l'errore e' visibile sopra
-        } else {
-          setMessages(data.messages || []);
-        }
-      } catch (e) {
-        if (e.name === "AbortError") return;
-        setError(String(e));
-      } finally {
-        if (!ac.signal.aborted) setLoading(false);
+      const r = await safeFetchJson(
+        `${API}/api/chat-decision/history/${agentType}`,
+        { signal: ac.signal },
+        60000,  // history: 60s timeout
+      );
+      if (ac.signal.aborted) return;
+      if (!r.ok) {
+        setError((r.data && r.data.error) || r.error || `HTTP ${r.status}`);
+        // NON cancellare i messaggi precedenti: l'errore e' visibile sopra
+      } else {
+        setMessages((r.data && r.data.messages) || []);
       }
+      if (!ac.signal.aborted) setLoading(false);
     })();
     return () => { ac.abort(); };
   }, [agentType]);
@@ -669,15 +713,24 @@ export default function ChatDecisionPage() {
     setMessages((prev) => [...prev, tempUserMsg]);
     setInput("");
     try {
-      const res = await fetch(`${API}/api/chat-decision/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_type: agentType, message: msg }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || `HTTP ${res.status}`);
+      // Timeout esteso a 180s: il second-round con technical agent + LLM
+      // re-call puo' impiegare 30-60s, e il default 30s del browser
+      // chiudeva la connessione prima → "Unexpected end of JSON input".
+      const r = await safeFetchJson(
+        `${API}/api/chat-decision/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent_type: agentType, message: msg }),
+        },
+        180000,
+      );
+      if (!r.ok) {
+        throw new Error(
+          (r.data && r.data.error) || r.error || `HTTP ${r.status}`
+        );
       }
+      const data = r.data || {};
       // FIX RACE CONDITION: invece di GET history (che puo' tornare vuoto
       // se l'INSERT in DB e' fallito ma il fallback non e' ancora popolato),
       // costruiamo i nuovi messaggi DIRETTAMENTE dalla response del send.
@@ -725,15 +778,20 @@ export default function ChatDecisionPage() {
     setExecutingMsgId(messageId);
     setError(null);
     try {
-      const res = await fetch(`${API}/api/chat-decision/execute-trade`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message_id: messageId }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || data.reason || `HTTP ${res.status}`);
+      const r = await safeFetchJson(
+        `${API}/api/chat-decision/execute-trade`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message_id: messageId }),
+        },
+        90000,
+      );
+      if (!r.ok) {
+        const d = r.data || {};
+        throw new Error(d.error || d.reason || r.error || `HTTP ${r.status}`);
       }
+      const data = r.data || {};
       setLastExecutedId(data.trade_id);
       // FIX: invece di GET history, aggiorna direttamente il msg in place
       // per riflettere lo stato eseguito.
@@ -758,14 +816,18 @@ export default function ChatDecisionPage() {
     setExecutingActionIndex(actionIndex);
     setError(null);
     try {
-      const res = await fetch(`${API}/api/chat-decision/execute-action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message_id: messageId, action_index: actionIndex }),
-      });
-      const data = await res.json();
-      if (!res.ok && !data.result) {
-        throw new Error(data.error || `HTTP ${res.status}`);
+      const r = await safeFetchJson(
+        `${API}/api/chat-decision/execute-action`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message_id: messageId, action_index: actionIndex }),
+        },
+        90000,
+      );
+      const data = r.data || {};
+      if (!r.ok && !data.result) {
+        throw new Error(data.error || r.error || `HTTP ${r.status}`);
       }
       // FIX: aggiorna direttamente lo state del msg con il nuovo
       // executed_action_results per indice — niente piu' GET history
