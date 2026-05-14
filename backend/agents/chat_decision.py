@@ -621,9 +621,24 @@ def _parse_response(raw_text: str) -> dict:
     except json.JSONDecodeError:
         return {"text": text, "proposed_trade": None, "proposed_actions": []}
 
-    if not isinstance(parsed, dict) or "text" not in parsed:
+    if not isinstance(parsed, dict):
         return {"text": text, "proposed_trade": None, "proposed_actions": []}
 
+    # Il JSON e' valido se contiene ALMENO UNO dei campi conosciuti.
+    # IMPORTANTE: il system prompt istruisce esplicitamente il modello a
+    # OMETTERE 'text' quando vuole chiedere needs_technical_analysis
+    # ("INVECE di 'text' il campo 'needs_technical_analysis'"). Quindi NON
+    # possiamo richiedere 'text' obbligatorio: causava il bug per cui chi
+    # chiedeva un'analisi tecnica vedeva il JSON crudo come risposta finale
+    # (parser cadeva nel fallback, second-round non partiva).
+    KNOWN_KEYS = {
+        "text", "proposed_trade", "proposed_actions", "needs_technical_analysis",
+    }
+    if not (set(parsed.keys()) & KNOWN_KEYS):
+        return {"text": text, "proposed_trade": None, "proposed_actions": []}
+
+    # user_text puo' essere vuota quando il modello chiede solo TA:
+    # il caller fa second-round e rimpiazza con la vera risposta testuale.
     user_text = str(parsed.get("text", "")).strip()
 
     # ── proposed_actions[] (nuovo formato) ─────────────────────────────
