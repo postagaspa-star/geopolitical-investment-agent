@@ -497,7 +497,10 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
             "filtered_out": filtered_count,
             "json_parsed": parse_ok,
             "analyses_summary": analyses_summary,
-            "summary_text": (report.get("summary") or "")[:300],
+            # Cap 300 → 2500: i summary tecnici crypto (BTC.D, funding,
+            # leader/laggard altcoin) raramente entrano in 300 char,
+            # e la Tech card del frontend mostrava sintesi troncate.
+            "summary_text": (report.get("summary") or "")[:2500],
             "raw_preview": "" if parse_ok else (response_text[:400] if response_text else ""),
         }, default=str))
     except Exception:

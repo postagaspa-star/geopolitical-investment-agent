@@ -151,6 +151,9 @@ def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
     sit = (ia.get("situation_overview") or "").strip()
     if sit:
         sections.append(f"📍 SITUAZIONE\n{sit}")
+    rot = (ia.get("rotation_summary") or "").strip()
+    if rot:
+        sections.append(f"🔄 ROTATION ANALYSIS\n{rot}")
     candidates = ia.get("asset_candidates") or []
     if candidates:
         if isinstance(candidates, list):
@@ -169,7 +172,11 @@ def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
         sections.append(f"⚠️ RISCHIO PRINCIPALE\n{primary_risk}")
     final = (final_text or "").strip()
     if final:
-        sections.append(f"✅ CONCLUSIONE\n{final[:500]}")
+        # Cap aumentato 500 → 4000: la conclusione del Decision Agent
+        # contiene rotation analysis, trade rationale, risk mitigation —
+        # truncare a 500 nascondeva l'intero ragionamento finale nella
+        # ReasoningCard del frontend.
+        sections.append(f"✅ CONCLUSIONE\n{final[:4000]}")
 
     if not sections:
         # Fallback: nessuna fase del workflow è stata committed
@@ -671,9 +678,36 @@ def _build_regime_protocol_block(asset_class: str = "equity") -> str:
         "🧭  REGIME PROTOCOL — DECISION FRAMEWORK (OBBLIGATORIO)",
         "═" * 60,
         "",
-        "Prima di QUALSIASI trade-decision esegui questi 3 step in ordine.",
+        "Prima di QUALSIASI trade-decision esegui questi step in ordine.",
         "Non e' opzionale: e' il processo che chiude il gap diagnosticato",
         "dalla memoria del Simulator (win-rate 0% in mercati laterali/macro).",
+        "",
+        "─── STEP 0 — ROTATION CHECK (OBBLIGATORIO, NON SOLO IN CRISI) ───",
+        "",
+        "Nel contesto trovi SEMPRE un blocco '🔄 ROTATION SCAN' con ~60 ticker",
+        "cross-sector (defensive, safe-haven, hedge, geopolitical, energy,",
+        "settoriali, bonds, international, factor) e relative metriche:",
+        "performance multi-TF, forza relativa vs SPY, RSI, distanza MA, vol.",
+        "",
+        "Devi leggerlo PRIMA di classificare il regime. Domande da farti:",
+        "  1. Quali categorie hanno rotation_score positivo robusto?",
+        "  2. Quali stanno guidando la forza relativa (RS5d/20d/60d > 0)?",
+        "  3. La tua watchlist abituale (tech mega-cap, posizioni esistenti) e'",
+        "     allineata con le categorie leader, o sta sottoperformando mentre",
+        "     altri segmenti ruotano?",
+        "  4. Se in regime GEOPOLITICAL/MACRO/CRASH: stanno guidando defense /",
+        "     gold / energy / defensive ETF? E' NORMALE e li devi considerare,",
+        "     non ignorarli per restare 'sulla solita lista'.",
+        "  5. Se in BULL/TREND-UP: c'e' rotazione intra-settori (es. da growth",
+        "     a value, o da cyclical a defensive)? Tipico segno di fase tarda.",
+        "",
+        "Principio: \"c'e' SEMPRE qualcosa che sale. Il tuo lavoro e' trovarlo,",
+        "non forzare un trade su asset che non si muovono\". La rotazione e'",
+        "uno stato PERMANENTE del mercato, non un fenomeno solo da crisi.",
+        "",
+        "Quando servono filtri (solo defensive, solo oversold, solo top X di",
+        "una categoria, includere bottom-performers per short...) chiama il",
+        "tool `scan_rotation_opportunities` con i parametri appropriati.",
         "",
         "─── STEP 1 — CLASSIFICA IL REGIME ───",
         "",
@@ -1414,6 +1448,81 @@ DECISION_TOOLS = [
         },
     },
     {
+        "name": "scan_rotation_opportunities",
+        "description": (
+            "Scansiona un universo AMPIO (~60 ticker cross-sector) per identificare "
+            "opportunità di rotazione attiva. Da chiamare SEMPRE quando il summary "
+            "rotation incluso in contesto non basta o vuoi filtrare per categoria/RSI. "
+            "L'universo copre 9 categorie:\n"
+            "  - defensive: utilities, staples, healthcare (XLU, XLP, XLV, KO, JNJ, ...)\n"
+            "  - safe_haven: oro, argento, treasuries, USD (GLD, SLV, TLT, IEF, UUP)\n"
+            "  - hedge: inverse ETF + volatilità (SH, PSQ, RWM, VIXY)\n"
+            "  - geopolitical: defense & aerospace (LMT, RTX, NOC, GD, ITA, ...)\n"
+            "  - energy_commodity: energy ETF + petroliferi (XLE, USO, OXY, CVX, ...)\n"
+            "  - sectors: gli altri sector ETF (XLK, XLF, XLY, XLI, XLB, XLRE, XLC)\n"
+            "  - bonds: corporate IG / HY / aggregate (HYG, LQD, AGG)\n"
+            "  - international: Europe, Japan, India, Brazil, China (VGK, EWJ, INDA, EWZ, FXI)\n"
+            "  - factor: low-vol, quality, momentum, value (USMV, QUAL, MTUM, VLUE)\n\n"
+            "Restituisce per ogni ticker filtrato: price, performance multi-TF (1d/5d/20d/60d), "
+            "forza relativa vs SPY (RS5d/RS20d/RS60d in %), RSI14, distanza da 50MA/200MA, "
+            "posizione nel range 52-week, volume ratio vs 20d-avg, e rotation_score finale.\n\n"
+            "USO TIPICO:\n"
+            "  - 'voglio vedere SOLO defensive con RS positivo' → categories=[defensive], min_rs_5d_pct=0\n"
+            "  - 'top 10 anti-correlati' → categories=[hedge, safe_haven], top_n=10\n"
+            "  - 'tutti con RSI oversold' → rsi_max=35\n"
+            "  - 'big picture rotazione tra settori' → categories=[sectors], top_n=11\n"
+            "Costo: ~0$ (dati cached 30 min). Chiamabile più volte per filtri diversi."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "categories": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "defensive", "safe_haven", "hedge", "geopolitical",
+                            "energy_commodity", "sectors", "bonds",
+                            "international", "factor",
+                        ],
+                    },
+                    "description": "Categorie da scansionare. Default: tutte e 9.",
+                },
+                "min_rs_5d_pct": {
+                    "type": "number",
+                    "description": "Filtra solo ticker con forza relativa 5d vs SPY ≥ X%. Es: 0.5 = solo chi batte SPY di almeno 0.5% in 5gg.",
+                },
+                "min_rs_20d_pct": {
+                    "type": "number",
+                    "description": "Filtra solo ticker con forza relativa 20d vs SPY ≥ X%.",
+                },
+                "rsi_max": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Limite RSI superiore (es. 70 per escludere overbought).",
+                },
+                "rsi_min": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Limite RSI inferiore (es. 30 per cercare solo oversold).",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60,
+                    "description": "Max ticker da ritornare ordinati per rotation_score (default 20).",
+                },
+                "include_bottom": {
+                    "type": "boolean",
+                    "description": "Se true include anche i 5 peggiori (per short / ticker da evitare). Default false.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "set_stop_loss",
         "description": (
             "Imposta o aggiorna lo stop-loss AUTOMATICO su una posizione "
@@ -1590,6 +1699,9 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
         if tool_name == "commit_initial_assessment":
             payload = {
                 "situation_overview": (tool_input.get("situation_overview") or "")[:6000],
+                # rotation_summary: campo obbligatorio della FASE 1 che riassume
+                # cosa il modello ha visto nel rotation scan iniettato in contesto.
+                "rotation_summary": (tool_input.get("rotation_summary") or "")[:2000],
                 "asset_candidates": tool_input.get("asset_candidates") or [],
                 "technical_questions": tool_input.get("technical_questions") or [],
             }
@@ -1835,8 +1947,11 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
 
         elif tool_name == "do_nothing":
             reasoning = tool_input["reasoning"]
+            # Cap aumentato 1000 → 4000: NO_TRADE reasoning include la
+            # rotation analysis ("ho scartato XYZ perché defensive guida")
+            # + motivazione regime. 1000 char nascondeva metà argomento.
             database.insert_agent_log(run_id, "DECISION_NO_TRADE",
-                json.dumps({"reasoning": reasoning[:1000]}, default=str))
+                json.dumps({"reasoning": reasoning[:4000]}, default=str))
             return json.dumps({"action": "no_trade", "reasoning": reasoning, "at": timestamp})
 
         elif tool_name == "request_extra_analysis":
@@ -1960,6 +2075,70 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                 "errors_per_ticker": errors_per_ticker,
                 "raw_indicators_available": bool(report.get("raw_indicators")),
             }, default=str)
+
+        elif tool_name == "scan_rotation_opportunities":
+            # ── Rotation scan tool ──────────────────────────────────────────
+            # Universo ampio cross-sector con metriche dettagliate per
+            # individuare opportunità di rotazione attiva (sempre on, non
+            # solo in crisi). Cached 30 min — tipicamente cache-hit.
+            try:
+                from agents.rotation_scan import (
+                    scan_rotation_universe, filter_rotation,
+                    format_filtered_for_tool, VALID_CATEGORIES,
+                )
+                # Parametri (tutti opzionali — defaults sensati)
+                raw_cats = tool_input.get("categories") or []
+                if isinstance(raw_cats, str):
+                    raw_cats = [raw_cats]
+                cats = [c for c in raw_cats if c in VALID_CATEGORIES] or None
+
+                min_rs_5d = tool_input.get("min_rs_5d_pct")
+                min_rs_20d = tool_input.get("min_rs_20d_pct")
+                rsi_max = tool_input.get("rsi_max")
+                rsi_min = tool_input.get("rsi_min")
+                top_n = tool_input.get("top_n", 20)
+                include_bottom = bool(tool_input.get("include_bottom", False))
+
+                # Safety caps
+                if top_n is not None:
+                    try:
+                        top_n = max(1, min(60, int(top_n)))
+                    except Exception:
+                        top_n = 20
+
+                scan_data = await scan_rotation_universe()
+                filtered = filter_rotation(
+                    scan_data,
+                    categories=cats,
+                    min_rs_5d_pct=(float(min_rs_5d) if min_rs_5d is not None else None),
+                    min_rs_20d_pct=(float(min_rs_20d) if min_rs_20d is not None else None),
+                    rsi_max=(float(rsi_max) if rsi_max is not None else None),
+                    rsi_min=(float(rsi_min) if rsi_min is not None else None),
+                    top_n=top_n,
+                    include_bottom=include_bottom,
+                )
+
+                database.insert_agent_log(run_id, "DECISION_ROTATION_SCAN", json.dumps({
+                    "categories": cats or "all",
+                    "filters": {
+                        "min_rs_5d_pct": min_rs_5d,
+                        "min_rs_20d_pct": min_rs_20d,
+                        "rsi_max": rsi_max,
+                        "rsi_min": rsi_min,
+                        "top_n": top_n,
+                        "include_bottom": include_bottom,
+                    },
+                    "results_count": filtered.get("filter_count", 0),
+                    "top_3_tickers": [r["ticker"] for r in filtered.get("rows", [])[:3]],
+                }, default=str))
+
+                return format_filtered_for_tool(filtered)
+            except Exception as exc:
+                logger.warning("[%s] rotation scan tool error: %s", run_id, exc)
+                return json.dumps({
+                    "error": f"Rotation scan fallito: {exc}",
+                    "hint": "Riprova senza filtri, oppure cala il numero di categorie.",
+                })
 
         elif tool_name == "set_stop_loss":
             ticker = (tool_input.get("ticker") or "").upper().strip()
@@ -2152,6 +2331,17 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     # Checkpoint
     _save_checkpoint(run_id, "decision", "RUNNING", {"phase": "context_loading"})
 
+    # --- ROTATION SCAN (sempre-on, in parallelo all'ingestione contesto) ---
+    # Lancia subito il rotation scan: ~10-20s a cache-miss, istantaneo a
+    # cache-hit (TTL 30 min). Awaited dopo che gli altri context fetch
+    # sono completi, così la latenza si nasconde.
+    rotation_task = None
+    try:
+        from agents.rotation_scan import scan_rotation_universe as _scan_rot
+        rotation_task = asyncio.create_task(_scan_rot())
+    except Exception as _rot_exc:
+        logger.debug("[%s] rotation scan task launch failed: %s", run_id, _rot_exc)
+
     # --- FASE A: Ingestione Contesto a Cascata (8H + 4D, no più 3W) ---
     context_loaded = {}
 
@@ -2240,10 +2430,81 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             "skipped": True,
         }
 
+    # --- Await rotation scan (lanciato in parallelo all'inizio) ---
+    # Timeout 25s: a cache-hit è istantaneo; a cache-miss prende 10-20s.
+    # Se fallisce/scade, continuiamo senza scan (il tool resta comunque
+    # invocabile dal modello).
+    rotation_data = None
+    rotation_status = "not_started"
+    if rotation_task is not None:
+        try:
+            rotation_data = await asyncio.wait_for(rotation_task, timeout=25.0)
+            scanned = (rotation_data or {}).get("tickers_scanned", 0)
+            context_loaded["rotation_scan"] = scanned
+            rotation_status = "ok" if scanned > 0 else "empty"
+            logger.info("[%s][DECISION] rotation scan ready: %d tickers", run_id, scanned)
+        except asyncio.TimeoutError:
+            logger.warning("[%s][DECISION] rotation scan timeout", run_id)
+            context_loaded["rotation_scan"] = "timeout"
+            rotation_status = "timeout"
+        except Exception as exc:
+            logger.warning("[%s][DECISION] rotation scan failed: %s", run_id, exc)
+            context_loaded["rotation_scan"] = "error"
+            rotation_status = "error"
+
+    # ── Log esplicito DECISION_ROTATION (visibile in dashboard) ────────
+    # Permette all'utente di verificare che lo scan sia girato realmente e
+    # quali siano le top opportunità di rotazione iniettate nel contesto
+    # del Decision Agent. Senza questo log, il rotation scan era invisibile
+    # → l'utente non poteva sapere se il modello stesse effettivamente
+    # vedendo dati di rotazione.
+    try:
+        rot_log_payload = {
+            "event": "rotation_scan_ready",
+            "status": rotation_status,
+        }
+        if rotation_data and rotation_data.get("rows"):
+            top_5 = rotation_data["rows"][:5]
+            bottom_5 = sorted(
+                rotation_data["rows"],
+                key=lambda r: r.get("rotation_score", 0),
+            )[:5]
+            rot_log_payload.update({
+                "tickers_total": rotation_data.get("tickers_total", 0),
+                "tickers_scanned": rotation_data.get("tickers_scanned", 0),
+                "spy_benchmark": rotation_data.get("spy_benchmark", {}),
+                "scan_timestamp_utc": rotation_data.get("scan_timestamp_utc"),
+                "top_5_by_score": [
+                    {
+                        "ticker": r["ticker"],
+                        "category": r["category"],
+                        "rotation_score": r["rotation_score"],
+                        "c5d_pct": r.get("c5d_pct"),
+                        "rs5d_vs_spy_pct": r.get("rs5d_vs_spy_pct"),
+                        "rs20d_vs_spy_pct": r.get("rs20d_vs_spy_pct"),
+                        "rsi14": r.get("rsi14"),
+                    } for r in top_5
+                ],
+                "bottom_5_by_score": [
+                    {
+                        "ticker": r["ticker"],
+                        "category": r["category"],
+                        "rotation_score": r["rotation_score"],
+                        "c5d_pct": r.get("c5d_pct"),
+                        "rs5d_vs_spy_pct": r.get("rs5d_vs_spy_pct"),
+                    } for r in bottom_5
+                ],
+            })
+        database.insert_agent_log(run_id, "DECISION_ROTATION",
+            json.dumps(rot_log_payload, default=str))
+    except Exception as _e:
+        logger.debug("[%s] DECISION_ROTATION log failed: %s", run_id, _e)
+
     # --- Costruisci messaggio utente ---
     user_message = _build_context_message(
         rep_4d, rep_8h, recent_buffer, tech_report, portfolio_state, docs,
         focus_tickers=focus_tickers, watchdog_reason=watchdog_reason,
+        rotation_data=rotation_data,
     )
 
     database.insert_agent_log(run_id, "DECISION_CONTEXT",
@@ -2554,16 +2815,20 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         ia = (workflow_state.initial_assessment or {}) if 'workflow_state' in locals() else {}
         ft = (workflow_state.final_thesis or {}) if 'workflow_state' in locals() else {}
         reasoning_text = _build_reasoning_text(ia, ft, final_text)
+        # Cap field aumentati: situation_overview 1500→4000, thesis
+        # 2000→5000, action_plan 1000→3000, primary_risk 1000→3000.
+        # I cap precedenti tagliavano contenuto nelle card dashboard.
         reasoning_summary = {
             "model": used_model,
             "phase_state": ws.get("phase"),
             "reasoning_text": reasoning_text,   # campo letto dal frontend
-            "situation_overview": (ia.get("situation_overview") or "")[:1500],
+            "situation_overview": (ia.get("situation_overview") or "")[:4000],
+            "rotation_summary": (ia.get("rotation_summary") or "")[:2000],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],
-            "thesis": (ft.get("thesis") or "")[:2000],
-            "action_plan": (ft.get("action_plan") or "")[:1000],
-            "primary_risk": (ft.get("primary_risk") or "")[:1000],
+            "thesis": (ft.get("thesis") or "")[:5000],
+            "action_plan": (ft.get("action_plan") or "")[:3000],
+            "primary_risk": (ft.get("primary_risk") or "")[:3000],
             "final_text": final_text[:8000],
             "trades": len(trades_executed),
         }
@@ -2774,12 +3039,14 @@ async def _run_deepseek_decision_loop(
             "model": DEEPSEEK_R1_MODEL,
             "phase_state": workflow_state.phase,
             "reasoning_text": _build_reasoning_text(ia, ft, final_text),
-            "situation_overview": (ia.get("situation_overview") or "")[:1500],
+            # Cap field aumentati per evitare troncamento nelle card UI
+            "situation_overview": (ia.get("situation_overview") or "")[:4000],
+            "rotation_summary": (ia.get("rotation_summary") or "")[:2000],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],
-            "thesis": (ft.get("thesis") or "")[:2000],
-            "action_plan": (ft.get("action_plan") or "")[:1000],
-            "primary_risk": (ft.get("primary_risk") or "")[:1000],
+            "thesis": (ft.get("thesis") or "")[:5000],
+            "action_plan": (ft.get("action_plan") or "")[:3000],
+            "primary_risk": (ft.get("primary_risk") or "")[:3000],
             "final_text": final_text[:8000],
             "trades": len(trades_executed),
         }, default=str))
@@ -2795,7 +3062,8 @@ async def _run_deepseek_decision_loop(
 
 def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state, docs,
                            focus_tickers: list[str] | None = None,
-                           watchdog_reason: str | None = None) -> str:
+                           watchdog_reason: str | None = None,
+                           rotation_data: dict | None = None) -> str:
     """
     Costruisce il messaggio di contesto per il Decision Agent.
     Riceve liste di report aggregati (sistema cascata 4D/8H).
@@ -2804,8 +3072,27 @@ def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state,
     ticker che hanno scatenato il trigger (es. NVDA, GLD, QQQ con +5%, +3%,
     +2% in 5 min). Questi DEVONO essere il punto di partenza dell'analisi
     del Decision Agent — non possono essere ignorati senza giustificazione.
+
+    rotation_data: output di scan_rotation_universe() — universo ampio
+    cross-sector con metriche dettagliate. Iniettato come blocco visibile
+    nel contesto cosi' il modello vede SEMPRE le opportunità di rotazione
+    (non solo durante regimi di crisi).
     """
     parts = []
+
+    # === ROTATION SCAN BLOCK (sempre-on) ===
+    # In testa al contesto (subito dopo questa nota), così è la PRIMA cosa
+    # che il modello legge dopo gli obiettivi attivi/direttive. Mostra forza
+    # relativa cross-sector — segnala flow su defensive/safe-haven/energy/
+    # defense/etc. che la watchlist standard ignorerebbe.
+    if rotation_data and rotation_data.get("rows"):
+        try:
+            from agents.rotation_scan import format_rotation_for_prompt
+            rot_block = format_rotation_for_prompt(rotation_data, top_n=18)
+            if rot_block:
+                parts.append(rot_block)
+        except Exception as _e:
+            logger.debug("rotation block format failed: %s", _e)
 
     # === OBIETTIVI ATTIVI (impegni dei run precedenti) ===
     # Memoria persistente: gli impegni che il Decision Agent stesso ha preso

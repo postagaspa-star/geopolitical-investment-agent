@@ -43,13 +43,18 @@ def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
         return _impl(ia, ft, final_text)
     except Exception:
         # Fallback inline se l'import fallisce
+        # NB: cap 500 → 4000 per allinearsi al path principale (decision.py).
+        # Il fallback è raro (solo se circular import a load time), ma
+        # quando scatta il cap 500 troncava la CONCLUSIONE a metà frase.
         parts = []
         if ia.get("situation_overview"):
             parts.append(f"SITUAZIONE: {ia['situation_overview']}")
+        if ia.get("rotation_summary"):
+            parts.append(f"ROTATION: {ia['rotation_summary']}")
         if ft.get("thesis"):
             parts.append(f"TESI: {ft['thesis']}")
         if final_text:
-            parts.append(f"CONCLUSIONE: {final_text[:500]}")
+            parts.append(f"CONCLUSIONE: {final_text[:4000]}")
         return "\n\n".join(parts) or final_text or "(no reasoning)"
 
 

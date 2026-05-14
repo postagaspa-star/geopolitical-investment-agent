@@ -177,6 +177,7 @@ def apply_tool_transition(state: WorkflowState, tool_name: str,
         questions = tool_input.get("technical_questions") or []
         state.initial_assessment = {
             "situation_overview": tool_input.get("situation_overview", ""),
+            "rotation_summary": tool_input.get("rotation_summary", ""),
             "asset_candidates": tool_input.get("asset_candidates", []),
             "technical_questions": questions,
         }
@@ -257,10 +258,17 @@ COMMIT_INITIAL_ASSESSMENT_TOOL = {
     "name": "commit_initial_assessment",
     "description": (
         "FASE 1 OBBLIGATORIA. Commit dell'analisi iniziale della situazione "
-        "corrente (portfolio, briefing macro, sentiment buffer) PRIMA di "
-        "richiedere dati tecnici. situation_overview deve essere >= 200 char. "
-        "Se non ti servono dati tecnici, passa technical_questions=[]: "
-        "potrai saltare la FASE 2 e andare direttamente a commit_final_thesis."
+        "corrente (portfolio, briefing macro, sentiment buffer, ROTATION SCAN) "
+        "PRIMA di richiedere dati tecnici. situation_overview deve essere "
+        ">= 200 char e DEVE riferirsi esplicitamente al rotation scan: "
+        "quali categorie guidano, quali sono in coda, e se la tua watchlist "
+        "abituale è allineata o no. Se non ti servono dati tecnici, passa "
+        "technical_questions=[]: potrai saltare la FASE 2 e andare "
+        "direttamente a commit_final_thesis.\n\n"
+        "Il campo rotation_summary è OBBLIGATORIO: 1-2 frasi su cosa il "
+        "rotation scan ti ha detto su questa giornata di mercato. Senza "
+        "questo campo non posso verificare che tu abbia integrato i dati "
+        "cross-sector nel tuo ragionamento."
     ),
     "input_schema": {
         "type": "object",
@@ -268,13 +276,28 @@ COMMIT_INITIAL_ASSESSMENT_TOOL = {
             "situation_overview": {
                 "type": "string",
                 "description": "Analisi della situazione corrente senza dati tecnici "
-                               "(>= 200 caratteri).",
+                               "(>= 200 caratteri). DEVE menzionare cosa hai osservato "
+                               "nel rotation scan (categorie leader/laggard, SPY benchmark).",
+            },
+            "rotation_summary": {
+                "type": "string",
+                "description": "OBBLIGATORIO. 1-3 frasi che riassumono il rotation scan: "
+                               "quali categorie hanno rotation_score positivo, quali "
+                               "ticker guidano (top 2-3), se SPY è positivo/negativo, "
+                               "e se questo cambia la tua scelta di asset rispetto "
+                               "alla watchlist standard. Esempio: 'Safe-haven (GLD, TLT) "
+                               "e defensive (XLU) guidano con RS5d positivi vs SPY -1.5%. "
+                               "Tech (XLK) in coda. Sposto focus dalle posizioni tech "
+                               "verso gold/utilities'.",
             },
             "asset_candidates": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Ticker su cui vuoi indagare (puo' essere lista vuota se "
-                               "il run e' di pure rebalancing/no-trade).",
+                               "il run e' di pure rebalancing/no-trade). DEVE includere "
+                               "almeno 1 ticker dal rotation scan se esistono opportunità "
+                               "con rotation_score positivo, A MENO CHE tu motivi "
+                               "esplicitamente in situation_overview perché ignorarli.",
             },
             "technical_questions": {
                 "type": "array",
@@ -283,7 +306,8 @@ COMMIT_INITIAL_ASSESSMENT_TOOL = {
                                "Vuoto = salta FASE 2 e vai direttamente a commit_final_thesis.",
             },
         },
-        "required": ["situation_overview", "asset_candidates", "technical_questions"],
+        "required": ["situation_overview", "rotation_summary",
+                      "asset_candidates", "technical_questions"],
     },
 }
 
