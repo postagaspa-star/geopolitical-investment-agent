@@ -43,8 +43,22 @@ logger = logging.getLogger("scenario_generator")
 
 # ─── Configurazione ─────────────────────────────────────────────────────────
 
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"   # V3 — economico per generazione strutturata
+# Toggle Auriko/DeepSeek INLINE (non importa sim_llm: questo script gira su
+# GitHub Actions con cwd != backend/, quindi resta standalone). Stessa
+# semantica di backend/sim_llm.py: AURIKO_API_KEY presente → Auriko gateway,
+# assente → DeepSeek diretto (default, comportamento storico).
+_AURIKO_KEY = os.environ.get("AURIKO_API_KEY", "").strip()
+if _AURIKO_KEY:
+    _AURIKO_BASE = os.environ.get(
+        "AURIKO_BASE_URL", "https://api.auriko.ai/v1"
+    ).strip().rstrip("/")
+    DEEPSEEK_API_URL = f"{_AURIKO_BASE}/chat/completions"
+    DEEPSEEK_MODEL = os.environ.get("AURIKO_MODEL_V3", "deepseek-chat").strip()
+    _LLM_PROVIDER = "auriko"
+else:
+    DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+    DEEPSEEK_MODEL = "deepseek-chat"   # V3 — economico per generazione strutturata
+    _LLM_PROVIDER = "deepseek"
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_QUERY = (
@@ -185,10 +199,17 @@ def _new_scenario_id(category: str, slug: str, idx: int) -> str:
 
 async def generate_scenarios_via_llm(session: aiohttp.ClientSession,
                                       news_text: str) -> list[dict]:
-    """Chiama DeepSeek-V3 e parsea i scenari JSON."""
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    """Chiama il modello V3 (DeepSeek diretto o via Auriko) e parsea i scenari JSON."""
+    # Se Auriko attivo usa la sua chiave; altrimenti DeepSeek diretto.
+    api_key = (_AURIKO_KEY if _LLM_PROVIDER == "auriko"
+               else os.environ.get("DEEPSEEK_API_KEY", "").strip())
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY non configurata")
+        raise RuntimeError(
+            "Nessuna API key LLM configurata "
+            "(DEEPSEEK_API_KEY o AURIKO_API_KEY)"
+        )
+    logger.info("Scenario generator LLM provider=%s model=%s",
+                _LLM_PROVIDER, DEEPSEEK_MODEL)
 
     user_msg = (
         f"NEWS DELLE ULTIME 24H (top {NUM_NEWS_TO_PASS} via GDELT):\n\n"

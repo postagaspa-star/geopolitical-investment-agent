@@ -38,6 +38,13 @@ jobs:
       TARGET_SCENARIOS: ${{ github.event.inputs.target_scenarios || '5' }}
       # Min guarantee: lo script ritenta se < di questo (default 2)
       MIN_VALID_SCENARIOS: '2'
+      # Toggle Auriko (opzionale). Se i secrets non esistono questi
+      # restano stringa vuota → build_scenarios.py usa DeepSeek diretto
+      # (comportamento storico, zero rischio). Per testare il generator
+      # via Auriko: aggiungi i 3 secrets su GitHub Settings → Secrets.
+      AURIKO_API_KEY: ${{ secrets.AURIKO_API_KEY }}
+      AURIKO_BASE_URL: ${{ secrets.AURIKO_BASE_URL }}
+      AURIKO_MODEL_V3: ${{ secrets.AURIKO_MODEL_V3 }}
 
     steps:
       - name: Checkout repository

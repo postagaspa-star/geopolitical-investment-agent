@@ -699,9 +699,12 @@ async def _call_r1(system_prompt: str, user_message: str,
     Simulator e il bot Live ragionano con la stessa filosofia di gestione
     del rischio.
     """
-    api_key = _get_deepseek_key()
+    # Toggle Auriko/DeepSeek (sim_llm). Default = DeepSeek diretto se
+    # AURIKO_API_KEY non e' settata → comportamento identico a prima.
+    from sim_llm import get_sim_llm_config
+    _api_url, api_key, _model, _provider = get_sim_llm_config("reasoner")
     if not api_key:
-        raise ValueError("DEEPSEEK_API_KEY non configurata")
+        raise ValueError("Nessuna API key LLM configurata (DEEPSEEK_API_KEY o AURIKO_API_KEY)")
 
     # Inietta shared principles in coda al system_prompt (idempotente: se gia'
     # presenti per via di un prompt custom, e' solo ridondanza inerte).
@@ -713,7 +716,7 @@ async def _call_r1(system_prompt: str, user_message: str,
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
-        "model": DEEPSEEK_R1,
+        "model": _model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -726,7 +729,7 @@ async def _call_r1(system_prompt: str, user_message: str,
         try:
             async with aiohttp.ClientSession() as sess:
                 async with sess.post(
-                    DEEPSEEK_API_URL, json=payload, headers=headers,
+                    _api_url, json=payload, headers=headers,
                     timeout=aiohttp.ClientTimeout(total=180)
                 ) as resp:
                     if resp.status == 200:

@@ -520,14 +520,16 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
 async def _call_r1(system_prompt: str, user_message: str,
                    max_retries: int = 3) -> str:
     """Chiama DeepSeek-R1 con retry exponential backoff."""
-    api_key = _get_deepseek_key()
+    # Toggle Auriko/DeepSeek (sim_llm). Default = DeepSeek diretto.
+    from sim_llm import get_sim_llm_config
+    _api_url, api_key, _model, _provider = get_sim_llm_config("reasoner")
     if not api_key:
-        raise ValueError("DEEPSEEK_API_KEY non configurata")
+        raise ValueError("Nessuna API key LLM configurata (DEEPSEEK_API_KEY o AURIKO_API_KEY)")
 
     headers = {"Authorization": f"Bearer {api_key}",
                "Content-Type": "application/json"}
     payload = {
-        "model": DEEPSEEK_R1,
+        "model": _model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},

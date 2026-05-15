@@ -570,10 +570,13 @@ async def chat_with_advisor(
     user_message: messaggio dell'utente attuale.
     run_context: blocco contestuale del run (da iniettare nel primo turno).
     """
-    api_key = _get_api_key()
+    # Toggle Auriko/DeepSeek (sim_llm). Default = DeepSeek diretto se
+    # AURIKO_API_KEY non configurata. tier="chat" = DeepSeek-V3.
+    from sim_llm import get_sim_llm_config
+    _api_url, api_key, _model, _provider = get_sim_llm_config("chat")
     if not api_key:
-        return ("DEEPSEEK_API_KEY non configurata. Impostala in Settings → "
-                "DeepSeek API Key per usare l'advisor.", "", [])
+        return ("Nessuna API key LLM configurata (DEEPSEEK_API_KEY o "
+                "AURIKO_API_KEY). Impostala in Settings o env.", "", [])
 
     messages = [{"role": "system", "content": ADVISOR_SYSTEM_PROMPT}]
 
@@ -606,7 +609,7 @@ async def chat_with_advisor(
         messages.append({"role": "user", "content": reminder})
 
     payload = {
-        "model": DEEPSEEK_MODEL,
+        "model": _model,
         # V3 supporta temperature → consistency calibrata
         "temperature": 0.5,
         "messages": messages,
@@ -627,7 +630,7 @@ async def chat_with_advisor(
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                DEEPSEEK_API_URL, json=payload, headers=headers,
+                _api_url, json=payload, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=180),
             ) as resp:
                 body = await resp.text()
