@@ -699,11 +699,13 @@ async def _call_r1(system_prompt: str, user_message: str,
     Simulator e il bot Live ragionano con la stessa filosofia di gestione
     del rischio.
     """
-    # Toggle Auriko/DeepSeek (sim_llm). Default = DeepSeek diretto se
-    # AURIKO_API_KEY non e' settata → comportamento identico a prima.
-    from sim_llm import get_sim_llm_config
-    _api_url, api_key, _model, _provider = get_sim_llm_config("reasoner")
-    if not api_key:
+    # Toggle Auriko/DeepSeek con fallback automatico (sim_llm).
+    # configs = [auriko, deepseek] se Auriko attivo, [deepseek] altrimenti.
+    # Se Auriko esaurisce i retry (gateway down, model errato, auth, 5xx,
+    # timeout) si ripiega su DeepSeek diretto invece di far fallire il run.
+    from sim_llm import get_sim_llm_configs
+    configs = get_sim_llm_configs("reasoner")
+    if not configs or not configs[0][1]:
         raise ValueError("Nessuna API key LLM configurata (DEEPSEEK_API_KEY o AURIKO_API_KEY)")
 
     # Inietta shared principles in coda al system_prompt (idempotente: se gia'
@@ -714,66 +716,86 @@ async def _call_r1(system_prompt: str, user_message: str,
     except Exception:
         pass
 
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": _model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        "max_tokens": 4500,
-    }
-
     last_error: str = ""
-    for attempt in range(max_retries):
-        try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.post(
-                    _api_url, json=payload, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=180)
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data["choices"][0]["message"]["content"] or ""
-                    body = await resp.text()
-                    last_error = f"HTTP {resp.status}: {body[:200]}"
-                    # Retry solo su errori transitori (429, 5xx)
-                    if resp.status == 429 or 500 <= resp.status < 600:
-                        if attempt < max_retries - 1:
-                            wait_s = 2 ** (attempt + 1)
-                            logger.warning(
-                                "[SIM] DeepSeek-R1 %d (attempt %d/%d), retry in %ds: %s",
-                                resp.status, attempt + 1, max_retries, wait_s,
-                                body[:120]
-                            )
-                            await asyncio.sleep(wait_s)
-                            continue
-                    # Errore non transitorio (4xx eccetto 429): fail immediato
-                    raise ValueError(f"DeepSeek-R1 {last_error}")
-        except asyncio.TimeoutError:
-            last_error = "timeout"
-            if attempt < max_retries - 1:
-                wait_s = 2 ** (attempt + 1)
-                logger.warning(
-                    "[SIM] DeepSeek-R1 timeout (attempt %d/%d), retry in %ds",
-                    attempt + 1, max_retries, wait_s
-                )
-                await asyncio.sleep(wait_s)
-                continue
-            raise ValueError(f"DeepSeek-R1 timeout dopo {max_retries} tentativi")
-        except aiohttp.ClientError as e:
-            last_error = f"network: {e}"
-            if attempt < max_retries - 1:
-                wait_s = 2 ** (attempt + 1)
-                logger.warning(
-                    "[SIM] DeepSeek-R1 network err (attempt %d/%d), retry in %ds: %s",
-                    attempt + 1, max_retries, wait_s, str(e)[:120]
-                )
-                await asyncio.sleep(wait_s)
-                continue
-            raise ValueError(f"DeepSeek-R1 network error: {e}")
+    for cfg_i, (api_url, api_key, model, provider) in enumerate(configs):
+        is_last_cfg = (cfg_i == len(configs) - 1)
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "max_tokens": 4500,
+        }
+        cfg_failed = False
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(
+                        api_url, json=payload, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=180)
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return data["choices"][0]["message"]["content"] or ""
+                        body = await resp.text()
+                        last_error = f"{provider} HTTP {resp.status}: {body[:200]}"
+                        # Errori transitori (429, 5xx): retry con backoff
+                        if resp.status == 429 or 500 <= resp.status < 600:
+                            if attempt < max_retries - 1:
+                                wait_s = 2 ** (attempt + 1)
+                                logger.warning(
+                                    "[SIM] %s %d (attempt %d/%d), retry in %ds: %s",
+                                    provider, resp.status, attempt + 1, max_retries,
+                                    wait_s, body[:120]
+                                )
+                                await asyncio.sleep(wait_s)
+                                continue
+                            cfg_failed = True
+                            break
+                        # Errore non-transitorio (4xx: model not found, auth):
+                        # NON crashare → prova la config di fallback.
+                        logger.warning(
+                            "[SIM] %s errore non-transitorio: %s — %s",
+                            provider, last_error,
+                            "provo fallback DeepSeek" if not is_last_cfg
+                            else "nessun fallback disponibile"
+                        )
+                        cfg_failed = True
+                        break
+            except asyncio.TimeoutError:
+                last_error = f"{provider} timeout"
+                if attempt < max_retries - 1:
+                    wait_s = 2 ** (attempt + 1)
+                    logger.warning(
+                        "[SIM] %s timeout (attempt %d/%d), retry in %ds",
+                        provider, attempt + 1, max_retries, wait_s
+                    )
+                    await asyncio.sleep(wait_s)
+                    continue
+                cfg_failed = True
+                break
+            except aiohttp.ClientError as e:
+                last_error = f"{provider} network: {e}"
+                if attempt < max_retries - 1:
+                    wait_s = 2 ** (attempt + 1)
+                    logger.warning(
+                        "[SIM] %s network err (attempt %d/%d), retry in %ds: %s",
+                        provider, attempt + 1, max_retries, wait_s, str(e)[:120]
+                    )
+                    await asyncio.sleep(wait_s)
+                    continue
+                cfg_failed = True
+                break
+        if cfg_failed and not is_last_cfg:
+            logger.warning("[SIM] config '%s' fallita (%s) → fallback alla successiva",
+                            provider, last_error)
+            continue
+        if cfg_failed and is_last_cfg:
+            break
 
-    raise ValueError(f"DeepSeek-R1 fallito dopo {max_retries} tentativi: {last_error}")
+    raise ValueError(f"Tutte le config LLM fallite (Simulator R1): {last_error}")
 
 
 def _parse_response(raw: str) -> dict:

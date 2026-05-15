@@ -570,11 +570,11 @@ async def chat_with_advisor(
     user_message: messaggio dell'utente attuale.
     run_context: blocco contestuale del run (da iniettare nel primo turno).
     """
-    # Toggle Auriko/DeepSeek (sim_llm). Default = DeepSeek diretto se
-    # AURIKO_API_KEY non configurata. tier="chat" = DeepSeek-V3.
-    from sim_llm import get_sim_llm_config
-    _api_url, api_key, _model, _provider = get_sim_llm_config("chat")
-    if not api_key:
+    # Toggle Auriko/DeepSeek con fallback (sim_llm). tier="chat" = V3.
+    # configs = [auriko, deepseek] se Auriko attivo, [deepseek] altrimenti.
+    from sim_llm import get_sim_llm_configs
+    configs = get_sim_llm_configs("chat")
+    if not configs or not configs[0][1]:
         return ("Nessuna API key LLM configurata (DEEPSEEK_API_KEY o "
                 "AURIKO_API_KEY). Impostala in Settings o env.", "", [])
 
@@ -608,18 +608,6 @@ async def chat_with_advisor(
         )
         messages.append({"role": "user", "content": reminder})
 
-    payload = {
-        "model": _model,
-        # V3 supporta temperature → consistency calibrata
-        "temperature": 0.5,
-        "messages": messages,
-        "max_tokens": MAX_RESPONSE_TOKENS,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
     logger.info(
         "sim_advisor call: msgs=%d, total_chars=%d, history_len=%d",
         len(messages),
@@ -627,32 +615,67 @@ async def chat_with_advisor(
         len(history),
     )
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                _api_url, json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=180),
-            ) as resp:
-                body = await resp.text()
-                if resp.status != 200:
-                    logger.error("sim_advisor HTTP %d: %s", resp.status, body[:400])
-                    err_msg = f"HTTP {resp.status}"
+    # Loop sulle config con fallback automatico: prova Auriko, se fallisce
+    # (status!=200 / rete / parsing) ripiega su DeepSeek diretto.
+    data = None
+    last_err = ""
+    for cfg_i, (api_url, api_key, model, provider) in enumerate(configs):
+        is_last_cfg = (cfg_i == len(configs) - 1)
+        payload = {
+            "model": model,
+            # V3 supporta temperature → consistency calibrata
+            "temperature": 0.5,
+            "messages": messages,
+            "max_tokens": MAX_RESPONSE_TOKENS,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    api_url, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=180),
+                ) as resp:
+                    body = await resp.text()
+                    if resp.status != 200:
+                        logger.error("sim_advisor %s HTTP %d: %s",
+                                     provider, resp.status, body[:400])
+                        err_msg = f"HTTP {resp.status}"
+                        try:
+                            ej = json.loads(body)
+                            if isinstance(ej.get("error"), dict):
+                                err_msg = ej["error"].get("message", err_msg)
+                        except Exception:
+                            pass
+                        last_err = f"{provider}: {err_msg}"
+                        if not is_last_cfg:
+                            logger.warning("sim_advisor: %s fallito → fallback DeepSeek",
+                                           provider)
+                        continue
                     try:
-                        ej = json.loads(body)
-                        if isinstance(ej.get("error"), dict):
-                            err_msg = ej["error"].get("message", err_msg)
-                    except Exception:
-                        pass
-                    return (f"Errore DeepSeek: {err_msg}", "", [])
-                try:
-                    data = json.loads(body)
-                except Exception as e:
-                    return (f"Risposta DeepSeek non parsabile: {e}", "", [])
-    except aiohttp.ClientError as e:
-        return (f"Errore di rete: {e}", "", [])
-    except Exception as e:
-        logger.error("sim_advisor unexpected error: %s", e, exc_info=True)
-        return (f"Errore inatteso: {e}", "", [])
+                        data = json.loads(body)
+                        break  # successo
+                    except Exception as e:
+                        last_err = f"{provider}: risposta non parsabile: {e}"
+                        if not is_last_cfg:
+                            continue
+        except aiohttp.ClientError as e:
+            last_err = f"{provider}: errore di rete: {e}"
+            if not is_last_cfg:
+                logger.warning("sim_advisor: %s network err → fallback DeepSeek: %s",
+                               provider, str(e)[:120])
+            continue
+        except Exception as e:
+            logger.error("sim_advisor %s unexpected error: %s",
+                         provider, e, exc_info=True)
+            last_err = f"{provider}: errore inatteso: {e}"
+            if not is_last_cfg:
+                continue
+
+    if data is None:
+        return (f"Errore advisor (tutte le config fallite): {last_err}", "", [])
 
     choice = (data.get("choices") or [{}])[0]
     msg = choice.get("message", {}) or {}

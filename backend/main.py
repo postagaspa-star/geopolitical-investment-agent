@@ -1450,24 +1450,37 @@ async def sim_kpi():
     #
     # Coerente con compute_profit_factor/compute_expectancy di metrics.py,
     # ma aggregato cross-run invece che per singolo run.
-    pnls = [r.get("perf_1m") for r in runs if r.get("perf_1m") is not None]
-    winners = [p for p in pnls if p > 0]
-    losers = [p for p in pnls if p < 0]
-    gross_win = sum(winners)
-    gross_loss_abs = abs(sum(losers))
+    def _trade_metrics(run_subset: list) -> dict:
+        """PF/AvgWin/AvgLoss su un sottoinsieme di run (globale o categoria)."""
+        _pnls = [r.get("perf_1m") for r in run_subset
+                 if r.get("perf_1m") is not None]
+        _win = [p for p in _pnls if p > 0]
+        _los = [p for p in _pnls if p < 0]
+        _gw = sum(_win)
+        _gl_abs = abs(sum(_los))
+        if not _pnls:
+            _pf, _pf_inf = None, False
+        elif _gl_abs == 0:
+            _pf, _pf_inf = None, (_gw > 0)   # solo vincenti → ∞
+        else:
+            _pf, _pf_inf = round(_gw / _gl_abs, 3), False
+        return {
+            "profit_factor": _pf,
+            "profit_factor_infinite": _pf_inf,
+            "avg_win": round(sum(_win) / len(_win), 5) if _win else 0.0,
+            "avg_loss": round(sum(_los) / len(_los), 5) if _los else 0.0,
+            "trades_total": len(_pnls),
+            "trades_winners": len(_win),
+            "trades_losers": len(_los),
+        }
 
-    if not pnls:
-        profit_factor = None
-        profit_factor_infinite = False
-    elif gross_loss_abs == 0:
-        profit_factor = None
-        profit_factor_infinite = gross_win > 0   # solo vincenti
-    else:
-        profit_factor = round(gross_win / gross_loss_abs, 3)
-        profit_factor_infinite = False
+    global_metrics = _trade_metrics(runs)
 
-    avg_win = round(sum(winners) / len(winners), 5) if winners else 0.0
-    avg_loss = round(sum(losers) / len(losers), 5) if losers else 0.0
+    # Stesse metriche divise per categoria (richiesta utente)
+    metrics_by_category = {}
+    for cat in ["normale", "geopolitico", "macro", "crash_rally"]:
+        cr = [r for r in runs if r.get("category") == cat]
+        metrics_by_category[cat] = _trade_metrics(cr)
 
     result = {
         "score": round(wins / total * 100, 1),
@@ -1476,14 +1489,10 @@ async def sim_kpi():
         "wins": wins, "total": total, "single_step": single, "multi_step": multi,
         "avg_delta_sp": avg_delta,
         "win_by_category": win_by_cat,
-        # Metriche per-trade aggregate (perf_1m in formato decimale: 0.03 = 3%)
-        "profit_factor": profit_factor,
-        "profit_factor_infinite": profit_factor_infinite,
-        "avg_win": avg_win,            # decimale, es. 0.042 = +4.2%
-        "avg_loss": avg_loss,          # decimale negativo, es. -0.028 = -2.8%
-        "trades_total": len(pnls),
-        "trades_winners": len(winners),
-        "trades_losers": len(losers),
+        # Metriche per-trade aggregate GLOBALI (perf_1m decimale: 0.03 = 3%)
+        **global_metrics,
+        # Stesse metriche divise per categoria
+        "metrics_by_category": metrics_by_category,
     }
     _cache_set("sim_kpi", result)
     return result

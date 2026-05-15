@@ -269,6 +269,16 @@ export default function SimDashboard() {
         <CategoryBars data={kpi?.win_by_category} />
       </div>
 
+      {/* Profit Factor / Avg Win / Avg Loss per categoria */}
+      <div style={S.card} data-pdf-section="true">
+        <div style={S.cardTitle}>Profit Factor · Avg Win · Avg Loss per categoria</div>
+        <div style={S.subText}>
+          Stesse metriche per-trade, divise per categoria di scenario.
+          Profit Factor &gt; 2 eccellente, 1-2 discreto, &lt; 1 in perdita.
+        </div>
+        <MetricsByCategoryTable data={kpi?.metrics_by_category} />
+      </div>
+
       {/* Win rate per Scenario specifico (NON solo categoria) */}
       <div style={S.card} data-pdf-section="true">
         <div style={S.cardTitle}>
@@ -550,11 +560,88 @@ function FullRunsTable({ runs, kpi }) {
 
 // Profit Factor: gestisce null (no trade), infinite (solo vincenti),
 // e valore numerico. Soglie: >2 eccellente, 1-2 discreto, <1 in perdita.
-function fmtProfitFactor(kpi) {
-  if (!kpi || kpi.trades_total === 0 || kpi.trades_total == null) return "—";
-  if (kpi.profit_factor_infinite) return "∞";
-  if (kpi.profit_factor == null) return "—";
-  return kpi.profit_factor.toFixed(2);
+// Accetta un oggetto con {profit_factor, profit_factor_infinite, trades_total}.
+function fmtProfitFactor(m) {
+  if (!m || m.trades_total === 0 || m.trades_total == null) return "—";
+  if (m.profit_factor_infinite) return "∞";
+  if (m.profit_factor == null) return "—";
+  return m.profit_factor.toFixed(2);
+}
+
+// Colore del Profit Factor secondo le soglie standard.
+function pfColor(m) {
+  if (!m || m.trades_total === 0 || m.trades_total == null) return "#64748b";
+  if (m.profit_factor_infinite) return "#10b981";
+  const pf = m.profit_factor;
+  if (pf == null) return "#64748b";
+  if (pf >= 2) return "#10b981";
+  if (pf >= 1) return "#fbbf24";
+  return "#ef4444";
+}
+
+function MetricsByCategoryTable({ data }) {
+  const cats = [
+    { key: "normale", name: "Normale", tone: "#06b6d4" },
+    { key: "geopolitico", name: "Geopolitico", tone: "#f472b6" },
+    { key: "macro", name: "Macro", tone: "#fbbf24" },
+    { key: "crash_rally", name: "Crash/Rally", tone: "#ef4444" },
+  ];
+  if (!data) {
+    return <div style={S.subText}>Nessun dato disponibile.</div>;
+  }
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={S.mbcTable}>
+        <thead>
+          <tr>
+            <th style={S.mbcTh}>Categoria</th>
+            <th style={{ ...S.mbcTh, textAlign: "right" }}>Profit Factor</th>
+            <th style={{ ...S.mbcTh, textAlign: "right" }}>Avg Win</th>
+            <th style={{ ...S.mbcTh, textAlign: "right" }}>Avg Loss</th>
+            <th style={{ ...S.mbcTh, textAlign: "right" }}>Trade (W/L)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {cats.map((c) => {
+            const m = data[c.key] || {};
+            const has = m.trades_total > 0;
+            return (
+              <tr key={c.key}>
+                <td style={S.mbcTd}>
+                  <span style={{
+                    display: "inline-block", width: 8, height: 8,
+                    borderRadius: "50%", background: c.tone, marginRight: 8,
+                  }} />
+                  {c.name}
+                </td>
+                <td style={{
+                  ...S.mbcTd, textAlign: "right", fontWeight: 700,
+                  color: pfColor(m),
+                }}>
+                  {fmtProfitFactor(m)}
+                </td>
+                <td style={{
+                  ...S.mbcTd, textAlign: "right",
+                  color: has && m.avg_win > 0 ? "#10b981" : "#64748b",
+                }}>
+                  {has ? `+${(m.avg_win * 100).toFixed(2)}%` : "—"}
+                </td>
+                <td style={{
+                  ...S.mbcTd, textAlign: "right",
+                  color: has && m.avg_loss < 0 ? "#ef4444" : "#64748b",
+                }}>
+                  {has ? `${(m.avg_loss * 100).toFixed(2)}%` : "—"}
+                </td>
+                <td style={{ ...S.mbcTd, textAlign: "right", color: "#94a3b8" }}>
+                  {has ? `${m.trades_winners}/${m.trades_losers}` : "0/0"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function KPI({ label, value, sub, tone }) {
@@ -1026,6 +1113,16 @@ const S = {
           borderRadius: 8, marginBottom: 20 },
   cardTitle: { fontSize: 14, fontWeight: 600, color: "#e2e8f0", marginBottom: 14 },
   subText: { fontSize: 12, color: "#94a3b8", marginBottom: 14, lineHeight: 1.55 },
+  mbcTable: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
+  mbcTh: {
+    textAlign: "left", padding: "8px 12px", fontSize: 11, fontWeight: 600,
+    textTransform: "uppercase", letterSpacing: "0.05em", color: "#64748b",
+    borderBottom: "1px solid #1f2937",
+  },
+  mbcTd: {
+    padding: "10px 12px", color: "#e2e8f0",
+    borderBottom: "1px solid #131a2a",
+  },
   empty: { padding: 24, textAlign: "center", color: "#64748b", fontSize: 13 },
   actionsRow: { display: "flex", gap: 16, alignItems: "center", marginBottom: 24, flexWrap: "wrap" },
   btnPrimary: { background: "#a78bfa", color: "#0a0e1a", border: 0, padding: "10px 18px",

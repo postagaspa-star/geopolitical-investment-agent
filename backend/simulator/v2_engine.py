@@ -519,56 +519,76 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
 
 async def _call_r1(system_prompt: str, user_message: str,
                    max_retries: int = 3) -> str:
-    """Chiama DeepSeek-R1 con retry exponential backoff."""
-    # Toggle Auriko/DeepSeek (sim_llm). Default = DeepSeek diretto.
-    from sim_llm import get_sim_llm_config
-    _api_url, api_key, _model, _provider = get_sim_llm_config("reasoner")
-    if not api_key:
+    """Chiama R1 con retry + fallback automatico Auriko→DeepSeek."""
+    # Toggle Auriko/DeepSeek con fallback (sim_llm). Se Auriko esaurisce
+    # i retry si ripiega su DeepSeek diretto invece di far fallire il run.
+    from sim_llm import get_sim_llm_configs
+    configs = get_sim_llm_configs("reasoner")
+    if not configs or not configs[0][1]:
         raise ValueError("Nessuna API key LLM configurata (DEEPSEEK_API_KEY o AURIKO_API_KEY)")
 
-    headers = {"Authorization": f"Bearer {api_key}",
-               "Content-Type": "application/json"}
-    payload = {
-        "model": _model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        "max_tokens": 4500,
-    }
-
     last_error = ""
-    for attempt in range(max_retries):
-        try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.post(
-                    DEEPSEEK_API_URL, json=payload, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=180)
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data["choices"][0]["message"]["content"] or ""
-                    body = await resp.text()
-                    last_error = f"HTTP {resp.status}: {body[:200]}"
-                    if resp.status == 429 or 500 <= resp.status < 600:
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(2 ** (attempt + 1))
-                            continue
-                    raise ValueError(f"DeepSeek-R1 {last_error}")
-        except asyncio.TimeoutError:
-            last_error = "timeout"
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** (attempt + 1))
-                continue
-            raise ValueError(f"DeepSeek-R1 timeout after {max_retries}")
-        except aiohttp.ClientError as e:
-            last_error = f"network: {e}"
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** (attempt + 1))
-                continue
-            raise ValueError(f"DeepSeek-R1 network: {e}")
+    for cfg_i, (api_url, api_key, model, provider) in enumerate(configs):
+        is_last_cfg = (cfg_i == len(configs) - 1)
+        headers = {"Authorization": f"Bearer {api_key}",
+                   "Content-Type": "application/json"}
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "max_tokens": 4500,
+        }
+        cfg_failed = False
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(
+                        api_url, json=payload, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=180)
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return data["choices"][0]["message"]["content"] or ""
+                        body = await resp.text()
+                        last_error = f"{provider} HTTP {resp.status}: {body[:200]}"
+                        if resp.status == 429 or 500 <= resp.status < 600:
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2 ** (attempt + 1))
+                                continue
+                            cfg_failed = True
+                            break
+                        # Errore non-transitorio → prova fallback config
+                        logger.warning(
+                            "[SIM-V2] %s errore non-transitorio: %s — %s",
+                            provider, last_error,
+                            "fallback DeepSeek" if not is_last_cfg else "no fallback"
+                        )
+                        cfg_failed = True
+                        break
+            except asyncio.TimeoutError:
+                last_error = f"{provider} timeout"
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                    continue
+                cfg_failed = True
+                break
+            except aiohttp.ClientError as e:
+                last_error = f"{provider} network: {e}"
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                    continue
+                cfg_failed = True
+                break
+        if cfg_failed and not is_last_cfg:
+            logger.warning("[SIM-V2] config '%s' fallita (%s) → fallback",
+                            provider, last_error)
+            continue
+        if cfg_failed and is_last_cfg:
+            break
 
-    raise ValueError(f"DeepSeek-R1 failed after {max_retries}: {last_error}")
+    raise ValueError(f"Tutte le config LLM fallite (Simulator V2 R1): {last_error}")
 
 
 def _parse_response(raw: str) -> dict:

@@ -110,3 +110,41 @@ def get_sim_llm_config(tier: str) -> tuple[str, str, str, str]:
     key = _get_deepseek_key()
     model = _DEEPSEEK_R1 if is_reasoner else _DEEPSEEK_V3
     return _DEEPSEEK_URL, key, model, "deepseek"
+
+
+def get_sim_llm_configs(tier: str) -> list[tuple[str, str, str, str]]:
+    """
+    Ritorna la LISTA ordinata di config da provare, per il fallback
+    automatico:
+
+      - Se Auriko e' attivo (AURIKO_API_KEY presente):
+          [ (auriko...), (deepseek diretto...) ]
+        → si prova Auriko; se fallisce TUTTI i retry (gateway down,
+          modello sbagliato, auth, 5xx, timeout) si ripiega su DeepSeek
+          diretto invece di far fallire il run del Simulator.
+
+      - Se Auriko NON e' attivo:
+          [ (deepseek diretto...) ]
+        → comportamento storico, nessun fallback (gia' su DeepSeek).
+
+    Il chiamante itera la lista: prova la config[0], se esaurisce i
+    retry passa alla config[1], ecc. Solo se TUTTE falliscono → errore.
+    """
+    is_reasoner = str(tier).lower() in ("reasoner", "r1", "deepseek-reasoner")
+
+    primary = get_sim_llm_config(tier)
+    if primary[3] == "auriko":
+        # Fallback esplicito: DeepSeek diretto (bypass gateway)
+        ds_key = _get_deepseek_key()
+        ds_model = _DEEPSEEK_R1 if is_reasoner else _DEEPSEEK_V3
+        deepseek_fallback = (_DEEPSEEK_URL, ds_key, ds_model, "deepseek")
+        # Includi il fallback solo se la chiave DeepSeek esiste davvero
+        if ds_key:
+            return [primary, deepseek_fallback]
+        logger.warning(
+            "[SIM-LLM] Auriko attivo ma DEEPSEEK_API_KEY assente: "
+            "nessun fallback disponibile se Auriko fallisce"
+        )
+        return [primary]
+    # Gia' su DeepSeek diretto: nessun fallback (sarebbe se stesso)
+    return [primary]

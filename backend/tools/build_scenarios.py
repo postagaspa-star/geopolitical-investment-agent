@@ -197,19 +197,30 @@ def _new_scenario_id(category: str, slug: str, idx: int) -> str:
     return f"dyn-{today}-{safe_slug}-{idx}"
 
 
+def _llm_configs_inline() -> list[tuple]:
+    """
+    Lista config (url, key, model, provider) con fallback inline.
+    Auriko attivo → [auriko, deepseek]; altrimenti → [deepseek].
+    Standalone: questo script gira su GitHub Actions, non importa sim_llm.
+    """
+    ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    ds_cfg = ("https://api.deepseek.com/v1/chat/completions",
+              ds_key, "deepseek-chat", "deepseek")
+    if _LLM_PROVIDER == "auriko" and _AURIKO_KEY:
+        auriko_cfg = (DEEPSEEK_API_URL, _AURIKO_KEY, DEEPSEEK_MODEL, "auriko")
+        # Fallback a DeepSeek diretto solo se la chiave DeepSeek esiste
+        return [auriko_cfg, ds_cfg] if ds_key else [auriko_cfg]
+    return [ds_cfg]
+
+
 async def generate_scenarios_via_llm(session: aiohttp.ClientSession,
                                       news_text: str) -> list[dict]:
-    """Chiama il modello V3 (DeepSeek diretto o via Auriko) e parsea i scenari JSON."""
-    # Se Auriko attivo usa la sua chiave; altrimenti DeepSeek diretto.
-    api_key = (_AURIKO_KEY if _LLM_PROVIDER == "auriko"
-               else os.environ.get("DEEPSEEK_API_KEY", "").strip())
-    if not api_key:
+    """Genera scenari via V3 (DeepSeek o Auriko) con fallback automatico."""
+    configs = _llm_configs_inline()
+    if not configs or not configs[0][1]:
         raise RuntimeError(
-            "Nessuna API key LLM configurata "
-            "(DEEPSEEK_API_KEY o AURIKO_API_KEY)"
+            "Nessuna API key LLM configurata (DEEPSEEK_API_KEY o AURIKO_API_KEY)"
         )
-    logger.info("Scenario generator LLM provider=%s model=%s",
-                _LLM_PROVIDER, DEEPSEEK_MODEL)
 
     user_msg = (
         f"NEWS DELLE ULTIME 24H (top {NUM_NEWS_TO_PASS} via GDELT):\n\n"
@@ -217,36 +228,58 @@ async def generate_scenarios_via_llm(session: aiohttp.ClientSession,
         f"Produci {NUM_SCENARIOS_TARGET} scenari secondo lo schema specificato."
     )
 
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": SCENARIO_GENERATOR_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.6,   # un po' di varieta' tra scenari, no random extreme
-        "max_tokens": 6000,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    content = ""
+    last_err = ""
+    for cfg_i, (api_url, api_key, model, provider) in enumerate(configs):
+        is_last_cfg = (cfg_i == len(configs) - 1)
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": SCENARIO_GENERATOR_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.6,
+            "max_tokens": 6000,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        logger.info("Chiamata LLM provider=%s model=%s (news_chars=%d)...",
+                    provider, model, len(news_text))
+        try:
+            async with session.post(
+                api_url, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=180),
+            ) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    last_err = f"{provider} HTTP {resp.status}: {body[:300]}"
+                    if not is_last_cfg:
+                        logger.warning("%s fallito → fallback DeepSeek diretto",
+                                        provider)
+                        continue
+                    raise RuntimeError(last_err)
+                data = json.loads(body)
+        except aiohttp.ClientError as e:
+            last_err = f"{provider} network: {e}"
+            if not is_last_cfg:
+                logger.warning("%s network err → fallback DeepSeek: %s",
+                                provider, str(e)[:120])
+                continue
+            raise RuntimeError(last_err)
 
-    logger.info("Chiamata DeepSeek-V3 (model=%s, news_chars=%d)...",
-                DEEPSEEK_MODEL, len(news_text))
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        if content:
+            break
+        last_err = f"{provider}: content vuoto"
+        if not is_last_cfg:
+            logger.warning("%s content vuoto → fallback DeepSeek", provider)
+            continue
 
-    async with session.post(
-        DEEPSEEK_API_URL, json=payload, headers=headers,
-        timeout=aiohttp.ClientTimeout(total=180),
-    ) as resp:
-        body = await resp.text()
-        if resp.status != 200:
-            raise RuntimeError(f"DeepSeek HTTP {resp.status}: {body[:300]}")
-        data = json.loads(body)
-
-    content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
     if not content:
-        raise RuntimeError("DeepSeek ha ritornato content vuoto")
+        raise RuntimeError(f"Generazione fallita (tutte le config): {last_err}")
 
     try:
         parsed = json.loads(content)
