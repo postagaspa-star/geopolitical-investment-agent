@@ -594,16 +594,24 @@ def format_rotation_for_prompt(data: dict, top_n: int = 18) -> str:
 
 def format_filtered_for_tool(filtered: dict) -> str:
     """
-    Output dettagliato JSON-friendly per il tool `scan_rotation_opportunities`.
-    A differenza del prompt-format, qui includiamo TUTTI i campi raw.
+    Output JSON per il tool `scan_rotation_opportunities`.
+
+    Token optimization (no perdita info): NON ritorniamo piu'
+    `results_by_category`, che duplicava integralmente le stesse row di
+    `results` raggruppate per categoria. Ogni row ha gia' il campo
+    `category`, quindi il modello puo' raggruppare/filtrare da solo senza
+    ricevere i dati 2 volte. Su top_n=20 (~16 campi/row) questo dimezza
+    il payload del tool result, che rientrava nel tool-loop ad OGNI
+    iterazione successiva (costo input-token moltiplicato per le iter).
     """
     import json as _json
     payload = {
         "scan_timestamp_utc": filtered.get("scan_timestamp_utc"),
         "spy_benchmark": filtered.get("spy_benchmark"),
         "total_after_filter": filtered.get("filter_count", 0),
+        # results e' ordinato per rotation_score desc; ogni row include
+        # `category` → raggruppa lato modello se serve (no duplicazione).
         "results": filtered.get("rows", []),
-        "results_by_category": filtered.get("by_category", {}),
     }
     if "bottom_5_universe" in filtered:
         payload["bottom_5_universe"] = filtered["bottom_5_universe"]

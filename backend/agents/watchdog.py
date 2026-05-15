@@ -88,7 +88,7 @@ The user message will tell you the MARKET STATE (OPEN or CLOSED). Adjust accordi
 WHEN MARKET STATE = OPEN (NYSE/LSE/XETRA hours, no holiday):
 ═══════════════════════════════════════════════════════════════════════════
 TRIGGER if you detect ANY of:
-- Price move > 1.5% in last 5 minutes on any major index/ETF or watched stock
+- Price move > 2.5% in last 5 minutes on any major index/ETF or watched stock
 - Breaking geopolitical news (conflict, sanctions, elections, central bank)
 - Earnings surprise or M&A announcement for watched tickers
 - VIX spike or bond yield jump > 5 basis points
@@ -97,6 +97,10 @@ TRIGGER if you detect ANY of:
 - Significant crypto move (BTC/ETH > 3% in last hour)
 
 DO NOT TRIGGER for:
+- Price moves < 2.5% WITHOUT another concrete catalyst (news/earnings/M&A).
+  A pure price move between 0.5% and 2.5% is NOT enough on its own anymore:
+  it is normal intraday rotation, the Decision Agent does not need to wake
+  for it. Trigger on sub-2.5% moves ONLY if paired with a real catalyst.
 - Normal market noise (< 0.5% moves)
 - Already-known news (nothing new in last 20 min)
 - Pre-market/after-hours with no catalyst
@@ -210,9 +214,15 @@ def _count_recent_decision_errors(database, minutes: int = 60) -> int:
         return 0
 
 
-def _is_throttled(database, throttle_minutes: int = 60) -> bool:
+def _is_throttled(database, throttle_minutes: int = 120) -> bool:
     """
     Ritorna True se il Decision Agent ha tentato di girare negli ultimi N min.
+
+    Default 120 min (2h): allineato al cron standard (14/16/18/20 UTC = ogni
+    2h). Anche se il Watchdog rileva un trigger valido, NON sveglia il
+    Decision Agent piu' di una volta ogni 2h — riduce sia i costi token
+    Claude sia il carico DB. Un evento davvero critico (urgency molto alta)
+    resta comunque catturato al successivo slot.
 
     BACKOFF SU ERRORI: se gli ultimi N minuti contengono 2+ DECISION_ERROR,
     estende il throttle a 4h (240 min) per evitare di bruciare token su
@@ -778,7 +788,9 @@ async def run_watchdog(run_id: str) -> dict:
     # ────────────────────────────────────────────────────────────────────────
 
     # 1. Controlla throttle prima di fare qualsiasi altra cosa
-    if _is_throttled(database, throttle_minutes=60):
+    # 120 min = 2h: il Decision Standard non viene svegliato dal watchdog
+    # piu' di una volta ogni 2 ore (allineato al cron 14/16/18/20 UTC).
+    if _is_throttled(database, throttle_minutes=120):
         database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
             "event": "watchdog_throttled",
             "reason": "decision_ran_recently",

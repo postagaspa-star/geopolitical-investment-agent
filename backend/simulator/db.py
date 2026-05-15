@@ -567,8 +567,24 @@ def get_run(run_id: str) -> dict | None:
     return None
 
 
+# Campi scalari di sim_runs (TUTTI tranne full_data). list_runs() li
+# seleziona esplicitamente per NON trascinare la colonna full_data JSONB
+# (steps/price_chart/scatter/reasoning: 50-200 KB per run). Caricare
+# full_data di 500 run per mostrare metriche aggregate era la causa #1
+# dell'egress Supabase. full_data si carica SOLO via get_run(run_id).
+_SIM_RUN_LIGHT_COLS = (
+    "id,created_at,completed_at,mode,category,scenario_type,steps,"
+    "scenario_id,historical_period,asset_chosen,action_chosen,conviction,"
+    "horizon,perf_1w,perf_1m,perf_3m,perf_sp_1m,perf_sector_1m,"
+    "perf_monkey_1m,delta_sp,delta_sector,delta_monkey,outcome,"
+    "original_thesis,what_happened,thesis_evaluation"
+)
+_SIM_RUN_LIGHT_COLS_SQLITE = _SIM_RUN_LIGHT_COLS  # stesso set di colonne
+
+
 def list_runs(category: str | None = None, scenario_type: str | None = None,
-              outcome: str | None = None, limit: int = 50) -> list[dict]:
+              outcome: str | None = None, limit: int = 50,
+              include_full_data: bool = False) -> list[dict]:
     """
     Lista i run con merge di tutte le sorgenti disponibili:
       1. Supabase sim_runs (primario)
@@ -578,16 +594,21 @@ def list_runs(category: str | None = None, scenario_type: str | None = None,
     Quando il fallback e' attivo, ritorniamo dal fallback. Altrimenti
     proviamo sim_runs come prima — ma se va a vuoto e c'e' un fallback
     popolato, mergiamo entrambi (dedup per id, ordine per recency).
+
+    include_full_data=False (default): NON carica la colonna full_data
+    (ottimizzazione egress Supabase). Per il dettaglio completo di un
+    singolo run usa get_run(run_id), che carica full_data.
     """
     global _SIM_RUN_FALLBACK_MODE
     client = _get_client()
     primary: list[dict] = []
     used_fallback = False
+    _select_cols = "*" if include_full_data else _SIM_RUN_LIGHT_COLS
 
     # Tier 1: Supabase sim_runs
     if client and not _SIM_RUN_FALLBACK_MODE:
         try:
-            q = client.table("sim_runs").select("*")\
+            q = client.table("sim_runs").select(_select_cols)\
                 .order("completed_at", desc=True).limit(limit)
             if category:
                 q = q.eq("category", category)
@@ -645,9 +666,10 @@ def list_runs(category: str | None = None, scenario_type: str | None = None,
         if scenario_type: clauses.append("scenario_type=?"); vals.append(scenario_type)
         if outcome: clauses.append("outcome=?"); vals.append(outcome)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        _cols = "*" if include_full_data else _SIM_RUN_LIGHT_COLS_SQLITE
         with db_sqlite.get_db() as conn:
             rows = conn.execute(
-                f"SELECT * FROM sim_runs {where} ORDER BY completed_at DESC LIMIT ?",
+                f"SELECT {_cols} FROM sim_runs {where} ORDER BY completed_at DESC LIMIT ?",
                 vals + [limit],
             ).fetchall()
             return [dict(r) for r in rows]

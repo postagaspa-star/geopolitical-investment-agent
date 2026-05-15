@@ -21,7 +21,10 @@ export default function AgentActivityCards() {
 
   const reload = async () => {
     try {
-      const res = await fetch(`${API}/api/logs?limit=200`);
+      // limit 200 -> 80: la UI mostra comunque solo le prime 30 card
+      // (.slice(0,30)). 80 log bastano per coprirle anche dopo il
+      // filtraggio del rumore. Riduce ~60% del payload egress Supabase.
+      const res = await fetch(`${API}/api/logs?limit=80`);
       if (res.ok) setLogs(await res.json());
     } catch {}
     setLoading(false);
@@ -29,7 +32,10 @@ export default function AgentActivityCards() {
 
   useEffect(() => {
     reload();
-    const id = setInterval(reload, 15000);
+    // poll 15s -> 30s: l'endpoint /api/logs e' cachato 20s lato backend,
+    // pollare ogni 15s sprecava query. 30s dimezza i fetch lato client
+    // e si allinea bene alla cache backend.
+    const id = setInterval(reload, 30000);
     return () => clearInterval(id);
   }, []);
 

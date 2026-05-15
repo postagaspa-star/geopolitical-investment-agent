@@ -317,6 +317,35 @@ async def get_trades(limit: int = Query(default=50, ge=1, le=1000)):
         return {"error": str(e)}
 
 
+# ─── Cache TTL in-memory per endpoint aggregati read-heavy ──────────────────
+# Riduce egress Supabase: piu' client che pollano lo stesso endpoint
+# aggregato condividono UNA sola query DB per la durata del TTL invece
+# di N query. I dati aggregati (KPI, win-by-scenario, log dashboard)
+# non cambiano ogni secondo, quindi 60-90s di staleness e' accettabile.
+_RESP_CACHE: dict[str, tuple[float, object]] = {}
+
+
+def _cache_get(key: str, ttl_seconds: float):
+    """Ritorna il valore cached se entro TTL, altrimenti None."""
+    import time as _t
+    entry = _RESP_CACHE.get(key)
+    if entry is None:
+        return None
+    ts, val = entry
+    if (_t.time() - ts) < ttl_seconds:
+        return val
+    return None
+
+
+def _cache_set(key: str, value) -> None:
+    import time as _t
+    _RESP_CACHE[key] = (_t.time(), value)
+    # Bound: evita crescita illimitata (max 64 chiavi distinte)
+    if len(_RESP_CACHE) > 64:
+        oldest = min(_RESP_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _RESP_CACHE.pop(oldest, None)
+
+
 # --- Endpoint dei log dell'agente ---
 
 
@@ -328,12 +357,20 @@ async def get_logs(
     """
     Restituisce i log dell'agente.
     Accetta i parametri ?limit e ?run_id per filtrare i risultati.
+
+    Cache TTL 20s sul path senza run_id (quello pollato dalla dashboard
+    AgentActivityCards): riduce drasticamente l'egress quando piu' tab/
+    client sono aperti. Il path con run_id (dettaglio) NON e' cachato.
     """
     try:
         if run_id:
-            logs = database.get_logs_by_run(run_id)
-        else:
-            logs = database.get_agent_logs(limit=limit)
+            return database.get_logs_by_run(run_id)
+        ck = f"logs::{limit}"
+        cached = _cache_get(ck, ttl_seconds=20)
+        if cached is not None:
+            return cached
+        logs = database.get_agent_logs(limit=limit)
+        _cache_set(ck, logs)
         return logs
     except Exception as e:
         logger.error(f"Errore nel recupero dei log: {e}", exc_info=True)
@@ -1377,14 +1414,19 @@ async def sim_scenario_counts():
 
 @app.get("/api/simulator/kpi")
 async def sim_kpi():
-    """KPI aggregati per la dashboard simulator."""
+    """KPI aggregati per la dashboard simulator. Cache TTL 60s."""
+    cached = _cache_get("sim_kpi", ttl_seconds=60)
+    if cached is not None:
+        return cached
     from simulator import db as sim_db
-    runs = sim_db.list_runs(limit=500)
+    runs = sim_db.list_runs(limit=500)  # light: no full_data (P1)
     total = len(runs)
     if total == 0:
-        return {"score": None, "score_label": "Nessun run", "win_rate": 0,
-                "wins": 0, "total": 0, "single_step": 0, "multi_step": 0,
-                "avg_delta_sp": 0, "win_by_category": {}}
+        empty = {"score": None, "score_label": "Nessun run", "win_rate": 0,
+                 "wins": 0, "total": 0, "single_step": 0, "multi_step": 0,
+                 "avg_delta_sp": 0, "win_by_category": {}}
+        _cache_set("sim_kpi", empty)
+        return empty
     wins = sum(1 for r in runs if r.get("outcome") == "green")
     single = sum(1 for r in runs if r.get("scenario_type") == "single")
     multi = total - single
@@ -1427,7 +1469,7 @@ async def sim_kpi():
     avg_win = round(sum(winners) / len(winners), 5) if winners else 0.0
     avg_loss = round(sum(losers) / len(losers), 5) if losers else 0.0
 
-    return {
+    result = {
         "score": round(wins / total * 100, 1),
         "score_label": f"{wins} verdi su {total} run",
         "win_rate": wins / total,
@@ -1443,6 +1485,8 @@ async def sim_kpi():
         "trades_winners": len(winners),
         "trades_losers": len(losers),
     }
+    _cache_set("sim_kpi", result)
+    return result
 
 
 @app.get("/api/simulator/runs")
@@ -2091,12 +2135,18 @@ async def sim_win_by_scenario():
       - avg_sharpe: Sharpe medio dei run V2 (se computato)
 
     Considera solo scenari con almeno 1 run (no rumore).
+
+    Cache TTL 90s: e' l'endpoint piu' pesante (list_runs 2000), pollato
+    dalla dashboard. 90s di staleness su un breakdown storico e' irrilevante.
     """
+    cached = _cache_get("sim_win_by_scenario", ttl_seconds=90)
+    if cached is not None:
+        return cached
     from simulator import db as sim_db
     from simulator import scenarios as _scn
     from simulator import crypto_scenarios as _cs
 
-    runs = sim_db.list_runs(limit=2000)
+    runs = sim_db.list_runs(limit=2000)  # light: no full_data (P1)
 
     # Mappa scenario_id → metadata
     sid_meta = {}
@@ -2152,7 +2202,9 @@ async def sim_win_by_scenario():
         })
     # Ordina: piu' giocati prima, e win rate alto prima a parita' di n_runs
     out.sort(key=lambda x: (-x["n_runs"], -(x["win_rate"] or 0)))
-    return {"scenarios": out, "total_scenarios_played": len(out)}
+    result = {"scenarios": out, "total_scenarios_played": len(out)}
+    _cache_set("sim_win_by_scenario", result)
+    return result
 
 
 @app.get("/api/simulator/sentiment-drift")
