@@ -262,6 +262,46 @@ export default function AboutPage() {
             </li>
           </ul>
 
+          <h3 style={S.h3}>Metriche statistiche aggregate</h3>
+          <p style={S.p}>
+            Oltre al win rate, la dashboard del Simulator calcola metriche
+            quantitative su <b>tutti i trade di tutte le simulazioni</b>
+            completate (ogni run = un trade: una entry su un asset, tenuta
+            per un mese):
+          </p>
+          <ul style={S.ul}>
+            <li>
+              <b>Profit Factor:</b> rapporto tra la somma dei rendimenti dei
+              trade vincenti e il valore assoluto della somma dei trade
+              perdenti. Sopra 2.0 è eccellente, tra 1 e 2 è discreto, sotto
+              1 il sistema è in perdita strutturale. È la misura più sintetica
+              della qualità del sistema: dice quanto si guadagna per ogni
+              unità di rischio perso.
+            </li>
+            <li>
+              <b>Avg Win:</b> rendimento percentuale medio dei soli trade
+              chiusi in profitto. Misura quanto "rendono" le tesi corrette.
+            </li>
+            <li>
+              <b>Avg Loss:</b> rendimento percentuale medio dei soli trade
+              chiusi in perdita. Misura quanto costano gli errori: un sistema
+              robusto mantiene |Avg Loss| contenuto grazie alla disciplina
+              di stop-loss.
+            </li>
+            <li>
+              <b>Win Rate:</b> percentuale di run classificati "verde"
+              (PnL ≥ 3% oppure batte l'S&P di almeno 0.5%). Un win rate
+              basso può comunque produrre profitto se Avg Win &gt;&gt; |Avg
+              Loss| (asimmetria favorevole).
+            </li>
+          </ul>
+          <p style={S.p}>
+            Queste metriche convergono verso quelle del bot Live: un sistema
+            sano mantiene Profit Factor &gt; 1.5 e una asimmetria
+            Avg&nbsp;Win / |Avg&nbsp;Loss| superiore a 1, dimostrando che
+            limita i danni quando sbaglia e lascia correre quando ha ragione.
+          </p>
+
           <h3 style={S.h3}>Memoria cognitiva</h3>
           <p style={S.p}>
             Il Simulator mantiene una memoria persistente delle simulazioni

@@ -1395,6 +1395,38 @@ async def sim_kpi():
         n = len(cr)
         win_by_cat[cat] = (sum(1 for r in cr if r.get("outcome") == "green") / n) if n else 0
         win_by_cat[cat + "_total"] = n
+
+    # ── Profit Factor / Avg Win / Avg Loss su TUTTI i trade ──────────────
+    # Nel Simulator ogni run = 1 trade (1 entry su 1 asset, hold 1M). Usiamo
+    # perf_1m (return % della posizione, gia' invertito per SHORT) come P&L
+    # per-trade: e' un campo top-level, quindi zero costo extra (no parsing
+    # full_data → importante anche per l'egress Supabase).
+    #
+    #   Profit Factor = somma return vincenti / |somma return perdenti|
+    #   Avg Win       = media dei return positivi (%)
+    #   Avg Loss      = media dei return negativi (%, negativo)
+    #
+    # Coerente con compute_profit_factor/compute_expectancy di metrics.py,
+    # ma aggregato cross-run invece che per singolo run.
+    pnls = [r.get("perf_1m") for r in runs if r.get("perf_1m") is not None]
+    winners = [p for p in pnls if p > 0]
+    losers = [p for p in pnls if p < 0]
+    gross_win = sum(winners)
+    gross_loss_abs = abs(sum(losers))
+
+    if not pnls:
+        profit_factor = None
+        profit_factor_infinite = False
+    elif gross_loss_abs == 0:
+        profit_factor = None
+        profit_factor_infinite = gross_win > 0   # solo vincenti
+    else:
+        profit_factor = round(gross_win / gross_loss_abs, 3)
+        profit_factor_infinite = False
+
+    avg_win = round(sum(winners) / len(winners), 5) if winners else 0.0
+    avg_loss = round(sum(losers) / len(losers), 5) if losers else 0.0
+
     return {
         "score": round(wins / total * 100, 1),
         "score_label": f"{wins} verdi su {total} run",
@@ -1402,6 +1434,14 @@ async def sim_kpi():
         "wins": wins, "total": total, "single_step": single, "multi_step": multi,
         "avg_delta_sp": avg_delta,
         "win_by_category": win_by_cat,
+        # Metriche per-trade aggregate (perf_1m in formato decimale: 0.03 = 3%)
+        "profit_factor": profit_factor,
+        "profit_factor_infinite": profit_factor_infinite,
+        "avg_win": avg_win,            # decimale, es. 0.042 = +4.2%
+        "avg_loss": avg_loss,          # decimale negativo, es. -0.028 = -2.8%
+        "trades_total": len(pnls),
+        "trades_winners": len(winners),
+        "trades_losers": len(losers),
     }
 
 

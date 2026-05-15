@@ -237,6 +237,32 @@ export default function SimDashboard() {
              sub="Performance media a 1M" tone="#f472b6" />
       </div>
 
+      {/* KPI ROW 2 — metriche per-trade aggregate (tutti i trade) */}
+      <div style={S.kpiRow3} data-pdf-section="true">
+        <KPI
+          label="Profit Factor (tutti i trade)"
+          value={fmtProfitFactor(kpi)}
+          sub={
+            kpi?.trades_total
+              ? `${kpi.trades_winners}W / ${kpi.trades_losers}L su ${kpi.trades_total} trade`
+              : "Nessun trade"
+          }
+          tone="#22d3ee"
+        />
+        <KPI
+          label="AVG WIN (tutti i trade)"
+          value={kpi?.avg_win != null ? `+${(kpi.avg_win * 100).toFixed(2)}%` : "—"}
+          sub={kpi?.trades_winners ? `media dei ${kpi.trades_winners} trade vincenti` : "—"}
+          tone="#10b981"
+        />
+        <KPI
+          label="AVG LOSS (tutti i trade)"
+          value={kpi?.avg_loss != null ? `${(kpi.avg_loss * 100).toFixed(2)}%` : "—"}
+          sub={kpi?.trades_losers ? `media dei ${kpi.trades_losers} trade perdenti` : "—"}
+          tone="#ef4444"
+        />
+      </div>
+
       {/* Win rate per categoria */}
       <div style={S.card} data-pdf-section="true">
         <div style={S.cardTitle}>Win rate per categoria</div>
@@ -520,6 +546,15 @@ function FullRunsTable({ runs, kpi }) {
       </table>
     </div>
   );
+}
+
+// Profit Factor: gestisce null (no trade), infinite (solo vincenti),
+// e valore numerico. Soglie: >2 eccellente, 1-2 discreto, <1 in perdita.
+function fmtProfitFactor(kpi) {
+  if (!kpi || kpi.trades_total === 0 || kpi.trades_total == null) return "—";
+  if (kpi.profit_factor_infinite) return "∞";
+  if (kpi.profit_factor == null) return "—";
+  return kpi.profit_factor.toFixed(2);
 }
 
 function KPI({ label, value, sub, tone }) {
@@ -980,7 +1015,8 @@ const S = {
   refreshBtn: { background: "#1e293b", color: "#cbd5e1", border: "1px solid #334155",
                 padding: "6px 12px", borderRadius: 6, cursor: "pointer",
                 display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13 },
-  kpiRow: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 24 },
+  kpiRow: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 12 },
+  kpiRow3: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 24 },
   kpi: { background: "#111827", border: "1px solid #1f2937", borderLeft: "3px solid",
          padding: "16px", borderRadius: 8 },
   kpiLabel: { color: "#94a3b8", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 },
