@@ -19,6 +19,7 @@ import SimRunner from "./pages/simulator/SimRunner";
 import SimResult from "./pages/simulator/SimResult";
 import SimHistory from "./pages/simulator/SimHistory";
 import SimMemory from "./pages/simulator/SimMemory";
+import SimScenarioPipeline from "./pages/simulator/SimScenarioPipeline";
 
 const API = window.location.origin;
 
@@ -228,6 +229,7 @@ function App() {
           <Route path="result/:runId" element={<SimResult />} />
           <Route path="history" element={<SimHistory />} />
           <Route path="memory" element={<SimMemory />} />
+          <Route path="pipeline" element={<SimScenarioPipeline />} />
         </Route>
 
         {/* Fallback: redirect a entry page */}

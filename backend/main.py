@@ -2602,6 +2602,39 @@ def _validate_scenario(s: DynamicScenarioPayload) -> tuple[bool, str]:
     return True, ""
 
 
+# ─── Pipeline event log (diagnostica generator scenari) ─────────────────────
+# Persistito su sim_settings come `_sim_scenario::pipeline_log` = lista JSON
+# degli ultimi N eventi. Registra OGNI tentativo che arriva al backend:
+#   - success: scenari accettati/rifiutati con reasons
+#   - auth_failed: token GitHub mancante o errato (401)
+#   - server_misconfig: SCENARIO_UPLOAD_TOKEN non settato lato server (503)
+# Cosi' la pagina di status puo' mostrare il PERCHE' senza dover leggere
+# i log di GitHub Actions.
+_PIPELINE_LOG_KEY = "_sim_scenario::pipeline_log"
+_PIPELINE_LOG_MAX = 60
+
+
+def _log_pipeline_event(event: dict) -> None:
+    """Append-and-trim di un evento alla pipeline log su sim_settings."""
+    try:
+        from simulator import db as sim_db
+        event = dict(event)
+        event.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        raw = sim_db.get_setting(_PIPELINE_LOG_KEY, "[]")
+        try:
+            log = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            if not isinstance(log, list):
+                log = []
+        except Exception:
+            log = []
+        log.append(event)
+        # Tieni solo gli ultimi N (i piu' recenti in coda)
+        log = log[-_PIPELINE_LOG_MAX:]
+        sim_db.set_setting(_PIPELINE_LOG_KEY, json.dumps(log, default=str))
+    except Exception as e:
+        logger.warning("Impossibile loggare pipeline event: %s", e)
+
+
 @app.post("/api/simulator/scenarios/dynamic")
 async def upload_dynamic_scenarios(
     batch: DynamicScenarioBatch,
@@ -2619,16 +2652,37 @@ async def upload_dynamic_scenarios(
     # Auth
     expected_token = os.environ.get("SCENARIO_UPLOAD_TOKEN", "").strip()
     if not expected_token:
+        _log_pipeline_event({
+            "event": "server_misconfig",
+            "status": "error",
+            "detail": "SCENARIO_UPLOAD_TOKEN non configurato sul server (Render env var mancante)",
+            "accepted": 0, "rejected": 0,
+        })
         return JSONResponse(status_code=503, content={
             "error": "SCENARIO_UPLOAD_TOKEN non configurato sul server",
         })
     provided = request.headers.get("X-Scenario-Token", "").strip()
     if not provided or provided != expected_token:
+        _log_pipeline_event({
+            "event": "auth_failed",
+            "status": "error",
+            "detail": ("Token mancante nella request"
+                       if not provided else
+                       "Token fornito NON coincide con SCENARIO_UPLOAD_TOKEN server "
+                       "(controlla che GitHub Secret e Render env var siano identici)"),
+            "accepted": 0, "rejected": 0,
+        })
         return JSONResponse(status_code=401, content={
             "error": "Token mancante o non valido",
         })
 
     if not batch.scenarios:
+        _log_pipeline_event({
+            "event": "empty_batch",
+            "status": "warning",
+            "detail": "Request autenticata ma batch scenari vuoto (generator non ha prodotto nulla)",
+            "accepted": 0, "rejected": 0,
+        })
         return {"accepted": 0, "rejected": 0, "rejected_reasons": []}
 
     # Default expires_at: +30 giorni
@@ -2678,6 +2732,18 @@ async def upload_dynamic_scenarios(
     logger.info("Dynamic scenarios upload: %d accepted, %d rejected",
                 len(accepted), len(rejected))
 
+    # Log evento per la pagina di diagnostica pipeline
+    _log_pipeline_event({
+        "event": "upload",
+        "status": ("ok" if accepted else ("partial" if rejected else "empty")),
+        "accepted": len(accepted),
+        "rejected": len(rejected),
+        "accepted_ids": accepted[:20],
+        "rejected_reasons": rejected[:20],
+        "detail": (f"{len(accepted)} scenari accettati"
+                   + (f", {len(rejected)} rifiutati" if rejected else "")),
+    })
+
     return {
         "accepted": len(accepted),
         "rejected": len(rejected),
@@ -2698,6 +2764,129 @@ async def list_dynamic_scenarios():
             "scenarios": items,
         }
     except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/simulator/scenarios/pipeline-status")
+async def scenario_pipeline_status():
+    """
+    Stato diagnostico della pipeline di generazione scenari.
+
+    Ritorna:
+      - health: ok | stale | error | never (derivato dall'ultimo upload OK)
+      - summary: conteggi + timestamp chiave + breakdown categorie
+      - pipeline_log: ultimi eventi (upload/auth_failed/server_misconfig/...)
+      - active_scenarios: scenari dinamici attivi (id/cat/title/quando/scadenza)
+
+    Usato dalla pagina Simulator → Pipeline Scenari per capire se il
+    generator GitHub Actions sta funzionando e, se no, PERCHE'.
+    """
+    try:
+        from simulator import db as sim_db
+        from simulator import scenarios as _sc
+
+        # 1. Pipeline event log
+        raw_log = sim_db.get_setting(_PIPELINE_LOG_KEY, "[]")
+        try:
+            pipeline_log = json.loads(raw_log) if isinstance(raw_log, str) else (raw_log or [])
+            if not isinstance(pipeline_log, list):
+                pipeline_log = []
+        except Exception:
+            pipeline_log = []
+        # Piu' recenti in cima per la UI
+        pipeline_log_desc = list(reversed(pipeline_log))
+
+        # 2. Scenari dinamici attivi (non scaduti)
+        active = _sc.load_dynamic_scenarios(strip_reveal=True)
+        now = datetime.now(timezone.utc)
+
+        def _parse_ts(v):
+            if not v:
+                return None
+            try:
+                return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        active_view = []
+        cat_breakdown: dict = {}
+        added_24h = 0
+        added_7d = 0
+        for s in active:
+            up = _parse_ts(s.get("uploaded_at"))
+            cat = s.get("category", "unknown")
+            cat_breakdown[cat] = cat_breakdown.get(cat, 0) + 1
+            if up:
+                age_h = (now - up).total_seconds() / 3600.0
+                if age_h <= 24:
+                    added_24h += 1
+                if age_h <= 168:
+                    added_7d += 1
+            active_view.append({
+                "id": s.get("id"),
+                "category": cat,
+                "title": s.get("title", ""),
+                "uploaded_at": s.get("uploaded_at"),
+                "expires_at": s.get("expires_at"),
+                "source": s.get("source", ""),
+            })
+        # Ordina per uploaded_at desc (i piu' recenti in cima)
+        active_view.sort(key=lambda x: x.get("uploaded_at") or "", reverse=True)
+
+        # 3. Timestamp chiave + health
+        last_success_ts = None
+        last_attempt_ts = None
+        last_error = None
+        for ev in pipeline_log:  # ordine cronologico
+            ts = ev.get("ts")
+            last_attempt_ts = ts or last_attempt_ts
+            if ev.get("status") == "ok":
+                last_success_ts = ts or last_success_ts
+            if ev.get("status") == "error":
+                last_error = {
+                    "ts": ts,
+                    "event": ev.get("event"),
+                    "detail": ev.get("detail", ""),
+                }
+
+        # Health: basato sull'ultimo upload OK.
+        #   ok    = upload riuscito nelle ultime 26h (3 run/giorno previste)
+        #   stale = ultimo successo 26-50h fa (1+ run saltati)
+        #   error = nessun successo > 50h MA ci sono tentativi (problema attivo)
+        #   never = nessun upload mai ricevuto dal backend
+        health = "never"
+        last_success_dt = _parse_ts(last_success_ts)
+        last_attempt_dt = _parse_ts(last_attempt_ts)
+        if last_success_dt:
+            age_h = (now - last_success_dt).total_seconds() / 3600.0
+            if age_h <= 26:
+                health = "ok"
+            elif age_h <= 50:
+                health = "stale"
+            else:
+                health = "error"
+        elif last_attempt_dt:
+            # Tentativi presenti ma nessuno riuscito → problema attivo
+            health = "error"
+
+        return {
+            "health": health,
+            "summary": {
+                "active_total": len(active_view),
+                "added_last_24h": added_24h,
+                "added_last_7d": added_7d,
+                "categories": cat_breakdown,
+                "last_successful_upload_at": last_success_ts,
+                "last_attempt_at": last_attempt_ts,
+                "last_error": last_error,
+                "expected_per_day": 15,  # 3 run/giorno × 5 target
+                "min_guarantee_per_run": 2,
+            },
+            "pipeline_log": pipeline_log_desc[:60],
+            "active_scenarios": active_view,
+        }
+    except Exception as e:
+        logger.error("pipeline-status error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
