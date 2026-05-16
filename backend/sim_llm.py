@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time as _time
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,52 @@ logger = logging.getLogger(__name__)
 _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 _DEEPSEEK_R1 = "deepseek-reasoner"
 _DEEPSEEK_V3 = "deepseek-chat"
+
+# ── CIRCUIT BREAKER Auriko ──────────────────────────────────────────────────
+# Problema risolto: il Simulator auto-mode ha un timeout HARD di 480s per run
+# (8 min). Un run V2 = 3-5 step, ogni step chiama _call_r1. Se Auriko e' lento/
+# down, ogni step pagava fino a 3 retry × 180s = 540s SOLO per Auriko prima del
+# fallback DeepSeek → un singolo step esauriva il budget → run abortito →
+# crollo del numero di test completati.
+#
+# Il circuit breaker: dopo N fallimenti Auriko consecutivi, smette di provarlo
+# per X minuti e va DIRETTO a DeepSeek (zero overhead Auriko). Si richiude
+# automaticamente al primo successo dopo la finestra. In-memory per-processo
+# (sufficiente: i run girano nel processo backend long-lived; build_scenarios
+# e' effimero su GitHub Actions e non lo usa).
+_CB_FAIL_THRESHOLD = 3        # fallimenti consecutivi per APRIRE il circuit
+_CB_OPEN_SECONDS = 900        # 15 min: durata skip Auriko a circuit aperto
+_auriko_fail_count = 0
+_auriko_circuit_open_until = 0.0
+
+
+def record_auriko_failure() -> None:
+    """Chiamato da un call site quando un tentativo Auriko fallisce."""
+    global _auriko_fail_count, _auriko_circuit_open_until
+    _auriko_fail_count += 1
+    if (_auriko_fail_count >= _CB_FAIL_THRESHOLD
+            and _time.time() >= _auriko_circuit_open_until):
+        _auriko_circuit_open_until = _time.time() + _CB_OPEN_SECONDS
+        logger.warning(
+            "[SIM-LLM] CIRCUIT BREAKER APERTO: %d fallimenti Auriko "
+            "consecutivi → bypass Auriko (DeepSeek diretto) per %d min",
+            _auriko_fail_count, _CB_OPEN_SECONDS // 60,
+        )
+
+
+def record_auriko_success() -> None:
+    """Chiamato da un call site quando un tentativo Auriko riesce."""
+    global _auriko_fail_count, _auriko_circuit_open_until
+    if _auriko_fail_count or _auriko_circuit_open_until:
+        logger.info("[SIM-LLM] Auriko OK → circuit breaker reset (era %d fail)",
+                     _auriko_fail_count)
+    _auriko_fail_count = 0
+    _auriko_circuit_open_until = 0.0
+
+
+def _auriko_circuit_open() -> bool:
+    """True se il circuit e' aperto (Auriko da saltare in questo momento)."""
+    return _time.time() < _auriko_circuit_open_until
 
 
 def _get_deepseek_key() -> str:
@@ -134,11 +181,30 @@ def get_sim_llm_configs(tier: str) -> list[tuple[str, str, str, str]]:
 
     primary = get_sim_llm_config(tier)
     if primary[3] == "auriko":
-        # Fallback esplicito: DeepSeek diretto (bypass gateway)
         ds_key = _get_deepseek_key()
         ds_model = _DEEPSEEK_R1 if is_reasoner else _DEEPSEEK_V3
         deepseek_fallback = (_DEEPSEEK_URL, ds_key, ds_model, "deepseek")
-        # Includi il fallback solo se la chiave DeepSeek esiste davvero
+
+        # CIRCUIT BREAKER: se Auriko ha fallito troppo di recente, NON
+        # provarlo nemmeno → vai diretto a DeepSeek (zero overhead).
+        # Questo evita che ogni step di ogni run paghi il costo di
+        # sondare un Auriko morto, che faceva sforare il timeout 480s.
+        if _auriko_circuit_open():
+            if ds_key:
+                logger.info(
+                    "[SIM-LLM] circuit breaker aperto → skip Auriko, "
+                    "uso DeepSeek diretto"
+                )
+                return [deepseek_fallback]
+            # Nessun fallback possibile: siamo costretti a provare Auriko
+            logger.warning(
+                "[SIM-LLM] circuit aperto ma nessuna DEEPSEEK_API_KEY: "
+                "costretto a riprovare Auriko"
+            )
+            return [primary]
+
+        # Circuit chiuso: Auriko primario + fallback DeepSeek se la
+        # chiave esiste.
         if ds_key:
             return [primary, deepseek_fallback]
         logger.warning(
@@ -148,3 +214,22 @@ def get_sim_llm_configs(tier: str) -> list[tuple[str, str, str, str]]:
         return [primary]
     # Gia' su DeepSeek diretto: nessun fallback (sarebbe se stesso)
     return [primary]
+
+
+def auriko_attempt_budget(provider: str, has_fallback: bool) -> tuple[int, int]:
+    """
+    Ritorna (max_retries, timeout_seconds) per una config.
+
+    FAST-FAIL: se la config e' Auriko E c'e' un fallback DeepSeek dopo,
+    si fa UN SOLO tentativo con timeout breve (50s). Auriko qui e' un
+    "tentativo di ottimizzazione": se non risponde subito, si ripiega
+    su DeepSeek invece di bruciare 3×180s. Il fallback DeepSeek mantiene
+    i suoi retry completi (3 × 180s) → affidabilita' invariata.
+
+    Se Auriko e' l'unica config (no DeepSeek key) → retry completo
+    normale: l'utente ha scelto Auriko-only, deve funzionare.
+    DeepSeek diretto → sempre retry completo (comportamento storico).
+    """
+    if provider == "auriko" and has_fallback:
+        return 1, 50
+    return 3, 180

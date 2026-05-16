@@ -527,9 +527,17 @@ async def _call_r1(system_prompt: str, user_message: str,
     if not configs or not configs[0][1]:
         raise ValueError("Nessuna API key LLM configurata (DEEPSEEK_API_KEY o AURIKO_API_KEY)")
 
+    from sim_llm import (auriko_attempt_budget, record_auriko_failure,
+                          record_auriko_success)
+
     last_error = ""
     for cfg_i, (api_url, api_key, model, provider) in enumerate(configs):
         is_last_cfg = (cfg_i == len(configs) - 1)
+        has_fallback = not is_last_cfg
+        # FAST-FAIL: Auriko con fallback → 1 tentativo, timeout 50s.
+        # Critico per V2 multi-step: 3-5 step × budget run 480s. Senza
+        # questo, un Auriko lento su un solo step abortiva l'intero run.
+        cfg_retries, cfg_timeout = auriko_attempt_budget(provider, has_fallback)
         headers = {"Authorization": f"Bearer {api_key}",
                    "Content-Type": "application/json"}
         payload = {
@@ -541,51 +549,54 @@ async def _call_r1(system_prompt: str, user_message: str,
             "max_tokens": 4500,
         }
         cfg_failed = False
-        for attempt in range(max_retries):
+        for attempt in range(cfg_retries):
             try:
                 async with aiohttp.ClientSession() as sess:
                     async with sess.post(
                         api_url, json=payload, headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=180)
+                        timeout=aiohttp.ClientTimeout(total=cfg_timeout)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
+                            if provider == "auriko":
+                                record_auriko_success()
                             return data["choices"][0]["message"]["content"] or ""
                         body = await resp.text()
                         last_error = f"{provider} HTTP {resp.status}: {body[:200]}"
                         if resp.status == 429 or 500 <= resp.status < 600:
-                            if attempt < max_retries - 1:
+                            if attempt < cfg_retries - 1:
                                 await asyncio.sleep(2 ** (attempt + 1))
                                 continue
                             cfg_failed = True
                             break
-                        # Errore non-transitorio → prova fallback config
                         logger.warning(
                             "[SIM-V2] %s errore non-transitorio: %s — %s",
                             provider, last_error,
-                            "fallback DeepSeek" if not is_last_cfg else "no fallback"
+                            "fallback DeepSeek" if has_fallback else "no fallback"
                         )
                         cfg_failed = True
                         break
             except asyncio.TimeoutError:
-                last_error = f"{provider} timeout"
-                if attempt < max_retries - 1:
+                last_error = f"{provider} timeout ({cfg_timeout}s)"
+                if attempt < cfg_retries - 1:
                     await asyncio.sleep(2 ** (attempt + 1))
                     continue
                 cfg_failed = True
                 break
             except aiohttp.ClientError as e:
                 last_error = f"{provider} network: {e}"
-                if attempt < max_retries - 1:
+                if attempt < cfg_retries - 1:
                     await asyncio.sleep(2 ** (attempt + 1))
                     continue
                 cfg_failed = True
                 break
-        if cfg_failed and not is_last_cfg:
-            logger.warning("[SIM-V2] config '%s' fallita (%s) → fallback",
-                            provider, last_error)
-            continue
-        if cfg_failed and is_last_cfg:
+        if cfg_failed:
+            if provider == "auriko":
+                record_auriko_failure()   # alimenta il circuit breaker
+            if has_fallback:
+                logger.warning("[SIM-V2] config '%s' fallita (%s) → fallback",
+                                provider, last_error)
+                continue
             break
 
     raise ValueError(f"Tutte le config LLM fallite (Simulator V2 R1): {last_error}")

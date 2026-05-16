@@ -716,9 +716,17 @@ async def _call_r1(system_prompt: str, user_message: str,
     except Exception:
         pass
 
+    from sim_llm import (auriko_attempt_budget, record_auriko_failure,
+                          record_auriko_success)
+
     last_error: str = ""
     for cfg_i, (api_url, api_key, model, provider) in enumerate(configs):
         is_last_cfg = (cfg_i == len(configs) - 1)
+        has_fallback = not is_last_cfg
+        # FAST-FAIL: Auriko con fallback → 1 tentativo, timeout 50s.
+        # Altrimenti retry completo (3 × 180s). Evita che un Auriko
+        # lento bruci l'intero budget 480s del run prima del fallback.
+        cfg_retries, cfg_timeout = auriko_attempt_budget(provider, has_fallback)
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {
             "model": model,
@@ -729,48 +737,47 @@ async def _call_r1(system_prompt: str, user_message: str,
             "max_tokens": 4500,
         }
         cfg_failed = False
-        for attempt in range(max_retries):
+        for attempt in range(cfg_retries):
             try:
                 async with aiohttp.ClientSession() as sess:
                     async with sess.post(
                         api_url, json=payload, headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=180)
+                        timeout=aiohttp.ClientTimeout(total=cfg_timeout)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
+                            if provider == "auriko":
+                                record_auriko_success()
                             return data["choices"][0]["message"]["content"] or ""
                         body = await resp.text()
                         last_error = f"{provider} HTTP {resp.status}: {body[:200]}"
-                        # Errori transitori (429, 5xx): retry con backoff
                         if resp.status == 429 or 500 <= resp.status < 600:
-                            if attempt < max_retries - 1:
+                            if attempt < cfg_retries - 1:
                                 wait_s = 2 ** (attempt + 1)
                                 logger.warning(
                                     "[SIM] %s %d (attempt %d/%d), retry in %ds: %s",
-                                    provider, resp.status, attempt + 1, max_retries,
+                                    provider, resp.status, attempt + 1, cfg_retries,
                                     wait_s, body[:120]
                                 )
                                 await asyncio.sleep(wait_s)
                                 continue
                             cfg_failed = True
                             break
-                        # Errore non-transitorio (4xx: model not found, auth):
-                        # NON crashare → prova la config di fallback.
                         logger.warning(
                             "[SIM] %s errore non-transitorio: %s — %s",
                             provider, last_error,
-                            "provo fallback DeepSeek" if not is_last_cfg
+                            "provo fallback DeepSeek" if has_fallback
                             else "nessun fallback disponibile"
                         )
                         cfg_failed = True
                         break
             except asyncio.TimeoutError:
-                last_error = f"{provider} timeout"
-                if attempt < max_retries - 1:
+                last_error = f"{provider} timeout ({cfg_timeout}s)"
+                if attempt < cfg_retries - 1:
                     wait_s = 2 ** (attempt + 1)
                     logger.warning(
                         "[SIM] %s timeout (attempt %d/%d), retry in %ds",
-                        provider, attempt + 1, max_retries, wait_s
+                        provider, attempt + 1, cfg_retries, wait_s
                     )
                     await asyncio.sleep(wait_s)
                     continue
@@ -778,21 +785,24 @@ async def _call_r1(system_prompt: str, user_message: str,
                 break
             except aiohttp.ClientError as e:
                 last_error = f"{provider} network: {e}"
-                if attempt < max_retries - 1:
+                if attempt < cfg_retries - 1:
                     wait_s = 2 ** (attempt + 1)
                     logger.warning(
                         "[SIM] %s network err (attempt %d/%d), retry in %ds: %s",
-                        provider, attempt + 1, max_retries, wait_s, str(e)[:120]
+                        provider, attempt + 1, cfg_retries, wait_s, str(e)[:120]
                     )
                     await asyncio.sleep(wait_s)
                     continue
                 cfg_failed = True
                 break
-        if cfg_failed and not is_last_cfg:
-            logger.warning("[SIM] config '%s' fallita (%s) → fallback alla successiva",
-                            provider, last_error)
-            continue
-        if cfg_failed and is_last_cfg:
+        if cfg_failed:
+            if provider == "auriko":
+                record_auriko_failure()   # alimenta il circuit breaker
+            if has_fallback:
+                logger.warning(
+                    "[SIM] config '%s' fallita (%s) → fallback alla successiva",
+                    provider, last_error)
+                continue
             break
 
     raise ValueError(f"Tutte le config LLM fallite (Simulator R1): {last_error}")

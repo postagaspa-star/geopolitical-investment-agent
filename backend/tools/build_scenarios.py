@@ -246,12 +246,16 @@ async def generate_scenarios_via_llm(session: aiohttp.ClientSession,
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        logger.info("Chiamata LLM provider=%s model=%s (news_chars=%d)...",
-                    provider, model, len(news_text))
+        # FAST-FAIL: Auriko con fallback DeepSeek dopo → timeout breve
+        # (50s). Il workflow GitHub ha un cap di 15 min: non vogliamo
+        # restare appesi 180s su un Auriko lento prima del fallback.
+        cfg_timeout = 50 if (provider == "auriko" and not is_last_cfg) else 180
+        logger.info("Chiamata LLM provider=%s model=%s timeout=%ds (news_chars=%d)...",
+                    provider, model, cfg_timeout, len(news_text))
         try:
             async with session.post(
                 api_url, json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=180),
+                timeout=aiohttp.ClientTimeout(total=cfg_timeout),
             ) as resp:
                 body = await resp.text()
                 if resp.status != 200:

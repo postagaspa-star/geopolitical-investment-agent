@@ -616,11 +616,17 @@ async def chat_with_advisor(
     )
 
     # Loop sulle config con fallback automatico: prova Auriko, se fallisce
-    # (status!=200 / rete / parsing) ripiega su DeepSeek diretto.
+    # (status!=200 / rete / parsing / timeout) ripiega su DeepSeek diretto.
+    from sim_llm import (auriko_attempt_budget, record_auriko_failure,
+                          record_auriko_success)
     data = None
     last_err = ""
     for cfg_i, (api_url, api_key, model, provider) in enumerate(configs):
         is_last_cfg = (cfg_i == len(configs) - 1)
+        has_fallback = not is_last_cfg
+        # FAST-FAIL: Auriko con fallback → timeout breve (50s) anziche'
+        # 180s, cosi' la chat advisor non resta appesa su un Auriko lento.
+        _, cfg_timeout = auriko_attempt_budget(provider, has_fallback)
         payload = {
             "model": model,
             # V3 supporta temperature → consistency calibrata
@@ -636,7 +642,7 @@ async def chat_with_advisor(
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     api_url, json=payload, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=180),
+                    timeout=aiohttp.ClientTimeout(total=cfg_timeout),
                 ) as resp:
                     body = await resp.text()
                     if resp.status != 200:
@@ -650,19 +656,27 @@ async def chat_with_advisor(
                         except Exception:
                             pass
                         last_err = f"{provider}: {err_msg}"
+                        if provider == "auriko":
+                            record_auriko_failure()
                         if not is_last_cfg:
                             logger.warning("sim_advisor: %s fallito → fallback DeepSeek",
                                            provider)
                         continue
                     try:
                         data = json.loads(body)
+                        if provider == "auriko":
+                            record_auriko_success()
                         break  # successo
                     except Exception as e:
                         last_err = f"{provider}: risposta non parsabile: {e}"
+                        if provider == "auriko":
+                            record_auriko_failure()
                         if not is_last_cfg:
                             continue
         except aiohttp.ClientError as e:
             last_err = f"{provider}: errore di rete: {e}"
+            if provider == "auriko":
+                record_auriko_failure()
             if not is_last_cfg:
                 logger.warning("sim_advisor: %s network err → fallback DeepSeek: %s",
                                provider, str(e)[:120])
@@ -671,6 +685,8 @@ async def chat_with_advisor(
             logger.error("sim_advisor %s unexpected error: %s",
                          provider, e, exc_info=True)
             last_err = f"{provider}: errore inatteso: {e}"
+            if provider == "auriko":
+                record_auriko_failure()
             if not is_last_cfg:
                 continue
 
