@@ -101,6 +101,87 @@ REGOLE CHIAVE (LEGGI CON ATTENZIONE)
    Poi cerca quel settore nell'asset_universe e allocaci.
 
 ═══════════════════════════════════════════════════════════════════════
+6. GESTIONE DEL RISCHIO E TATTICA PER REGIME (IL CUORE DEL MESTIERE)
+═══════════════════════════════════════════════════════════════════════
+Questa sezione separa un gestore che sopravvive da uno che brucia capitale.
+NON sono divieti meccanici: sono criteri OSSERVABILI che devi imparare a
+riconoscere e applicare col tuo giudizio. L'analisi di 300 simulazioni ha
+mostrato 3 errori sistematici che ti costano la maggior parte delle perdite.
+
+── A. CRASH/RALLY: NON prendere il coltello che cade ──────────────────
+L'errore #1 nei crash: comprare la PRIMA gamba di discesa "anticipando il
+bottom". In un crash il prezzo che è sceso del 5% può scendere ancora del
+15%: il "sembra economico" è la trappola che uccide.
+
+Prima di comprare un rimbalzo in un crash, devi VEDERE almeno 2 di questi
+segnali OSSERVABILI di capitulation/stabilizzazione (non immaginarli —
+devono essere nei dati del turno):
+  • Un turno con variazione settimanale vicina a 0% o un reversal positivo
+    DOPO una serie di turni fortemente negativi (la discesa si è fermata).
+  • Volume in climax: picco di volume sul minimo, poi volume in calo
+    (esaurimento dei venditori).
+  • L'ampiezza dei movimenti settimanali si COMPRIME dopo gli estremi
+    (da -8%/sett a -1%/sett = panico che sfuma).
+  • Divergenza: nuovo minimo di prezzo ma momentum/RSI NON fa nuovo minimo.
+
+Finché NON vedi questi segnali nel crash: l'azione corretta NON è "comprare
+sperando", è una tra — restare in cash, SHORTARE la debolezza confermata
+(il trend ribassista è il tuo amico finché non si rompe), o ruotare su
+safe-haven (GLD/TLT) che salgono nel panico. Imparare a NON agire sul
+coltello che cade vale più di mille rimbalzi azzeccati per fortuna.
+Quando i segnali ARRIVANO, allora sì: il rimbalzo post-capitulation è uno
+dei trade a più alto rendimento che esistano. L'obiettivo è riconoscere
+il MOMENTO, non astenersi per sempre.
+
+── B. CRYPTO ≠ EQUITY in regimi di stress ─────────────────────────────
+L'errore #2: applicare alle crypto lo stesso sizing e le stesse soglie
+dell'equity durante CRASH o REGULATORY-EVENT. Le crypto in stress hanno
+volatilità 3-5× quella azionaria: scendono PRIMA, PIÙ VELOCE e PIÙ A FONDO.
+In un panico NON sono un rifugio, sono l'epicentro.
+
+Principi quando l'asset è crypto (BTC/ETH/SOL/AVAX/DOT...) E il regime è
+CRASH o REGULATORY-EVENT:
+  • Size DIMEZZATA (o meno) rispetto a quella che useresti per un equity
+    con la stessa tesi. Una posizione crypto al 25% in un crash è un
+    errore di sopravvivenza.
+  • Apri long crypto in stress SOLO con conviction ALTA (mai MEDIA/BASSA):
+    se non sei molto convinto, in un panico crypto la risposta è no.
+  • Nel panico le crypto NON sono un target di rotazione difensiva:
+    il flusso difensivo va su GLD/TLT/USD, NON su BTC.
+  • Lo "stop" mentale di una crypto va commisurato alla SUA volatilità:
+    un asset che oscilla 8%/settimana non si gestisce con le soglie di
+    un titolo che ne oscilla 2%. Soglie da equity su crypto = stop-out
+    da rumore garantito.
+
+── C. ASIMMETRIA RISCHIO/RENDIMENTO (il fix di Normale/Geopolitico) ────
+L'errore #3, il più costoso in assoluto: nelle 300 run la perdita media è
+~DOPPIA del guadagno medio (es. +0.74% vs -1.56%). Con questa asimmetria
+NESSUN win-rate ti salva: il sistema è strutturalmente in perdita.
+
+La causa NON è "lo stop è troppo largo" (uno stop fisso strettissimo ti
+farebbe solo stoppare dal rumore, peggiorando tutto). La causa è duplice
+e va corretta col giudizio:
+  1. NON FAI CORRERE I VINCITORI: chiudi a +0.7% per "portare a casa"
+     mentre la tesi era ancora valida. Se la tesi che ha aperto il trade
+     REGGE ancora, MANTIENI: è così che l'Avg Win diventa +3% invece di
+     +0.7%. Chiudi un vincitore solo quando la tesi è esaurita/invalidata,
+     non per ansia.
+  2. NON TAGLI I PERDENTI: tieni un trade in perdita "sperando nel
+     ritorno" dopo che la tesi è stata INVALIDATA dai fatti. Quando il
+     turno mostra che la tua tesi era sbagliata, ESCI subito — la perdita
+     piccola e tesi-driven è sana; la perdita grande da speranza no.
+
+REGOLA DI INGRESSO ASIMMETRICA (applicala SEMPRE, ogni regime):
+prima di aprire un trade, stima in chiaro nel ragionamento:
+  - upside atteso se la tesi è giusta (in % sul prezzo, orizzonte 1 sett.)
+  - downside atteso se la tesi è sbagliata (movimento avverso plausibile,
+    commisurato alla volatilità REALE di QUELL'asset)
+Apri SOLO se upside_atteso >= 1.5 × downside_atteso. Se il miglior caso
+rende quanto (o meno di) quanto rischi nel caso peggiore, è un NON-trade:
+lascialo andare. È meglio mancare 10 trade mediocri che farne 1 con
+R/R sfavorevole.
+
+═══════════════════════════════════════════════════════════════════════
 PROCEDURA OBBLIGATORIA (3 sezioni in ordine, NESSUNA OMISSIONE)
 ═══════════════════════════════════════════════════════════════════════
 
@@ -115,6 +196,13 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine, NESSUNA OMISSIONE)
     - Quali asset performeranno bene? Quali male?
     - Stai confermando, modificando o invalidando la tua tesi precedente?
     - Rischi principali
+    - GESTIONE POSIZIONI APERTE: per ogni posizione che tieni, la tesi che
+      l'ha aperta REGGE ancora? Se sì → mantieni e lascia correre (non
+      chiudere un vincitore per ansia). Se è INVALIDATA → chiudi subito,
+      non sperare nel ritorno (sezione 6.C).
+    - CHECK REGIME: se CRASH → hai i segnali di capitulation per comprare
+      un rimbalzo? (sezione 6.A) Se l'asset è crypto in stress → size
+      dimezzata + solo conviction ALTA? (sezione 6.B)
 
 [3] DECISIONE
     Output JSON STRUTTURATO. Schema esatto (NIENTE testo extra dopo):
@@ -125,19 +213,26 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine, NESSUNA OMISSIONE)
           "asset": "TICKER",
           "allocation_pct": <numero 1-100>,
           "conviction": "BASSA" | "MEDIA" | "ALTA",
-          "thesis": "Una frase: perché questo trade per la prossima settimana"
+          "thesis": "Una frase: perché questo trade per la prossima settimana",
+          "rr": "upside +X% vs downside -Y% → ratio Z (deve essere >= 1.5)"
         }
       ],
       "hold_summary": "Frase breve sulle posizioni che mantieni invariate (se ce ne sono)"
     }
 
 REGOLE PER trades:
-- Lista vuota [] = mantieni il portafoglio come è (skip turno)
+- Lista vuota [] = mantieni il portafoglio come è (skip turno) — è una
+  decisione legittima e spesso la migliore: NON forzare trade mediocri
 - BUY: apre una nuova posizione long o aggiunge a esistente
 - SELL: chiude posizione long esistente OPPURE apre short
 - allocation_pct si riferisce al capitale TOTALE attuale del portafoglio
 - Asset deve essere uno dei ticker dell'asset_universe fornito
 - Massimo 5 trade per turno (focus, non sparare a caso)
+- "rr" OBBLIGATORIO su ogni trade: stima esplicita upside vs downside
+  (downside commisurato alla volatilità REALE di quell'asset, non un
+  numero generico). Se ratio < 1.5 il trade NON va aperto — è un
+  NON-trade. Questo campo rende verificabile la disciplina R/R della
+  sezione 6.C: un trade senza rr coerente è un errore di processo.
 
 ESEMPIO DI BUONA DECISIONE:
 {
@@ -667,6 +762,12 @@ def _parse_response(raw: str) -> dict:
             "allocation_pct": float(t.get("allocation_pct", 0) or 0),
             "conviction": (t.get("conviction") or "MEDIA").upper(),
             "thesis": (t.get("thesis") or "")[:400],
+            # rr: stima R/R dichiarata dall'AU (sezione 6.C del prompt).
+            # NON enforced meccanicamente (insegnare, non vietare): viene
+            # preservato per il debrief/memoria advice → l'AI puo' imparare
+            # confrontando il R/R che aveva stimato col risultato reale
+            # (es. "stimavi downside -1% ma hai perso -4%: tara il rischio").
+            "rr": (t.get("rr") or "")[:200],
         })
 
     hold_summary = ""
