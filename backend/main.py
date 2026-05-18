@@ -5573,28 +5573,34 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         # caso reale: portfolio crollato a 75k e risalito a 111k senza
         # trade corrispondenti). Tali jump inquinano return E max-drawdown.
         #
-        # Sanitizzazione: clip di ogni step-return a ±soglia e ricostruzione
-        # della serie "pulita". I movimenti normali (<12%) restano INTATTI;
-        # solo i jump fisicamente implausibili vengono appiattiti. Non si
-        # nasconde nulla: si espongono SIA i valori grezzi SIA i puliti.
+        # Sanitizzazione per RIMOZIONE del segmento corrotto (non clip).
+        # I bug osservati sono "round-trip" brevi (<1 giorno): il valore
+        # crolla e risale senza trade (es. 100k→75k→111k). Il clip
+        # lasciava un -12% fittizio; meglio ELIMINARE i punti raggiunti
+        # da un jump anomalo e RICUCIRE i punti sani adiacenti — il
+        # drawdown-glitch sparisce del tutto e resta solo la traiettoria
+        # reale del trading. Si espongono comunque SIA grezzo SIA pulito.
         ANOMALY_THR = 0.12   # 12% step-to-step = glitch quasi certo
-        raw_rets = [(pvals[i] / pvals[i - 1] - 1.0)
-                    for i in range(1, len(pvals)) if pvals[i - 1] > 0]
-        n_anomalies = sum(1 for r in raw_rets if abs(r) > ANOMALY_THR)
-
-        # Serie sanitizzata: ricostruita da step-return clippati
-        clean = [pvals[0]]
+        corrupted = set()
         for i in range(1, len(pvals)):
             prev = pvals[i - 1]
-            if prev <= 0:
-                clean.append(clean[-1])
-                continue
-            r = pvals[i] / prev - 1.0
-            if r > ANOMALY_THR:
-                r = ANOMALY_THR
-            elif r < -ANOMALY_THR:
-                r = -ANOMALY_THR
-            clean.append(clean[-1] * (1.0 + r))
+            if prev > 0 and abs(pvals[i] / prev - 1.0) > ANOMALY_THR:
+                # Il punto RAGGIUNTO dal jump anomalo e' il sospetto:
+                # e' il valore mis-valutato dal glitch. Il punto di
+                # partenza (i-1) resta sano e fa da aggancio per la
+                # ricucitura col primo punto sano successivo.
+                corrupted.add(i)
+        n_anomalies = len(corrupted)
+
+        # Serie pulita = solo i punti SANI, in ordine (ricucitura: il
+        # punto sano pre-glitch si collega direttamente al sano
+        # post-glitch, come se il glitch <1g non fosse mai accaduto).
+        clean = [pvals[i] for i in range(len(pvals)) if i not in corrupted]
+        if len(clean) < 2:
+            # Troppi punti rimossi: non sanitizzare, usa il grezzo e
+            # segnala (meglio grezzo trasparente che serie inventata).
+            clean = list(pvals)
+            n_anomalies = 0
 
         port_ret_raw = (pvals[-1] / pvals[0] - 1.0) * 100.0
         port_mdd_raw = _max_dd(pvals)
