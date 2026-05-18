@@ -215,6 +215,49 @@ proposed_actions[] con una o piu' azioni nei formati descritti sotto.
 
 """ + ACTIONS_BLOCK + """
 ═══════════════════════════════════════════════════════════════════════
+DISCIPLINA DI RAGIONAMENTO (LEGGI PRIMA DI OGNI RISPOSTA)
+═══════════════════════════════════════════════════════════════════════
+Difetto noto da correggere: tendi a guardare i micromovimenti perdendo
+il quadro d'insieme, e a cambiare valutazione quando l'utente chiede di
+un asset specifico (bias di compiacenza). Applica SEMPRE questi 4 punti:
+
+1. QUADRO PRIMA DEL MICRO. Nel contesto trovi, in cima: la lettura del
+   REGIME dal Decision Standard (Sonnet 4.5, modello superiore) e LE TUE
+   ULTIME DECISIONI AUTONOME. Inquadra PRIMA il regime e la tua postura
+   autonoma; SOLO DOPO guarda i dati tecnici di breve. L'OHLCV a 5 giorni
+   di un alt NON ribalta il quadro di regime: e' un dettaglio, non la tesi.
+
+2. COERENZA CON LA RUN AUTONOMA (anti-compiacenza). Le tue decisioni
+   autonome sono piu' obiettive perche' NON sollecitate da una domanda
+   dell'utente. Se l'utente ti chiede di un asset che nella tua ultima
+   run autonoma hai valutato SELL o NO_TRADE, la tua posizione di DEFAULT
+   resta quella. Puoi discostarti SOLO se:
+     (a) sono emersi DATI NUOVI dopo quella run, oppure
+     (b) l'utente porta un ARGOMENTO che invalida concretamente la tesi.
+   In entrambi i casi DEVI: citare esplicitamente la valutazione autonoma
+   precedente ("nella run di [quando] avevo valutato X in SELL perche'
+   ..."), e spiegare COSA e' cambiato. Se non e' cambiato nulla, CONFERMA
+   la valutazione autonoma anche se l'utente sperava in un si'. Non
+   inventare un setup per accontentare la richiesta.
+
+3. ORIZZONTE TEMPORALE OBBLIGATORIO. Dichiara SEMPRE su quale orizzonte
+   stai ragionando: OPERATIVO (24-72h, quello su cui agisce la run
+   autonoma), MEDIO (1-4 settimane), LUNGO (1-3 mesi). Una tesi di medio
+   termine che sembra contraddire la valutazione operativa NON e' una
+   contraddizione se i timeframe sono diversi: dillo esplicitamente e
+   RICONCILIA ("operativamente resta SELL/flat per le prossime 48h come
+   da run autonoma; sul medio termine 2-4 sett. il dip diventa
+   interessante SE [condizione]"). Non spacciare una view di medio
+   termine come se ribaltasse l'azione operativa.
+
+4. PROPOSED_ACTIONS SOLO SE COERENTI. Proponi un'azione concreta solo se
+   sopravvive ai punti 1-3. Una proposta che contraddice regime + run
+   autonoma senza dati nuovi e' un errore di processo: in quel caso
+   rispondi con l'analisi ma NON popolare proposed_actions, e spiega
+   all'utente perche' il quadro complessivo non supporta ancora il trade.
+
+""" + """
+═══════════════════════════════════════════════════════════════════════
 REGOLE
 ═══════════════════════════════════════════════════════════════════════
 
@@ -360,9 +403,40 @@ def _build_context_block(agent_type: str, live_ohlcv: dict) -> str:
     except Exception as e:
         logger.warning("[CHAT-DEC] live_context failed: %s", e)
 
+    # ── COERENZA CON LA RUN AUTONOMA (fix incoerenza chat↔run) ──────────
+    # La chat partiva from-scratch: non sapeva cosa la run autonoma aveva
+    # appena deciso/valutato → poteva contraddirsi (es. run valuta LINK
+    # SELL, poi in chat propone buy-the-dip). Iniettiamo le ultime
+    # decisioni autonome + la lettura di regime dallo Standard PRIMA dei
+    # dati micro, cosi' il quadro d'insieme precede il micromovimento.
+    if agent_type == "crypto":
+        try:
+            from agents.decision import (
+                _build_recent_decisions_block,
+                build_standard_regime_read_for_crypto,
+            )
+            regime_read = build_standard_regime_read_for_crypto(limit=3)
+            if regime_read:
+                parts.append(regime_read)
+            auto_runs = _build_recent_decisions_block(agent_type="crypto", limit=4)
+            if auto_runs:
+                parts.append(
+                    "─── LE TUE ULTIME DECISIONI AUTONOME CRYPTO ───\n"
+                    "Queste sono le valutazioni che TU STESSO hai prodotto in "
+                    "modalita' autonoma (non sollecitata dall'utente, quindi "
+                    "piu' obiettiva). Se l'utente ti chiede di un asset che "
+                    "qui risulta valutato SELL/NO_TRADE, la tua posizione di "
+                    "DEFAULT resta questa: cambiala solo con dati nuovi o "
+                    "argomenti che invalidano la tesi, citandola esplicitamente.\n\n"
+                    + auto_runs
+                )
+        except Exception as e:
+            logger.debug("[CHAT-DEC] autonomous-run context failed: %s", e)
+
     if live_ohlcv:
         parts.append(
-            "OHLCV LIVE (ultimi 5 giorni, top ticker rilevanti):\n```json\n"
+            "OHLCV LIVE (ultimi 5 giorni, top ticker rilevanti) — DATO MICRO, "
+            "NON sovrascrive il quadro di regime/run autonoma sopra:\n```json\n"
             + json.dumps(live_ohlcv, indent=2, ensure_ascii=False, default=str)
             + "\n```"
         )
