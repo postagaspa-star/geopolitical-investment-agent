@@ -6,6 +6,7 @@ import Sidebar from "./components/Sidebar";
 import DashboardPage from "./pages/DashboardPage";
 import IntelligencePage from "./pages/IntelligencePage";
 import AnalyticsPage from "./pages/AnalyticsPage";
+import EdgeTrackerPage from "./pages/EdgeTrackerPage";
 import CoachCardsPage from "./pages/CoachCardsPage";
 import ChatDecisionPage from "./pages/ChatDecisionPage";
 import Settings from "./components/Settings";
@@ -197,6 +198,7 @@ function LiveApp() {
           } />
           <Route path="intelligence" element={<IntelligencePage />} />
           <Route path="analytics" element={<AnalyticsPage />} />
+          <Route path="edge-tracker" element={<EdgeTrackerPage />} />
           <Route path="coach-cards" element={<CoachCardsPage />} />
           <Route path="chat" element={<ChatDecisionPage />} />
           <Route path="settings" element={<Settings onDataRefresh={fetchAll} />} />

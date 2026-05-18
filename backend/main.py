@@ -5764,6 +5764,209 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ─── EDGE TRACKER: "il sistema ha un edge, o no, o dati insufficienti?" ──────
+# Mette insieme i dati che gia' esistono (trade chiusi, alpha vs S&P,
+# calibrazione del segnale) e applica criteri decisi A PRIORI per dare
+# UN verdetto onesto. I criteri sono hard-coded e mostrati in UI cosi'
+# NON sono spostabili a posteriori (anti-bias). Risponde alla domanda di
+# Michael: separare bravura da fortuna con campioni statisticamente
+# sufficienti, non sul "buon mese".
+
+# Criteri di giudizio — FISSI e VISIBILI (decisi prima, non aggiustabili)
+_EDGE_MIN_SAMPLES = 100          # sotto: dati insufficienti per giudicare
+_EDGE_PF_PROMOTE = 1.3          # profit factor minimo per "edge confermato"
+_EDGE_ASYM_PROMOTE = 1.2       # avg_win / |avg_loss| minimo
+_EDGE_PF_KILL = 1.0            # PF sotto 1 + alpha<=0 → ipotesi falsificata
+
+
+def _compute_closed_trades_py(trades: list) -> list:
+    """
+    Replica server-side ESATTA della logica FIFO di AnalyticsPage
+    (computeClosedTrades): accoppia BUY→SELL per ticker in ordine
+    temporale. Ritorna [{pnl_pct, confidence, ts}]. Stessa logica =
+    numeri coerenti col pannello Analytics.
+    """
+    from datetime import datetime as _dt
+    buy_queue: dict = {}
+    closed: list = []
+
+    def _ts(v):
+        try:
+            return _dt.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+
+    srt = sorted(trades or [], key=lambda t: _ts(t.get("timestamp")))
+    for t in srt:
+        ticker = (t.get("ticker") or "").upper()
+        action = (t.get("action") or t.get("side") or "").upper()
+        try:
+            price = float(t.get("price") or 0)
+            qty = float(t.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        conf = t.get("confidence_score", t.get("confidence"))
+        try:
+            conf = float(conf) if conf is not None else None
+        except (TypeError, ValueError):
+            conf = None
+        if not ticker or price <= 0 or qty <= 0:
+            continue
+        if action == "BUY":
+            buy_queue.setdefault(ticker, []).append(
+                {"price": price, "qty": qty, "conf": conf})
+        elif action == "SELL":
+            remaining = qty
+            while remaining > 0 and buy_queue.get(ticker):
+                buy = buy_queue[ticker][0]
+                if buy["price"] <= 0:
+                    buy_queue[ticker].pop(0)
+                    continue
+                matched = min(remaining, buy["qty"])
+                pnl_pct = (price - buy["price"]) / buy["price"] * 100.0
+                closed.append({"pnl_pct": round(pnl_pct, 3),
+                               "confidence": buy["conf"]})
+                remaining -= matched
+                buy["qty"] -= matched
+                if buy["qty"] <= 1e-9:
+                    buy_queue[ticker].pop(0)
+    return closed
+
+
+@app.get("/api/live/edge-tracker")
+async def live_edge_tracker():
+    """
+    Verdetto onesto: edge dimostrato / non dimostrato / dati insufficienti.
+    Aggrega trade chiusi + alpha vs S&P + calibrazione del segnale e
+    applica i criteri fissi decisi a priori.
+    """
+    try:
+        trades = database.get_trades(limit=5000) or []
+        closed = _compute_closed_trades_py(trades)
+        n = len(closed)
+
+        pnls = [c["pnl_pct"] for c in closed]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        gross_w = sum(wins)
+        gross_l_abs = abs(sum(losses))
+        win_rate = round(len(wins) / n * 100, 1) if n else 0.0
+        profit_factor = (round(gross_w / gross_l_abs, 2)
+                         if gross_l_abs > 0 else (None if not wins else float("inf")))
+        avg_win = round(sum(wins) / len(wins), 2) if wins else 0.0
+        avg_loss = round(sum(losses) / len(losses), 2) if losses else 0.0
+        asymmetry = (round(abs(avg_win) / abs(avg_loss), 2)
+                     if avg_loss != 0 else (None if avg_win == 0 else float("inf")))
+
+        # Calibrazione del segnale: i trade ad alta confidence rendono
+        # piu' di quelli a bassa? (dx vs dy di Michael, in sintesi).
+        with_conf = [c for c in closed if c.get("confidence") is not None]
+        calib_ok = None
+        calib_detail = "Confidence non registrata su abbastanza trade."
+        if len(with_conf) >= 20:
+            cs = sorted(with_conf, key=lambda c: c["confidence"])
+            half = len(cs) // 2
+            low = cs[:half]
+            high = cs[half:]
+            avg_low = sum(c["pnl_pct"] for c in low) / max(1, len(low))
+            avg_high = sum(c["pnl_pct"] for c in high) / max(1, len(high))
+            calib_ok = avg_high > avg_low
+            calib_detail = (
+                f"Trade ad alta confidence: pnl medio {avg_high:+.2f}% · "
+                f"bassa confidence: {avg_low:+.2f}%. "
+                + ("Il segnale discrimina (alta > bassa)."
+                   if calib_ok else
+                   "Il segnale NON discrimina (la confidence e' rumore)."))
+
+        # Alpha vs S&P su finestra lunga (riuso la logica benchmark che
+        # gia' gestisce anomaly detection).
+        alpha = None
+        bench_verdict = None
+        try:
+            bench = await get_portfolio_benchmark(period="all")
+            if isinstance(bench, dict) and bench.get("available"):
+                alpha = bench.get("alpha_pct")
+                bench_verdict = bench.get("verdict")
+        except Exception as _be:
+            logger.debug("edge-tracker benchmark fail: %s", _be)
+
+        # ── VERDETTO con criteri FISSI ───────────────────────────────────
+        pf_num = (profit_factor if isinstance(profit_factor, (int, float))
+                  and profit_factor != float("inf") else
+                  (999 if profit_factor == float("inf") else 0))
+        asym_num = (asymmetry if isinstance(asymmetry, (int, float))
+                    and asymmetry != float("inf") else
+                    (999 if asymmetry == float("inf") else 0))
+
+        if n < _EDGE_MIN_SAMPLES:
+            verdict = "insufficient_data"
+            verdict_msg = (
+                f"Dati insufficienti per giudicare: {n}/{_EDGE_MIN_SAMPLES} "
+                f"trade chiusi. Mancano {_EDGE_MIN_SAMPLES - n} campioni. "
+                "Continua a far girare il sistema, NON trarre conclusioni "
+                "ora (un campione piccolo = fortuna o sfortuna, non bravura).")
+        elif (alpha is not None and alpha > 0
+              and pf_num >= _EDGE_PF_PROMOTE
+              and asym_num >= _EDGE_ASYM_PROMOTE
+              and calib_ok is True):
+            verdict = "edge_confirmed"
+            verdict_msg = (
+                "EDGE DIMOSTRATO su questo campione: batte l'S&P (alpha "
+                f"+{alpha}pp), profit factor {profit_factor} ≥ "
+                f"{_EDGE_PF_PROMOTE}, asimmetria {asymmetry} ≥ "
+                f"{_EDGE_ASYM_PROMOTE}, e la confidence discrimina. "
+                "Tutti i criteri decisi a priori sono soddisfatti. "
+                "Prossimo passo: conferma su un regime di mercato diverso.")
+        elif (alpha is not None and alpha <= 0 and pf_num < _EDGE_PF_KILL):
+            verdict = "no_edge"
+            verdict_msg = (
+                f"Nessun edge su {n} trade: non batte l'S&P "
+                f"(alpha {alpha}pp) E profit factor {profit_factor} < "
+                f"{_EDGE_PF_KILL}. Con campione sufficiente e questi numeri, "
+                "l'ipotesi 'il sistema ha un vantaggio' e' falsificata su "
+                "questo periodo. Va ripensato l'approccio, non iterato.")
+        else:
+            verdict = "edge_emerging"
+            verdict_msg = (
+                f"Segnale parziale su {n} trade: alcuni criteri sono "
+                "soddisfatti, altri no (vedi sotto). Non e' ancora un edge "
+                "dimostrato ne' una bocciatura: serve continuare a "
+                "raccogliere dati e vedere se i criteri mancanti si "
+                "consolidano nel tempo, su regimi diversi.")
+
+        return {
+            "samples": n,
+            "min_samples": _EDGE_MIN_SAMPLES,
+            "win_rate_pct": win_rate,
+            "profit_factor": (profit_factor if profit_factor != float("inf")
+                              else "∞"),
+            "avg_win_pct": avg_win,
+            "avg_loss_pct": avg_loss,
+            "asymmetry": (asymmetry if asymmetry != float("inf") else "∞"),
+            "alpha_vs_sp_pct": alpha,
+            "benchmark_verdict": bench_verdict,
+            "calibration_ok": calib_ok,
+            "calibration_detail": calib_detail,
+            "verdict": verdict,
+            "verdict_msg": verdict_msg,
+            # Criteri FISSI mostrati in UI (decisi prima = non spostabili)
+            "criteria": {
+                "min_samples": _EDGE_MIN_SAMPLES,
+                "pf_promote": _EDGE_PF_PROMOTE,
+                "asymmetry_promote": _EDGE_ASYM_PROMOTE,
+                "pf_kill": _EDGE_PF_KILL,
+                "explain": (
+                    "EDGE CONFERMATO se: ≥100 trade E batte S&P E "
+                    "profit factor ≥1.3 E asimmetria ≥1.2 E confidence "
+                    "discrimina. NESSUN EDGE se: ≥100 trade E non batte "
+                    "S&P E profit factor <1.0. In mezzo: in costruzione."),
+            },
+        }
+    except Exception as e:
+        logger.error("edge-tracker error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/portfolio/history")
 async def get_portfolio_history(period: str = Query(default="30d")):
     """Restituisce lo storico del valore del portafoglio.

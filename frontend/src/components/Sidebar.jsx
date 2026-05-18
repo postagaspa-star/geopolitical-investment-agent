@@ -11,6 +11,7 @@ import {
   RefreshCw,
   BookOpen,
   MessageSquare,
+  Target,
 } from 'lucide-react';
 
 const MODE_LABELS = {
@@ -314,6 +315,11 @@ export default function Sidebar({
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             onClick={onCloseSidebar}>
             <BarChart3 /> Analytics
+          </NavLink>
+          <NavLink to="/live/edge-tracker"
+            className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
+            onClick={onCloseSidebar}>
+            <Target /> Edge Tracker
           </NavLink>
           <NavLink to="/live/chat"
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
