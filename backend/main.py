@@ -5553,8 +5553,6 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
             return {"available": False,
                     "reason": "storico portafoglio insufficiente per il periodo"}
 
-        port_ret = (pvals[-1] / pvals[0] - 1.0) * 100.0
-
         def _max_dd(series: list[float]) -> float:
             peak = series[0]
             mdd = 0.0
@@ -5566,16 +5564,58 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
                     mdd = dd
             return round(mdd, 2)
 
-        port_mdd = _max_dd(pvals)
+        # ── ANOMALY DETECTION (criterio fisico, non soggettivo) ──────────
+        # Un portafoglio che fa trading su asset liquidi senza leva estrema
+        # NON puo' fisicamente variare oltre ~12% tra due snapshot
+        # consecutivi (gli snapshot sono giornalieri o intraday). Una
+        # variazione superiore e' quasi sempre un GLITCH di valutazione
+        # (prezzo errato fetchato, posizione mis-valutata, bug — es. il
+        # caso reale: portfolio crollato a 75k e risalito a 111k senza
+        # trade corrispondenti). Tali jump inquinano return E max-drawdown.
+        #
+        # Sanitizzazione: clip di ogni step-return a ±soglia e ricostruzione
+        # della serie "pulita". I movimenti normali (<12%) restano INTATTI;
+        # solo i jump fisicamente implausibili vengono appiattiti. Non si
+        # nasconde nulla: si espongono SIA i valori grezzi SIA i puliti.
+        ANOMALY_THR = 0.12   # 12% step-to-step = glitch quasi certo
+        raw_rets = [(pvals[i] / pvals[i - 1] - 1.0)
+                    for i in range(1, len(pvals)) if pvals[i - 1] > 0]
+        n_anomalies = sum(1 for r in raw_rets if abs(r) > ANOMALY_THR)
 
-        # Sharpe indicativo: rendimenti tra snapshot consecutivi.
-        # rf=0, annualizzazione prudente su base 252 (ordine di grandezza).
-        rets = [(pvals[i] / pvals[i - 1] - 1.0)
-                for i in range(1, len(pvals)) if pvals[i - 1] > 0]
+        # Serie sanitizzata: ricostruita da step-return clippati
+        clean = [pvals[0]]
+        for i in range(1, len(pvals)):
+            prev = pvals[i - 1]
+            if prev <= 0:
+                clean.append(clean[-1])
+                continue
+            r = pvals[i] / prev - 1.0
+            if r > ANOMALY_THR:
+                r = ANOMALY_THR
+            elif r < -ANOMALY_THR:
+                r = -ANOMALY_THR
+            clean.append(clean[-1] * (1.0 + r))
+
+        port_ret_raw = (pvals[-1] / pvals[0] - 1.0) * 100.0
+        port_mdd_raw = _max_dd(pvals)
+        port_ret_clean = (clean[-1] / clean[0] - 1.0) * 100.0
+        port_mdd_clean = _max_dd(clean)
+
+        data_anomaly = n_anomalies > 0
+        # Le metriche "ufficiali" usate per il verdetto sono le PULITE
+        # quando ci sono anomalie (il grezzo e' inaffidabile); altrimenti
+        # grezzo == pulito.
+        port_ret = port_ret_clean if data_anomaly else port_ret_raw
+        port_mdd = port_mdd_clean if data_anomaly else port_mdd_raw
+
+        # Sharpe indicativo su rendimenti SANITIZZATI (i jump-glitch
+        # gonfiavano artificialmente la volatilita').
+        crets = [(clean[i] / clean[i - 1] - 1.0)
+                 for i in range(1, len(clean)) if clean[i - 1] > 0]
         sharpe = None
-        if len(rets) >= 5:
-            mean = sum(rets) / len(rets)
-            var = sum((r - mean) ** 2 for r in rets) / max(1, len(rets) - 1)
+        if len(crets) >= 5:
+            mean = sum(crets) / len(crets)
+            var = sum((r - mean) ** 2 for r in crets) / max(1, len(crets) - 1)
             std = _math.sqrt(var)
             if std > 0:
                 sharpe = round((mean / std) * _math.sqrt(252), 2)
@@ -5600,9 +5640,12 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         except Exception as _se:
             logger.debug("benchmark SPY fetch failed: %s", _se)
 
-        # Serie portafoglio normalizzata base 100
-        pbase = pvals[0]
-        port_series_norm = [round(v / pbase * 100.0, 3) for v in pvals]
+        # Serie portafoglio normalizzata base 100. Se ci sono anomalie
+        # usa la serie PULITA per il grafico (altrimenti il grafico
+        # mostrerebbe ancora il crollo-glitch a 75k che non e' reale).
+        _plot_src = clean if data_anomaly else pvals
+        pbase = _plot_src[0]
+        port_series_norm = [round(v / pbase * 100.0, 3) for v in _plot_src]
 
         alpha = (round(port_ret - spy_ret, 2)
                  if spy_ret is not None else None)
@@ -5657,6 +5700,21 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
                         f"(alpha {alpha}pp) e con drawdown non migliore: "
                         "nessun edge in questo periodo.")
 
+        # Trasparenza anomalie: se la serie conteneva jump fisicamente
+        # implausibili (glitch di valutazione), il verdetto e' calcolato
+        # sui dati SANITIZZATI e va dichiarato apertamente. Non si forza
+        # un giudizio su dati sporchi ne' si nascondono.
+        if data_anomaly:
+            verdict_detail = (
+                f"⚠️ DATI SANITIZZATI: rilevati {n_anomalies} salti "
+                f"anomali (>±12% tra snapshot consecutivi) — glitch di "
+                f"valutazione, NON trading reale (es. crollo a ~75k e "
+                f"risalita a ~111k senza trade). Le metriche qui sono "
+                f"ricostruite escludendo quei salti; il grezzo "
+                f"(return {round(port_ret_raw, 2)}%, maxDD "
+                f"{port_mdd_raw}%) NON e' affidabile per questo periodo. "
+                f"Verdetto su serie pulita: " + verdict_detail)
+
         return {
             "available": True,
             "period": period,
@@ -5672,9 +5730,17 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
             "verdict_detail": verdict_detail,
             "portfolio_series_norm": port_series_norm,
             "sp500_series_norm": spy_series_norm,
+            # Trasparenza anomalie (grezzo vs pulito)
+            "data_anomaly": data_anomaly,
+            "n_anomalies": n_anomalies,
+            "portfolio_return_pct_raw": round(port_ret_raw, 2),
+            "portfolio_max_drawdown_pct_raw": port_mdd_raw,
             "note": ("alpha_pct e' GREZZO (non risk-adjusted). Un mese non "
                      "distingue edge da fortuna di regime: leggi sempre "
-                     "verdict + drawdown."),
+                     "verdict + drawdown."
+                     + (" Periodo con anomalie tecniche: metriche "
+                        "sanitizzate, vedi avviso nel verdetto."
+                        if data_anomaly else "")),
         }
     except Exception as e:
         logger.error("benchmark error: %s", e, exc_info=True)

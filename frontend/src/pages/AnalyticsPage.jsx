@@ -1285,12 +1285,32 @@ export default function AnalyticsPage() {
                         strokeWidth={2} strokeDasharray="5 4" dot={false} />
                 </LineChart>
               </ResponsiveContainer>
+              {benchmark.data_anomaly && (
+                <div style={{
+                  marginTop: 10, padding: '10px 12px', borderRadius: 8,
+                  background: '#7c2d1222', border: '1px solid #f59e0b66',
+                }}>
+                  <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#f59e0b' }}>
+                    ⚠️ Periodo con {benchmark.n_anomalies} anomalia/e tecnica/e — dati sanitizzati
+                  </div>
+                  <div style={{ fontSize: '0.74rem', color: '#cbd5e1', marginTop: 4, lineHeight: 1.5 }}>
+                    Rilevati salti &gt;±12% tra snapshot consecutivi: glitch di
+                    valutazione, NON decisioni di trading. Le metriche sotto sono
+                    ricostruite escludendo quei salti.
+                    <br />
+                    <span style={{ color: '#64748b' }}>
+                      Grezzo (NON affidabile): return {benchmark.portfolio_return_pct_raw >= 0 ? '+' : ''}{benchmark.portfolio_return_pct_raw}%
+                      · maxDD {benchmark.portfolio_max_drawdown_pct_raw}%
+                    </span>
+                  </div>
+                </div>
+              )}
               <div style={{
                 marginTop: 10, padding: '10px 12px', borderRadius: 8,
                 background: `${vd.c}1a`, border: `1px solid ${vd.c}55`,
               }}>
                 <div style={{ fontSize: '0.82rem', fontWeight: 700, color: vd.c }}>
-                  {vd.t}
+                  {vd.t}{benchmark.data_anomaly ? ' (su dati puliti)' : ''}
                 </div>
                 <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginTop: 4, lineHeight: 1.5 }}>
                   {benchmark.verdict_detail}
@@ -1298,6 +1318,7 @@ export default function AnalyticsPage() {
                 <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: 6 }}>
                   Tu {benchmark.portfolio_return_pct >= 0 ? '+' : ''}{benchmark.portfolio_return_pct}%
                   (maxDD {benchmark.portfolio_max_drawdown_pct}%)
+                  {benchmark.data_anomaly ? ' [pulito]' : ''}
                   {' · '}S&P {benchmark.sp500_return_pct >= 0 ? '+' : ''}{benchmark.sp500_return_pct}%
                   (maxDD {benchmark.sp500_max_drawdown_pct}%)
                   {benchmark.portfolio_sharpe_est != null
