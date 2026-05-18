@@ -49,6 +49,17 @@ function Criterion({ label, ok, detail }) {
   );
 }
 
+function Row({ k, v, strong }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between",
+                  padding: "3px 0", fontSize: "0.78rem" }}>
+      <span style={{ color: "#94a3b8" }}>{k}</span>
+      <span style={{ color: strong ? "#f1f5f9" : "#cbd5e1",
+                     fontWeight: strong ? 700 : 500 }}>{v}</span>
+    </div>
+  );
+}
+
 export default function EdgeTrackerPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -183,6 +194,78 @@ export default function EdgeTrackerPage() {
         <Criterion label="La confidence dell'AI discrimina"
           ok={data.calibration_ok} detail={data.calibration_detail} />
       </div>
+
+      {/* DATI GREZZI DEL CALCOLO — trasparenza totale */}
+      {data.raw_calc && (
+        <div style={{ background: "#111827", border: "1px solid #1f2937",
+                      borderRadius: 10, padding: "16px 18px",
+                      marginBottom: 16 }}>
+          <div style={{ fontSize: "0.95rem", fontWeight: 700,
+                        color: "#e2e8f0", marginBottom: 4 }}>
+            Dati grezzi del calcolo
+          </div>
+          <div style={{ fontSize: "0.74rem", color: "#64748b",
+                        marginBottom: 12 }}>
+            Esattamente cosa è stato usato per confrontare te con l'S&P,
+            sullo stesso identico arco di tempo. Niente di nascosto.
+          </div>
+          <div style={{ display: "grid",
+                        gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div style={{ background: "#0a1018", borderRadius: 8,
+                          padding: "12px 14px" }}>
+              <div style={{ fontSize: "0.78rem", color: "#3b82f6",
+                            fontWeight: 700, marginBottom: 6 }}>
+                Il tuo portafoglio
+              </div>
+              <Row k="Valore iniziale"
+                v={`$${data.raw_calc.portfolio_first_value?.toLocaleString()}`} />
+              <Row k="Valore finale"
+                v={`$${data.raw_calc.portfolio_last_value?.toLocaleString()}`} />
+              <Row k="Dal" v={data.raw_calc.portfolio_first_date || "—"} />
+              <Row k="Al" v={data.raw_calc.portfolio_last_date || "—"} />
+              <Row k="Punti dati" v={data.raw_calc.portfolio_points} />
+              <Row k="Rendimento" strong
+                v={data.benchmark_portfolio_return_pct != null
+                  ? `${data.benchmark_portfolio_return_pct >= 0 ? "+" : ""}`
+                    + `${data.benchmark_portfolio_return_pct}%` : "—"} />
+            </div>
+            <div style={{ background: "#0a1018", borderRadius: 8,
+                          padding: "12px 14px" }}>
+              <div style={{ fontSize: "0.78rem", color: "#94a3b8",
+                            fontWeight: 700, marginBottom: 6 }}>
+                S&P 500 (stesso periodo)
+              </div>
+              <Row k="Close iniziale"
+                v={data.raw_calc.sp500_first_close != null
+                  ? `$${data.raw_calc.sp500_first_close}` : "—"} />
+              <Row k="Close finale"
+                v={data.raw_calc.sp500_last_close != null
+                  ? `$${data.raw_calc.sp500_last_close}` : "—"} />
+              <Row k="Dal" v={data.raw_calc.sp500_first_date || "—"} />
+              <Row k="Al" v={data.raw_calc.sp500_last_date || "—"} />
+              <Row k="Punti dati" v={data.raw_calc.sp500_points} />
+              <Row k="Rendimento" strong
+                v={data.benchmark_sp500_return_pct != null
+                  ? `${data.benchmark_sp500_return_pct >= 0 ? "+" : ""}`
+                    + `${data.benchmark_sp500_return_pct}%` : "—"} />
+            </div>
+          </div>
+          <div style={{ fontSize: "0.8rem", color: "#e2e8f0",
+                        marginTop: 12, padding: "10px 12px",
+                        background: "#0d1424", borderRadius: 8 }}>
+            Differenza (alpha) ={" "}
+            <strong style={{ color: data.alpha_vs_sp_pct >= 0
+              ? "#10b981" : "#ef4444" }}>
+              {data.alpha_vs_sp_pct != null
+                ? `${data.alpha_vs_sp_pct >= 0 ? "+" : ""}`
+                  + `${data.alpha_vs_sp_pct} punti`
+                : "—"}
+            </strong>
+            {" "}— il tuo rendimento meno quello dell'S&P, stesso periodo.
+            Se le date qui sopra coincidono e l'alpha non torna, segnalalo.
+          </div>
+        </div>
+      )}
 
       {/* CRITERI DECISI PRIMA — trasparenza anti-bias */}
       <div style={{ background: "#0d1424", border: "1px dashed #334155",

@@ -5662,18 +5662,43 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         spy_ret = None
         spy_mdd = None
         spy_series_norm = []
+        spy_first_date = spy_last_date = None
         try:
             import data_fetchers
-            # Fetch SPY sulla finestra REALE del portafoglio, non su
-            # `days` grezzo (fix disallineamento period="all").
+            # Fetch ampio, poi allinea per DATA (non per numero di punti).
+            # BUG residuo precedente: closes[-effective_days:] prendeva N
+            # GIORNI DI BORSA, ma effective_days e' in giorni di
+            # CALENDARIO. La borsa apre ~5/7 → si prendeva un arco S&P
+            # piu' lungo del portafoglio → S&P gonfiato → alpha negativo.
+            # Fix: tieni SOLO i close S&P con data nella finestra reale
+            # del portafoglio [_t0 .. _t1].
             spy = data_fetchers.fetch_market_data(
-                "SPY", period_days=effective_days + 5)
+                "SPY", period_days=effective_days + 10)
             rows = (spy or {}).get("data") or []
-            closes = [float(r["close"]) for r in rows
+
+            sel = []
+            if _t0 and _t1:
+                d0 = _t0.strftime("%Y-%m-%d")
+                d1 = _t1.strftime("%Y-%m-%d")
+                for r in rows:
+                    rd = str(r.get("date") or "")[:10]
+                    c = r.get("close")
+                    if rd and c and float(c) > 0 and d0 <= rd <= d1:
+                        sel.append((rd, float(c)))
+            if len(sel) < 2:
+                # Fallback: nessuna data utile → ultimi N punti (vecchio
+                # metodo, meno preciso ma meglio di niente).
+                fc = [float(r["close"]) for r in rows
                       if r.get("close") and float(r["close"]) > 0]
-            # Allinea: stesso arco temporale del portafoglio.
-            if len(closes) >= 2:
-                closes = closes[-min(len(closes), effective_days + 1):]
+                fd = [str(r.get("date") or "")[:10] for r in rows
+                      if r.get("close") and float(r["close"]) > 0]
+                k = min(len(fc), effective_days + 1)
+                sel = list(zip(fd[-k:], fc[-k:]))
+
+            if len(sel) >= 2:
+                sel.sort(key=lambda x: x[0])
+                closes = [c for _, c in sel]
+                spy_first_date, spy_last_date = sel[0][0], sel[-1][0]
                 spy_ret = (closes[-1] / closes[0] - 1.0) * 100.0
                 spy_mdd = _max_dd(closes)
                 base = closes[0]
@@ -5778,6 +5803,27 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
             "n_anomalies": n_anomalies,
             "portfolio_return_pct_raw": round(port_ret_raw, 2),
             "portfolio_max_drawdown_pct_raw": port_mdd_raw,
+            # DATI GREZZI del calcolo (trasparenza totale: l'utente vede
+            # ESATTAMENTE cosa e' stato usato per portafoglio e S&P,
+            # stesso arco temporale).
+            "raw_calc": {
+                "portfolio_first_value": round(pvals[0], 2),
+                "portfolio_last_value": round(pvals[-1], 2),
+                "portfolio_first_date": (_t0.strftime("%Y-%m-%d")
+                                         if _t0 else None),
+                "portfolio_last_date": (_t1.strftime("%Y-%m-%d")
+                                        if _t1 else None),
+                "portfolio_points": len(pvals),
+                "sp500_first_close": (round(closes[0], 2)
+                                      if spy_ret is not None else None),
+                "sp500_last_close": (round(closes[-1], 2)
+                                     if spy_ret is not None else None),
+                "sp500_first_date": spy_first_date,
+                "sp500_last_date": spy_last_date,
+                "sp500_points": (len(closes)
+                                 if spy_ret is not None else 0),
+                "window_days": effective_days,
+            },
             "note": ("alpha_pct e' GREZZO (non risk-adjusted). Un mese non "
                      "distingue edge da fortuna di regime: leggi sempre "
                      "verdict + drawdown."
@@ -5923,11 +5969,17 @@ async def live_edge_tracker():
         # gia' gestisce anomaly detection).
         alpha = None
         bench_verdict = None
+        bench_raw = None
+        bench_port_ret = None
+        bench_sp_ret = None
         try:
             bench = await get_portfolio_benchmark(period="all")
             if isinstance(bench, dict) and bench.get("available"):
                 alpha = bench.get("alpha_pct")
                 bench_verdict = bench.get("verdict")
+                bench_raw = bench.get("raw_calc")
+                bench_port_ret = bench.get("portfolio_return_pct")
+                bench_sp_ret = bench.get("sp500_return_pct")
         except Exception as _be:
             logger.debug("edge-tracker benchmark fail: %s", _be)
 
@@ -5986,6 +6038,9 @@ async def live_edge_tracker():
             "asymmetry": (asymmetry if asymmetry != float("inf") else "∞"),
             "alpha_vs_sp_pct": alpha,
             "benchmark_verdict": bench_verdict,
+            "benchmark_portfolio_return_pct": bench_port_ret,
+            "benchmark_sp500_return_pct": bench_sp_ret,
+            "raw_calc": bench_raw,
             "calibration_ok": calib_ok,
             "calibration_detail": calib_detail,
             "verdict": verdict,
