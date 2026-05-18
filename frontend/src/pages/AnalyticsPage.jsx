@@ -1256,6 +1256,7 @@ export default function AnalyticsPage() {
           const vMap = {
             alpha_plausibile: { c: '#10b981', t: '✅ Segnale di alpha' },
             beta_travestito: { c: '#f59e0b', t: '⚠️ Beta travestito da alpha' },
+            difensivo_sotto: { c: '#38bdf8', t: '🛡️ Difensivo (no edge di rendimento)' },
             sotto_benchmark: { c: '#ef4444', t: '❌ Sotto il benchmark' },
             insufficiente: { c: '#64748b', t: 'Dati insufficienti' },
           };

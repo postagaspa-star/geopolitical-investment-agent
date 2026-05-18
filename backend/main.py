@@ -5607,28 +5607,55 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         alpha = (round(port_ret - spy_ret, 2)
                  if spy_ret is not None else None)
 
-        # Verdetto risk-adjusted onesto
+        # Verdetto risk-adjusted onesto.
+        # BUGFIX: i drawdown sono numeri <= 0. La versione precedente
+        # usava `port_mdd <= spy_mdd*1.3` (segno invertito + ternario
+        # inline fragile) → classificava un maxDD -23% vs -1.2% come
+        # "drawdown comparabile". Si ragiona in VALORE ASSOLUTO.
         verdict = "insufficiente"
         verdict_detail = ""
-        if spy_ret is not None:
-            if alpha is not None and alpha > 0:
-                if port_mdd <= spy_mdd * 1.3 if spy_mdd else True:
-                    verdict = "alpha_plausibile"
-                    verdict_detail = (
-                        "Return superiore al benchmark con drawdown "
-                        "comparabile: segnale di alpha (1 periodo, non "
-                        "conclusivo — serve conferma multi-regime).")
-                else:
-                    verdict = "beta_travestito"
-                    verdict_detail = (
-                        f"Return piu' alto (+{alpha}pp) MA drawdown "
-                        f"{port_mdd}% vs {spy_mdd}% S&P: l'extra-return e' "
-                        "stato pagato con piu' rischio. Risk-adjusted NON "
-                        "e' detto sia meglio del benchmark.")
+        if spy_ret is not None and alpha is not None:
+            pdd_abs = abs(port_mdd)
+            sdd_abs = abs(spy_mdd) if spy_mdd is not None else 0.0
+            # "Comparabile" se il drawdown del portafoglio non supera
+            # 1.5× quello dell'S&P, OPPURE e' comunque piccolo in
+            # assoluto (<=3%) — evita falsi "beta travestito" quando
+            # entrambi i drawdown sono trascurabili.
+            dd_threshold = max(sdd_abs * 1.5, 3.0)
+            dd_comparable = pdd_abs <= dd_threshold
+
+            if alpha > 0 and dd_comparable:
+                verdict = "alpha_plausibile"
+                verdict_detail = (
+                    f"Hai battuto l'S&P (alpha +{alpha}pp) con drawdown "
+                    f"comparabile ({port_mdd}% vs {spy_mdd}% S&P): segnale "
+                    "di alpha. UN solo periodo, NON conclusivo — serve "
+                    "conferma su piu' regimi.")
+            elif alpha > 0 and not dd_comparable:
+                verdict = "beta_travestito"
+                verdict_detail = (
+                    f"Return piu' alto (alpha +{alpha}pp) MA drawdown "
+                    f"{port_mdd}% vs {spy_mdd}% S&P (~{pdd_abs / max(sdd_abs, 0.01):.0f}× "
+                    "piu' profondo): l'extra-return e' stato pagato con "
+                    "MOLTO piu' rischio. Risk-adjusted NON e' meglio del "
+                    "benchmark.")
             else:
-                verdict = "sotto_benchmark"
-                verdict_detail = ("Il portafoglio NON ha battuto l'S&P nel "
-                                  "periodo (alpha grezzo <= 0).")
+                # alpha <= 0
+                if pdd_abs < sdd_abs:
+                    # ha perso piu' del mercato ma con meno drawdown:
+                    # difensivo ma non ha aggiunto valore in rendimento
+                    verdict = "difensivo_sotto"
+                    verdict_detail = (
+                        f"Non hai battuto l'S&P in rendimento "
+                        f"(alpha {alpha}pp) ma con drawdown minore "
+                        f"({port_mdd}% vs {spy_mdd}%): postura difensiva, "
+                        "nessun edge di rendimento in questo periodo.")
+                else:
+                    verdict = "sotto_benchmark"
+                    verdict_detail = (
+                        f"Il portafoglio NON ha battuto l'S&P nel periodo "
+                        f"(alpha {alpha}pp) e con drawdown non migliore: "
+                        "nessun edge in questo periodo.")
 
         return {
             "available": True,
