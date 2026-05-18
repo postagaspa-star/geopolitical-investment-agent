@@ -5564,31 +5564,40 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
                     mdd = dd
             return round(mdd, 2)
 
-        # ── ANOMALY DETECTION (criterio fisico, non soggettivo) ──────────
-        # Un portafoglio che fa trading su asset liquidi senza leva estrema
-        # NON puo' fisicamente variare oltre ~12% tra due snapshot
-        # consecutivi (gli snapshot sono giornalieri o intraday). Una
-        # variazione superiore e' quasi sempre un GLITCH di valutazione
-        # (prezzo errato fetchato, posizione mis-valutata, bug — es. il
-        # caso reale: portfolio crollato a 75k e risalito a 111k senza
-        # trade corrispondenti). Tali jump inquinano return E max-drawdown.
+        # ── ANOMALY DETECTION: solo PICCHI/VALLE ISOLATI ─────────────────
+        # Un singolo salto >12% NON e' di per se' un glitch: se il sistema
+        # e' stato fermo (interruzioni API/deploy), al riavvio il valore
+        # differisce per il MOVIMENTO DI MERCATO REALE accaduto durante lo
+        # stop, non per un errore. Marcare ogni salto grande generava
+        # FALSI POSITIVI (gap legittimi scambiati per bug).
         #
-        # Sanitizzazione per RIMOZIONE del segmento corrotto (non clip).
-        # I bug osservati sono "round-trip" brevi (<1 giorno): il valore
-        # crolla e risale senza trade (es. 100k→75k→111k). Il clip
-        # lasciava un -12% fittizio; meglio ELIMINARE i punti raggiunti
-        # da un jump anomalo e RICUCIRE i punti sani adiacenti — il
-        # drawdown-glitch sparisce del tutto e resta solo la traiettoria
-        # reale del trading. Si espongono comunque SIA grezzo SIA pulito.
-        ANOMALY_THR = 0.12   # 12% step-to-step = glitch quasi certo
+        # Un glitch vero e' invece un PICCO/VALLE ISOLATO: il valore devia
+        # forte SIA dal punto precedente SIA dal successivo, MA precedente
+        # e successivo sono coerenti tra loro (= il livello reale NON e'
+        # cambiato, e' solo quel singolo punto a essere mis-valutato).
+        #   - 100k → 75k → 111k : 75k e' una VALLE isolata (devia da
+        #     entrambi; 100k e 111k tra loro coerenti) → glitch ✓
+        #   - 100k →(stop)→ 112k → 113k : gradino che sale e RESTA →
+        #     reale (gap di mercato), NON marcato ✓
+        #   - vero crash 100→88→80→78 : scende e resta giu' →
+        #     drawdown reale, NON marcato ✓
+        #
+        # Rimozione del punto isolato + ricucitura dei sani adiacenti:
+        # il drawdown-glitch sparisce, la traiettoria reale resta. Si
+        # espongono comunque SIA grezzo SIA pulito.
+        ANOMALY_THR = 0.12   # soglia di deviazione da un vicino
         corrupted = set()
-        for i in range(1, len(pvals)):
-            prev = pvals[i - 1]
-            if prev > 0 and abs(pvals[i] / prev - 1.0) > ANOMALY_THR:
-                # Il punto RAGGIUNTO dal jump anomalo e' il sospetto:
-                # e' il valore mis-valutato dal glitch. Il punto di
-                # partenza (i-1) resta sano e fa da aggancio per la
-                # ricucitura col primo punto sano successivo.
+        for i in range(1, len(pvals) - 1):
+            a, b, c = pvals[i - 1], pvals[i], pvals[i + 1]
+            if a <= 0 or b <= 0 or c <= 0:
+                continue
+            dev_prev = abs(b / a - 1.0)
+            dev_next = abs(c / b - 1.0)
+            neighbors_consistent = abs(c / a - 1.0) <= ANOMALY_THR
+            # Picco/valle isolato: forte deviazione da ENTRAMBI i vicini
+            # MA i due vicini coerenti tra loro (livello reale invariato).
+            if (dev_prev > ANOMALY_THR and dev_next > ANOMALY_THR
+                    and neighbors_consistent):
                 corrupted.add(i)
         n_anomalies = len(corrupted)
 
@@ -5712,12 +5721,14 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         # un giudizio su dati sporchi ne' si nascondono.
         if data_anomaly:
             verdict_detail = (
-                f"⚠️ DATI SANITIZZATI: rilevati {n_anomalies} salti "
-                f"anomali (>±12% tra snapshot consecutivi) — glitch di "
-                f"valutazione, NON trading reale (es. crollo a ~75k e "
-                f"risalita a ~111k senza trade). Le metriche qui sono "
-                f"ricostruite escludendo quei salti; il grezzo "
-                f"(return {round(port_ret_raw, 2)}%, maxDD "
+                f"⚠️ DATI SANITIZZATI: rimossi {n_anomalies} picco/i "
+                f"o valle isolata/e (valore molto diverso sia da prima "
+                f"sia da dopo, ma prima e dopo coerenti tra loro = "
+                f"glitch di valutazione, NON trading reale — es. crollo "
+                f"a ~75k e risalita a ~111k senza trade). I gap legittimi "
+                f"(sistema fermo, mercato mosso) NON vengono toccati. "
+                f"Metriche ricostruite escludendo i punti isolati; il "
+                f"grezzo (return {round(port_ret_raw, 2)}%, maxDD "
                 f"{port_mdd_raw}%) NON e' affidabile per questo periodo. "
                 f"Verdetto su serie pulita: " + verdict_detail)
 
