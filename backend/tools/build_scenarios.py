@@ -45,25 +45,31 @@ logger = logging.getLogger("scenario_generator")
 
 # Toggle Auriko/DeepSeek INLINE (non importa sim_llm: questo script gira su
 # GitHub Actions con cwd != backend/, quindi resta standalone). Stessa
-# semantica di backend/sim_llm.py: AURIKO_API_KEY presente → Auriko gateway,
-# assente → DeepSeek diretto (default, comportamento storico).
+# semantica di backend/sim_llm.py.
+#
+# Pattern `(env or default)`: tratta stringa vuota come "usa default".
+# Nel workflow yml `AURIKO_*: ${{ secrets... }}` setta la env var a "" se
+# il secret non esiste (NON la lascia assente), e os.environ.get(k, def)
+# usa il default SOLO se k e' assente, non se k="".
+def _env_or(k: str, d: str) -> str:
+    return (os.environ.get(k, "").strip() or d)
+
+
 _AURIKO_KEY = os.environ.get("AURIKO_API_KEY", "").strip()
+_DEEPSEEK_OFFICIAL_URL = "https://api.deepseek.com/v1/chat/completions"
+_DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+
 if _AURIKO_KEY:
-    # BUGFIX: nel workflow yml `AURIKO_BASE_URL: ${{ secrets... }}` setta
-    # la env var a "" se il secret non esiste (NON la lascia assente).
-    # os.environ.get(k, default) ritorna default SOLO se k e' assente,
-    # NON se k="" → serve il pattern `(... or default)` per trattare
-    # stringa vuota come "usa il default".
-    _AURIKO_BASE = (os.environ.get("AURIKO_BASE_URL", "").strip()
-                    or "https://api.auriko.ai/v1").rstrip("/")
-    DEEPSEEK_API_URL = f"{_AURIKO_BASE}/chat/completions"
-    DEEPSEEK_MODEL = (os.environ.get("AURIKO_MODEL_V3", "").strip()
-                      or "deepseek-chat")
+    _AURIKO_URL = (_env_or("AURIKO_BASE_URL", "https://api.auriko.ai/v1")
+                   .rstrip("/")) + "/chat/completions"
     _LLM_PROVIDER = "auriko"
+    # Compat con codice che legge ancora queste 2 globali (logging ecc.)
+    DEEPSEEK_API_URL = _AURIKO_URL
+    DEEPSEEK_MODEL = _env_or("AURIKO_MODEL_V3", "deepseek-chat")  # V4-Flash
 else:
-    DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-    DEEPSEEK_MODEL = "deepseek-chat"   # V3 — economico per generazione strutturata
     _LLM_PROVIDER = "deepseek"
+    DEEPSEEK_API_URL = _DEEPSEEK_OFFICIAL_URL
+    DEEPSEEK_MODEL = "deepseek-chat"   # V4-Flash via DeepSeek ufficiale
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_QUERY = (
@@ -204,18 +210,28 @@ def _new_scenario_id(category: str, slug: str, idx: int) -> str:
 
 def _llm_configs_inline() -> list[tuple]:
     """
-    Lista config (url, key, model, provider) con fallback inline.
-    Auriko attivo → [auriko, deepseek]; altrimenti → [deepseek].
-    Standalone: questo script gira su GitHub Actions, non importa sim_llm.
+    CATENA A 3 LIVELLI (tier chat = V4-Flash; il generator usa chat):
+      1. Auriko + modello primario   (AURIKO_MODEL_V3, default deepseek-chat)
+      2. Auriko + modello fallback   (AURIKO_MODEL_V3_FALLBACK, default
+         deepseek-chat) — saltato se identico al primario
+      3. API DeepSeek UFFICIALE      (deepseek-chat) — bypass gateway
+
+    Auriko non attivo → [DeepSeek ufficiale] singolo (storico).
+    Standalone: gira su GitHub Actions, non importa sim_llm (cwd != backend/).
+    "DeepSeek-V3" non esiste piu': deepseek-chat = V4-Flash.
     """
-    ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    ds_cfg = ("https://api.deepseek.com/v1/chat/completions",
-              ds_key, "deepseek-chat", "deepseek")
-    if _LLM_PROVIDER == "auriko" and _AURIKO_KEY:
-        auriko_cfg = (DEEPSEEK_API_URL, _AURIKO_KEY, DEEPSEEK_MODEL, "auriko")
-        # Fallback a DeepSeek diretto solo se la chiave DeepSeek esiste
-        return [auriko_cfg, ds_cfg] if ds_key else [auriko_cfg]
-    return [ds_cfg]
+    ds_cfg = (_DEEPSEEK_OFFICIAL_URL, _DEEPSEEK_KEY, "deepseek-chat", "deepseek")
+    if not (_LLM_PROVIDER == "auriko" and _AURIKO_KEY):
+        return [ds_cfg]
+
+    primary_model = _env_or("AURIKO_MODEL_V3", "deepseek-chat")
+    fallback_model = _env_or("AURIKO_MODEL_V3_FALLBACK", "deepseek-chat")
+    chain = [(_AURIKO_URL, _AURIKO_KEY, primary_model, "auriko")]
+    if fallback_model != primary_model:
+        chain.append((_AURIKO_URL, _AURIKO_KEY, fallback_model, "auriko"))
+    if _DEEPSEEK_KEY:
+        chain.append(ds_cfg)   # bypass-gateway finale
+    return chain
 
 
 async def generate_scenarios_via_llm(session: aiohttp.ClientSession,

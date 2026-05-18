@@ -121,44 +121,34 @@ def _get_deepseek_key() -> str:
         return ""
 
 
+def _env_or(key: str, default: str) -> str:
+    """os.environ.get robusto: stringa vuota → usa default."""
+    return (os.environ.get(key, "").strip() or default)
+
+
+def _auriko_base_url() -> str:
+    base = _env_or("AURIKO_BASE_URL", "https://api.auriko.ai/v1").rstrip("/")
+    return f"{base}/chat/completions"
+
+
 def get_sim_llm_config(tier: str) -> tuple[str, str, str, str]:
     """
-    Ritorna (api_url, api_key, model_name, provider) per il Simulator.
+    Ritorna (api_url, api_key, model_name, provider) — config PRIMARIA.
+    Mantenuta per retrocompat; la catena completa e' get_sim_llm_configs.
 
-    tier:
-      - "reasoner" / "r1"  → modello reasoning (run scenari, v2_engine)
-      - "chat" / "v3"      → modello chat (advisor, generator scenari)
-
-    Se AURIKO_API_KEY è configurata → instrada via Auriko (OpenAI-compatible,
-    payload identico). Altrimenti → DeepSeek diretto (default).
-
-    provider è "auriko" o "deepseek" — usalo per logging/A-B comparison.
+    tier: "reasoner"/"r1" (run, v2_engine) | "chat"/"v3" (advisor, generator).
     """
     is_reasoner = str(tier).lower() in ("reasoner", "r1", "deepseek-reasoner")
-
     auriko_key = os.environ.get("AURIKO_API_KEY", "").strip()
     if auriko_key:
-        # Pattern `(env or default)`: tratta stringa vuota come "usa
-        # default". os.environ.get(k, default) NON usa il default se la
-        # env var esiste ma e' "" (es. secret GitHub referenziato ma
-        # non configurato, o env var Render creata vuota per errore).
-        base = (os.environ.get("AURIKO_BASE_URL", "").strip()
-                or "https://api.auriko.ai/v1").rstrip("/")
-        url = f"{base}/chat/completions"
+        url = _auriko_base_url()
         if is_reasoner:
-            model = (os.environ.get("AURIKO_MODEL_R1", "").strip()
-                     or _DEEPSEEK_R1)
+            model = _env_or("AURIKO_MODEL_R1", _DEEPSEEK_R1)
         else:
-            model = (os.environ.get("AURIKO_MODEL_V3", "").strip()
-                     or _DEEPSEEK_V3)
-        # Log INFO solo quando Auriko è attivo (visibilità A/B test).
-        # Quando è DeepSeek diretto NON logga → zero rumore, comportamento
-        # storico invariato.
+            model = _env_or("AURIKO_MODEL_V3", _DEEPSEEK_V3)
         logger.info("[SIM-LLM] routing via AURIKO gateway (tier=%s model=%s url=%s)",
                     tier, model, url)
         return url, auriko_key, model, "auriko"
-
-    # Default: DeepSeek diretto — comportamento storico, rischio zero.
     key = _get_deepseek_key()
     model = _DEEPSEEK_R1 if is_reasoner else _DEEPSEEK_V3
     return _DEEPSEEK_URL, key, model, "deepseek"
@@ -166,59 +156,73 @@ def get_sim_llm_config(tier: str) -> tuple[str, str, str, str]:
 
 def get_sim_llm_configs(tier: str) -> list[tuple[str, str, str, str]]:
     """
-    Ritorna la LISTA ordinata di config da provare, per il fallback
-    automatico:
+    CATENA DI FALLBACK A 3 LIVELLI (Auriko attivo, circuit chiuso):
 
-      - Se Auriko e' attivo (AURIKO_API_KEY presente):
-          [ (auriko...), (deepseek diretto...) ]
-        → si prova Auriko; se fallisce TUTTI i retry (gateway down,
-          modello sbagliato, auth, 5xx, timeout) si ripiega su DeepSeek
-          diretto invece di far fallire il run del Simulator.
+      1. Auriko + modello PRIMARIO (default V4-Pro per reasoner /
+         V4-Flash per chat) — Auriko ottimizza routing/costo
+      2. Auriko + modello FALLBACK economico (default V4-Flash)
+         — se il modello primario non e' disponibile/lento su Auriko,
+         degradazione graceful verso un modello piu' economico, sempre
+         sfruttando il routing Auriko
+      3. API DeepSeek UFFICIALE + modello standard — bypass totale del
+         gateway: ultima rete di sicurezza se Auriko e' giu'
 
-      - Se Auriko NON e' attivo:
-          [ (deepseek diretto...) ]
-        → comportamento storico, nessun fallback (gia' su DeepSeek).
+    NOTA: "DeepSeek-V3" non esiste piu' come modello separato. DeepSeek
+    ha consolidato in V4: `deepseek-reasoner`→V4-Pro (thinking),
+    `deepseek-chat`→V4-Flash (non-thinking). I default qui sotto usano
+    quei nomi (= V4). Tutto override-abile via env senza deploy:
+      AURIKO_MODEL_R1 / AURIKO_MODEL_R1_FALLBACK   (tier reasoner)
+      AURIKO_MODEL_V3 / AURIKO_MODEL_V3_FALLBACK   (tier chat)
 
-    Il chiamante itera la lista: prova la config[0], se esaurisce i
-    retry passa alla config[1], ecc. Solo se TUTTE falliscono → errore.
+    Circuit breaker aperto → salta ENTRAMBI i livelli Auriko, va
+    diretto a DeepSeek ufficiale (zero overhead su Auriko morto).
+
+    Auriko NON attivo → [DeepSeek ufficiale] singolo (storico, invariato).
     """
     is_reasoner = str(tier).lower() in ("reasoner", "r1", "deepseek-reasoner")
+    ds_std_model = _DEEPSEEK_R1 if is_reasoner else _DEEPSEEK_V3
+    ds_key = _get_deepseek_key()
+    deepseek_official = (_DEEPSEEK_URL, ds_key, ds_std_model, "deepseek")
 
-    primary = get_sim_llm_config(tier)
-    if primary[3] == "auriko":
-        ds_key = _get_deepseek_key()
-        ds_model = _DEEPSEEK_R1 if is_reasoner else _DEEPSEEK_V3
-        deepseek_fallback = (_DEEPSEEK_URL, ds_key, ds_model, "deepseek")
+    auriko_key = os.environ.get("AURIKO_API_KEY", "").strip()
+    if not auriko_key:
+        # Auriko non attivo → comportamento storico, nessun fallback.
+        return [deepseek_official]
 
-        # CIRCUIT BREAKER: se Auriko ha fallito troppo di recente, NON
-        # provarlo nemmeno → vai diretto a DeepSeek (zero overhead).
-        # Questo evita che ogni step di ogni run paghi il costo di
-        # sondare un Auriko morto, che faceva sforare il timeout 480s.
-        if _auriko_circuit_open():
-            if ds_key:
-                logger.info(
-                    "[SIM-LLM] circuit breaker aperto → skip Auriko, "
-                    "uso DeepSeek diretto"
-                )
-                return [deepseek_fallback]
-            # Nessun fallback possibile: siamo costretti a provare Auriko
-            logger.warning(
-                "[SIM-LLM] circuit aperto ma nessuna DEEPSEEK_API_KEY: "
-                "costretto a riprovare Auriko"
-            )
-            return [primary]
+    auriko_url = _auriko_base_url()
+    if is_reasoner:
+        primary_model = _env_or("AURIKO_MODEL_R1", _DEEPSEEK_R1)        # V4-Pro
+        fallback_model = _env_or("AURIKO_MODEL_R1_FALLBACK", _DEEPSEEK_V3)  # V4-Flash
+    else:
+        primary_model = _env_or("AURIKO_MODEL_V3", _DEEPSEEK_V3)        # V4-Flash
+        fallback_model = _env_or("AURIKO_MODEL_V3_FALLBACK", _DEEPSEEK_V3)
 
-        # Circuit chiuso: Auriko primario + fallback DeepSeek se la
-        # chiave esiste.
+    auriko_primary = (auriko_url, auriko_key, primary_model, "auriko")
+    auriko_fallback = (auriko_url, auriko_key, fallback_model, "auriko")
+
+    # CIRCUIT BREAKER: Auriko ha fallito troppo di recente → salta
+    # entrambi i livelli Auriko, vai diretto a DeepSeek ufficiale.
+    if _auriko_circuit_open():
         if ds_key:
-            return [primary, deepseek_fallback]
-        logger.warning(
-            "[SIM-LLM] Auriko attivo ma DEEPSEEK_API_KEY assente: "
-            "nessun fallback disponibile se Auriko fallisce"
-        )
-        return [primary]
-    # Gia' su DeepSeek diretto: nessun fallback (sarebbe se stesso)
-    return [primary]
+            logger.info("[SIM-LLM] circuit breaker aperto → skip Auriko "
+                        "(2 livelli), uso DeepSeek ufficiale diretto")
+            return [deepseek_official]
+        logger.warning("[SIM-LLM] circuit aperto ma DEEPSEEK_API_KEY assente: "
+                        "costretto a riprovare Auriko")
+        return [auriko_primary, auriko_fallback]
+
+    # Circuit chiuso → catena completa. Il livello DeepSeek ufficiale
+    # si aggiunge solo se la chiave esiste (altrimenti i 2 Auriko soli).
+    chain = [auriko_primary]
+    # Evita un livello 2 identico al livello 1 (stesso modello): inutile
+    if fallback_model != primary_model:
+        chain.append(auriko_fallback)
+    if ds_key:
+        chain.append(deepseek_official)
+    else:
+        logger.warning("[SIM-LLM] DEEPSEEK_API_KEY assente: niente "
+                        "bypass-gateway finale se Auriko fallisce del tutto")
+    return chain
 
 
 def auriko_attempt_budget(provider: str, has_fallback: bool) -> tuple[int, int]:
