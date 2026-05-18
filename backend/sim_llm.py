@@ -138,14 +138,19 @@ def get_sim_llm_config(tier: str) -> tuple[str, str, str, str]:
 
     auriko_key = os.environ.get("AURIKO_API_KEY", "").strip()
     if auriko_key:
-        base = os.environ.get(
-            "AURIKO_BASE_URL", "https://api.auriko.ai/v1"
-        ).strip().rstrip("/")
+        # Pattern `(env or default)`: tratta stringa vuota come "usa
+        # default". os.environ.get(k, default) NON usa il default se la
+        # env var esiste ma e' "" (es. secret GitHub referenziato ma
+        # non configurato, o env var Render creata vuota per errore).
+        base = (os.environ.get("AURIKO_BASE_URL", "").strip()
+                or "https://api.auriko.ai/v1").rstrip("/")
         url = f"{base}/chat/completions"
         if is_reasoner:
-            model = os.environ.get("AURIKO_MODEL_R1", _DEEPSEEK_R1).strip()
+            model = (os.environ.get("AURIKO_MODEL_R1", "").strip()
+                     or _DEEPSEEK_R1)
         else:
-            model = os.environ.get("AURIKO_MODEL_V3", _DEEPSEEK_V3).strip()
+            model = (os.environ.get("AURIKO_MODEL_V3", "").strip()
+                     or _DEEPSEEK_V3)
         # Log INFO solo quando Auriko è attivo (visibilità A/B test).
         # Quando è DeepSeek diretto NON logga → zero rumore, comportamento
         # storico invariato.

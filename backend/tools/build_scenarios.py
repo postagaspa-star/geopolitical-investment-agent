@@ -49,11 +49,16 @@ logger = logging.getLogger("scenario_generator")
 # assente → DeepSeek diretto (default, comportamento storico).
 _AURIKO_KEY = os.environ.get("AURIKO_API_KEY", "").strip()
 if _AURIKO_KEY:
-    _AURIKO_BASE = os.environ.get(
-        "AURIKO_BASE_URL", "https://api.auriko.ai/v1"
-    ).strip().rstrip("/")
+    # BUGFIX: nel workflow yml `AURIKO_BASE_URL: ${{ secrets... }}` setta
+    # la env var a "" se il secret non esiste (NON la lascia assente).
+    # os.environ.get(k, default) ritorna default SOLO se k e' assente,
+    # NON se k="" → serve il pattern `(... or default)` per trattare
+    # stringa vuota come "usa il default".
+    _AURIKO_BASE = (os.environ.get("AURIKO_BASE_URL", "").strip()
+                    or "https://api.auriko.ai/v1").rstrip("/")
     DEEPSEEK_API_URL = f"{_AURIKO_BASE}/chat/completions"
-    DEEPSEEK_MODEL = os.environ.get("AURIKO_MODEL_V3", "deepseek-chat").strip()
+    DEEPSEEK_MODEL = (os.environ.get("AURIKO_MODEL_V3", "").strip()
+                      or "deepseek-chat")
     _LLM_PROVIDER = "auriko"
 else:
     DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -252,6 +257,7 @@ async def generate_scenarios_via_llm(session: aiohttp.ClientSession,
         cfg_timeout = 50 if (provider == "auriko" and not is_last_cfg) else 180
         logger.info("Chiamata LLM provider=%s model=%s timeout=%ds (news_chars=%d)...",
                     provider, model, cfg_timeout, len(news_text))
+        data = None
         try:
             async with session.post(
                 api_url, json=payload, headers=headers,
@@ -266,10 +272,28 @@ async def generate_scenarios_via_llm(session: aiohttp.ClientSession,
                         continue
                     raise RuntimeError(last_err)
                 data = json.loads(body)
-        except aiohttp.ClientError as e:
-            last_err = f"{provider} network: {e}"
+        except RuntimeError:
+            # Errore finale intenzionale (is_last_cfg): propaga.
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            # BUGFIX: asyncio.TimeoutError NON e' una aiohttp.ClientError.
+            # Quando Auriko (o DeepSeek) va in timeout veniva sollevata
+            # qui e propagata FUORI dal loop → il fallback DeepSeek non
+            # scattava mai → workflow Scenario Generator fallito.
+            last_err = f"{provider} timeout/network: {type(e).__name__}: {e}"
             if not is_last_cfg:
-                logger.warning("%s network err → fallback DeepSeek: %s",
+                logger.warning("%s timeout/network → fallback DeepSeek: %s",
+                                provider, str(e)[:120])
+                continue
+            raise RuntimeError(last_err)
+        except Exception as e:
+            # Safety net totale: qualsiasi altro errore (es. JSONDecodeError
+            # su body non-JSON da un gateway che risponde HTML) → fallback
+            # se possibile, mai crashare il workflow senza aver provato
+            # DeepSeek diretto.
+            last_err = f"{provider} errore inatteso: {type(e).__name__}: {e}"
+            if not is_last_cfg:
+                logger.warning("%s errore inatteso → fallback DeepSeek: %s",
                                 provider, str(e)[:120])
                 continue
             raise RuntimeError(last_err)
