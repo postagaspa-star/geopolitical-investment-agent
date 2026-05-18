@@ -5809,8 +5809,14 @@ def _compute_closed_trades_py(trades: list) -> list:
     """
     Replica server-side ESATTA della logica FIFO di AnalyticsPage
     (computeClosedTrades): accoppia BUY→SELL per ticker in ordine
-    temporale. Ritorna [{pnl_pct, confidence, ts}]. Stessa logica =
-    numeri coerenti col pannello Analytics.
+    temporale. Ritorna [{pnl_pct, pnl_usd, confidence}].
+
+    CRITICO per la coerenza con Analytics: il profit factor di
+    AnalyticsPage e' calcolato sui DOLLARI (sum win$ / |sum loss$|),
+    NON sulle percentuali. Salviamo quindi anche pnl_usd = (sell-buy)
+    *qty, identico al JS, cosi' i numeri COINCIDONO con Analytics
+    (in modalita' "Tutto"). Calcolare il PF in % dava un numero
+    completamente diverso (es. 6+ vs 1.95) e confondeva.
     """
     from datetime import datetime as _dt
     buy_queue: dict = {}
@@ -5850,7 +5856,9 @@ def _compute_closed_trades_py(trades: list) -> list:
                     continue
                 matched = min(remaining, buy["qty"])
                 pnl_pct = (price - buy["price"]) / buy["price"] * 100.0
+                pnl_usd = (price - buy["price"]) * matched
                 closed.append({"pnl_pct": round(pnl_pct, 3),
+                               "pnl_usd": round(pnl_usd, 2),
                                "confidence": buy["conf"]})
                 remaining -= matched
                 buy["qty"] -= matched
@@ -5871,16 +5879,23 @@ async def live_edge_tracker():
         closed = _compute_closed_trades_py(trades)
         n = len(closed)
 
-        pnls = [c["pnl_pct"] for c in closed]
-        wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p < 0]
-        gross_w = sum(wins)
-        gross_l_abs = abs(sum(losses))
-        win_rate = round(len(wins) / n * 100, 1) if n else 0.0
+        # IDENTICO ad AnalyticsPage.computeKpis:
+        #  - win/loss split sul segno del pnl ($ e % hanno lo stesso
+        #    segno → win_rate identico in entrambi)
+        #  - profit_factor su DOLLARI: sum(win$) / |sum(loss$)|
+        #  - avg_win/avg_loss in PERCENTUALE (come righe 167-168 del JS)
+        #  - asimmetria = |avg_win%| / |avg_loss%|
+        wins_usd = [c["pnl_usd"] for c in closed if c["pnl_usd"] > 0]
+        loss_usd = [c["pnl_usd"] for c in closed if c["pnl_usd"] < 0]
+        win_pct = [c["pnl_pct"] for c in closed if c["pnl_usd"] > 0]
+        loss_pct = [c["pnl_pct"] for c in closed if c["pnl_usd"] < 0]
+        gross_w = sum(wins_usd)
+        gross_l_abs = abs(sum(loss_usd))
+        win_rate = round(len(wins_usd) / n * 100, 1) if n else 0.0
         profit_factor = (round(gross_w / gross_l_abs, 2)
-                         if gross_l_abs > 0 else (None if not wins else float("inf")))
-        avg_win = round(sum(wins) / len(wins), 2) if wins else 0.0
-        avg_loss = round(sum(losses) / len(losses), 2) if losses else 0.0
+                         if gross_l_abs > 0 else (None if not wins_usd else float("inf")))
+        avg_win = round(sum(win_pct) / len(win_pct), 2) if win_pct else 0.0
+        avg_loss = round(sum(loss_pct) / len(loss_pct), 2) if loss_pct else 0.0
         asymmetry = (round(abs(avg_win) / abs(avg_loss), 2)
                      if avg_loss != 0 else (None if avg_win == 0 else float("inf")))
 

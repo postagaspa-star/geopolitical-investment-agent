@@ -155,7 +155,15 @@ export default function EdgeTrackerPage() {
       <div style={{ background: "#111827", border: "1px solid #1f2937",
                     borderRadius: 10, padding: "16px 18px", marginBottom: 16 }}>
         <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#e2e8f0",
-                      marginBottom: 10 }}>I criteri, uno per uno</div>
+                      marginBottom: 4 }}>I criteri, uno per uno</div>
+        <div style={{ fontSize: "0.74rem", color: "#64748b", marginBottom: 10,
+                      lineHeight: 1.5 }}>
+          Calcolati su <strong>tutto lo storico</strong> ({data.samples} trade
+          chiusi), con la stessa formula di Analytics. Coincidono con
+          Analytics in modalità <strong>"Tutto"</strong>; differiscono da
+          Analytics su un periodo specifico (30g, 7g…) solo perché lì i
+          trade sono filtrati per data — non è un errore.
+        </div>
         <Criterion label={`Batte l'S&P 500 (alpha > 0)`} ok={beatsSp}
           detail={data.alpha_vs_sp_pct !== null
             ? `Alpha: ${data.alpha_vs_sp_pct >= 0 ? "+" : ""}`
