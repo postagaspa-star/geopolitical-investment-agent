@@ -250,138 +250,6 @@ ESEMPIO DI BUONA DECISIONE:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# FASE 1 — STRATEGIA RELATIVE VALUE (market-neutral) — variante A/B
-# ═════════════════════════════════════════════════════════════════════════
-# Razionale: indovinare la DIREZIONE di asset liquidi (mercato efficiente)
-# non da' edge a un LLM. L'unico edge plausibile e' la LETTURA DEL REGIME.
-# La strategia relative-value isola quell'edge: long sul beneficiario del
-# regime + short sul danneggiato, bilanciati → esposizione netta al mercato
-# ~0 → il beta sparisce, resta solo lo SPREAD (= qualita' della selezione).
-#
-# Implementazione a rischio zero per la baseline: il prompt baseline
-# (SIM_V2_SYSTEM_PROMPT) NON viene toccato. Si riusa il suo "tail"
-# condiviso (sez.6 disciplina rischio + PROCEDURA output con schema/rr)
-# via split su marker univoco, e si sostituisce solo la "testa" strategica.
-
-_SIM_V2_HEAD_RELATIVE = """Sei un PORTFOLIO MANAGER AI in modalità SIMULATOR — STRATEGIA RELATIVE VALUE (market-neutral).
-
-Stai gestendo un portafoglio reale di fronte a uno scenario storico, con
-un BUDGET INIZIALE in dollari. La tua filosofia NON è direzionale.
-
-═══════════════════════════════════════════════════════════════════════
-IL PRINCIPIO (LEGGILO E APPLICALO SEMPRE)
-═══════════════════════════════════════════════════════════════════════
-
-NON scommetti su "il mercato sale o scende". Indovinare la direzione di
-asset liquidi è un gioco quasi a somma zero contro istituzionali con dati
-e velocità superiori: lì non hai edge.
-
-Scommetti su QUALE asset/settore farà MEGLIO di un altro nello STESSO
-regime. Costruisci COPPIE:
-  • LONG sul BENEFICIARIO del regime
-  • SHORT sul DANNEGGIATO dello stesso regime
-dimensionate così che l'esposizione netta al mercato sia ~0
-(Σ allocazioni LONG ≈ Σ allocazioni SHORT).
-
-Perché funziona: se il mercato intero crolla, perdi sul long MA guadagni
-sullo short → il beta si annulla. Resta solo lo SPREAD tra i due: il tuo
-P&L dipende SOLO dall'aver letto bene il regime, non dalla fortuna di
-direzione. È l'unico terreno dove un'AI brava a interpretare regimi
-geopolitici/macro può avere un edge reale e misurabile.
-
-═══════════════════════════════════════════════════════════════════════
-REGOLE CHIAVE
-═══════════════════════════════════════════════════════════════════════
-
-1. ORIZZONTE FISSO 1 SETTIMANA PER TURNO. Ogni decisione vale 7 giorni.
-
-2. ALLOCAZIONE IN % del capitale totale. "BUY XOM 20%" = usa il 20% del
-   capitale per il long XOM. "SELL su asset NON posseduto" = apre uno
-   SHORT (lo strumento chiave di questa strategia).
-
-3. MARKET-NEUTRALITY OBBLIGATORIA. Ad ogni turno, dopo i tuoi trade,
-   |Σ LONG% − Σ SHORT%| deve essere ≤ 15% del capitale. Sei un
-   gestore di SPREAD, non un direzionale travestito. Se sbilanci oltre,
-   stai facendo una scommessa direzionale: NON è questa strategia.
-
-4. SE NON TROVI UNA COPPIA CON EDGE DI SELEZIONE CHIARO → RESTA FLAT
-   (cash, trades:[]). Forzare una coppia debole è peggio del non agire.
-   Una coppia vale solo se sai dire in una frase PERCHÉ il long batte
-   lo short IN QUEL regime. Se non lo sai, non è una coppia.
-
-5. NIENTE RICETTE FISSE — VERIFICA LA DIVERGENZA SUI DATI.
-   NON esiste una mappa "regime X → coppia Y" valida a priori. Un evento
-   geopolitico (es. una guerra) NON ha un vincitore stabile per tutta la
-   settimana: ha sotto-fasi che si ribaltano (escalation → negoziati →
-   nuova minaccia...), e gli stessi settori si ALTERNANO su e giù. Una
-   coppia fissa applicata a un regime "a sotto-fasi" perde su ENTRAMBE
-   le gambe quando la situazione gira a metà.
-
-   Quindi: prima di proporre una coppia, GUARDA i prezzi recenti dei due
-   asset candidati (sono nei dati dello scenario) e chiediti:
-     "Negli ultimi punti, uno è andato COSTANTEMENTE meglio dell'altro
-      (divergenza monotòna, lo spread si allarga in modo stabile)?
-      Oppure si RINCORRONO (ora uno ora l'altro, spread che oscilla
-      senza direzione)?"
-
-   • Divergenza COSTANTE e leggibile → la coppia è valida, scommetti.
-   • Si ALTERNANO / spread che oscilla / quadro confuso → NON è una
-     coppia: NON scommettere, resta FLAT (cash). Meglio non giocare
-     che giocare una partita confusa.
-
-   I "tipi" classici (difesa vs tech in conflitto, gold/TLT vs banche
-   in crisi bancaria, energy vs growth in inflazione, ecc.) sono solo
-   IDEE da cui partire per scegliere QUALI due asset confrontare —
-   NON conclusioni. La conclusione la danno i dati, non la categoria.
-
-6. CRYPTO: in regime di stress restano alto-beta. Una coppia
-   long-crypto/short-equity NON è market-neutral (beta diversi): usala
-   solo crypto-vs-crypto (es. long BTC / short alt debole) o evitala.
-
-═══════════════════════════════════════════════════════════════════════
-"""
-
-# Deriva il "tail" condiviso (sez.6 disciplina rischio + PROCEDURA con
-# schema output + campo rr) dal prompt baseline SENZA modificarlo:
-# split robusto sulla barra ═══ che precede la sezione 6.
-_SPLIT_AT = "6. GESTIONE DEL RISCHIO E TATTICA PER REGIME"
-_p = SIM_V2_SYSTEM_PROMPT.find(_SPLIT_AT)
-_bp = SIM_V2_SYSTEM_PROMPT.rfind("\n═", 0, _p) if _p > 0 else -1
-if _p > 0 and _bp >= 0:
-    _SIM_V2_SHARED_TAIL = SIM_V2_SYSTEM_PROMPT[_bp + 1:]
-    SIM_V2_SYSTEM_PROMPT_RELATIVE = _SIM_V2_HEAD_RELATIVE + _SIM_V2_SHARED_TAIL
-else:
-    # Fallback difensivo: se il marker cambia, degrada alla baseline
-    # (mai crash, mai prompt monco).
-    SIM_V2_SYSTEM_PROMPT_RELATIVE = SIM_V2_SYSTEM_PROMPT
-
-
-def _resolve_sim_strategy(strategy: str | None, run_mode: str) -> str:
-    """
-    Determina la strategia del run.
-      - strategy esplicita ("directional"|"relative_value") → usala
-      - auto-mode senza strategy → ALTERNANZA via counter sim_settings:
-        run pari = directional (baseline), dispari = relative_value.
-        Cosi' le due gambe vedono gli stessi periodi/regimi → A/B
-        parallelo PULITO (niente bias di periodo).
-      - default → "directional" (baseline invariata)
-    """
-    s = (strategy or "").strip().lower()
-    if s in ("directional", "relative_value"):
-        return s
-    if run_mode == "auto":
-        try:
-            from simulator import db as _sdb
-            raw = _sdb.get_setting("sim_v2_auto_strategy_idx", "0") or "0"
-            idx = int(raw) if str(raw).lstrip("-").isdigit() else 0
-            _sdb.set_setting("sim_v2_auto_strategy_idx", str(idx + 1))
-            return "relative_value" if (idx % 2 == 1) else "directional"
-        except Exception:
-            return "directional"
-    return "directional"
-
-
-# ═════════════════════════════════════════════════════════════════════════
 # UTILITY — date/scenario expansion
 # ═════════════════════════════════════════════════════════════════════════
 
@@ -1002,7 +870,6 @@ async def start_run(
     initial_capital: float = 100000.0,
     commission_bps: float | None = None,
     run_mode: str = "manual",
-    strategy: str | None = None,
 ) -> dict:
     """
     Inizializza una nuova partita simulator V2.
@@ -1118,10 +985,6 @@ async def start_run(
             # Tracking ID per la "Run in corso" dashboard
             "tracking_id": tracking_id,
             "run_mode": run_mode,
-            # FASE 1: strategia del run (directional=baseline |
-            # relative_value=market-neutral). Risolta una volta a
-            # start_run e rispedita ad ogni step (come advice_block).
-            "strategy": _resolve_sim_strategy(strategy, run_mode),
         },
         "portfolio": portfolio,
         "t0_prices": t0_prices,
@@ -1208,17 +1071,11 @@ async def execute_step(
     )
 
     # 5. Call AI — inietta direttive utente + advice memory in cima al system prompt
-    # FASE 1: scegli il framework strategico in base a scenario.strategy
-    # (directional=baseline | relative_value=market-neutral). Default
-    # directional → comportamento storico invariato.
-    _base_prompt = (SIM_V2_SYSTEM_PROMPT_RELATIVE
-                    if scenario.get("strategy") == "relative_value"
-                    else SIM_V2_SYSTEM_PROMPT)
     try:
         from agents.decision import _build_directives_block
-        sys_prompt = _build_directives_block() + _base_prompt
+        sys_prompt = _build_directives_block() + SIM_V2_SYSTEM_PROMPT
     except Exception:
-        sys_prompt = _base_prompt
+        sys_prompt = SIM_V2_SYSTEM_PROMPT
     # Advice memory: pre-caricata da start_run e veicolata via scenario.
     # Stesso pattern dei "MEMORIA — run recenti" del V1, ma stateless: il
     # blocco e' calcolato una volta sola al T0 e rispedito ad ogni step.
@@ -2189,10 +2046,6 @@ def _persist_run(scenario: dict, history: list[dict], final_result: dict,
         "thesis_evaluation": final_result.get("debrief", "")[:1500],
         "full_data": {
             "engine": "simulator_v2",
-            # FASE 1: strategia usata in questo run (per il confronto A/B
-            # directional vs relative_value: stessa metrica alpha, gambe
-            # alternate run-by-run nello stesso periodo di mercato).
-            "strategy": scenario.get("strategy", "directional"),
             "scenario": scenario,
             "history": history,
             "final_valuation": final_result.get("final_valuation"),
@@ -2209,10 +2062,4 @@ def _persist_run(scenario: dict, history: list[dict], final_result: dict,
         },
     }
     sim_db.insert_run(run_data)
-    logger.info("[SIM-V2] run %s completato — strategy=%s outcome=%s "
-                "perf=%.2f%% vs SPY=%.2f%% (delta=%.2f%%)",
-                run_id, scenario.get("strategy", "directional"),
-                final_result.get("outcome", "?"),
-                pnl_pct * 100.0, bench_pct * 100.0,
-                (pnl_pct - bench_pct) * 100.0)
     return run_id
