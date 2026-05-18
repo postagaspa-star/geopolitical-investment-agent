@@ -309,15 +309,30 @@ REGOLE CHIAVE
    Una coppia vale solo se sai dire in una frase PERCHÉ il long batte
    lo short IN QUEL regime. Se non lo sai, non è una coppia.
 
-5. MAPPA REGIME → COPPIA (chi batte chi, in termini RELATIVI):
-   • Conflitto militare   →  LONG Defense/Energy/Gold  / SHORT Tech-growth
-   • Crisi bancaria        →  LONG Gold/TLT             / SHORT Financials
-   • Inflazione alta       →  LONG Energy/Commodity     / SHORT Growth/Bond
-   • Pivot/taglio tassi    →  LONG Growth/REIT          / SHORT Value/Banche
-   • Panico (VIX 30+)     →  LONG Safe-haven (GLD/TLT) / SHORT ciclici/alta-beta
-   • Risk-on / espansione →  LONG ciclici/Discretionary / SHORT difensivi
-   • Yen carry unwind      →  LONG JPY-proxy/quality    / SHORT alta-beta
-   Adatta ai ticker REALI presenti nell'asset_universe dello scenario.
+5. NIENTE RICETTE FISSE — VERIFICA LA DIVERGENZA SUI DATI.
+   NON esiste una mappa "regime X → coppia Y" valida a priori. Un evento
+   geopolitico (es. una guerra) NON ha un vincitore stabile per tutta la
+   settimana: ha sotto-fasi che si ribaltano (escalation → negoziati →
+   nuova minaccia...), e gli stessi settori si ALTERNANO su e giù. Una
+   coppia fissa applicata a un regime "a sotto-fasi" perde su ENTRAMBE
+   le gambe quando la situazione gira a metà.
+
+   Quindi: prima di proporre una coppia, GUARDA i prezzi recenti dei due
+   asset candidati (sono nei dati dello scenario) e chiediti:
+     "Negli ultimi punti, uno è andato COSTANTEMENTE meglio dell'altro
+      (divergenza monotòna, lo spread si allarga in modo stabile)?
+      Oppure si RINCORRONO (ora uno ora l'altro, spread che oscilla
+      senza direzione)?"
+
+   • Divergenza COSTANTE e leggibile → la coppia è valida, scommetti.
+   • Si ALTERNANO / spread che oscilla / quadro confuso → NON è una
+     coppia: NON scommettere, resta FLAT (cash). Meglio non giocare
+     che giocare una partita confusa.
+
+   I "tipi" classici (difesa vs tech in conflitto, gold/TLT vs banche
+   in crisi bancaria, energy vs growth in inflazione, ecc.) sono solo
+   IDEE da cui partire per scegliere QUALI due asset confrontare —
+   NON conclusioni. La conclusione la danno i dati, non la categoria.
 
 6. CRYPTO: in regime di stress restano alto-beta. Una coppia
    long-crypto/short-equity NON è market-neutral (beta diversi): usala
