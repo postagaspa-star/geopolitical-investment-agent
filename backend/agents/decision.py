@@ -633,6 +633,155 @@ def _build_recent_decisions_block(agent_type: str = "standard",
     return header + "\n" + "\n".join(lines) + "\n"
 
 
+# Regimi che il Decision Standard puo' dichiarare nel suo reasoning
+# (STEP 1 del Regime Protocol: "Regime: [XXX]"). Usati per estrarre la
+# lettura del regime dalle run standard e iniettarla nel Decision Crypto.
+_KNOWN_REGIMES = (
+    "TREND-UP", "TREND-DOWN", "LATERAL", "MACRO", "CRASH-RALLY",
+    "GEOPOLITICAL", "REGULATORY-EVENT", "BULL-CYCLE",
+)
+
+
+def _extract_regime_label(text: str) -> str:
+    """
+    Estrae il regime dichiarato dal Decision Standard nel reasoning.
+    Il Regime Protocol impone di scrivere "Regime: [XXX]" all'inizio.
+    Ritorna es. "GEOPOLITICAL" o "" se non trovato.
+    """
+    if not text:
+        return ""
+    import re as _re
+    # Pattern primario: "Regime: [XXX]" o "[XXX]" tra i regimi noti
+    for rx in (r"[Rr]egime\s*[:=]?\s*\[?\s*([A-Z][A-Z\-]+)\s*\]?",
+               r"\[\s*([A-Z][A-Z\-]+)\s*\]"):
+        for m in _re.finditer(rx, text):
+            cand = m.group(1).strip().upper()
+            if cand in _KNOWN_REGIMES:
+                return cand
+    return ""
+
+
+def build_standard_regime_read_for_crypto(limit: int = 5) -> str:
+    """
+    Blocco AD ALTA PRIORITA' per il Decision Crypto: rilegge le ultime
+    run del Decision STANDARD (Sonnet 4.5) e ne estrae la lettura del
+    REGIME di mercato + la postura strategica.
+
+    Razionale (richiesta utente): il Decision Standard gira su un modello
+    nettamente superiore (Sonnet 4.5) che comprende il regime macro/geo
+    molto meglio di R1. La sua classificazione del regime e la sua
+    postura devono pesare FORTEMENTE sulle decisioni crypto: se lo
+    Standard ha letto un regime, il Crypto vi si allinea salvo evidenza
+    tecnica crypto-specifica fortemente contraria, motivata in chiaro.
+
+    Legge DECISION_REASONING (standard). Per ogni run estrae:
+    timestamp, regime dichiarato, verdict, sintesi situazione/tesi.
+    """
+    try:
+        import database as _db
+        rows = _db.get_recent_decisions(limit=limit, agent_type="standard")
+    except Exception as exc:
+        logger.debug("[regime-read] get_recent_decisions failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+
+    entries: list[str] = []
+    latest_regime = ""
+    for idx, r in enumerate(rows):
+        try:
+            content = r.get("content")
+            if isinstance(content, str):
+                try:
+                    payload = json.loads(content)
+                except Exception:
+                    payload = {}
+            elif isinstance(content, dict):
+                payload = content
+            else:
+                payload = {}
+
+            ts_raw = r.get("timestamp") or r.get("created_at") or ""
+            try:
+                ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                stamp = ts.strftime("%d/%m %H:%M")
+            except Exception:
+                stamp = str(ts_raw)[:16]
+
+            reasoning = (payload.get("reasoning_text") or "").strip()
+            situation = (payload.get("situation_overview") or "").strip()
+            thesis = (payload.get("thesis") or "").strip()
+            rotation = (payload.get("rotation_summary") or "").strip()
+            final_text = (payload.get("final_text") or "").strip()
+            trades = payload.get("trades") or payload.get("trades_executed")
+            n_trades = trades if isinstance(trades, int) else (
+                len(trades) if isinstance(trades, list) else 0)
+            verdict = "TRADE" if n_trades > 0 else "NO_TRADE"
+
+            regime = (_extract_regime_label(situation)
+                      or _extract_regime_label(reasoning)
+                      or _extract_regime_label(final_text))
+            if idx == 0:
+                latest_regime = regime
+
+            # Sintesi: priorità situation (contiene il regime + contesto),
+            # poi thesis, poi reasoning. Single-line, max 280 char.
+            summary = situation or thesis or reasoning or final_text
+            summary = " ".join(summary.split())
+            if len(summary) > 280:
+                summary = summary[:277] + "..."
+
+            reg_tag = f"[{regime}]" if regime else "[regime non esplicitato]"
+            line = f"  • [{stamp}] {reg_tag} {verdict}"
+            if rotation:
+                rot = " ".join(rotation.split())
+                if len(rot) > 160:
+                    rot = rot[:157] + "..."
+                line += f"\n     rotation: {rot}"
+            if summary:
+                line += f"\n     lettura: {summary}"
+            entries.append(line)
+        except Exception as exc:
+            logger.debug("[regime-read] skip row: %s", exc)
+            continue
+
+    if not entries:
+        return ""
+
+    head_lines = [
+        "═" * 60,
+        "🧭  LETTURA DEL REGIME DAL DECISION STANDARD — PESO ALTO",
+        "═" * 60,
+        "",
+        "Il Decision Standard (equity/ETF) gira su Claude Sonnet 4.5, un",
+        "modello NETTAMENTE SUPERIORE a te (R1) nella comprensione del",
+        "regime di mercato macro/geopolitico e della rotazione settoriale.",
+        "",
+        "Queste sono le sue ultime letture del regime. Trattale come input",
+        "ad ALTA PRIORITA':",
+        "  • Se lo Standard ha classificato un regime e una postura,",
+        "    ALLINEA la tua strategia crypto a quella visione di regime.",
+        "  • Le crypto sono risk-asset ad alto beta: in un regime che lo",
+        "    Standard legge come risk-off / difensivo / macro-avverso, NON",
+        "    aprire long crypto aggressivi anche se il setup tecnico crypto",
+        "    sembra invitante — il quadro di regime vince.",
+        "  • Puoi discostarti SOLO con evidenza tecnica crypto-specifica",
+        "    FORTE e contraria (es. divergenza on-chain/dominance netta):",
+        "    in tal caso DEVI dichiarare esplicitamente perche' contraddici",
+        "    la lettura di regime del modello superiore.",
+        "",
+    ]
+    if latest_regime:
+        head_lines.append(
+            f"➡️  REGIME CORRENTE (ultima run Standard): [{latest_regime}] — "
+            "e' la lettura piu' aggiornata, pesala piu' di tutte."
+        )
+        head_lines.append("")
+    head_lines.append("Ultime letture (piu' recente in cima):")
+    head_lines.append("")
+    return "\n".join(head_lines) + "\n".join(entries) + "\n"
+
+
 def _build_regime_protocol_block(asset_class: str = "equity") -> str:
     """
     Regime Protocol: framework decisionale OBBLIGATORIO che precede ogni

@@ -268,7 +268,22 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
         logger.debug("[DEC-CRYPTO] coach cards block fallito: %s", e)
     coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
 
-    # 5. Memoria operativa: ultime N decisioni crypto del Live (feedback loop).
+    # 5. LETTURA DEL REGIME DAL DECISION STANDARD (peso alto).
+    #    Il Decision Standard gira su Sonnet 4.5 (modello superiore a R1)
+    #    e comprende il regime macro/geo molto meglio. Il Crypto rilegge
+    #    le sue ultime run e si allinea FORTEMENTE alla sua lettura del
+    #    regime. Posizionato SUBITO DOPO regime_block per massima
+    #    prominenza nel system prompt.
+    std_regime_section = ""
+    try:
+        from agents.decision import build_standard_regime_read_for_crypto
+        srr = build_standard_regime_read_for_crypto(limit=5)
+        if srr:
+            std_regime_section = srr + "\n" + "═" * 60 + "\n"
+    except Exception as exc:
+        logger.debug("[DEC-CRYPTO] standard regime read failed: %s", exc)
+
+    # 6. Memoria operativa: ultime N decisioni crypto del Live (feedback loop).
     #    Iniettata anche qui per evitare che R1 ripeta tesi gia' applicate
     #    senza esito su crypto laterali / regime range-bound.
     recent_section = ""
@@ -280,16 +295,19 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
     except Exception as exc:
         logger.debug("[DEC-CRYPTO] recent decisions block failed: %s", exc)
 
-    # 6. Shared principles in coda
+    # 7. Shared principles in coda. Ordine: il blocco regime Standard va
+    #    subito dopo il regime_block crypto (il Crypto legge prima il
+    #    proprio framework di regime, poi la lettura autorevole dello
+    #    Standard che la sovra-pesa).
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
         text = (directives_block + risk_block + risk_state_block + regime_block
-                + coach_section + recent_section + base
+                + std_regime_section + coach_section + recent_section + base
                 + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
         text = (directives_block + risk_block + risk_state_block + regime_block
-                + coach_section + recent_section + base)
+                + std_regime_section + coach_section + recent_section + base)
     return text, coach_card_ids
 
 
