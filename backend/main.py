@@ -5543,15 +5543,38 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         days = days_map.get(period.lower(), 30)
 
         history = database.get_portfolio_history(days=days) or []
-        # Serie valori portafoglio (ordine cronologico)
+        # Serie valori portafoglio (ordine cronologico) + timestamp.
         pvals = []
+        ptimes = []
         for h in history:
             v = h.get("total_value")
             if isinstance(v, (int, float)) and v > 0:
                 pvals.append(float(v))
+                ptimes.append(h.get("timestamp") or h.get("created_at"))
         if len(pvals) < 2:
             return {"available": False,
                     "reason": "storico portafoglio insufficiente per il periodo"}
+
+        # BUGFIX disallineamento temporale: il portafoglio vive da poche
+        # settimane, ma con period="all" (days=3650) confrontavamo il suo
+        # rendimento con quello dell'S&P preso su 10 ANNI → alpha assurdo
+        # (es. -256pp). L'S&P va misurato ESATTAMENTE sulla finestra reale
+        # in cui il portafoglio e' esistito (primo→ultimo snapshot).
+        from datetime import datetime as _dtp
+        def _pd(v):
+            try:
+                return _dtp.fromisoformat(str(v).replace("Z", "+00:00"))
+            except Exception:
+                return None
+        _t0 = next((_pd(t) for t in ptimes if _pd(t)), None)
+        _t1 = next((_pd(t) for t in reversed(ptimes) if _pd(t)), None)
+        if _t0 and _t1 and _t1 > _t0:
+            effective_days = max(1, int((_t1 - _t0).total_seconds() / 86400) + 1)
+        else:
+            effective_days = days
+        # Non oltre il periodo richiesto (es. "30d" resta 30 anche se la
+        # storia e' piu' lunga); ma per "all" usa la vita reale.
+        effective_days = min(effective_days, days)
 
         def _max_dd(series: list[float]) -> float:
             peak = series[0]
@@ -5641,13 +5664,16 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         spy_series_norm = []
         try:
             import data_fetchers
-            spy = data_fetchers.fetch_market_data("SPY", period_days=days + 5)
+            # Fetch SPY sulla finestra REALE del portafoglio, non su
+            # `days` grezzo (fix disallineamento period="all").
+            spy = data_fetchers.fetch_market_data(
+                "SPY", period_days=effective_days + 5)
             rows = (spy or {}).get("data") or []
             closes = [float(r["close"]) for r in rows
                       if r.get("close") and float(r["close"]) > 0]
-            # Allinea al periodo: prendi gli ultimi `days` punti utili
+            # Allinea: stesso arco temporale del portafoglio.
             if len(closes) >= 2:
-                closes = closes[-min(len(closes), days + 1):]
+                closes = closes[-min(len(closes), effective_days + 1):]
                 spy_ret = (closes[-1] / closes[0] - 1.0) * 100.0
                 spy_mdd = _max_dd(closes)
                 base = closes[0]
