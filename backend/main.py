@@ -5520,6 +5520,140 @@ async def update_crypto_monitor_settings(payload: CryptoMonitorSettingsPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/portfolio/benchmark")
+async def get_portfolio_benchmark(period: str = Query(default="30d")):
+    """
+    Confronto portafoglio vs S&P 500 (benchmark) nello STESSO periodo.
+
+    Il return assoluto non distingue ALPHA (bravura) da BETA (mercato che
+    saliva e tu eri long). Questo endpoint isola il segnale vero:
+      - return_pct portafoglio vs return_pct S&P nel periodo
+      - alpha = differenza (grezzo)
+      - max_drawdown di entrambi (il rischio preso per quel return)
+      - sharpe stima del portafoglio (return/vol annualizzato — indicativo)
+      - serie equity normalizzate a base 100 al T0 (per il grafico)
+      - verdict: alpha grezzo POSITIVO non basta — se il portafoglio ha
+        drawdown molto peggiore dell'S&P, il risk-adjusted puo' essere
+        inferiore al benchmark nonostante il return assoluto piu' alto.
+    """
+    import math as _math
+    try:
+        days_map = {"1h": 1, "4h": 1, "1d": 1, "7d": 7, "1w": 7,
+                    "30d": 30, "1m": 30, "90d": 90, "3m": 90, "all": 3650}
+        days = days_map.get(period.lower(), 30)
+
+        history = database.get_portfolio_history(days=days) or []
+        # Serie valori portafoglio (ordine cronologico)
+        pvals = []
+        for h in history:
+            v = h.get("total_value")
+            if isinstance(v, (int, float)) and v > 0:
+                pvals.append(float(v))
+        if len(pvals) < 2:
+            return {"available": False,
+                    "reason": "storico portafoglio insufficiente per il periodo"}
+
+        port_ret = (pvals[-1] / pvals[0] - 1.0) * 100.0
+
+        def _max_dd(series: list[float]) -> float:
+            peak = series[0]
+            mdd = 0.0
+            for x in series:
+                if x > peak:
+                    peak = x
+                dd = (x / peak - 1.0) * 100.0 if peak > 0 else 0.0
+                if dd < mdd:
+                    mdd = dd
+            return round(mdd, 2)
+
+        port_mdd = _max_dd(pvals)
+
+        # Sharpe indicativo: rendimenti tra snapshot consecutivi.
+        # rf=0, annualizzazione prudente su base 252 (ordine di grandezza).
+        rets = [(pvals[i] / pvals[i - 1] - 1.0)
+                for i in range(1, len(pvals)) if pvals[i - 1] > 0]
+        sharpe = None
+        if len(rets) >= 5:
+            mean = sum(rets) / len(rets)
+            var = sum((r - mean) ** 2 for r in rets) / max(1, len(rets) - 1)
+            std = _math.sqrt(var)
+            if std > 0:
+                sharpe = round((mean / std) * _math.sqrt(252), 2)
+
+        # S&P 500 via SPY nello stesso range
+        spy_ret = None
+        spy_mdd = None
+        spy_series_norm = []
+        try:
+            import data_fetchers
+            spy = data_fetchers.fetch_market_data("SPY", period_days=days + 5)
+            rows = (spy or {}).get("data") or []
+            closes = [float(r["close"]) for r in rows
+                      if r.get("close") and float(r["close"]) > 0]
+            # Allinea al periodo: prendi gli ultimi `days` punti utili
+            if len(closes) >= 2:
+                closes = closes[-min(len(closes), days + 1):]
+                spy_ret = (closes[-1] / closes[0] - 1.0) * 100.0
+                spy_mdd = _max_dd(closes)
+                base = closes[0]
+                spy_series_norm = [round(c / base * 100.0, 3) for c in closes]
+        except Exception as _se:
+            logger.debug("benchmark SPY fetch failed: %s", _se)
+
+        # Serie portafoglio normalizzata base 100
+        pbase = pvals[0]
+        port_series_norm = [round(v / pbase * 100.0, 3) for v in pvals]
+
+        alpha = (round(port_ret - spy_ret, 2)
+                 if spy_ret is not None else None)
+
+        # Verdetto risk-adjusted onesto
+        verdict = "insufficiente"
+        verdict_detail = ""
+        if spy_ret is not None:
+            if alpha is not None and alpha > 0:
+                if port_mdd <= spy_mdd * 1.3 if spy_mdd else True:
+                    verdict = "alpha_plausibile"
+                    verdict_detail = (
+                        "Return superiore al benchmark con drawdown "
+                        "comparabile: segnale di alpha (1 periodo, non "
+                        "conclusivo — serve conferma multi-regime).")
+                else:
+                    verdict = "beta_travestito"
+                    verdict_detail = (
+                        f"Return piu' alto (+{alpha}pp) MA drawdown "
+                        f"{port_mdd}% vs {spy_mdd}% S&P: l'extra-return e' "
+                        "stato pagato con piu' rischio. Risk-adjusted NON "
+                        "e' detto sia meglio del benchmark.")
+            else:
+                verdict = "sotto_benchmark"
+                verdict_detail = ("Il portafoglio NON ha battuto l'S&P nel "
+                                  "periodo (alpha grezzo <= 0).")
+
+        return {
+            "available": True,
+            "period": period,
+            "days": days,
+            "portfolio_return_pct": round(port_ret, 2),
+            "sp500_return_pct": (round(spy_ret, 2)
+                                 if spy_ret is not None else None),
+            "alpha_pct": alpha,
+            "portfolio_max_drawdown_pct": port_mdd,
+            "sp500_max_drawdown_pct": spy_mdd,
+            "portfolio_sharpe_est": sharpe,
+            "verdict": verdict,
+            "verdict_detail": verdict_detail,
+            "portfolio_series_norm": port_series_norm,
+            "sp500_series_norm": spy_series_norm,
+            "note": ("alpha_pct e' GREZZO (non risk-adjusted). Un mese non "
+                     "distingue edge da fortuna di regime: leggi sempre "
+                     "verdict + drawdown."),
+        }
+    except Exception as e:
+        logger.error("benchmark error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/portfolio/history")
 async def get_portfolio_history(period: str = Query(default="30d")):
     """Restituisce lo storico del valore del portafoglio.

@@ -1068,6 +1068,7 @@ export default function AnalyticsPage() {
   const [trades, setTrades] = useState([]);
   const [history, setHistory] = useState([]);
   const [portfolio, setPortfolio] = useState(null);
+  const [benchmark, setBenchmark] = useState(null);
   const [period, setPeriod] = useState("30d");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -1077,7 +1078,7 @@ export default function AnalyticsPage() {
       setLoading(true);
       setError(null);
       try {
-        const [posRes, tradeRes, histRes, portRes] = await Promise.all([
+        const [posRes, tradeRes, histRes, portRes, benchRes] = await Promise.all([
           fetch(`${API}/api/positions`),
           // FIX: limit alto per non troncare le statistiche. Bug precedente:
           // default 50 → 80+ trade reali → KPI calcolati solo sugli ultimi 50.
@@ -1086,19 +1087,23 @@ export default function AnalyticsPage() {
           // Portfolio per estrarre cash_balance e mostrare la Liquidità
           // nel pie chart Esposizione Attuale.
           fetch(`${API}/api/portfolio`),
+          // Confronto vs S&P 500: isola alpha (bravura) da beta (mercato).
+          fetch(`${API}/api/portfolio/benchmark?period=${period}`),
         ]);
 
-        const [posData, tradeData, histData, portData] = await Promise.all([
+        const [posData, tradeData, histData, portData, benchData] = await Promise.all([
           posRes.ok ? posRes.json() : Promise.resolve([]),
           tradeRes.ok ? tradeRes.json() : Promise.resolve([]),
           histRes.ok ? histRes.json() : Promise.resolve([]),
           portRes.ok ? portRes.json() : Promise.resolve(null),
+          benchRes.ok ? benchRes.json() : Promise.resolve(null),
         ]);
 
         setPositions(Array.isArray(posData) ? posData : posData?.positions ?? []);
         setTrades(Array.isArray(tradeData) ? tradeData : tradeData?.trades ?? []);
         setHistory(Array.isArray(histData) ? histData : []);
         setPortfolio(portData);
+        setBenchmark(benchData && benchData.available ? benchData : null);
       } catch (err) {
         setError(err.message ?? 'Errore nel caricamento dei dati');
       } finally {
@@ -1205,6 +1210,17 @@ export default function AnalyticsPage() {
           subValue={kpis.worstTrade ? `${kpis.worstTrade.ticker} · ${fmtUsd(kpis.worstTrade.pnl)}` : ''}
           color="#ef4444"
         />
+        {benchmark && benchmark.alpha_pct != null && (
+          <KpiCard
+            label="Alpha vs S&P 500"
+            value={`${benchmark.alpha_pct >= 0 ? '+' : ''}${benchmark.alpha_pct}pp`}
+            subValue={`Tu ${benchmark.portfolio_return_pct >= 0 ? '+' : ''}${benchmark.portfolio_return_pct}% · S&P ${benchmark.sp500_return_pct >= 0 ? '+' : ''}${benchmark.sp500_return_pct}%`}
+            color={benchmark.alpha_pct > 0 ? '#10b981' : '#ef4444'}
+            hint={benchmark.portfolio_sharpe_est != null
+              ? `Sharpe~${benchmark.portfolio_sharpe_est} · maxDD ${benchmark.portfolio_max_drawdown_pct}% vs ${benchmark.sp500_max_drawdown_pct}%`
+              : 'alpha GREZZO — vedi verdetto sotto'}
+          />
+        )}
       </div>
 
       {/* Charts grid */}
@@ -1213,6 +1229,83 @@ export default function AnalyticsPage() {
         gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
         gap: '1rem',
       }}>
+        {benchmark && (() => {
+          // Resample lineare a 60 punti comuni: asse X = % periodo
+          // trascorso, cosi' le due serie (snapshot portfolio vs daily
+          // SPY, lunghezze diverse) sono visivamente comparabili.
+          const K = 60;
+          const rs = (arr) => {
+            if (!arr || arr.length === 0) return [];
+            if (arr.length === 1) return Array(K).fill(arr[0]);
+            const out = [];
+            for (let i = 0; i < K; i++) {
+              const pos = (i / (K - 1)) * (arr.length - 1);
+              const lo = Math.floor(pos), hi = Math.ceil(pos);
+              const frac = pos - lo;
+              out.push(arr[lo] * (1 - frac) + arr[hi] * frac);
+            }
+            return out;
+          };
+          const pN = rs(benchmark.portfolio_series_norm);
+          const sN = rs(benchmark.sp500_series_norm);
+          const data = pN.map((v, i) => ({
+            t: Math.round((i / (K - 1)) * 100),
+            Portafoglio: Number(v.toFixed(2)),
+            'S&P 500': sN[i] != null ? Number(sN[i].toFixed(2)) : null,
+          }));
+          const vMap = {
+            alpha_plausibile: { c: '#10b981', t: '✅ Segnale di alpha' },
+            beta_travestito: { c: '#f59e0b', t: '⚠️ Beta travestito da alpha' },
+            sotto_benchmark: { c: '#ef4444', t: '❌ Sotto il benchmark' },
+            insufficiente: { c: '#64748b', t: 'Dati insufficienti' },
+          };
+          const vd = vMap[benchmark.verdict] || vMap.insufficiente;
+          return (
+            <ChartCard
+              title="Performance vs S&P 500 (base 100)"
+              description="Confronto a parità di punto di partenza. Battere l'S&P in rendimento NON basta: conta il rendimento aggiustato per il rischio (drawdown). Un mese non distingue edge da fortuna di regime."
+              subtitle={`Periodo: ${PERIOD_OPTIONS.find(o => o.key === period)?.label}`}>
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={data} margin={{ top: 5, right: 12, left: -8, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                  <XAxis dataKey="t" stroke="#64748b" fontSize={11}
+                         tickFormatter={(v) => `${v}%`} />
+                  <YAxis stroke="#64748b" fontSize={11}
+                         domain={['auto', 'auto']} />
+                  <Tooltip
+                    contentStyle={{ background: '#0f172a', border: '1px solid #1e293b',
+                                    borderRadius: 8, fontSize: 12 }}
+                    formatter={(v) => (v != null ? v.toFixed(2) : '—')}
+                    labelFormatter={(l) => `${l}% del periodo`} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Line type="monotone" dataKey="Portafoglio" stroke="#3b82f6"
+                        strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="S&P 500" stroke="#94a3b8"
+                        strokeWidth={2} strokeDasharray="5 4" dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+              <div style={{
+                marginTop: 10, padding: '10px 12px', borderRadius: 8,
+                background: `${vd.c}1a`, border: `1px solid ${vd.c}55`,
+              }}>
+                <div style={{ fontSize: '0.82rem', fontWeight: 700, color: vd.c }}>
+                  {vd.t}
+                </div>
+                <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginTop: 4, lineHeight: 1.5 }}>
+                  {benchmark.verdict_detail}
+                </div>
+                <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: 6 }}>
+                  Tu {benchmark.portfolio_return_pct >= 0 ? '+' : ''}{benchmark.portfolio_return_pct}%
+                  (maxDD {benchmark.portfolio_max_drawdown_pct}%)
+                  {' · '}S&P {benchmark.sp500_return_pct >= 0 ? '+' : ''}{benchmark.sp500_return_pct}%
+                  (maxDD {benchmark.sp500_max_drawdown_pct}%)
+                  {benchmark.portfolio_sharpe_est != null
+                    ? ` · Sharpe~${benchmark.portfolio_sharpe_est}` : ''}
+                </div>
+              </div>
+            </ChartCard>
+          );
+        })()}
         <ChartCard title="Equity Curve & Drawdown"
                    description="Valore del portafoglio nel tempo (linea blu, asse sx) e perdita rispetto al massimo storico (rosso, asse dx). Un drawdown -10% significa che ora vali il 10% in meno del tuo picco."
                    subtitle={`Periodo: ${PERIOD_OPTIONS.find(o => o.key === period)?.label}`}>
