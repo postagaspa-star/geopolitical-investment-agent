@@ -88,14 +88,29 @@ _RUN_FALLBACK_MAX_LIST = 300   # cap totale run preservati nel fallback
 
 
 def _is_table_missing_error(exc: Exception) -> bool:
-    """Riconosce errori "tabella non trovata" su Supabase / Postgres."""
+    """
+    True SOLO per errori "tabella inesistente" (DDL non applicato).
+
+    Volutamente STRETTO. Il classificatore precedente era troppo largo:
+    includeva 'schema cache' (errore TRANSITORIO che Supabase/PostgREST
+    restituisce durante un restart/instabilita', NON una tabella mancante)
+    e un nudo 'does not exist' (che matcha anche errori di colonna). Un
+    singolo blip transitorio faceva quindi LATCHARE _SIM_RUN_FALLBACK_MODE
+    per tutto il processo: list_runs serviva solo il fallback (poche run
+    recenti) finche' non si redeployava. I dati NON erano persi, solo
+    nascosti. Mantiene tutti i veri segnali di tabella assente.
+    """
     s = str(exc).lower()
-    return ("pgrst205" in s
-            or "does not exist" in s
-            or "no such table" in s
-            or "could not find the table" in s
-            or "schema cache" in s
-            or "relation" in s and "does not exist" in s)
+    if "pgrst205" in s:                 # PostgREST: table not found in schema
+        return True
+    if "could not find the table" in s:
+        return True
+    if "no such table" in s:            # SQLite
+        return True
+    # Postgres: 'relation "x" does not exist' / 'table "x" does not exist'
+    if ("relation" in s or "table" in s) and "does not exist" in s:
+        return True
+    return False
 
 
 def _settings_get(key: str, default: str = "") -> str:
