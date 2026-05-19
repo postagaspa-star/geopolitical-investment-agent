@@ -5956,8 +5956,15 @@ def _compute_closed_trades_py(trades: list) -> list:
         if not ticker or price <= 0 or qty <= 0:
             continue
         if action == "BUY":
+            # Estratto del ragionamento al momento dell'ENTRATA: e' qui
+            # che si forma (o si sbaglia) la confidence. final_decision
+            # e' il piu' sintetico; fallback ai due agenti specialisti.
+            _reason = (t.get("final_decision") or t.get("technical_reasoning")
+                       or t.get("geopolitical_reasoning") or "")
+            _reason = " ".join(str(_reason).split())[:240]
             buy_queue.setdefault(ticker, []).append(
-                {"price": price, "qty": qty, "conf": conf})
+                {"price": price, "qty": qty, "conf": conf,
+                 "ts": t.get("timestamp"), "reason": _reason})
         elif action == "SELL":
             remaining = qty
             while remaining > 0 and buy_queue.get(ticker):
@@ -5970,7 +5977,11 @@ def _compute_closed_trades_py(trades: list) -> list:
                 pnl_usd = (price - buy["price"]) * matched
                 closed.append({"pnl_pct": round(pnl_pct, 3),
                                "pnl_usd": round(pnl_usd, 2),
-                               "confidence": buy["conf"]})
+                               "confidence": buy["conf"],
+                               "ticker": ticker,
+                               "buy_date": str(buy.get("ts") or "")[:10],
+                               "sell_date": str(t.get("timestamp") or "")[:10],
+                               "reason": buy.get("reason") or ""})
                 remaining -= matched
                 buy["qty"] -= matched
                 if buy["qty"] <= 1e-9:
@@ -6125,6 +6136,157 @@ async def live_edge_tracker():
         }
     except Exception as e:
         logger.error("edge-tracker error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/live/confidence-diagnosis")
+async def live_confidence_diagnosis():
+    """
+    DIAGNOSI della confidence: NON "cura" il problema, lo MOSTRA.
+
+    L'Edge Tracker dice solo SE la confidence discrimina (si'/no). Qui
+    si vede QUALI trade rompono la relazione: i casi "molto sicuro ma
+    perso" e "poco sicuro ma vinto", con ticker, date, return e l'estratto
+    del ragionamento dell'AI all'entrata. Primo passo prima di correggere:
+    capire il PATTERN (es. iper-confidente su trade di consenso/narrativa
+    gia' prezzati) invece di aggiustare alla cieca.
+    """
+    try:
+        trades = database.get_trades(limit=5000) or []
+        closed = _compute_closed_trades_py(trades)
+        wc = [c for c in closed if c.get("confidence") is not None]
+        n = len(wc)
+        if n < 20:
+            return {"available": False,
+                    "reason": (f"Solo {n} trade chiusi con confidence "
+                               "registrata: troppo pochi per una diagnosi "
+                               "affidabile (servono ≥20).")}
+
+        confs = [float(c["confidence"]) for c in wc]
+        rets = [float(c["pnl_pct"]) for c in wc]
+        cmean = sum(confs) / n
+        rmean = sum(rets) / n
+        cvar = sum((x - cmean) ** 2 for x in confs) / n
+        rvar = sum((y - rmean) ** 2 for y in rets) / n
+        cstd = cvar ** 0.5
+        rstd = rvar ** 0.5
+
+        if cstd < 1e-9:
+            return {"available": False,
+                    "reason": ("La confidence e' (quasi) sempre lo stesso "
+                               "valore: non c'e' nulla da diagnosticare "
+                               "finche' il segnale non varia.")}
+
+        cov = sum((confs[i] - cmean) * (rets[i] - rmean)
+                  for i in range(n)) / n
+        corr = (round(cov / (cstd * rstd), 3)
+                if rstd > 1e-9 else None)
+
+        # Terzili per confidence (qualsiasi scala: 0-1, 0-100, 1-10...).
+        order = sorted(range(n), key=lambda i: confs[i])
+        t = n // 3
+        low_idx = order[:t]
+        high_idx = order[-t:] if t else []
+
+        def _tier_stats(idxs):
+            if not idxs:
+                return {"n": 0, "avg_return_pct": None,
+                        "win_rate_pct": None}
+            rr = [rets[i] for i in idxs]
+            wins = sum(1 for x in rr if x > 0)
+            return {
+                "n": len(idxs),
+                "avg_return_pct": round(sum(rr) / len(rr), 2),
+                "win_rate_pct": round(wins / len(rr) * 100, 1),
+                "conf_min": round(min(confs[i] for i in idxs), 3),
+                "conf_max": round(max(confs[i] for i in idxs), 3),
+            }
+
+        mid_idx = order[t:n - t] if t else order
+        tiers = {
+            "low": _tier_stats(low_idx),
+            "mid": _tier_stats(mid_idx),
+            "high": _tier_stats(high_idx),
+        }
+
+        def _row(i):
+            c = wc[i]
+            return {
+                "ticker": c.get("ticker"),
+                "confidence": round(float(c["confidence"]), 3),
+                "return_pct": round(float(c["pnl_pct"]), 2),
+                "return_usd": c.get("pnl_usd"),
+                "buy_date": c.get("buy_date"),
+                "sell_date": c.get("sell_date"),
+                "reason": c.get("reason") or "",
+            }
+
+        # Iper-confidenti che hanno PERSO (terzile alto, peggiori return).
+        overconfident = sorted(
+            [i for i in high_idx if rets[i] < 0],
+            key=lambda i: rets[i])[:15]
+        # Sottostimati che hanno VINTO (terzile basso, migliori return).
+        underrated = sorted(
+            [i for i in low_idx if rets[i] > 0],
+            key=lambda i: -rets[i])[:15]
+
+        # Pattern: quali ticker ricorrono tra gli iper-confidenti in
+        # perdita (un cluster = punto cieco sistematico, non sfortuna).
+        from collections import Counter as _Counter
+        oc_tickers = _Counter(wc[i].get("ticker") for i in overconfident)
+        recurring = [{"ticker": k, "count": v}
+                     for k, v in oc_tickers.most_common(5) if v >= 2]
+
+        hi, lo = tiers["high"], tiers["low"]
+        inverted = (corr is not None and corr < 0) or (
+            hi["avg_return_pct"] is not None
+            and lo["avg_return_pct"] is not None
+            and hi["avg_return_pct"] < lo["avg_return_pct"])
+
+        if inverted:
+            diagnosis = (
+                f"Correlazione confidence↔rendimento = {corr} "
+                "(NEGATIVA = invertita). I trade in cui l'AI era piu' "
+                f"sicura rendono in media {hi['avg_return_pct']}%, quelli "
+                f"in cui era meno sicura {lo['avg_return_pct']}%: la "
+                "sicurezza dichiarata e' un segnale al contrario. Guarda "
+                "i casi 'molto sicuro ma perso' qui sotto e i loro "
+                "ragionamenti: serve capire SU COSA si iper-confida "
+                "(spesso: trade di consenso/narrativa gia' prezzati dal "
+                "mercato) prima di ritarare la confidence.")
+        else:
+            diagnosis = (
+                f"Correlazione confidence↔rendimento = {corr}. In questo "
+                f"campione il terzile alto rende {hi['avg_return_pct']}% "
+                f"vs {lo['avg_return_pct']}% del basso: la confidence "
+                "non e' (piu') invertita, ma controlla i casi anomali "
+                "qui sotto per i residui.")
+
+        return {
+            "available": True,
+            "samples": n,
+            "correlation": corr,
+            "correlation_note": (
+                "Pearson tra confidence e return%. <0 = invertita "
+                "(piu' sicuro → peggio). ~0 = la confidence e' rumore. "
+                ">0 = discrimina correttamente."),
+            "tiers": tiers,
+            "inverted": bool(inverted),
+            "overconfident_losers": [_row(i) for i in overconfident],
+            "underrated_winners": [_row(i) for i in underrated],
+            "recurring_overconfident_tickers": recurring,
+            "diagnosis": diagnosis,
+            "next_levers": [
+                "Loop di calibrazione: mostrare all'AI, al momento della "
+                "decisione, com'e' andata storicamente la SUA confidence "
+                "(feedback sul proprio track record).",
+                "Ridefinire la confidence: non piu' 'quanto mi sento "
+                "sicuro' ma una probabilita' verificabile + stima del "
+                "rapporto rischio/rendimento atteso.",
+            ],
+        }
+    except Exception as e:
+        logger.error("confidence-diagnosis error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
