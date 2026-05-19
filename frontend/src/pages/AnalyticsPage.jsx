@@ -7,6 +7,7 @@ import {
   ComposedChart, ReferenceArea,
   ScatterChart, Scatter, ZAxis, ReferenceLine,
 } from 'recharts';
+import ResearchPanel from '../components/ResearchPanel';
 
 const API = window.location.origin;
 
@@ -1083,6 +1084,7 @@ export default function AnalyticsPage() {
   const [period, setPeriod] = useState("30d");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [researchOpen, setResearchOpen] = useState(false);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -1399,6 +1401,22 @@ export default function AnalyticsPage() {
           <ExposurePieCard positions={positions} portfolio={portfolio} />
         </ChartCard>
       </div>
+
+      {/* Tastino discreto in basso a destra → pannello ricerca avanzata
+          (analisi suggerite da Michael). Tenuto fuori dal flusso della
+          pagina per non appesantirla. */}
+      <button onClick={() => setResearchOpen(true)} title="Ricerca avanzata"
+        style={{
+          position: "fixed", bottom: 20, right: 20, zIndex: 90,
+          background: "#1e293b", color: "#93c5fd",
+          border: "1px solid #334155", borderRadius: 999,
+          padding: "9px 16px", fontSize: "0.78rem", fontWeight: 600,
+          cursor: "pointer", boxShadow: "0 2px 10px rgba(0,0,0,0.35)",
+        }}>
+        🔬 Ricerca
+      </button>
+      <ResearchPanel open={researchOpen}
+        onClose={() => setResearchOpen(false)} />
     </div>
   );
 }

@@ -6338,6 +6338,175 @@ async def live_confidence_diagnosis():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/api/live/research-stats")
+async def live_research_stats():
+    """
+    Strumenti di ricerca suggeriti da Michael (forward-testing review):
+    distribuzione P&L, P&L cumulato, outlier (max gain/loss) + metriche
+    SENZA outlier, e il test chiave: il segnale (confidence) ha valore
+    predittivo STATISTICAMENTE significativo sull'esito? Test di
+    permutazione (no dipendenze) → p-value onesto su campione piccolo.
+
+    Distinzione netta (coerente col fix P&L):
+      - P&L/distribuzione/cumulato/outlier = TUTTI i trade (fatto
+        finanziario, include chiusure non-AI).
+      - significativita' confidence→return = vista SKILL (esclude le
+        chiusure non-AI conf 100: misura la bravura, non il denaro).
+    """
+    try:
+        import trade_analytics as _ta
+        import random as _rnd
+        trades = database.get_trades(limit=5000) or []
+        perf = _ta.compute_closed_trades(trades)  # include tutto (P&L)
+        n = len(perf)
+        if n < 10:
+            return {"available": False,
+                    "reason": f"Solo {n} trade chiusi: troppo pochi."}
+
+        pnl_usd = [float(c["pnl_usd"]) for c in perf]
+        pnl_pct = [float(c["pnl_pct"]) for c in perf]
+
+        # ── Distribuzione P&L% (istogramma a bucket fissi) ──────────────
+        edges = [-100, -20, -10, -5, -2, 0, 2, 5, 10, 20, 100]
+        dist = []
+        for i in range(len(edges) - 1):
+            lo, hi = edges[i], edges[i + 1]
+            cnt = sum(1 for x in pnl_pct if (x >= lo and x < hi)
+                      or (i == len(edges) - 2 and x == hi))
+            dist.append({"range": f"{lo}%/{hi}%", "lo": lo, "hi": hi,
+                         "count": cnt})
+
+        # ── P&L cumulato (ordine di chiusura) ───────────────────────────
+        ordered = sorted(perf, key=lambda c: str(c.get("sell_date") or ""))
+        cum, run = [], 0.0
+        for c in ordered:
+            run += float(c["pnl_usd"])
+            cum.append({"date": c.get("sell_date") or "",
+                        "cum_pnl_usd": round(run, 2)})
+
+        # ── Outlier + metriche con/senza outlier ────────────────────────
+        def _metrics(rows):
+            if not rows:
+                return {"n": 0}
+            w = [r for r in rows if r["pnl_usd"] > 0]
+            l = [r for r in rows if r["pnl_usd"] < 0]
+            gw = sum(r["pnl_usd"] for r in w)
+            gl = abs(sum(r["pnl_usd"] for r in l))
+            return {
+                "n": len(rows),
+                "total_usd": round(sum(r["pnl_usd"] for r in rows), 2),
+                "win_rate_pct": round(len(w) / len(rows) * 100, 1),
+                "profit_factor": (round(gw / gl, 2) if gl > 0
+                                  else ("∞" if gw > 0 else 0)),
+                "avg_pct": round(sum(r["pnl_pct"] for r in rows)
+                                 / len(rows), 2),
+            }
+
+        by_usd = sorted(perf, key=lambda c: c["pnl_usd"])
+        k = max(1, round(n * 0.05))  # ~5% per lato
+        worst = by_usd[:5]
+        best = list(reversed(by_usd[-5:]))
+
+        def _row(c):
+            return {"ticker": c.get("ticker"),
+                    "pnl_pct": round(float(c["pnl_pct"]), 2),
+                    "pnl_usd": round(float(c["pnl_usd"]), 2),
+                    "confidence": c.get("confidence"),
+                    "is_manual": bool(c.get("is_manual")),
+                    "buy_date": c.get("buy_date"),
+                    "sell_date": c.get("sell_date"),
+                    "reason": c.get("reason") or ""}
+
+        ex_outliers = by_usd[k:n - k] if n > 2 * k else perf
+        metrics = {"all": _metrics(perf),
+                   "ex_outliers": _metrics(ex_outliers),
+                   "outliers_removed_per_side": k}
+
+        # ── Significativita' confidence→return (vista SKILL) ────────────
+        skill = _ta.compute_closed_trades(trades, exclude_manual_closes=True)
+        sc = [(float(c["confidence"]), float(c["pnl_pct"]))
+              for c in skill if c.get("confidence") is not None]
+        significance = {"testable": False,
+                        "reason": "Confidence non registrata su abbastanza "
+                                  "trade AI."}
+        sigpts = [{"confidence": round(a, 2), "return_pct": round(b, 2),
+                   "ticker": c.get("ticker")}
+                  for c, (a, b) in zip(
+                      [s for s in skill if s.get("confidence") is not None],
+                      sc)]
+        if len(sc) >= 20:
+            xs = [a for a, _ in sc]
+            ys = [b for _, b in sc]
+            m = len(sc)
+            mx = sum(xs) / m
+            my = sum(ys) / m
+            sx = (sum((v - mx) ** 2 for v in xs) / m) ** 0.5
+            sy = (sum((v - my) ** 2 for v in ys) / m) ** 0.5
+            if sx > 1e-9 and sy > 1e-9:
+                cov = sum((xs[i] - mx) * (ys[i] - my)
+                          for i in range(m)) / m
+                r_obs = cov / (sx * sy)
+                # Permutation test: shuffle ys vs xs, conta |r| >= |r_obs|
+                _rnd.seed(42)
+                N = 3000
+                ge = 0
+                yperm = list(ys)
+                for _ in range(N):
+                    _rnd.shuffle(yperm)
+                    c2 = sum((xs[i] - mx) * (yperm[i] - my)
+                             for i in range(m)) / m
+                    if abs(c2 / (sx * sy)) >= abs(r_obs):
+                        ge += 1
+                p = (ge + 1) / (N + 1)
+                significance = {
+                    "testable": True,
+                    "samples": m,
+                    "pearson_r": round(r_obs, 3),
+                    "p_value": round(p, 4),
+                    "significant_5pct": bool(p < 0.05),
+                    "method": ("test di permutazione, "
+                               f"{N} shuffle, seed fisso"),
+                }
+
+        if significance.get("testable"):
+            if significance["significant_5pct"]:
+                interp = (
+                    f"Il segnale confidence HA valore predittivo "
+                    f"statisticamente significativo (p={significance['p_value']}, "
+                    f"r={significance['pearson_r']}) su {significance['samples']} "
+                    "trade AI. Resta un campione piccolo: confermare nel "
+                    "tempo e su regimi diversi.")
+            else:
+                interp = (
+                    f"Il segnale confidence NON ha valore predittivo "
+                    f"statisticamente significativo (p={significance['p_value']}, "
+                    f"r={significance['pearson_r']}): su questo campione la "
+                    "relazione confidence→esito e' indistinguibile dal caso. "
+                    "Esattamente il punto di Michael: serve un dx che predica "
+                    "dy in modo significativo.")
+        else:
+            interp = significance.get("reason", "")
+
+        return {
+            "available": True,
+            "samples": n,
+            "pnl_distribution": dist,
+            "cumulative_pnl": cum,
+            "outliers": {"best": [_row(c) for c in best],
+                         "worst": [_row(c) for c in worst]},
+            "metrics": metrics,
+            "signal_vs_return": sigpts,
+            "significance": significance,
+            "interpretation": interp,
+            "note": ("Distribuzione/cumulato/outlier = TUTTI i trade "
+                     "(P&L reale). Significativita' = solo decisioni AI "
+                     "(chiusure non-AI escluse)."),
+        }
+    except Exception as e:
+        logger.error("research-stats error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/portfolio/history")
 async def get_portfolio_history(period: str = Query(default="30d")):
     """Restituisce lo storico del valore del portafoglio.
