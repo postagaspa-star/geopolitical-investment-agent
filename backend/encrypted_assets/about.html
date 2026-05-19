@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="description" content="GeoInvest AI: sistema multi-agente di investimento autonomo che integra analisi geopolitica, dati di mercato e LLM per decisioni di trading 24/7 su equity e crypto." />
+<meta name="description" content="GeoInvest AI: sistema multi-agente di investimento autonomo che integra analisi geopolitica, dati di mercato e LLM, con un'ossessione: misurare bravura, non fortuna." />
 <meta name="robots" content="index, follow" />
 <title>GeoInvest AI - Documentazione tecnica</title>
 <style>
@@ -333,18 +333,16 @@
     <h1>GeoInvest AI</h1>
     <p class="hero-sub">
       Sistema multi-agente di investimento autonomo che integra analisi
-      geopolitica, dati di mercato e ragionamento LLM per prendere
-      decisioni di trading 24/7 su equity e crypto.
+      geopolitica, dati di mercato e ragionamento LLM per decidere su
+      equity e crypto &mdash; con un'ossessione: misurare bravura, non fortuna.
     </p>
     <div class="hero-chips">
-      <span class="chip">Multi-agent pipeline</span>
+      <span class="chip">Pipeline multi-agente</span>
       <span class="chip">Claude Sonnet 4.5</span>
-      <span class="chip">DeepSeek-R1 + V3</span>
-      <span class="chip">Regime Protocol (8 regimi)</span>
-      <span class="chip">Risk State stateful</span>
-      <span class="chip">CryptoMonitor 15min</span>
-      <span class="chip">Coach Cards (Sim &rarr; Live)</span>
-      <span class="chip">Paper trading 24/7</span>
+      <span class="chip">DeepSeek-R1 / V3</span>
+      <span class="chip">Paper trading</span>
+      <span class="chip">Forward testing</span>
+      <span class="chip">Edge Tracker</span>
     </div>
   </section>
 
@@ -353,33 +351,35 @@
     <h2><span class="ic">&#128214;</span> Cos'&egrave; GeoInvest AI</h2>
     <div class="body">
       <p>
-        GeoInvest AI &egrave; un sistema software che opera come un fund manager
-        quantitativo autonomo. Invece di seguire regole fisse o modelli
-        statistici tradizionali, utilizza una pipeline di <b>cinque agenti
-        cognitivi</b> basati su Large Language Model che leggono notizie
+        GeoInvest AI opera come un fund manager quantitativo autonomo.
+        Invece di seguire regole fisse, usa una pipeline di agenti
+        cognitivi basati su Large Language Model che leggono notizie
         geopolitiche e finanziarie, ne sintetizzano le implicazioni di
-        mercato, e decidono se e come modificare un portafoglio reale.
+        mercato e decidono se e come modificare un portafoglio.
       </p>
-      <p>Il sistema &egrave; strutturato in due ambienti indipendenti:</p>
+      <p>
+        Tutto il trading &egrave; <b>paper</b> (nessun fondo reale). Il valore
+        del progetto non &egrave; "quanto rende" su un buon mese, ma se esiste
+        un <b>vantaggio dimostrabile</b> separato dalla fortuna di regime.
+      </p>
       <div class="two-col">
         <div class="mini-card">
           <div class="mini-ic" style="color:#10b981;">&#128200;</div>
           <h3>Live</h3>
           <p>
-            Bot operativo che gira 24/7 in paper trading. Pipeline
-            multi-agente attiva ogni 1 minuto via watchdog. Esegue trade
-            reali su portafoglio interno e li riflette su ClawStreet
-            Tournament per benchmark pubblico.
+            Bot operativo che gira 24/7 su infrastruttura cloud. Pipeline
+            multi-agente attivata su trigger dal Watchdog. Portafoglio
+            paper interno con stato persistente su database gestito.
           </p>
         </div>
         <div class="mini-card">
           <div class="mini-ic" style="color:#a78bfa;">&#129514;</div>
           <h3>Simulator</h3>
           <p>
-            Sandbox cognitivo su scenari storici reali (crisi geopolitiche,
-            eventi macro, crash, rally). L'agente decide senza conoscere il
-            periodo. Benchmark contro S&amp;P 500, monkey trader e medie di
-            settore. Memoria cognitiva persistente tra run.
+            Sandbox cognitivo su scenari storici reali. L'agente decide
+            senza conoscere il periodo (no data leakage temporale).
+            Benchmark contro S&amp;P 500, monkey trader e media di settore.
+            Memoria cognitiva persistente tra run.
           </p>
         </div>
       </div>
@@ -391,10 +391,11 @@
     <h2><span class="ic">&#9881;</span> Pipeline multi-agente</h2>
     <div class="body">
       <p>
-        Ogni ciclo decisionale attraversa cinque agenti specializzati che
-        si passano il contesto in catena. Ogni agente ha un ruolo
-        cognitivo distinto e pu&ograve; fallire indipendentemente senza
-        corrompere lo stato globale.
+        Ogni ciclo decisionale attraversa agenti specializzati con modelli
+        diversi e ruoli cognitivi distinti. Ogni agente pu&ograve; fallire
+        indipendentemente senza corrompere lo stato globale. Lo scheduler
+        attiva il ciclo completo a intervalli regolari; il ramo crypto
+        opera 24/7 indipendentemente dagli orari di borsa.
       </p>
       <div class="agents-list">
         <div class="agent-card" style="border-left-color:#4f8cff;">
@@ -402,16 +403,16 @@
             <div class="agent-num" style="background:#4f8cff;">1</div>
             <div>
               <div class="agent-name">&#128225; Watchdog</div>
-              <div class="agent-role">Trigger detection</div>
+              <div class="agent-role">Trigger detection &middot; DeepSeek-V3</div>
             </div>
-            <div class="agent-freq">ogni 1 minuto</div>
+            <div class="agent-freq">~5 min (mercato aperto)</div>
           </div>
           <p class="agent-desc">
-            Monitora costantemente news feed, prezzi e drift di portafoglio.
-            Decide se vale la pena svegliare gli agenti pesanti. Filtra
-            rumore. Implementa cooldown globale (15 min) per evitare trigger
-            storm. Distingue tra equity (mercato aperto + giorno feriale) e
-            crypto (24/7).
+            Sentinella a costo quasi nullo. Assegna un punteggio di urgenza
+            a news, drift di prezzo e posizioni sovraesposte. Sopra soglia
+            attiva la pipeline pesante. Cooldown globale anti trigger-storm.
+            Se una posizione supera la soglia di concentrazione, forza un
+            ribilanciamento mirato.
           </p>
         </div>
 
@@ -419,17 +420,17 @@
           <div class="agent-header">
             <div class="agent-num" style="background:#06b6d4;">2</div>
             <div>
-              <div class="agent-name">&#128065; Geopolitical Analyst</div>
-              <div class="agent-role">Intelligence sintesi</div>
+              <div class="agent-name">&#128065; Scout &mdash; Intelligence a cascata</div>
+              <div class="agent-role">Sintesi multi-fonte &middot; DeepSeek-V3</div>
             </div>
-            <div class="agent-freq">on-demand</div>
+            <div class="agent-freq">ogni 20 min &middot; 24/7</div>
           </div>
           <p class="agent-desc">
-            Legge notizie da NewsAPI, RSS feed selezionati e fonti
-            istituzionali. Estrae eventi geopolitici rilevanti (conflitti,
-            sanzioni, elezioni, decisioni banche centrali). Restituisce un
-            dossier strutturato con livello di certezza, attori coinvolti,
-            asset potenzialmente impattati.
+            Aggrega numerose fonti (eventi geopolitici, news, sentiment
+            social, trade del Congresso USA, dati crypto) in micro-schede,
+            poi sintetizzate in report a 8 ore e a 4 giorni. &Egrave; la
+            memoria di contesto che il Decision legge &mdash; niente &egrave;
+            analizzato due volte.
           </p>
         </div>
 
@@ -437,16 +438,15 @@
           <div class="agent-header">
             <div class="agent-num" style="background:#f59e0b;">3</div>
             <div>
-              <div class="agent-name">&#128202; Market Analyst</div>
-              <div class="agent-role">Analisi tecnica + macro</div>
+              <div class="agent-name">&#128202; Technical Analyst</div>
+              <div class="agent-role">Analisi quantitativa &middot; DeepSeek-V3</div>
             </div>
-            <div class="agent-freq">on-demand</div>
+            <div class="agent-freq">on-demand (Fase 2)</div>
           </div>
           <p class="agent-desc">
-            Calcola indicatori tecnici (RSI, MACD, volatilit&agrave;, drift),
-            analizza correlazioni cross-asset, valuta liquidit&agrave; e regime
-            di mercato. Integra dati Polygon + yfinance. Restituisce
-            contesto numerico oggettivo per il Decision Agent.
+            Calcola indicatori, pattern, livelli di supporto/resistenza e
+            confluenze multi-timeframe. Restituisce contesto numerico
+            oggettivo richiesto esplicitamente dal Decision Agent.
           </p>
         </div>
 
@@ -454,17 +454,16 @@
           <div class="agent-header">
             <div class="agent-num" style="background:#a78bfa;">4</div>
             <div>
-              <div class="agent-name">&#129504; Decision Agent</div>
-              <div class="agent-role">Tesi di investimento + trade</div>
+              <div class="agent-name">&#129504; Decision Standard</div>
+              <div class="agent-role">Tesi + trade equity &middot; Claude Sonnet 4.5</div>
             </div>
-            <div class="agent-freq">on-demand</div>
+            <div class="agent-freq">on-demand (su trigger)</div>
           </div>
           <p class="agent-desc">
-            Il cervello del sistema. Riceve l'output di Watchdog +
-            Geopolitical + Market e formula una tesi di investimento
-            articolata. Decide se aprire posizioni, ribilanciare o restare
-            flat. Esegue tool calls per piazzare ordini. Modello: Claude
-            Sonnet 4.5 (Live) o DeepSeek-R1 (Tournament).
+            Il cervello del sistema per equity/ETF. Riceve contesto cascata
+            + tecnico + portafoglio, formula una tesi causale e decide.
+            Vincolato a un workflow obbligatorio a 4 fasi che impedisce
+            decisioni impulsive.
           </p>
         </div>
 
@@ -473,465 +472,94 @@
             <div class="agent-num" style="background:#10b981;">5</div>
             <div>
               <div class="agent-name">&#9881; Decision Crypto</div>
-              <div class="agent-role">Branch dedicato cripto</div>
+              <div class="agent-role">Branch cripto dedicato &middot; DeepSeek-R1</div>
             </div>
-            <div class="agent-freq">cron ogni ora :00, 24/7</div>
+            <div class="agent-freq">~ogni ora &middot; 24/7</div>
           </div>
           <p class="agent-desc">
-            Versione specializzata del Decision Agent per asset cripto.
-            Considera ciclicit&agrave; di mining, regolamentazione, halving
-            Bitcoin, liquidazioni on-chain. Opera 24/7 indipendentemente
-            dall'orario di mercato equity. Modello: DeepSeek-R1 con
-            reasoning esteso.
-          </p>
-        </div>
-      </div>
-
-      <h3 style="margin-top:32px;">Agenti di supporto</h3>
-      <p>
-        Oltre alla pipeline cognitiva principale, il sistema include cinque
-        agenti specializzati con compiti circoscritti che girano in
-        parallelo per arricchire il contesto, proteggere il capitale e
-        chiudere il loop di apprendimento Simulator &harr; Live.
-      </p>
-      <div class="agents-list">
-        <div class="agent-card" style="border-left-color:#f97316;">
-          <div class="agent-header">
-            <div class="agent-num" style="background:#f97316;">6</div>
-            <div>
-              <div class="agent-name">&#128274; Risk Safety Job</div>
-              <div class="agent-role">Regole stateful di protezione capitale</div>
-            </div>
-            <div class="agent-freq">ogni 5 minuti, 24/7</div>
-          </div>
-          <p class="agent-desc">
-            Applica cinque regole stateful che il Decision Agent da solo
-            non pu&ograve; enforce-are (richiedono dati storici + persistenza):
-            <b>circuit breaker 24h</b> (liquida tutto se drawdown &gt; 5%),
-            <b>recovery mode</b> (SL &le; 5% finch&eacute; portafoglio non torna a
-            livello iniziale), <b>lock-in 0.5%</b> (SL auto a entry+0.5%
-            quando posizione raggiunge +5% di profitto), <b>trailing stop
-            dinamico 4%</b> dal picco su posizioni vincenti, <b>concentration
-            trigger</b> (alert se posizione &gt; 35% NAV). Tutte le regole sono
-            idempotenti, safe-by-default, attive 24/7.
-          </p>
-        </div>
-
-        <div class="agent-card" style="border-left-color:#22d3ee;">
-          <div class="agent-header">
-            <div class="agent-num" style="background:#22d3ee;">7</div>
-            <div>
-              <div class="agent-name">&#128202; CryptoMonitor</div>
-              <div class="agent-role">Trend health monitor cripto</div>
-            </div>
-            <div class="agent-freq">ogni 15 minuti, 24/7</div>
-          </div>
-          <p class="agent-desc">
-            Sorveglianza intelligente delle posizioni cripto aperte. Per
-            ogni asset legge le ultime ~25 candele 15-min via yfinance e
-            chiede a DeepSeek-V3 di valutare se il trend di entrata
-            &egrave; ancora sano (<code>HEALTHY</code>), in fase di esaurimento
-            (<code>WARNING</code>) o si &egrave; confermata un'inversione
-            (<code>REVERSAL_CONFIRMED</code>). Niente regole hard-coded:
-            l'LLM ragiona su volume divergence, candle pattern, momentum.
-            Logga alert visibili in dashboard + inietta commitment per il
-            prossimo run del Decision Crypto. Costo: ~$0.01/giorno.
-          </p>
-        </div>
-
-        <div class="agent-card" style="border-left-color:#84cc16;">
-          <div class="agent-header">
-            <div class="agent-num" style="background:#84cc16;">8</div>
-            <div>
-              <div class="agent-name">&#128221; Scout 8H + 4D Aggregators</div>
-              <div class="agent-role">Intelligence cascade</div>
-            </div>
-            <div class="agent-freq">ogni 8h / ogni 4 giorni</div>
-          </div>
-          <p class="agent-desc">
-            La conoscenza accumulata dallo Scout viene "compressa" a piu'
-            livelli: ogni 8 ore le micro-cards delle ultime 8h diventano
-            un singolo <b>report 8H</b> (sintesi causale, regime, asset
-            chiave); ogni 4 giorni gli 8H degli ultimi 4gg diventano un
-            <b>report 4D</b> (visione macro di periodo). I report aggregati
-            sono iniettati nel context del Decision Agent come "memoria
-            di sfondo", evitando di passargli centinaia di micro-cards
-            grezze ad ogni run.
-          </p>
-        </div>
-
-        <div class="agent-card" style="border-left-color:#ec4899;">
-          <div class="agent-header">
-            <div class="agent-num" style="background:#ec4899;">9</div>
-            <div>
-              <div class="agent-name">&#128203; Coach Cards Synthesizer</div>
-              <div class="agent-role">Loop Sim &rarr; Live</div>
-            </div>
-            <div class="agent-freq">ogni Luned&igrave; 06:00 UTC</div>
-          </div>
-          <p class="agent-desc">
-            Settimanalmente legge la memoria dell'advisor del Simulator
-            (errori ricorrenti, pattern di successo, decisioni perdenti) e
-            tramite DeepSeek-V3 sintetizza 3-5 <b>Coach Cards</b>
-            human-readable. Queste card vengono iniettate nei prompt del
-            Decision Live, trasformando il Simulator da semplice valutazione
-            a formazione attiva del bot in produzione.
-          </p>
-        </div>
-
-        <div class="agent-card" style="border-left-color:#f43f5e;">
-          <div class="agent-header">
-            <div class="agent-num" style="background:#f43f5e;">10</div>
-            <div>
-              <div class="agent-name">&#128176; Price Polling + Auto-Exits</div>
-              <div class="agent-role">SL/TP enforcement continuo</div>
-            </div>
-            <div class="agent-freq">ogni 10 minuti</div>
-          </div>
-          <p class="agent-desc">
-            Polling cascade Polygon &rarr; Massive &rarr; yfinance per
-            aggiornare i prezzi di tutte le posizioni aperte + watchlist.
-            Aggiorna gli snapshot del portafoglio (per equity curve) e
-            <b>controlla in continuo i target SL/TP</b>: se il prezzo
-            scende sotto lo stop-loss o supera il take-profit, esegue
-            <code>execute_sell</code> automaticamente. &Egrave; il
-            meccanismo che rende effettivi gli stop-loss memorizzati come
-            metadati sulla posizione.
+            Versione specializzata per asset cripto: ciclicit&agrave;,
+            regolamentazione, dominanza BTC, rischio liquidazioni. Reasoning
+            chain-of-thought esteso. Opera indipendentemente dall'orario di
+            mercato equity.
           </p>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- REGIME PROTOCOL -->
+  <!-- WORKFLOW 4 FASI -->
   <section class="box">
-    <h2><span class="ic">&#129517;</span> Regime Protocol &mdash; il framework decisionale</h2>
+    <h2><span class="ic">&#9095;</span> Workflow decisionale a 4 fasi</h2>
     <div class="body">
       <p>
-        Prima di qualsiasi trade-decision il Decision Agent attraversa un
-        protocollo obbligatorio a tre step: classifica il regime di mercato
-        corrente, applica i vincoli operativi e la strategia tattica del
-        regime, infine decide. Il protocollo &egrave; nato dall'analisi delle
-        run storiche del Simulator, che mostravano <b>0% win-rate in
-        mercati LATERAL/MACRO</b> e <b>63% in scenari geopolitici</b>:
-        senza un layer di regime-classification l'agente trattava tutti
-        i mercati come se fossero trend, perdendo sistematicamente quando
-        non c'era direzione.
+        Il Decision Agent non pu&ograve; "sparare un trade" d'impulso. &Egrave;
+        vincolato a una macchina a stati che il sistema fa rispettare via
+        tool:
+      </p>
+      <ol>
+        <li><b>Valutazione iniziale</b> &mdash; analisi della situazione corrente (portafoglio, briefing cascata, sentiment).</li>
+        <li><b>Richiesta dati tecnici</b> &mdash; interroga il Technical Analyst sui ticker candidati.</li>
+        <li><b>Tesi finale</b> &mdash; tesi causale "se X allora Y perch&eacute;", piano d'azione e rischio principale.</li>
+        <li><b>Esecuzione</b> &mdash; solo ora pu&ograve; eseguire un trade. Se prova prima di aver completato le fasi, il sistema rifiuta il tool.</li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- MISURARE BRAVURA, NON FORTUNA -->
+  <section class="box">
+    <h2><span class="ic">&#127919;</span> Misurare bravura, non fortuna</h2>
+    <div class="body">
+      <p>
+        &Egrave; il punto identitario del progetto. Un rendimento positivo su
+        un mese non distingue <b>edge</b> (bravura) da <b>beta</b> (eri long
+        mentre il mercato saliva). Questi strumenti servono a non illudersi.
       </p>
 
-      <h3>Le 8 categorie di regime</h3>
-      <div class="four-col">
-        <div class="cat-card" style="border-top-color:#10b981;">
-          <div class="cat-name" style="color:#10b981;">[TREND-UP]</div>
-          <p class="cat-desc"><b>Trend rialzista non esplosivo.</b> Breadth &gt; 60%, VIX &lt; 20, mosse 0.5-1.5%/giorno.
-          <br><i>Strategia:</i> Relative Strength. Identifica leader settoriali vs SPY, cavalca il trend. Niente reversal contrarian.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#ef4444;">
-          <div class="cat-name" style="color:#ef4444;">[TREND-DOWN]</div>
-          <p class="cat-desc"><b>Trend ribassista.</b> Breadth &lt; 40%, VIX &gt; 25, deterioramento macro.
-          <br><i>Strategia:</i> Difesa attiva. XLU/XLP/XLV difensivi, TLT, hedge. Niente bottom-fishing.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#94a3b8;">
-          <div class="cat-name" style="color:#94a3b8;">[LATERAL]</div>
-          <p class="cat-desc"><b>Range-bound senza edge direzionale.</b> Volumi compressi, news non decisive.
-          <br><i>Strategia:</i> Mean Reversion (NON breakout). Compra supporti, vendi resistenze. Size -50%. Default = NO_TRADE a meta' range.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#a78bfa;">
-          <div class="cat-name" style="color:#a78bfa;">[MACRO]</div>
-          <p class="cat-desc"><b>Evento macro schedulato</b> (FOMC, CPI, NFP, GDP).
-          <br><i>Strategia:</i> Correlazioni macro. Tassi calo &rarr; TLT/Growth. Inflazione &rarr; GLD/Energy. Mai contro driver.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#f59e0b;">
-          <div class="cat-name" style="color:#f59e0b;">[CRASH-RALLY]</div>
-          <p class="cat-desc"><b>Shock volatilit&agrave;</b> (VIX &gt; 30, mosse &gt; 3%).
-          <br><i>Strategia:</i> Convexity &amp; Speed. Aspetta capitolazione (volumi Reddit/X). Trailing stop stretto in rally, no TP statici.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#06b6d4;">
-          <div class="cat-name" style="color:#06b6d4;">[GEOPOLITICAL]</div>
-          <p class="cat-desc"><b>Conflitti, sanzioni, supply chain shock.</b> Win-rate Sim ~63% (campo favorevole).
-          <br><i>Strategia:</i> Event-driven arbitrage. GLD/TLT/UUP safe havens, XLE/Defense sensitive. SL largo poi break-even a +3%.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#fb7185;">
-          <div class="cat-name" style="color:#fb7185;">[REGULATORY-EVENT]</div>
-          <p class="cat-desc"><b>Decisioni binarie</b> (SEC ETF, antitrust, ban). P&amp;L medio storico -0.21%.
-          <br><i>Strategia:</i> Binary outcome risk. Conviction &ge; 0.85, max 5-10% NAV, sell 50% pre-event se rallied &gt; 30%.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#22c55e;">
-          <div class="cat-name" style="color:#22c55e;">[BULL-CYCLE]</div>
-          <p class="cat-desc"><b>Bull esplosivo</b> (mosse &gt; 3% daily, breadth &gt; 70%). Es. Q1 2021.
-          <br><i>Strategia:</i> Aggressive compounding. Aumenta su vincitori, usa cap pieno profilo, no scaling-out prematuro.</p>
-        </div>
-      </div>
+      <h3>Edge Tracker</h3>
+      <p>
+        Applica criteri decisi <b>a priori e mostrati in chiaro</b> (cos&igrave;
+        non sono spostabili dopo aver visto i risultati): campione minimo di
+        trade chiusi, profit factor sui dollari, asimmetria guadagni/perdite,
+        alpha contro l'S&amp;P 500 sulla vita reale del portafoglio, e una
+        confidence che deve davvero discriminare. Verdetto onesto: edge
+        dimostrato / nessun edge / in costruzione / dati insufficienti.
+        Tutti i dati grezzi del calcolo sono esposti.
+      </p>
 
-      <h3>I tre step del Regime Protocol</h3>
+      <h3>Solo le decisioni vere dell'AI</h3>
       <ul>
-        <li><b>STEP 1 &mdash; Classifica:</b> il Decision Agent dichiara esplicitamente il regime corrente (es. <code>Regime: [LATERAL]</code>) prima di qualsiasi reasoning. Una sola etichetta, no ibridi.</li>
-        <li><b>STEP 2 &mdash; Profilo operativo:</b> applica modificatori numerici additivi (conviction floor, SL preference, max nuove posizioni) coerenti col Risk Profile attivo. Pu&ograve; solo restringere, mai allargare.</li>
-        <li><b>STEP 2.5 &mdash; Strategia tattica:</b> applica il mindset operativo del regime (Relative Strength / Mean Reversion / Correlazioni / Event-driven / Aggressive compounding). Risponde al "come tradare", non solo "se".</li>
-        <li><b>STEP 3 &mdash; Decide:</b> applica il vincolo pi&ugrave; stretto tra Risk Profile e Regime. In caso di conflitto, vince il pi&ugrave; conservativo.</li>
+        <li><b>Inizio ufficiale ancorato</b>: la misurazione parte dal primo movimento operativo reale, escludendo il periodo iniziale inattivo &mdash; return e alpha coprono la vita vera del portafoglio.</li>
+        <li><b>Chiusure non-AI escluse</b>: stop forzati, auto-exit e chiusure manuali non entrano in nessuna analisi/grafico. L'edge misurato riflette solo round-trip decisi dall'AI. Eccezione voluta: il termometro di sicurezza del rischio resta onesto.</li>
       </ul>
 
-      <p style="margin-top:16px;">
-        In regimi <b>[LATERAL]</b>, <b>[MACRO]</b> e <b>[REGULATORY-EVENT]</b>
-        il default &egrave; <code>NO_TRADE</code>. Per derogare, l'agente DEVE
-        scrivere esplicitamente tre giustificazioni: catalyst specifico,
-        conviction al di sopra del floor regime, SL sostenibile. Senza
-        queste, il trade non &egrave; ammesso. &Egrave; il meccanismo
-        anti-azionismo che blocca il bias degli LLM verso l'azione.
+      <h3>Calibrazione della confidence</h3>
+      <p>
+        La "confidence" non &egrave; pi&ugrave; "quanto mi piace la tesi" ma una
+        <b>probabilit&agrave; verificabile</b> abbinata a un rapporto
+        rischio/rendimento atteso. Una diagnosi dedicata mostra quali trade
+        rompono la relazione (molto sicuro &rarr; perso vs poco sicuro &rarr;
+        vinto) e l'agente riceve, al momento di decidere, il proprio storico
+        di calibrazione &mdash; cos&igrave; ritara invece di ripetere l'errore
+        tipico: iper-confidenza sulle tesi di consenso gi&agrave; scontate.
       </p>
     </div>
   </section>
 
-  <!-- RISK MANAGEMENT -->
+  <!-- RISCHIO -->
   <section class="box">
-    <h2><span class="ic">&#128737;</span> Risk Management a tre livelli</h2>
+    <h2><span class="ic">&#128737;</span> Gestione del rischio</h2>
     <div class="body">
       <p>
-        Il sistema di gestione del rischio &egrave; stratificato in tre layer
-        indipendenti che lavorano insieme. Ognuno ha responsabilit&agrave;
-        distinte e fallisce con grace se gli altri sono compromessi.
-      </p>
-
-      <h3>Livello 1 &mdash; Risk Profile (vincoli hard)</h3>
-      <p>
-        Tre preset configurabili dall'utente, ognuno con cap numerici
-        validati a runtime PRIMA di ogni <code>execute_trade</code>. Sono
-        vincoli invalicabili: qualsiasi trade che li viola viene rifiutato
-        dal validator indipendentemente da cosa l'LLM ha deciso.
-      </p>
-      <div class="four-col">
-        <div class="cat-card" style="border-top-color:#10b981;">
-          <div class="cat-name" style="color:#10b981;">&#128737; Conservative</div>
-          <p class="cat-desc">Capital preservation. Max 8% per posizione equity / 6% crypto, max 3 posizioni aperte, confidence min 0.80, drawdown stop 6%.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#a78bfa;">
-          <div class="cat-name" style="color:#a78bfa;">&#9878; Moderate</div>
-          <p class="cat-desc">Default consigliato. Max 15% per posizione equity / 12% crypto, max 6 posizioni, confidence min 0.65, drawdown stop 12%.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#f59e0b;">
-          <div class="cat-name" style="color:#f59e0b;">&#128293; Aggressive</div>
-          <p class="cat-desc">Massima esposizione. Max 25% per posizione equity / 20% crypto, max 10 posizioni, confidence min 0.50, drawdown stop 20%.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#06b6d4;">
-          <div class="cat-name" style="color:#06b6d4;">&#9881; Configurabile</div>
-          <p class="cat-desc">Tutti i parametri sono persistiti in DB. L'utente pu&ograve; switchare profilo dalla UI: la modifica vale dal prossimo run del Decision Agent.</p>
-        </div>
-      </div>
-
-      <h3>Livello 2 &mdash; Regime Protocol (vincoli additivi)</h3>
-      <p>
-        Sopra il Risk Profile, il Regime Protocol pu&ograve; <b>solo
-        restringere</b> i cap (mai allargarli). In <code>[LATERAL]</code>
-        e <code>[MACRO]</code> aggiunge confidence floor +0.10 sopra il
-        profilo, SL obbligatoriamente sull'estremo stretto, max 1 nuova
-        posizione per run. In <code>[REGULATORY-EVENT]</code> impone
-        confidence &ge; 0.85 e allocazione &le; 10% NAV per posizioni
-        binarie. In <code>[BULL-CYCLE]</code> sblocca la piena allocazione
-        del profilo (no riduzioni regime) ma solo con condizioni multiple:
-        WR ultime 10 &gt; 60%, cash &gt; $20k, conviction alta.
-      </p>
-
-      <h3>Livello 3 &mdash; Risk State (regole stateful)</h3>
-      <p>
-        Il job <code>_risk_safety_job</code> gira ogni 5 minuti 24/7 e
-        applica 5 regole che richiedono persistenza e dati storici:
+        Il rischio &egrave; gestito a strati, con la sicurezza prima
+        dell'aggressivit&agrave; (alcune protezioni automatiche sono opt-in,
+        disattivate di default dopo un incidente passato di
+        auto-liquidazione):
       </p>
       <ul>
-        <li><b>Circuit breaker 24h:</b> se il drawdown nelle ultime 24 ore supera -5%, il sistema <b>liquida tutte le posizioni</b> automaticamente al prezzo corrente e entra in <b>recovery mode</b>.</li>
-        <li><b>Recovery mode:</b> durante questa fase, ogni nuovo trade pu&ograve; avere SL massimo 5% e confidence minima 0.75 (override del floor profilo verso l'alto). Si esce automaticamente quando il portafoglio torna al valore iniziale.</li>
-        <li><b>Lock-in 0.5%:</b> appena una posizione raggiunge +5% di profitto unrealized, il sistema imposta automaticamente lo SL a <code>entry &times; 1.005</code>. Protezione del profitto minimo: anche se il prezzo crolla, esci con +0.5%.</li>
-        <li><b>Trailing stop dinamico:</b> a +10% di profitto, lo SL diventa un trailing al 4% dal picco intraday del prezzo. Il trailing sale, mai scende. Permette di catturare la coda dei winner senza chiusure premature.</li>
-        <li><b>Concentration trigger:</b> se una posizione supera il 35% del NAV totale, il sistema logga un warning visibile in dashboard. Il Decision Agent al prossimo run vede questo segnale e valuta rebalance.</li>
-      </ul>
-      <p>
-        Il riepilogo dello stato di rischio (recovery_mode, drawdown_24h,
-        win_rate_last_10, max_concentration) viene iniettato nel system
-        prompt del Decision Agent a ogni run, cos&igrave; pu&ograve; orientare
-        le decisioni in base ai numeri reali del momento.
-      </p>
-    </div>
-  </section>
-
-  <!-- INTELLIGENCE CASCADE -->
-  <section class="box">
-    <h2><span class="ic">&#128240;</span> Intelligence Cascade &mdash; memoria persistente</h2>
-    <div class="body">
-      <p>
-        Lo Scout produce un flusso continuo di micro-schede informative
-        dalla rete (news, social, on-chain, congressional trading) che
-        vengono compresse in tre livelli successivi di sintesi. Il
-        Decision Agent non vede mai centinaia di micro-cards grezze: vede
-        sempre i report aggregati pi&ugrave; recenti, mantenendo il prompt
-        compatto e leggibile.
-      </p>
-
-      <h3>I tre livelli della cascade</h3>
-      <div class="agents-list">
-        <div class="agent-card" style="border-left-color:#06b6d4;">
-          <div class="agent-header">
-            <div class="agent-num" style="background:#06b6d4;">L0</div>
-            <div>
-              <div class="agent-name">Scout 20-min &mdash; micro-cards</div>
-              <div class="agent-role">8 fonti, dedup semantica</div>
-            </div>
-            <div class="agent-freq">20 min weekday / 60 min weekend</div>
-          </div>
-          <p class="agent-desc">
-            Ad ogni ciclo lo Scout interroga in parallelo: <b>GDELT</b> (eventi
-            geopolitici), <b>NewsAPI</b> (notizie generali), <b>yfinance news</b>
-            (corporate), <b>Reddit + X</b> (sentiment), <b>Congressional Trading</b>
-            (insider activity), <b>CoinGecko</b> (crypto market data). DeepSeek-V3
-            filtra il rumore e produce micro-cards JSON strutturate. Una dedup
-            semantica (Jaccard &ge; 0.55) elimina ripetizioni intra-ciclo.
-          </p>
-        </div>
-        <div class="agent-card" style="border-left-color:#84cc16;">
-          <div class="agent-header">
-            <div class="agent-num" style="background:#84cc16;">L1</div>
-            <div>
-              <div class="agent-name">Report 8H</div>
-              <div class="agent-role">Sintesi causale 8 ore</div>
-            </div>
-            <div class="agent-freq">ogni 8 ore</div>
-          </div>
-          <p class="agent-desc">
-            Le micro-cards delle ultime 8h vengono lette e sintetizzate da
-            DeepSeek-V3 in un singolo report con: tema dominante, regime
-            suggerito, asset chiave mossi, sentiment macro, eventi binari
-            attesi. Le micro-cards consumate vengono marcate processed.
-            Anti-double-run: skip se l'ultimo AGG_8H &egrave; &lt; 6h fa.
-          </p>
-        </div>
-        <div class="agent-card" style="border-left-color:#a78bfa;">
-          <div class="agent-header">
-            <div class="agent-num" style="background:#a78bfa;">L2</div>
-            <div>
-              <div class="agent-name">Report 4D</div>
-              <div class="agent-role">Visione macro di periodo</div>
-            </div>
-            <div class="agent-freq">ogni 4 giorni</div>
-          </div>
-          <p class="agent-desc">
-            I report 8H degli ultimi 4 giorni vengono aggregati in un
-            singolo report 4D che descrive il regime di periodo, i bias
-            di rischio, gli scenari alternativi. &Egrave; il "background
-            macro" del Decision Agent: meno reattivo delle micro-cards, pi&ugrave;
-            stabile, utile per la coerenza strategica.
-          </p>
-        </div>
-      </div>
-
-      <h3>Memoria operativa &mdash; chiusura del loop</h3>
-      <p>
-        Oltre all'intelligence Scout, il sistema inietta nel prompt del
-        Decision Agent anche le sue <b>ultime 12 decisioni</b> (tesi,
-        razionali, esito). Cos&igrave; pu&ograve; riconoscere pattern ricorrenti
-        nei propri errori, evitare di rifare la stessa tesi fallita in
-        mercati laterali, mantenere coerenza con il proprio reasoning
-        recente. Senza questa memoria, l'agente partiva from-scratch ogni
-        ciclo e ripeteva gli stessi errori.
-      </p>
-    </div>
-  </section>
-
-  <!-- COACH CARDS + LOOP SIM-LIVE -->
-  <section class="box">
-    <h2><span class="ic">&#127919;</span> Coach Cards &mdash; il loop Simulator &rarr; Live</h2>
-    <div class="body">
-      <p>
-        Il Simulator non &egrave; solo un tool di valutazione: &egrave;
-        anche il <b>meccanismo di formazione attiva</b> del bot in produzione.
-        Ogni settimana DeepSeek-V3 sintetizza la memoria advisor del
-        Simulator (errori ricorrenti, pattern di successo, deviazioni
-        strategiche) in 3-5 <b>Coach Cards</b> human-readable.
-      </p>
-      <p>Le Coach Cards sono regole operative concrete del tipo:</p>
-      <ul>
-        <li><i>"In regime macro, non aprire posizioni nelle 24h precedenti FOMC senza un edge asimmetrico esplicito."</i></li>
-        <li><i>"Su crypto in trend down, evita di aggiungere long sperando nel rimbalzo: chiudi e cash."</i></li>
-        <li><i>"Quando il VIX &egrave; sopra 25, riduci la dimensione dei trade del 30%."</i></li>
-      </ul>
-      <p>
-        Queste card vengono <b>iniettate nel system prompt del Decision Live</b>
-        a ogni run, chiudendo cos&igrave; il loop di apprendimento: il Simulator
-        scopre regole tramite migliaia di scenari simulati, le sintetizza,
-        e le passa al bot in produzione che le applica al mondo reale.
-        Il primo synth dopo un deploy gira a +3min dall'avvio se l'ultimo
-        synth &egrave; &gt; 7gg fa (backfill automatico).
-      </p>
-    </div>
-  </section>
-
-  <!-- CHAT DECISION + USER DIRECTIVES -->
-  <section class="box">
-    <h2><span class="ic">&#128172;</span> Chat Decision + User Directives</h2>
-    <div class="body">
-      <p>
-        Oltre all'automazione, l'utente ha due meccanismi per influenzare
-        direttamente il comportamento dell'agente: una <b>chat
-        actionable</b> per dialogare in tempo reale e un sistema di
-        <b>direttive persistenti</b> che modificano i prompt di ogni run
-        successivo.
-      </p>
-
-      <h3>Chat Decision actionable</h3>
-      <p>
-        Dalla pagina <code>/live/chat</code> l'utente parla direttamente
-        con lo stesso agente che opera il portafoglio (Decision Standard
-        con Claude, o Decision Crypto con DeepSeek-R1). L'agente pu&ograve;
-        proporre fino a quattro tipi di azioni concrete, ognuna
-        renderizzata come una card con bottone "Conferma":
-      </p>
-      <ul>
-        <li><b><code>execute_trade</code></b> &mdash; apri/chiudi una posizione su un ticker specifico con confidence dichiarata.</li>
-        <li><b><code>set_stop_loss</code></b> &mdash; imposta SL su una posizione esistente (pct dal prezzo medio o prezzo assoluto).</li>
-        <li><b><code>set_take_profit</code></b> &mdash; imposta TP su una posizione esistente.</li>
-        <li><b><code>add_directive</code></b> &mdash; aggiungi una direttiva strategica permanente (vedi sotto).</li>
-      </ul>
-      <p>
-        Nessuna azione viene eseguita automaticamente: ogni proposta
-        richiede conferma esplicita via click. Il risultato viene persistito
-        per indice nel messaggio, cos&igrave; ogni card mostra lo stato
-        (eseguita / fallita / in attesa).
-      </p>
-
-      <h3>User Directives</h3>
-      <p>
-        Testo libero che viene <b>iniettato in cima a TUTTI i prompt</b>
-        del Decision Agent (Live + Sim). Serve per dare istruzioni
-        strategiche persistenti senza modificare il system prompt base.
-        Esempi pratici:
-      </p>
-      <ul>
-        <li><i>"Non aprire posizioni tech durante la settimana FOMC."</i></li>
-        <li><i>"Confidence floor 0.75 per qualsiasi trade con SL &gt; 10%."</i></li>
-        <li><i>"In recovery mode, default = NO_TRADE per 48h."</i></li>
-      </ul>
-      <p>
-        Le direttive sono complementari al Risk Profile e al Regime Protocol:
-        possono restringere il comportamento dell'agente, ma non superare
-        i vincoli hard del profilo (validate_trade le ignorerebbe).
-      </p>
-    </div>
-  </section>
-
-  <!-- WATCHDOG DEEP-DIVE -->
-  <section class="box">
-    <h2><span class="ic">&#10227;</span> Watchdog: il cuore reattivo</h2>
-    <div class="body">
-      <p>
-        Il Watchdog &egrave; ci&ograve; che distingue GeoInvest AI da un classico bot
-        schedulato. Non aspetta orari fissi: <b>monitora costantemente
-        l'ambiente</b> e decide quando vale la pena attivare i modelli
-        pesanti.
-      </p>
-      <ul>
-        <li><b>Frequenza:</b> ogni 60 secondi durante orari di mercato, costo trascurabile (DeepSeek-V3 trigger filter, &lt; $0.001/call).</li>
-        <li><b>Trigger types:</b> news ad alto impatto, drift di prezzo significativo, posizioni sovraesposte, eventi macro calendarizzati, rotture tecniche su asset in portafoglio.</li>
-        <li><b>Cooldown globale:</b> 60 minuti tra un'attivazione full pipeline e la successiva. Previene trigger storm su news correlate.</li>
-        <li><b>Routing per asset:</b> trigger crypto attivano sempre Decision Crypto. Trigger equity attivano la pipeline standard solo se giorno feriale + non festivit&agrave; NYSE + mercato aperto.</li>
-        <li><b>Rebalance autonomo:</b> se una posizione supera la soglia di concentration (default 35% del NAV), il Watchdog pu&ograve; richiedere un ribilanciamento mirato senza attivare l'analisi geopolitica completa.</li>
-        <li><b>Pipeline serialization:</b> crypto pipeline (cron :00) e standard (cron :02) sono serializzate via flag boolean. La standard attende che la crypto finisca (max 8 min polling) per evitare contention sul thread pool asyncio.</li>
+        <li><b>Profili di rischio</b> (conservativo / moderato / aggressivo): tetto per posizione, confidence minima, range stop-loss, numero massimo di posizioni, drawdown massimo. &Egrave; un cancello duro: i trade che li violano vengono rifiutati.</li>
+        <li><b>Recovery mode</b>: sotto una certa perdita, vincoli pi&ugrave; stretti finch&eacute; il portafoglio non recupera.</li>
+        <li><b>Circuit breaker</b> su drawdown, allarme di concentrazione, lock-in del profitto e trailing stop dinamico (tutti attivabili su scelta).</li>
+        <li><b>Realismo</b>: commissioni simulate per non gonfiare il P&amp;L, e pi&ugrave; livelli di guardia anti dati-corrotti sul valore del portafoglio.</li>
       </ul>
     </div>
   </section>
@@ -941,71 +569,37 @@
     <h2><span class="ic">&#129514;</span> Il Simulator: sandbox cognitivo</h2>
     <div class="body">
       <p>
-        Il Simulator &egrave; uno strumento di valutazione qualitativa del
-        ragionamento dell'agente. Pesca uno scenario storico reale,
-        mostra all'agente solo i dati disponibili a quel momento (no data
-        leakage temporale) e lascia che decida cosa fare.
+        Strumento di valutazione del ragionamento dell'agente. Pesca uno
+        scenario storico reale, mostra solo i dati disponibili a quel
+        momento (no data leakage temporale) e lo lascia decidere.
       </p>
 
-      <h3>Le categorie di scenari</h3>
-      <p>
-        Il Simulator dispone di una libreria di scenari distribuita sulle
-        8 categorie del Regime Protocol (vedi sezione dedicata sopra). Ogni
-        scenario forza l'agente a classificare il regime corrente PRIMA di
-        decidere e ad applicare la strategia tattica appropriata. Le 8
-        categorie:
-      </p>
+      <h3>Categorie di scenario</h3>
       <div class="four-col">
         <div class="cat-card" style="border-top-color:#10b981;">
-          <div class="cat-name" style="color:#10b981;">TREND-UP / DOWN</div>
-          <p class="cat-desc">Trend strutturali non esplosivi. Test della relative strength e della difesa.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#94a3b8;">
-          <div class="cat-name" style="color:#94a3b8;">LATERAL</div>
-          <p class="cat-desc">Range-bound. Test della disciplina mean-reversion vs trappola breakout (70% falsi nei dati storici).</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#a78bfa;">
-          <div class="cat-name" style="color:#a78bfa;">MACRO</div>
-          <p class="cat-desc">Decisioni banche centrali, CPI, NFP. Test delle correlazioni macro.</p>
-        </div>
-        <div class="cat-card" style="border-top-color:#06b6d4;">
-          <div class="cat-name" style="color:#06b6d4;">GEOPOLITICAL</div>
-          <p class="cat-desc">Crisi internazionali, sanzioni, supply chain shock. Campo favorevole (~63% win rate).</p>
+          <div class="cat-name" style="color:#10b981;">Normale</div>
+          <p class="cat-desc">Mercato ordinario. Test della capacit&agrave; di NON forzare trade quando non c'&egrave; edge.</p>
         </div>
         <div class="cat-card" style="border-top-color:#f59e0b;">
-          <div class="cat-name" style="color:#f59e0b;">CRASH-RALLY</div>
-          <p class="cat-desc">Movimenti estremi (&gt;3% daily). Test convexity &amp; speed, capitulation signals.</p>
+          <div class="cat-name" style="color:#f59e0b;">Geopolitico</div>
+          <p class="cat-desc">Crisi internazionali, sanzioni, conflitti, elezioni. Test di reattivit&agrave; e interpretazione.</p>
         </div>
-        <div class="cat-card" style="border-top-color:#fb7185;">
-          <div class="cat-name" style="color:#fb7185;">REGULATORY-EVENT</div>
-          <p class="cat-desc">Decisioni binarie (SEC ETF, antitrust). Asymmetric sizing + sell-the-news protection.</p>
+        <div class="cat-card" style="border-top-color:#06b6d4;">
+          <div class="cat-name" style="color:#06b6d4;">Macro</div>
+          <p class="cat-desc">Banche centrali, inflazione, recessioni, shock energetici. Test delle dinamiche macro.</p>
         </div>
-        <div class="cat-card" style="border-top-color:#22c55e;">
-          <div class="cat-name" style="color:#22c55e;">BULL-CYCLE</div>
-          <p class="cat-desc">Bull esplosivo (Q1 2021-style). Test dell'aggressive compounding sui leader.</p>
+        <div class="cat-card" style="border-top-color:#ef4444;">
+          <div class="cat-name" style="color:#ef4444;">Crash / Rally</div>
+          <p class="cat-desc">Movimenti estremi. Test della disciplina: tagliare le perdite, cavalcare i rally, niente panico.</p>
         </div>
       </div>
 
-      <h3>Modalit&agrave; di esecuzione</h3>
+      <h3>Esecuzione e benchmark</h3>
       <ul>
-        <li><b>Single-step:</b> un singolo punto temporale. L'agente decide una volta sola e si misura il risultato a 1 settimana / 1 mese / 3 mesi.</li>
-        <li><b>Multi-step (3-5 step):</b> simulazione iterata. L'agente vede il risultato della propria decisione e pu&ograve; aggiornare la tesi al passo successivo. Test della capacit&agrave; di adattamento.</li>
+        <li><b>Equity</b>: step da 1 settimana, 3-5 turni. <b>Crypto</b>: step da 2 giorni, 5-7 turni (DeepSeek-R1). Multi-step: l'agente vede l'esito della propria decisione e pu&ograve; aggiornare la tesi.</li>
+        <li><b>Benchmark</b>: vs S&amp;P 500, vs monkey trader (random) e vs media di settore. Metriche pure: Sharpe, max drawdown, profit factor.</li>
+        <li><b>Loop Sim &rarr; Live</b>: le lezioni accumulate vengono distillate settimanalmente in "Coach Cards" iniettate nel prompt del Live. Il sapere del Simulator non va sprecato.</li>
       </ul>
-
-      <h3>Benchmark</h3>
-      <ul>
-        <li><b>vs S&amp;P 500:</b> il riferimento classico. Battere il mercato &egrave; il vero test.</li>
-        <li><b>vs Monkey trader:</b> agente random. Battere il monkey &egrave; il minimo sindacale per dimostrare che c'&egrave; ragionamento.</li>
-        <li><b>vs Settore:</b> media degli asset della stessa categoria. Misura la qualit&agrave; della selezione titoli a parit&agrave; di tema.</li>
-      </ul>
-
-      <h3>Memoria cognitiva</h3>
-      <p>
-        Il Simulator mantiene una memoria persistente delle simulazioni
-        passate: errori ricorrenti, pattern di successo, bias osservati.
-        Questa memoria viene iniettata nei prompt dei run successivi come
-        "lessons learned", consentendo un meta-apprendimento di sessione.
-      </p>
     </div>
   </section>
 
@@ -1014,49 +608,25 @@
     <h2><span class="ic">&#128200;</span> Il Live: bot operativo</h2>
     <div class="body">
       <p>
-        Il Live &egrave; la modalit&agrave; di produzione. Il sistema gira 24/7 su
-        infrastruttura cloud (Render) e gestisce un portafoglio paper
-        trading interno con mirror automatico su <b>ClawStreet
-        Tournament</b> per il confronto pubblico con altri bot.
+        Modalit&agrave; di produzione, 24/7 su cloud. Portafoglio paper
+        interno, stato persistente su database gestito. Tre modalit&agrave;:
+        standard (equity, in orario di mercato), crypto (sempre attiva) e
+        idle (fuori mercato &mdash; crypto resta operativo, il Watchdog
+        continua a monitorare).
       </p>
-
-      <h3>Cron schedule completo (UTC)</h3>
+      <h3>Strumenti di osservabilit&agrave;</h3>
       <ul>
-        <li><b>Watchdog:</b> ogni 1 min (solo orari mercato).</li>
-        <li><b>Price Polling + Auto-Exits:</b> ogni 10 min (Polygon &rarr; Massive &rarr; yfinance cascade).</li>
-        <li><b>Scout micro-cards (L0):</b> ogni 20 min weekday / 60 min weekend &amp; festivi.</li>
-        <li><b>Scout 8H Report (L1):</b> ogni 8 ore (consume L0).</li>
-        <li><b>Scout 4D Report (L2):</b> ogni 4 giorni (consume L1).</li>
-        <li><b>Crypto Pipeline (Tech V3 + Decision R1):</b> cron ogni ora a :00, 24/7.</li>
-        <li><b>Standard Pipeline (Tech V3 + Decision Sonnet):</b> cron 14:02, 16:02, 18:02, 20:02 UTC lun-ven (NYSE hours).</li>
-        <li><b>CryptoMonitor (DeepSeek-V3):</b> ogni 15 min, 24/7.</li>
-        <li><b>Risk Safety Job:</b> ogni 5 min, 24/7 (circuit breaker + lock-in + trailing).</li>
-        <li><b>Coach Cards Synth (DeepSeek-V3):</b> ogni Luned&igrave; 06:00 UTC.</li>
-        <li><b>Simulator Auto Mode:</b> opt-in, ogni 30 min (alterna equity/crypto).</li>
+        <li><b>Dashboard &amp; Analytics</b>: equity curve, posizioni, P&amp;L, KPI, alpha, calibrazione.</li>
+        <li><b>Edge Tracker</b>: il verdetto onesto + la diagnosi della confidence.</li>
+        <li><b>Intelligence</b>: le micro-schede dello Scout e il "thinking process" per run.</li>
+        <li><b>Coach Cards &amp; Chat Decision</b>: raccomandazioni leggibili e chat per interrogare le decisioni passate ("perch&eacute; hai aperto questa posizione?").</li>
       </ul>
-
-      <h3>Modalit&agrave; operative</h3>
-      <ul>
-        <li><b>Standard mode (equity):</b> attiva durante giorni feriali + non festivit&agrave; NYSE. Watchdog a 1 min, Decision Sonnet 4.5 a cron 14:02/16:02/18:02/20:02, ribilanciamento posizioni sovraesposte automatico via concentration trigger.</li>
-        <li><b>Crypto mode:</b> sempre attiva, 24/7. Decision Crypto su DeepSeek-R1 a cron ogni ora :00, CryptoMonitor ogni 15 min, Risk Safety ogni 5 min. Indipendente dagli orari di mercato equity.</li>
-        <li><b>Idle mode:</b> fuori orario equity (weekend, festivit&agrave;). Crypto + Risk Safety + Scout cascade restano operativi. Watchdog non triggera la pipeline equity.</li>
-      </ul>
-
-      <h3>Frontend dashboard</h3>
-      <ul>
-        <li><b>/live</b> &mdash; dashboard real-time con prezzi, posizioni, log degli agenti.</li>
-        <li><b>/live/chat</b> &mdash; chat actionable con il Decision Agent (vedi sezione dedicata).</li>
-        <li><b>/analytics</b> &mdash; equity curve, drawdown, win rate, esposizione, KPI strategici.</li>
-        <li><b>/about</b> &mdash; questa pagina (pubblica, fuori dal bundle cifrato).</li>
-      </ul>
-
-      <h3>Protezione client-side AES-256</h3>
+      <h3>Memoria operativa</h3>
       <p>
-        L'intera build React (eccetto questa pagina <code>/about</code> e
-        <code>/unlock</code>) viene cifrata client-side AES-256-GCM e
-        servita come blob unico (<code>bundle.enc</code>). Senza il token
-        di accesso, nessuna parte del frontend &egrave; mai trasmessa in
-        chiaro. La decifratura avviene nel browser via Web Crypto API.
+        L'agente registra "impegni" condizionati che ricompaiono nei run
+        successivi finch&eacute; non risolti o scaduti, e vede le proprie
+        ultime decisioni: chiude il feedback loop ed evita di ripetere
+        errori o contraddirsi.
       </p>
     </div>
   </section>
@@ -1073,24 +643,23 @@
           </div>
           <ul>
             <li>Python 3.11</li>
-            <li>FastAPI (server async)</li>
+            <li>FastAPI (async)</li>
             <li>asyncio (pipeline non-blocking)</li>
-            <li>AsyncIOScheduler (cron jobs)</li>
-            <li>aiohttp (HTTP client async)</li>
+            <li>Scheduler asincrono</li>
+            <li>Frontend React servito da FastAPI</li>
           </ul>
         </div>
         <div class="stack-card">
           <div class="stack-header">
             <span class="stack-icon">&#129504;</span>
-            <span class="stack-title">LLM Layer (multi-modello)</span>
+            <span class="stack-title">LLM Layer</span>
           </div>
           <ul>
-            <li>Claude Sonnet 4.5 (Decision Live equity)</li>
-            <li>DeepSeek-R1 (Decision Crypto, reasoning)</li>
-            <li>DeepSeek-V3 (Scout, CryptoMonitor, Coach Cards, aggregators)</li>
-            <li>Anthropic SDK + tool use nativo</li>
-            <li>OpenAI-compatible API (DeepSeek)</li>
-            <li>Tool loop con max 10-15 iterazioni, workflow 4 fasi</li>
+            <li>Claude Sonnet 4.5 (Decision equity)</li>
+            <li>DeepSeek-R1 (Decision Crypto / reasoning)</li>
+            <li>DeepSeek-V3 (Watchdog/Scout/Technical)</li>
+            <li>Tool use + tool loop</li>
+            <li>Engine intercambiabile via env</li>
           </ul>
         </div>
         <div class="stack-card">
@@ -1099,11 +668,11 @@
             <span class="stack-title">Data Layer</span>
           </div>
           <ul>
-            <li>Supabase (PostgreSQL gestito)</li>
-            <li>SQLite fallback (sviluppo)</li>
-            <li>Polygon.io (market data)</li>
-            <li>yfinance (fallback + crypto)</li>
-            <li>NewsAPI + RSS feed istituzionali</li>
+            <li>Supabase (PostgreSQL) &mdash; produzione</li>
+            <li>SQLite &mdash; sviluppo locale</li>
+            <li>Market data multi-provider (cascata)</li>
+            <li>News, sentiment social, dati crypto</li>
+            <li>Cache + guardie anti rate-limit</li>
           </ul>
         </div>
         <div class="stack-card">
@@ -1112,11 +681,11 @@
             <span class="stack-title">Frontend</span>
           </div>
           <ul>
-            <li>React 18 + CRA</li>
-            <li>React Router v7</li>
+            <li>React 18 + React Router</li>
             <li>Recharts (grafici)</li>
-            <li>Lucide-react (icone)</li>
-            <li>jsPDF + html2canvas (export PDF)</li>
+            <li>Tema scuro, USD only</li>
+            <li>Error Boundary + degrado controllato</li>
+            <li>Cifratura client-side AES-256 (opzionale)</li>
           </ul>
         </div>
         <div class="stack-card">
@@ -1125,11 +694,10 @@
             <span class="stack-title">Deployment</span>
           </div>
           <ul>
-            <li>Render (Live, dyno + scheduler)</li>
-            <li>GitHub Actions (Tournament, ogni 2h)</li>
-            <li>Vercel/Render (frontend statico)</li>
-            <li>Supabase tier free (state)</li>
-            <li>Client-side AES-256 encryption</li>
+            <li>Render (auto-deploy su push)</li>
+            <li>Stato su Supabase (indipendente dall'host)</li>
+            <li>Gateway inferenza con circuit breaker</li>
+            <li>Resilienza UI a backend instabile</li>
           </ul>
         </div>
         <div class="stack-card">
@@ -1139,11 +707,10 @@
           </div>
           <ul>
             <li>Paper trading (no fondi reali)</li>
-            <li>Risk Profile (Conservative/Moderate/Aggressive)</li>
-            <li>Regime Protocol additivo (8 regimi)</li>
-            <li>Circuit breaker 24h (DD &gt; 5% &rarr; liquida tutto)</li>
-            <li>Lock-in 0.5% + Trailing stop dinamico 4%</li>
-            <li>Concentration trigger (alert &gt; 35% NAV)</li>
+            <li>Profili rischio config-driven</li>
+            <li>Stop-loss / take-profit validati</li>
+            <li>Cooldown globale anti trigger-storm</li>
+            <li>Circuit breaker (opt-in)</li>
           </ul>
         </div>
       </div>
@@ -1152,31 +719,30 @@
 
   <!-- DUAL MODEL -->
   <section class="box">
-    <h2><span class="ic">&#129504;</span> Decision Engines: dual-model</h2>
+    <h2><span class="ic">&#129504;</span> Decision Engines: multi-modello</h2>
     <div class="body">
       <p>
-        Il sistema supporta due engine LLM intercambiabili tramite
-        variabile ambiente <code>DECISION_ENGINE</code>. Questo permette
-        di benchmarkare modelli diversi sullo stesso framework cognitivo.
+        Lo stesso framework cognitivo pu&ograve; girare su engine LLM diversi
+        (selezionabili via variabile ambiente <code>DECISION_ENGINE</code>),
+        cos&igrave; si possono benchmarkare modelli a parit&agrave; di pipeline.
       </p>
       <div class="two-col">
         <div class="mini-card">
           <div class="mini-ic" style="color:#a78bfa;">&#9889;</div>
           <h3>Claude Sonnet 4.5</h3>
           <p>
-            Default per il bot Live production. Tool use nativo, latenza
-            bassa (10-30s per ciclo), reasoning di alta qualit&agrave; su
-            geopolitica e market context. Costo ~$3/M input.
+            Default per il Decision equity. Tool use nativo, latenza bassa,
+            reasoning di alta qualit&agrave; su geopolitica e contesto di
+            mercato.
           </p>
         </div>
         <div class="mini-card">
           <div class="mini-ic" style="color:#10b981;">&#127919;</div>
-          <h3>DeepSeek-R1</h3>
+          <h3>DeepSeek-R1 / V3</h3>
           <p>
-            Default per Decision Crypto e variante Tournament. Reasoning
-            chain-of-thought esteso, latenza pi&ugrave; alta (60-120s), costo
-            ~10x pi&ugrave; basso di Sonnet. Eccellente su problemi numerici e
-            tecnici.
+            R1 (reasoning esteso) per Decision Crypto; V3 per gli agenti di
+            supporto (Watchdog, Scout, Technical). Costo molto pi&ugrave;
+            basso, ottimo su problemi numerici e di sintesi.
           </p>
         </div>
       </div>
@@ -1187,21 +753,12 @@
   <section class="box">
     <h2><span class="ic">&#128260;</span> Flusso dati per ciclo decisionale</h2>
     <div class="body">
-      <p>
-        Il flusso end-to-end di un singolo ciclo del Decision Agent, dalla
-        raccolta dati alla scrittura del trade nel DB:
-      </p>
       <ol>
-        <li><b>Scout L0 (20-min in continuo):</b> raccoglie da 8 fonti (GDELT, NewsAPI, yfinance, Reddit, X, Congressional, CoinGecko) e produce micro-cards JSON nel buffer. Dedup semantica Jaccard &ge; 0.55.</li>
-        <li><b>Scout L1/L2 (aggregators):</b> ogni 8h e ogni 4gg sintetizzano i livelli inferiori in report compatti. Sono questi i report che il Decision Agent legge.</li>
-        <li><b>Watchdog tick (1 min):</b> filtra trigger basati su news + drift prezzi + scadenze macro. Cooldown 60min globale.</li>
-        <li><b>Pipeline serialization:</b> crypto cron a :00 acquisisce il flag, standard cron a :02 attende polling fino a 8 min. Niente run sovrapposti.</li>
-        <li><b>System prompt build:</b> il Decision Agent riceve un prompt composto da
-          (a) direttive utente, (b) Risk Profile, (c) Risk State live, (d) Regime Protocol, (e) Coach Cards, (f) memoria operativa (ultime 12 decisioni), (g) report 8H/4D, (h) prompt base, (i) shared principles.</li>
-        <li><b>Workflow a 4 fasi:</b> il Decision Agent invoca <code>commit_initial_assessment</code>, opzionalmente <code>request_technical_analysis</code> (Tech V3 inline), poi <code>commit_final_thesis</code>, infine <code>execute_trade</code> uno o pi&ugrave; volte.</li>
-        <li><b>Validazione hard:</b> ogni <code>execute_trade</code> passa per <code>validate_trade</code> (Risk Profile caps) PRIMA di toccare il DB. I trade che violano vengono rifiutati a runtime.</li>
-        <li><b>Persistenza:</b> trade scritti nella tabella <code>trades</code>, posizioni aggiornate in <code>positions</code>, log dettagliati in <code>agent_logs</code>. Snapshot del portafoglio in <code>portfolio_snapshots</code> ogni 10 min via price polling.</li>
-        <li><b>Risk Safety post-trade:</b> ogni 5 min, il job stateful applica lock-in 0.5% a +5% di profitto, trailing stop dinamico a +10%, e monitora il circuit breaker 24h.</li>
+        <li><b>Scout:</b> aggrega le fonti in micro-schede &rarr; report 8H &rarr; report 4D (intelligence a cascata).</li>
+        <li><b>Watchdog:</b> calcola l'urgenza su news, prezzi e posizioni. Sopra soglia + cooldown rispettato &rarr; attiva.</li>
+        <li><b>Decision (4 fasi):</b> legge contesto cascata + portafoglio, richiede analisi tecnica, formula la tesi, poi esegue.</li>
+        <li><b>Esecuzione:</b> trade sul portafoglio paper, con validazione dei profili di rischio e delle soglie.</li>
+        <li><b>Persistenza:</b> log strutturati su database (log degli agenti, trade, posizioni, decisioni) per audit, chat e analytics.</li>
       </ol>
     </div>
   </section>
@@ -1210,12 +767,11 @@
   <section class="box">
     <h2><span class="ic">&#9888;</span> Cosa GeoInvest AI NON &egrave;</h2>
     <div class="body">
-      <p>Per evitare equivoci, ecco cosa il sistema esplicitamente non fa:</p>
       <ul>
-        <li><b>Non muove fondi reali.</b> Tutto il trading &egrave; in paper. Il mirror su ClawStreet &egrave; anche lui paper-only (&egrave; un torneo di bot, non vero broker).</li>
-        <li><b>Non fornisce consulenza finanziaria.</b> &Egrave; un progetto software di ricerca. Le decisioni dell'agente non sono raccomandazioni di investimento.</li>
-        <li><b>Non garantisce performance.</b> Le simulazioni storiche hanno overfitting bias. Performance passata &ne; performance futura.</li>
-        <li><b>Non sostituisce il giudizio umano.</b> &Egrave; pensato come strumento di analisi e ragionamento aumentato, non come autopilot.</li>
+        <li><b>Non muove fondi reali.</b> Tutto il trading &egrave; paper. &Egrave; un progetto software di ricerca.</li>
+        <li><b>Non fornisce consulenza finanziaria.</b> Le decisioni dell'agente non sono raccomandazioni di investimento.</li>
+        <li><b>Non garantisce performance.</b> Performance passata &ne; performance futura; un campione piccolo &egrave; fortuna, non bravura.</li>
+        <li><b>Non sostituisce il giudizio umano.</b> &Egrave; analisi e ragionamento aumentato, non un autopilot.</li>
       </ul>
     </div>
   </section>
@@ -1224,16 +780,15 @@
   <section class="cta">
     <h2>Pronto a esplorare?</h2>
     <p>
-      Torna alla home, inserisci il token di accesso e scegli tra il bot
-      Live (osservazione real-time) o il Simulator (sandbox cognitivo).
+      Torna alla home e scegli tra il bot Live (osservazione real-time) o
+      il Simulator (sandbox cognitivo).
     </p>
     <a href="/" class="cta-btn">&larr; Torna alla home</a>
   </section>
 
   <div class="footer">
     GeoInvest AI &middot; Sistema multi-agente di investimento autonomo &middot;
-    Paper trading only &middot; Documentazione tecnica v2 (Regime Protocol +
-    Risk State + Intelligence Cascade)
+    Paper trading only &middot; Documentazione tecnica v3
   </div>
 
 </div>
