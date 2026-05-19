@@ -5576,6 +5576,50 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         # storia e' piu' lunga); ma per "all" usa la vita reale.
         effective_days = min(effective_days, days)
 
+        # ── FIX FINESTRA TRONCATA ────────────────────────────────────────
+        # get_portfolio_history() ha .limit(1000) su Supabase. Con snapshot
+        # inseriti ogni minuto dal price_polling, 1000 righe coprono solo
+        # ~10 giorni: quindi pvals[0]/_t0 NON sono l'inizio vero del
+        # portafoglio (~2 mesi fa) ma solo il punto piu' vecchio ANCORA in
+        # finestra. Return e alpha vs S&P venivano calcolati su una fetta
+        # parziale (es. "da meta' maggio") invece che sulla vita completa.
+        #
+        # Recuperiamo il PRIMISSIMO snapshot reale e lo usiamo come ANCORA
+        # per il return e per _t0 (cosi' l'S&P si allinea sull'intera vita
+        # del portafoglio). Drawdown/equity-curve restano sulla serie densa
+        # recente: un solo punto vecchio + un buco di ~50 giorni renderebbe
+        # il drawdown privo di senso. La discontinuita' viene dichiarata
+        # apertamente in raw_calc/note.
+        true_start_value = None
+        true_start_date = None
+        try:
+            _since_dt = datetime.now(timezone.utc) - timedelta(days=days)
+            _fs = database.get_first_portfolio_snapshot()
+            if _fs:
+                _fsv = _fs.get("total_value")
+                _fst = _pd(_fs.get("timestamp") or _fs.get("created_at"))
+                # Anchor solo se: (a) c'e' un valore valido, (b) e' davvero
+                # PRIMA del primo punto in finestra (=storico troncato),
+                # (c) ricade nel periodo richiesto (per "all" sempre vero;
+                # per "30d" su portafoglio piu' vecchio NON si estende).
+                if (isinstance(_fsv, (int, float)) and _fsv > 0 and _fst
+                        and _t0 and _fst < _t0 - timedelta(hours=12)
+                        and _fst >= _since_dt):
+                    true_start_value = float(_fsv)
+                    true_start_date = _fst
+        except Exception as _fe:
+            logger.debug("first snapshot fetch failed: %s", _fe)
+
+        window_truncated = true_start_value is not None
+        if window_truncated:
+            # _t0 diventa l'inizio VERO (l'S&P si allineera' su
+            # [vero_inizio .. ultimo]); ricalcola la durata reale.
+            _t0 = true_start_date
+            if _t0 and _t1 and _t1 > _t0:
+                effective_days = max(
+                    1, int((_t1 - _t0).total_seconds() / 86400) + 1)
+            effective_days = min(effective_days, days)
+
         def _max_dd(series: list[float]) -> float:
             peak = series[0]
             mdd = 0.0
@@ -5634,9 +5678,16 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
             clean = list(pvals)
             n_anomalies = 0
 
-        port_ret_raw = (pvals[-1] / pvals[0] - 1.0) * 100.0
+        # Base del RETURN: se la finestra e' troncata si ancora al valore
+        # del primissimo snapshot reale (= vita completa del portafoglio);
+        # altrimenti il primo punto della serie. Il maxDD resta calcolato
+        # sulla serie densa recente (un buco di ~50g + 1 punto vecchio
+        # renderebbe il drawdown privo di senso): dichiarato in raw_calc.
+        _ret_base_raw = true_start_value if window_truncated else pvals[0]
+        _ret_base_clean = true_start_value if window_truncated else clean[0]
+        port_ret_raw = (pvals[-1] / _ret_base_raw - 1.0) * 100.0
         port_mdd_raw = _max_dd(pvals)
-        port_ret_clean = (clean[-1] / clean[0] - 1.0) * 100.0
+        port_ret_clean = (clean[-1] / _ret_base_clean - 1.0) * 100.0
         port_mdd_clean = _max_dd(clean)
 
         data_anomaly = n_anomalies > 0
@@ -5807,13 +5858,22 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
             # ESATTAMENTE cosa e' stato usato per portafoglio e S&P,
             # stesso arco temporale).
             "raw_calc": {
-                "portfolio_first_value": round(pvals[0], 2),
+                "portfolio_first_value": round(
+                    _ret_base_clean if data_anomaly else _ret_base_raw, 2),
                 "portfolio_last_value": round(pvals[-1], 2),
                 "portfolio_first_date": (_t0.strftime("%Y-%m-%d")
                                          if _t0 else None),
                 "portfolio_last_date": (_t1.strftime("%Y-%m-%d")
                                         if _t1 else None),
                 "portfolio_points": len(pvals),
+                # True quando lo storico denso era troncato (limite 1000
+                # righe) e il return e' stato ancorato al primissimo
+                # snapshot reale: il return copre l'intera vita, ma il
+                # max_drawdown e' calcolato solo sui punti densi recenti
+                # (mancano i punti intermedi della parte vecchia).
+                "window_truncated": window_truncated,
+                "drawdown_basis_points": len(clean) if data_anomaly
+                else len(pvals),
                 "sp500_first_close": (round(closes[0], 2)
                                       if spy_ret is not None else None),
                 "sp500_last_close": (round(closes[-1], 2)
@@ -5829,7 +5889,12 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
                      "verdict + drawdown."
                      + (" Periodo con anomalie tecniche: metriche "
                         "sanitizzate, vedi avviso nel verdetto."
-                        if data_anomaly else "")),
+                        if data_anomaly else "")
+                     + (" Storico denso troncato: return e alpha calcolati "
+                        "sull'intera vita del portafoglio (ancorati al "
+                        "primo snapshot reale), ma il max_drawdown copre "
+                        "solo la finestra densa recente."
+                        if window_truncated else "")),
         }
     except Exception as e:
         logger.error("benchmark error: %s", e, exc_info=True)

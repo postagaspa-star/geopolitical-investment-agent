@@ -640,6 +640,16 @@ def get_portfolio_history(days=30):
             (f'-{days} days',)).fetchall()
         return [dict(r) for r in rows]
 
+def get_first_portfolio_snapshot():
+    """Ritorna il primissimo snapshot mai registrato (inizio vita reale).
+    Parallelo alla versione Supabase: serve come punto di partenza vero per
+    return/alpha quando lo storico recente e' troncato."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT total_value, cash_balance, timestamp FROM portfolio_snapshots "
+            "ORDER BY timestamp ASC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
 
 def get_client():
     """SQLite stub — v4 tables not supported locally. Returns None."""
