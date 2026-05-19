@@ -3401,7 +3401,15 @@ async def upload_document(file: UploadFile = File(...), category: str = Query(de
     try:
         if category not in ("generic", "crypto"):
             category = "generic"
-        filename = file.filename or "documento_sconosciuto"
+        # SICUREZZA — path traversal in scrittura: file.filename e'
+        # controllato dal client. Senza basename, "../../app/main.py"
+        # sovrascriverebbe sorgenti del backend / il volume /data.
+        filename = os.path.basename(file.filename or "documento_sconosciuto")
+        if (not filename or filename in (".", "..")
+                or filename.startswith(".")
+                or "\x00" in filename):
+            return JSONResponse(status_code=400,
+                                content={"error": "nome file non valido"})
         raw_bytes = await file.read()
         file_size = len(raw_bytes)
 
@@ -6446,17 +6454,28 @@ async def live_research_stats():
                 cov = sum((xs[i] - mx) * (ys[i] - my)
                           for i in range(m)) / m
                 r_obs = cov / (sx * sy)
-                # Permutation test: shuffle ys vs xs, conta |r| >= |r_obs|
-                _rnd.seed(42)
-                N = 3000
-                ge = 0
-                yperm = list(ys)
-                for _ in range(N):
-                    _rnd.shuffle(yperm)
-                    c2 = sum((xs[i] - mx) * (yperm[i] - my)
-                             for i in range(m)) / m
-                    if abs(c2 / (sx * sy)) >= abs(r_obs):
-                        ge += 1
+                # Permutation test: shuffle ys vs xs, conta |r| >= |r_obs|.
+                # CPU pura O(N*m): offloaded su thread per NON bloccare
+                # l'event loop (bloccarlo stallava ogni altra richiesta
+                # → 502). N adattivo: lavoro totale limitato (~200k op).
+                import asyncio as _aio
+                N = min(3000, max(500, 200000 // max(1, m)))
+                _denom = sx * sy
+                _absr = abs(r_obs)
+
+                def _perm():
+                    _rnd.seed(42)
+                    g = 0
+                    yp = list(ys)
+                    for _ in range(N):
+                        _rnd.shuffle(yp)
+                        c2 = sum((xs[i] - mx) * (yp[i] - my)
+                                 for i in range(m)) / m
+                        if abs(c2 / _denom) >= _absr:
+                            g += 1
+                    return g
+
+                ge = await _aio.to_thread(_perm)
                 p = (ge + 1) / (N + 1)
                 significance = {
                     "testable": True,
@@ -6849,9 +6868,21 @@ else:
         @app.get("/{full_path:path}")
         async def serve_spa(request: Request, full_path: str):
             """Serve index.html per tutte le rotte non-API (SPA catch-all)."""
-            file_path = os.path.join(_spa_dir, full_path)
-            if full_path and os.path.isfile(file_path):
-                return FileResponse(file_path)
+            # Le rotte /api/* non gestite NON devono ricevere l'HTML SPA
+            # (un client API che chiama un endpoint sbagliato avrebbe un
+            # 200 HTML invece di un 404 → fallimenti confusi).
+            if full_path.startswith("api/"):
+                return JSONResponse(status_code=404,
+                                    content={"detail": "Not found"})
+            # SICUREZZA — path traversal: `full_path` arriva grezzo
+            # dall'URL. Senza normalizzazione, GET /../main.py o
+            # /..%2f..%2f.env servirebbe sorgenti/segreti del backend.
+            _root = os.path.abspath(_spa_dir)
+            _cand = os.path.abspath(os.path.join(_root, full_path))
+            if full_path and (_cand == _root
+                              or _cand.startswith(_root + os.sep)) \
+                    and os.path.isfile(_cand):
+                return FileResponse(_cand)
             index_path = os.path.join(_spa_dir, "index.html")
             if os.path.isfile(index_path):
                 return FileResponse(index_path)

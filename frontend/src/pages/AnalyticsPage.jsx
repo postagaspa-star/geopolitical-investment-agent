@@ -163,6 +163,18 @@ function computeClosedTrades(trades) {
     }
   }
 
+  // I closed-trade vengono emessi in ordine di PROCESSING dei SELL, non
+  // necessariamente cronologico (un SELL che chiude più BUY emette righe
+  // in ordine di BUY; SELL di ticker diversi si intrecciano). I grafici
+  // di TREND (rolling win-rate, Equity-vs-Crypto cumulato) assumono
+  // l'ordine per data di chiusura: senza questo sort mostravano un
+  // andamento temporale falsato. Ordina per sellTimestamp (tie-break su
+  // buyTimestamp) prima di restituire.
+  closed.sort((a, b) => {
+    const d = new Date(a.sellTimestamp ?? 0) - new Date(b.sellTimestamp ?? 0);
+    return d !== 0 ? d
+      : new Date(a.buyTimestamp ?? 0) - new Date(b.buyTimestamp ?? 0);
+  });
   return closed;
 }
 

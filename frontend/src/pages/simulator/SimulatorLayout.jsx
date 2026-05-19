@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Home, Play, History, ArrowLeft, FlaskConical, BookOpen, GitBranch } from "lucide-react";
+import ErrorBoundary from "../../components/ErrorBoundary";
 
 /**
  * Layout shared by tutte le schermate del Simulator.
@@ -45,7 +46,12 @@ export default function SimulatorLayout() {
       </aside>
 
       <main style={S.main}>
-        <Outlet />
+        {/* Isola i crash delle pagine /simulator: prima un errore di
+            render qui faceva schermo-blu su TUTTA l'app (l'ErrorBoundary
+            copriva solo /live). */}
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   );

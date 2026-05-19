@@ -107,8 +107,14 @@ def _is_table_missing_error(exc: Exception) -> bool:
         return True
     if "no such table" in s:            # SQLite
         return True
-    # Postgres: 'relation "x" does not exist' / 'table "x" does not exist'
-    if ("relation" in s or "table" in s) and "does not exist" in s:
+    # Postgres tabella assente: SOLO 'relation "..." does not exist'
+    # (frase canonica). NON matchare un generico "table" ovunque: un
+    # errore di COLONNA mancante e' 'column "..." does not exist' e NON
+    # deve far scattare il fallback; "table" come sottostringa compare
+    # anche in errori non-DDL (permission/trigger) → latch errato che
+    # nascondeva tutto lo storico run. "relation"+"does not exist"
+    # esclude per costruzione i casi colonna/transitori.
+    if "relation" in s and "does not exist" in s:
         return True
     return False
 

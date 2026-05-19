@@ -87,12 +87,13 @@ def compute_closed_trades(trades: list,
         if not ticker or price <= 0 or qty <= 0:
             continue
         leg_manual = is_manual_close(conf)
-        # Vista SKILL (exclude_manual_closes=True): salta la gamba non-AI
-        # del tutto (comportamento storico dell'Edge Tracker). Vista
-        # PERFORMANCE (default): NON saltare nulla — il denaro mosso e'
-        # reale e deve entrare nel P&L; si TAGGA soltanto is_manual.
-        if exclude_manual_closes and leg_manual:
-            continue
+        # NB: NON si salta MAI una gamba qui — nemmeno in vista SKILL.
+        # Saltare un SELL forzato lasciava il BUY corrispondente
+        # "appeso" in coda: un SELL AI successivo lo matchava contro
+        # quantita' gia' liquidate dal circuit breaker → closed-trade
+        # fantasma / quantita' doppie nelle metriche skill. La coda FIFO
+        # deve restare fisicamente coerente. Si TAGGA is_manual e, per
+        # la vista SKILL, si FILTRA l'output a fine funzione.
         if action == "BUY":
             # Estratto del ragionamento all'ENTRATA: e' qui che si forma
             # (o si sbaglia) la confidence. final_decision e' il piu'
@@ -126,6 +127,10 @@ def compute_closed_trades(trades: list,
                 buy["qty"] -= matched
                 if buy["qty"] <= 1e-9:
                     buy_queue[ticker].pop(0)
+    if exclude_manual_closes:
+        # Vista SKILL: la coda e' stata costruita interamente (corretta),
+        # ora si escludono SOLO i round-trip toccati da una gamba non-AI.
+        return [c for c in closed if not c.get("is_manual")]
     return closed
 
 

@@ -566,7 +566,12 @@ def _build_confidence_calibration_block(limit: int = 5000) -> str:
         import database as _db
         import trade_analytics as _ta
         trades = _db.get_trades(limit=limit) or []
-        closed = _ta.compute_closed_trades(trades)
+        # Vista SKILL: questo blocco auto-calibra l'AGENTE, quindi DEVE
+        # escludere le chiusure non-AI (conf 100: circuit breaker /
+        # auto-exit / manuali) — altrimenti dopo ogni liquidazione
+        # forzata la confidence dell'agente verrebbe falsata e l'agente
+        # si auto-istruirebbe a sbagliare. Coerente col docstring/prompt.
+        closed = _ta.compute_closed_trades(trades, exclude_manual_closes=True)
         summ = _ta.confidence_calibration_summary(closed)
     except Exception as exc:
         logger.debug("calibration block failed: %s", exc)

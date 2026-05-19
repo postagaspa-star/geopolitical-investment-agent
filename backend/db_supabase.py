@@ -877,14 +877,31 @@ _CHAT_FALLBACK_KEY_CONV = "_chat_fallback::conv::{id}"  # JSON per ogni conv
 _CHAT_FALLBACK_KEY_MSGS = "_chat_fallback::msgs::{id}"  # JSON list di messaggi
 
 
-def _chat_should_fallback(exc: Exception) -> bool:
-    """Decide se l'errore indica che la tabella manca → switch a fallback mode."""
+def _is_missing_table_err(exc: Exception) -> bool:
+    """
+    True SOLO per "tabella inesistente" (DDL non applicato). Classificatore
+    PRECISO e condiviso: i precedenti erano troppo larghi e LATCHAVANO un
+    fallback permanente su errori TRANSITORI ('schema cache' durante un
+    reload PostgREST, 'relation' dentro 'permission denied for relation'
+    o 'deadlock ... relation', un nudo 'does not exist' che matcha anche
+    'column ... does not exist'). Un singolo blip nascondeva cosi' tutta
+    la chat / decision-chat / commitments fino al riavvio del processo.
+    """
     s = str(exc).lower()
-    return ("pgrst205" in s
-            or "does not exist" in s
-            or "no such table" in s
-            or "could not find the table" in s
-            or "schema cache" in s)
+    if "pgrst205" in s:
+        return True
+    if "could not find the table" in s:
+        return True
+    if "no such table" in s:                       # SQLite
+        return True
+    if "relation" in s and "does not exist" in s:  # Postgres canonico
+        return True
+    return False
+
+
+def _chat_should_fallback(exc: Exception) -> bool:
+    """Tabella chat assente → fallback. Usa il classificatore preciso."""
+    return _is_missing_table_err(exc)
 
 
 def _chat_fallback_load_list() -> list:
@@ -1228,11 +1245,7 @@ _DEC_CHAT_FALLBACK_KEY_MSGS = "dec_chat_msgs_{cid}"
 
 
 def _dec_chat_should_fallback(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return any(s in msg for s in [
-        "does not exist", "no such table", "relation",
-        "schema cache", "could not find", "pgrst205",
-    ])
+    return _is_missing_table_err(exc)
 
 
 def get_or_create_decision_chat_conversation(agent_type: str) -> int | None:
@@ -1787,11 +1800,7 @@ _AGENT_COMMIT_FALLBACK_MODE = False
 
 
 def _agent_commit_should_fallback(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return any(s in msg for s in [
-        "does not exist", "no such table", "relation",
-        "schema cache", "could not find", "pgrst205",
-    ])
+    return _is_missing_table_err(exc)
 
 
 def _expire_old_commitments(client, agent_type: str) -> None:
