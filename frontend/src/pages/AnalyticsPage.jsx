@@ -118,12 +118,12 @@ function computeClosedTrades(trades) {
     if (!ticker || !Number.isFinite(price) || price <= 0 ||
         !Number.isFinite(qty) || qty <= 0) continue;
 
-    // Regola sistemica: confidence 100 = chiusura NON-AI (circuit
-    // breaker / auto-exit SL-TP / chiusura manuale). Non entra in
-    // nessuna analisi/grafico — coerente con backend (edge-tracker,
-    // diagnosi, contesto chat). confidence assente (NaN) NON e'
-    // esclusa: 100 esatto e' il marcatore riservato.
-    if (Number.isFinite(confidence) && confidence >= 100) continue;
+    // NB: le chiusure non-AI (confidence 100: circuit breaker /
+    // auto-exit / manuali) NON vengono escluse qui. Il P&L realizzato,
+    // l'equity e il win-rate sono un FATTO finanziario: ogni chiusura
+    // muove denaro reale e DEVE contare. L'esclusione "solo AI" e' una
+    // vista SKILL e si applica SOLO dove serve (la calibrazione della
+    // confidence, l'Edge Tracker), non al rendimento del portafoglio.
 
     if (action === 'BUY') {
       if (!buyQueue[ticker]) buyQueue[ticker] = [];
@@ -684,9 +684,13 @@ function ConfidenceVsOutcomeCard({ closedTrades }) {
     return <div className="empty-state">Nessun trade chiuso</div>;
   }
 
-  // Filtra solo trade con confidence definito
+  // Vista SKILL: questo grafico misura se la confidence dell'AI e'
+  // calibrata, quindi qui (e SOLO qui, non nel P&L) si escludono le
+  // chiusure non-AI a confidence 100 — non sono confidence reali ma
+  // marcatori di circuit breaker / auto-exit / chiusura manuale.
   const data = closedTrades
-    .filter((c) => Number.isFinite(c.confidence) && c.confidence > 0)
+    .filter((c) => Number.isFinite(c.confidence) && c.confidence > 0
+                   && c.confidence < 100)
     .map((c) => ({
       // Normalizza confidence: alcuni sono 0-1, altri 0-100. Forziamo 0-100.
       confidence: c.confidence > 1 ? c.confidence : c.confidence * 100,

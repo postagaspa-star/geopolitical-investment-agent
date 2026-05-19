@@ -43,19 +43,29 @@ def _ts(v) -> float:
         return 0.0
 
 
-def compute_closed_trades(trades: list) -> list:
+def compute_closed_trades(trades: list,
+                          exclude_manual_closes: bool = False) -> list:
     """
     Accoppia BUY→SELL per ticker in ordine temporale (FIFO). Ritorna
-    [{pnl_pct, pnl_usd, confidence, ticker, buy_date, sell_date, reason}].
+    [{pnl_pct, pnl_usd, confidence, ticker, buy_date, sell_date, reason,
+      is_manual}].
 
-    ESCLUDE qualsiasi gamba (BUY o SELL) con confidence di chiusura
-    manuale/forzata (== 100): il BUY non viene messo in coda, il SELL
-    non chiude nulla. Cosi' i round-trip toccati da un intervento
-    non-AI semplicemente NON entrano nelle statistiche (l'edge misurato
-    riflette solo decisioni AI complete entrata+uscita).
+    exclude_manual_closes (default False):
+      - False → INCLUDE TUTTO. Il P&L / la performance del portafoglio
+        sono un FATTO finanziario: ogni chiusura sposta denaro reale e
+        DEVE contare, anche le chiusure non-AI (circuit breaker,
+        auto-exit, manuali). Questo e' il comportamento per i numeri di
+        rendimento (Analytics, equity, P&L realizzato).
+      - True → vista SKILL/EDGE: salta le gambe a confidence manuale
+        (>=100) cosi' la misura della BRAVURA dell'AI non e' inquinata
+        da interventi non decisi dall'AI. Usato SOLO da Edge Tracker,
+        diagnosi confidence, contesto chat e test di significativita'.
 
-    Coerenza con Analytics: pnl_usd = (sell-buy)*qty, IDENTICO al JS,
-    cosi' profit factor sui DOLLARI coincide con AnalyticsPage "Tutto".
+    Ogni closed-trade porta `is_manual` (True se la gamba BUY o SELL era
+    una chiusura non-AI) cosi' i consumer "performance" mostrano tutto e
+    quelli "skill" possono filtrare senza ricalcolare.
+
+    Coerenza con Analytics: pnl_usd = (sell-buy)*qty, IDENTICO al JS.
     """
     buy_queue: dict = {}
     closed: list = []
@@ -76,11 +86,12 @@ def compute_closed_trades(trades: list) -> list:
             conf = None
         if not ticker or price <= 0 or qty <= 0:
             continue
-        # Regola sistemica: le operazioni a confidence 100 (chiusure
-        # non-AI) NON contano in nessuna analisi. Saltata la gamba,
-        # l'eventuale BUY rimasto in coda resta "aperto" (non chiuso
-        # in modo manuale) e non genera un closed-trade fittizio.
-        if is_manual_close(conf):
+        leg_manual = is_manual_close(conf)
+        # Vista SKILL (exclude_manual_closes=True): salta la gamba non-AI
+        # del tutto (comportamento storico dell'Edge Tracker). Vista
+        # PERFORMANCE (default): NON saltare nulla — il denaro mosso e'
+        # reale e deve entrare nel P&L; si TAGGA soltanto is_manual.
+        if exclude_manual_closes and leg_manual:
             continue
         if action == "BUY":
             # Estratto del ragionamento all'ENTRATA: e' qui che si forma
@@ -91,7 +102,8 @@ def compute_closed_trades(trades: list) -> list:
             _reason = " ".join(str(_reason).split())[:240]
             buy_queue.setdefault(ticker, []).append(
                 {"price": price, "qty": qty, "conf": conf,
-                 "ts": t.get("timestamp"), "reason": _reason})
+                 "ts": t.get("timestamp"), "reason": _reason,
+                 "manual": leg_manual})
         elif action == "SELL":
             remaining = qty
             while remaining > 0 and buy_queue.get(ticker):
@@ -108,7 +120,8 @@ def compute_closed_trades(trades: list) -> list:
                                "ticker": ticker,
                                "buy_date": str(buy.get("ts") or "")[:10],
                                "sell_date": str(t.get("timestamp") or "")[:10],
-                               "reason": buy.get("reason") or ""})
+                               "reason": buy.get("reason") or "",
+                               "is_manual": bool(buy.get("manual")) or leg_manual})
                 remaining -= matched
                 buy["qty"] -= matched
                 if buy["qty"] <= 1e-9:

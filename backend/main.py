@@ -6004,14 +6004,16 @@ _EDGE_PF_KILL = 1.0            # PF sotto 1 + alpha<=0 → ipotesi falsificata
 
 def _compute_closed_trades_py(trades: list) -> list:
     """
-    Delega alla logica CANONICA in trade_analytics.compute_closed_trades:
-    FIFO BUY→SELL per ticker + esclusione delle operazioni a confidence
-    100 (chiusure non-AI). Tenuto come wrapper per non toccare i call
-    site (edge-tracker, diagnosi confidence) e mantenere un solo posto
-    in cui vive la regola "manuale = non conta in analisi".
+    Vista SKILL/EDGE: delega alla logica canonica con
+    exclude_manual_closes=True. Edge Tracker e diagnosi confidence
+    misurano la BRAVURA dell'AI, quindi le chiusure non-AI (conf 100)
+    non devono inquinare il giudizio. NON e' la vista P&L: il
+    rendimento del portafoglio (Analytics) include TUTTO ed e' calcolato
+    altrove (e' un fatto finanziario, non una misura di bravura).
     """
     import trade_analytics
-    return trade_analytics.compute_closed_trades(trades)
+    return trade_analytics.compute_closed_trades(
+        trades, exclude_manual_closes=True)
 
 
 @app.get("/api/live/edge-tracker")
