@@ -943,8 +943,29 @@ async def chat_decision_send(payload: ChatDecisionSendPayload):
         if not message:
             return JSONResponse(status_code=400, content={"error": "messaggio vuoto"})
 
-        result = await chat_decision.chat_with_decision_agent(agent_type, message)
-        return result
+        # Budget esplicito: la chat Decision (Sonnet, eventuale 2° round
+        # col Technical) puo' essere lunga. Senza un limite, una chiamata
+        # lenta resta appesa finche' il proxy Render risponde 502 con una
+        # pagina HTML (esattamente l'errore segnalato). Con wait_for
+        # ritorniamo un messaggio JSON pulito e azionabile PRIMA che il
+        # proxy intervenga, invece di una 502 illeggibile.
+        import asyncio as _asyncio
+        try:
+            result = await _asyncio.wait_for(
+                chat_decision.chat_with_decision_agent(agent_type, message),
+                timeout=100,
+            )
+            return result
+        except (_asyncio.TimeoutError, TimeoutError):
+            logger.warning("chat_decision_send: timeout 100s (%s)", agent_type)
+            return JSONResponse(
+                status_code=504,
+                content={"error": (
+                    "Il Decision Agent sta impiegando troppo a rispondere "
+                    "(oltre 100s, di solito per un'analisi tecnica pesante). "
+                    "Riprova tra poco o semplifica la richiesta — nessun "
+                    "trade e' stato eseguito.")},
+            )
     except Exception as e:
         logger.error("chat_decision_send: %s", e, exc_info=True)
         return JSONResponse(
