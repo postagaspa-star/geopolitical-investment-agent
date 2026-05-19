@@ -839,6 +839,28 @@ def get_first_portfolio_snapshot():
         return None
 
 
+def get_first_snapshot_since(ts_iso):
+    """
+    Primo snapshot con timestamp >= ts_iso (ISO string). Usato per
+    ancorare return/alpha all'inizio UFFICIALE (primo movimento dopo la
+    chiusura di CRWD+LMT), non al primissimo snapshot del periodo
+    inattivo. .limit(1) → nessun problema col cap di 1000 righe.
+    """
+    client = _get_client()
+    try:
+        result = (client.table("portfolio_snapshots")
+                  .select("total_value, cash_balance, timestamp")
+                  .gte("timestamp", ts_iso)
+                  .order("timestamp", desc=False)
+                  .limit(1)
+                  .execute())
+        rows = result.data or []
+        return rows[0] if rows else None
+    except Exception as exc:
+        logger.warning("get_first_snapshot_since fallita: %s", exc)
+        return None
+
+
 # ============================================================
 # Chat Assistant (conversazioni con l'analista AI DeepSeek-R1)
 # ============================================================

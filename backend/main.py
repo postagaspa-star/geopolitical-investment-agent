@@ -5520,6 +5520,75 @@ async def update_crypto_monitor_settings(payload: CryptoMonitorSettingsPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+def _official_start_ts(trades: list):
+    """
+    Inizio UFFICIALE del portafoglio = primo movimento DOPO la chiusura
+    delle posizioni iniziali CRWD e LMT.
+
+    Razionale (richiesta utente): GeoInvest e' stato avviato molto tempo
+    prima, ma e' rimasto inattivo ~1 mese. Il primissimo snapshot e'
+    quindi irrealistico come "inizio". L'operativita' vera comincia dopo
+    aver liquidato le posizioni legacy CRWD e LMT.
+
+    Logica su trade GREZZI (qualsiasi confidence: queste chiusure possono
+    essere manuali/forzate a confidence 100 — qui NON vanno escluse,
+    servono proprio a trovare il confine):
+      - per CRWD e LMT, traccia la quantita' netta;
+      - quando la netta torna a ~0 dopo essere stata >0 → posizione
+        chiusa: registra il timestamp;
+      - confine = max(chiusura CRWD, chiusura LMT);
+      - inizio ufficiale = timestamp del primo trade DOPO il confine.
+
+    Ritorna l'ISO string del primo trade post-confine, o None se CRWD/LMT
+    non risultano aperte+chiuse (→ il chiamante usa il fallback).
+    """
+    from datetime import datetime as _dt
+
+    def _k(v):
+        try:
+            return _dt.fromisoformat(str(v).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    rows = []
+    for t in (trades or []):
+        ts = _k(t.get("timestamp"))
+        if ts:
+            rows.append((ts, t))
+    rows.sort(key=lambda x: x[0])
+
+    net = {"CRWD": 0.0, "LMT": 0.0}
+    opened = {"CRWD": False, "LMT": False}
+    closed_ts = {"CRWD": None, "LMT": None}
+    for ts, t in rows:
+        tk = (t.get("ticker") or "").upper()
+        if tk not in net:
+            continue
+        if closed_ts[tk] is not None:
+            continue  # interessa solo la PRIMA chiusura
+        action = (t.get("action") or t.get("side") or "").upper()
+        try:
+            qty = float(t.get("quantity") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if action == "BUY":
+            net[tk] += qty
+            if net[tk] > 1e-9:
+                opened[tk] = True
+        elif action == "SELL":
+            net[tk] -= qty
+        if opened[tk] and net[tk] <= 1e-9 and closed_ts[tk] is None:
+            closed_ts[tk] = ts
+
+    if closed_ts["CRWD"] is None or closed_ts["LMT"] is None:
+        return None
+    boundary = max(closed_ts["CRWD"], closed_ts["LMT"])
+    for ts, _t in rows:
+        if ts > boundary:
+            return ts.isoformat()
+    return None
+
+
 @app.get("/api/portfolio/benchmark")
 async def get_portfolio_benchmark(period: str = Query(default="30d")):
     """
@@ -5590,16 +5659,32 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         # recente: un solo punto vecchio + un buco di ~50 giorni renderebbe
         # il drawdown privo di senso. La discontinuita' viene dichiarata
         # apertamente in raw_calc/note.
+        # Inizio UFFICIALE = primo movimento dopo la chiusura di CRWD+LMT
+        # (richiesta utente: il primo snapshot e' di un periodo inattivo
+        # ~1 mese, irrealistico). Si ancora lo snapshot a/dopo quella
+        # data; fallback al primissimo snapshot se CRWD/LMT non rilevati.
         true_start_value = None
         true_start_date = None
         try:
             _since_dt = datetime.now(timezone.utc) - timedelta(days=days)
-            _fs = database.get_first_portfolio_snapshot()
-            if _fs:
-                _fsv = _fs.get("total_value")
-                _fst = _pd(_fs.get("timestamp") or _fs.get("created_at"))
-                # Anchor solo se: (a) c'e' un valore valido, (b) e' davvero
-                # PRIMA del primo punto in finestra (=storico troncato),
+            _anchor = None
+            try:
+                _raw_trades = database.get_trades(limit=10000) or []
+                _off = _official_start_ts(_raw_trades)
+                if _off and hasattr(database, "get_first_snapshot_since"):
+                    _anchor = database.get_first_snapshot_since(_off)
+            except Exception as _oe:
+                logger.debug("official start calc failed: %s", _oe)
+            # Fallback: primissimo snapshot reale (vita completa, ma
+            # include l'eventuale periodo inattivo iniziale).
+            if not _anchor:
+                _anchor = database.get_first_portfolio_snapshot()
+            if _anchor:
+                _fsv = _anchor.get("total_value")
+                _fst = _pd(_anchor.get("timestamp")
+                           or _anchor.get("created_at"))
+                # Anchor solo se: (a) valore valido, (b) e' davvero PRIMA
+                # del primo punto in finestra (=storico troncato),
                 # (c) ricade nel periodo richiesto (per "all" sempre vero;
                 # per "30d" su portafoglio piu' vecchio NON si estende).
                 if (isinstance(_fsv, (int, float)) and _fsv > 0 and _fst
@@ -5608,7 +5693,7 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
                     true_start_value = float(_fsv)
                     true_start_date = _fst
         except Exception as _fe:
-            logger.debug("first snapshot fetch failed: %s", _fe)
+            logger.debug("official-start anchor failed: %s", _fe)
 
         window_truncated = true_start_value is not None
         if window_truncated:
@@ -5866,10 +5951,11 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
                 "portfolio_last_date": (_t1.strftime("%Y-%m-%d")
                                         if _t1 else None),
                 "portfolio_points": len(pvals),
-                # True quando lo storico denso era troncato (limite 1000
-                # righe) e il return e' stato ancorato al primissimo
-                # snapshot reale: il return copre l'intera vita, ma il
-                # max_drawdown e' calcolato solo sui punti densi recenti
+                # True quando il return e' stato ri-ancorato all'inizio
+                # UFFICIALE (primo movimento post chiusura CRWD+LMT),
+                # diverso dal primo punto dello storico denso (troncato a
+                # 1000 righe): il return copre la vita operativa reale,
+                # ma il max_drawdown resta solo sui punti densi recenti
                 # (mancano i punti intermedi della parte vecchia).
                 "window_truncated": window_truncated,
                 "drawdown_basis_points": len(clean) if data_anomaly
@@ -5890,10 +5976,10 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
                      + (" Periodo con anomalie tecniche: metriche "
                         "sanitizzate, vedi avviso nel verdetto."
                         if data_anomaly else "")
-                     + (" Storico denso troncato: return e alpha calcolati "
-                        "sull'intera vita del portafoglio (ancorati al "
-                        "primo snapshot reale), ma il max_drawdown copre "
-                        "solo la finestra densa recente."
+                     + (" Return e alpha ancorati all'INIZIO UFFICIALE "
+                        "(primo movimento dopo la chiusura di CRWD+LMT; "
+                        "il periodo inattivo iniziale e' escluso), ma il "
+                        "max_drawdown copre solo la finestra densa recente."
                         if window_truncated else "")),
         }
     except Exception as e:
@@ -5918,75 +6004,14 @@ _EDGE_PF_KILL = 1.0            # PF sotto 1 + alpha<=0 → ipotesi falsificata
 
 def _compute_closed_trades_py(trades: list) -> list:
     """
-    Replica server-side ESATTA della logica FIFO di AnalyticsPage
-    (computeClosedTrades): accoppia BUY→SELL per ticker in ordine
-    temporale. Ritorna [{pnl_pct, pnl_usd, confidence}].
-
-    CRITICO per la coerenza con Analytics: il profit factor di
-    AnalyticsPage e' calcolato sui DOLLARI (sum win$ / |sum loss$|),
-    NON sulle percentuali. Salviamo quindi anche pnl_usd = (sell-buy)
-    *qty, identico al JS, cosi' i numeri COINCIDONO con Analytics
-    (in modalita' "Tutto"). Calcolare il PF in % dava un numero
-    completamente diverso (es. 6+ vs 1.95) e confondeva.
+    Delega alla logica CANONICA in trade_analytics.compute_closed_trades:
+    FIFO BUY→SELL per ticker + esclusione delle operazioni a confidence
+    100 (chiusure non-AI). Tenuto come wrapper per non toccare i call
+    site (edge-tracker, diagnosi confidence) e mantenere un solo posto
+    in cui vive la regola "manuale = non conta in analisi".
     """
-    from datetime import datetime as _dt
-    buy_queue: dict = {}
-    closed: list = []
-
-    def _ts(v):
-        try:
-            return _dt.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
-        except Exception:
-            return 0.0
-
-    srt = sorted(trades or [], key=lambda t: _ts(t.get("timestamp")))
-    for t in srt:
-        ticker = (t.get("ticker") or "").upper()
-        action = (t.get("action") or t.get("side") or "").upper()
-        try:
-            price = float(t.get("price") or 0)
-            qty = float(t.get("quantity") or 0)
-        except (TypeError, ValueError):
-            continue
-        conf = t.get("confidence_score", t.get("confidence"))
-        try:
-            conf = float(conf) if conf is not None else None
-        except (TypeError, ValueError):
-            conf = None
-        if not ticker or price <= 0 or qty <= 0:
-            continue
-        if action == "BUY":
-            # Estratto del ragionamento al momento dell'ENTRATA: e' qui
-            # che si forma (o si sbaglia) la confidence. final_decision
-            # e' il piu' sintetico; fallback ai due agenti specialisti.
-            _reason = (t.get("final_decision") or t.get("technical_reasoning")
-                       or t.get("geopolitical_reasoning") or "")
-            _reason = " ".join(str(_reason).split())[:240]
-            buy_queue.setdefault(ticker, []).append(
-                {"price": price, "qty": qty, "conf": conf,
-                 "ts": t.get("timestamp"), "reason": _reason})
-        elif action == "SELL":
-            remaining = qty
-            while remaining > 0 and buy_queue.get(ticker):
-                buy = buy_queue[ticker][0]
-                if buy["price"] <= 0:
-                    buy_queue[ticker].pop(0)
-                    continue
-                matched = min(remaining, buy["qty"])
-                pnl_pct = (price - buy["price"]) / buy["price"] * 100.0
-                pnl_usd = (price - buy["price"]) * matched
-                closed.append({"pnl_pct": round(pnl_pct, 3),
-                               "pnl_usd": round(pnl_usd, 2),
-                               "confidence": buy["conf"],
-                               "ticker": ticker,
-                               "buy_date": str(buy.get("ts") or "")[:10],
-                               "sell_date": str(t.get("timestamp") or "")[:10],
-                               "reason": buy.get("reason") or ""})
-                remaining -= matched
-                buy["qty"] -= matched
-                if buy["qty"] <= 1e-9:
-                    buy_queue[ticker].pop(0)
-    return closed
+    import trade_analytics
+    return trade_analytics.compute_closed_trades(trades)
 
 
 @app.get("/api/live/edge-tracker")

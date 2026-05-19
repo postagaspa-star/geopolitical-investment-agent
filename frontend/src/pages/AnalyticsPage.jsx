@@ -118,6 +118,13 @@ function computeClosedTrades(trades) {
     if (!ticker || !Number.isFinite(price) || price <= 0 ||
         !Number.isFinite(qty) || qty <= 0) continue;
 
+    // Regola sistemica: confidence 100 = chiusura NON-AI (circuit
+    // breaker / auto-exit SL-TP / chiusura manuale). Non entra in
+    // nessuna analisi/grafico — coerente con backend (edge-tracker,
+    // diagnosi, contesto chat). confidence assente (NaN) NON e'
+    // esclusa: 100 esatto e' il marcatore riservato.
+    if (Number.isFinite(confidence) && confidence >= 100) continue;
+
     if (action === 'BUY') {
       if (!buyQueue[ticker]) buyQueue[ticker] = [];
       buyQueue[ticker].push({ price, qty, ts, confidence });

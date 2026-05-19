@@ -650,6 +650,16 @@ def get_first_portfolio_snapshot():
             "ORDER BY timestamp ASC LIMIT 1").fetchone()
         return dict(row) if row else None
 
+def get_first_snapshot_since(ts_iso):
+    """Primo snapshot con timestamp >= ts_iso. Parallelo a Supabase:
+    ancora return/alpha all'inizio ufficiale (post chiusura CRWD+LMT)."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT total_value, cash_balance, timestamp FROM portfolio_snapshots "
+            "WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1",
+            (ts_iso,)).fetchone()
+        return dict(row) if row else None
+
 
 def get_client():
     """SQLite stub — v4 tables not supported locally. Returns None."""
