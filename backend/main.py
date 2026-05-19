@@ -5520,6 +5520,75 @@ async def update_crypto_monitor_settings(payload: CryptoMonitorSettingsPayload):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+def _official_start_ts(trades: list):
+    """
+    Inizio UFFICIALE del portafoglio = primo movimento DOPO la chiusura
+    delle posizioni iniziali CRWD e LMT.
+
+    Razionale (richiesta utente): GeoInvest e' stato avviato molto tempo
+    prima, ma e' rimasto inattivo ~1 mese. Il primissimo snapshot e'
+    quindi irrealistico come "inizio". L'operativita' vera comincia dopo
+    aver liquidato le posizioni legacy CRWD e LMT.
+
+    Logica su trade GREZZI (qualsiasi confidence: queste chiusure possono
+    essere manuali/forzate a confidence 100 — qui NON vanno escluse,
+    servono proprio a trovare il confine):
+      - per CRWD e LMT, traccia la quantita' netta;
+      - quando la netta torna a ~0 dopo essere stata >0 → posizione
+        chiusa: registra il timestamp;
+      - confine = max(chiusura CRWD, chiusura LMT);
+      - inizio ufficiale = timestamp del primo trade DOPO il confine.
+
+    Ritorna l'ISO string del primo trade post-confine, o None se CRWD/LMT
+    non risultano aperte+chiuse (→ il chiamante usa il fallback).
+    """
+    from datetime import datetime as _dt
+
+    def _k(v):
+        try:
+            return _dt.fromisoformat(str(v).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    rows = []
+    for t in (trades or []):
+        ts = _k(t.get("timestamp"))
+        if ts:
+            rows.append((ts, t))
+    rows.sort(key=lambda x: x[0])
+
+    net = {"CRWD": 0.0, "LMT": 0.0}
+    opened = {"CRWD": False, "LMT": False}
+    closed_ts = {"CRWD": None, "LMT": None}
+    for ts, t in rows:
+        tk = (t.get("ticker") or "").upper()
+        if tk not in net:
+            continue
+        if closed_ts[tk] is not None:
+            continue  # interessa solo la PRIMA chiusura
+        action = (t.get("action") or t.get("side") or "").upper()
+        try:
+            qty = float(t.get("quantity") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if action == "BUY":
+            net[tk] += qty
+            if net[tk] > 1e-9:
+                opened[tk] = True
+        elif action == "SELL":
+            net[tk] -= qty
+        if opened[tk] and net[tk] <= 1e-9 and closed_ts[tk] is None:
+            closed_ts[tk] = ts
+
+    if closed_ts["CRWD"] is None or closed_ts["LMT"] is None:
+        return None
+    boundary = max(closed_ts["CRWD"], closed_ts["LMT"])
+    for ts, _t in rows:
+        if ts > boundary:
+            return ts.isoformat()
+    return None
+
+
 @app.get("/api/portfolio/benchmark")
 async def get_portfolio_benchmark(period: str = Query(default="30d")):
     """
@@ -5575,6 +5644,66 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         # Non oltre il periodo richiesto (es. "30d" resta 30 anche se la
         # storia e' piu' lunga); ma per "all" usa la vita reale.
         effective_days = min(effective_days, days)
+
+        # ── FIX FINESTRA TRONCATA ────────────────────────────────────────
+        # get_portfolio_history() ha .limit(1000) su Supabase. Con snapshot
+        # inseriti ogni minuto dal price_polling, 1000 righe coprono solo
+        # ~10 giorni: quindi pvals[0]/_t0 NON sono l'inizio vero del
+        # portafoglio (~2 mesi fa) ma solo il punto piu' vecchio ANCORA in
+        # finestra. Return e alpha vs S&P venivano calcolati su una fetta
+        # parziale (es. "da meta' maggio") invece che sulla vita completa.
+        #
+        # Recuperiamo il PRIMISSIMO snapshot reale e lo usiamo come ANCORA
+        # per il return e per _t0 (cosi' l'S&P si allinea sull'intera vita
+        # del portafoglio). Drawdown/equity-curve restano sulla serie densa
+        # recente: un solo punto vecchio + un buco di ~50 giorni renderebbe
+        # il drawdown privo di senso. La discontinuita' viene dichiarata
+        # apertamente in raw_calc/note.
+        # Inizio UFFICIALE = primo movimento dopo la chiusura di CRWD+LMT
+        # (richiesta utente: il primo snapshot e' di un periodo inattivo
+        # ~1 mese, irrealistico). Si ancora lo snapshot a/dopo quella
+        # data; fallback al primissimo snapshot se CRWD/LMT non rilevati.
+        true_start_value = None
+        true_start_date = None
+        try:
+            _since_dt = datetime.now(timezone.utc) - timedelta(days=days)
+            _anchor = None
+            try:
+                _raw_trades = database.get_trades(limit=10000) or []
+                _off = _official_start_ts(_raw_trades)
+                if _off and hasattr(database, "get_first_snapshot_since"):
+                    _anchor = database.get_first_snapshot_since(_off)
+            except Exception as _oe:
+                logger.debug("official start calc failed: %s", _oe)
+            # Fallback: primissimo snapshot reale (vita completa, ma
+            # include l'eventuale periodo inattivo iniziale).
+            if not _anchor:
+                _anchor = database.get_first_portfolio_snapshot()
+            if _anchor:
+                _fsv = _anchor.get("total_value")
+                _fst = _pd(_anchor.get("timestamp")
+                           or _anchor.get("created_at"))
+                # Anchor solo se: (a) valore valido, (b) e' davvero PRIMA
+                # del primo punto in finestra (=storico troncato),
+                # (c) ricade nel periodo richiesto (per "all" sempre vero;
+                # per "30d" su portafoglio piu' vecchio NON si estende).
+                if (isinstance(_fsv, (int, float)) and _fsv > 0 and _fst
+                        and _t0 and _fst < _t0 - timedelta(hours=12)
+                        and _fst >= _since_dt):
+                    true_start_value = float(_fsv)
+                    true_start_date = _fst
+        except Exception as _fe:
+            logger.debug("official-start anchor failed: %s", _fe)
+
+        window_truncated = true_start_value is not None
+        if window_truncated:
+            # _t0 diventa l'inizio VERO (l'S&P si allineera' su
+            # [vero_inizio .. ultimo]); ricalcola la durata reale.
+            _t0 = true_start_date
+            if _t0 and _t1 and _t1 > _t0:
+                effective_days = max(
+                    1, int((_t1 - _t0).total_seconds() / 86400) + 1)
+            effective_days = min(effective_days, days)
 
         def _max_dd(series: list[float]) -> float:
             peak = series[0]
@@ -5634,9 +5763,16 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
             clean = list(pvals)
             n_anomalies = 0
 
-        port_ret_raw = (pvals[-1] / pvals[0] - 1.0) * 100.0
+        # Base del RETURN: se la finestra e' troncata si ancora al valore
+        # del primissimo snapshot reale (= vita completa del portafoglio);
+        # altrimenti il primo punto della serie. Il maxDD resta calcolato
+        # sulla serie densa recente (un buco di ~50g + 1 punto vecchio
+        # renderebbe il drawdown privo di senso): dichiarato in raw_calc.
+        _ret_base_raw = true_start_value if window_truncated else pvals[0]
+        _ret_base_clean = true_start_value if window_truncated else clean[0]
+        port_ret_raw = (pvals[-1] / _ret_base_raw - 1.0) * 100.0
         port_mdd_raw = _max_dd(pvals)
-        port_ret_clean = (clean[-1] / clean[0] - 1.0) * 100.0
+        port_ret_clean = (clean[-1] / _ret_base_clean - 1.0) * 100.0
         port_mdd_clean = _max_dd(clean)
 
         data_anomaly = n_anomalies > 0
@@ -5807,13 +5943,23 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
             # ESATTAMENTE cosa e' stato usato per portafoglio e S&P,
             # stesso arco temporale).
             "raw_calc": {
-                "portfolio_first_value": round(pvals[0], 2),
+                "portfolio_first_value": round(
+                    _ret_base_clean if data_anomaly else _ret_base_raw, 2),
                 "portfolio_last_value": round(pvals[-1], 2),
                 "portfolio_first_date": (_t0.strftime("%Y-%m-%d")
                                          if _t0 else None),
                 "portfolio_last_date": (_t1.strftime("%Y-%m-%d")
                                         if _t1 else None),
                 "portfolio_points": len(pvals),
+                # True quando il return e' stato ri-ancorato all'inizio
+                # UFFICIALE (primo movimento post chiusura CRWD+LMT),
+                # diverso dal primo punto dello storico denso (troncato a
+                # 1000 righe): il return copre la vita operativa reale,
+                # ma il max_drawdown resta solo sui punti densi recenti
+                # (mancano i punti intermedi della parte vecchia).
+                "window_truncated": window_truncated,
+                "drawdown_basis_points": len(clean) if data_anomaly
+                else len(pvals),
                 "sp500_first_close": (round(closes[0], 2)
                                       if spy_ret is not None else None),
                 "sp500_last_close": (round(closes[-1], 2)
@@ -5829,7 +5975,12 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
                      "verdict + drawdown."
                      + (" Periodo con anomalie tecniche: metriche "
                         "sanitizzate, vedi avviso nel verdetto."
-                        if data_anomaly else "")),
+                        if data_anomaly else "")
+                     + (" Return e alpha ancorati all'INIZIO UFFICIALE "
+                        "(primo movimento dopo la chiusura di CRWD+LMT; "
+                        "il periodo inattivo iniziale e' escluso), ma il "
+                        "max_drawdown copre solo la finestra densa recente."
+                        if window_truncated else "")),
         }
     except Exception as e:
         logger.error("benchmark error: %s", e, exc_info=True)
@@ -5853,64 +6004,14 @@ _EDGE_PF_KILL = 1.0            # PF sotto 1 + alpha<=0 → ipotesi falsificata
 
 def _compute_closed_trades_py(trades: list) -> list:
     """
-    Replica server-side ESATTA della logica FIFO di AnalyticsPage
-    (computeClosedTrades): accoppia BUY→SELL per ticker in ordine
-    temporale. Ritorna [{pnl_pct, pnl_usd, confidence}].
-
-    CRITICO per la coerenza con Analytics: il profit factor di
-    AnalyticsPage e' calcolato sui DOLLARI (sum win$ / |sum loss$|),
-    NON sulle percentuali. Salviamo quindi anche pnl_usd = (sell-buy)
-    *qty, identico al JS, cosi' i numeri COINCIDONO con Analytics
-    (in modalita' "Tutto"). Calcolare il PF in % dava un numero
-    completamente diverso (es. 6+ vs 1.95) e confondeva.
+    Delega alla logica CANONICA in trade_analytics.compute_closed_trades:
+    FIFO BUY→SELL per ticker + esclusione delle operazioni a confidence
+    100 (chiusure non-AI). Tenuto come wrapper per non toccare i call
+    site (edge-tracker, diagnosi confidence) e mantenere un solo posto
+    in cui vive la regola "manuale = non conta in analisi".
     """
-    from datetime import datetime as _dt
-    buy_queue: dict = {}
-    closed: list = []
-
-    def _ts(v):
-        try:
-            return _dt.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
-        except Exception:
-            return 0.0
-
-    srt = sorted(trades or [], key=lambda t: _ts(t.get("timestamp")))
-    for t in srt:
-        ticker = (t.get("ticker") or "").upper()
-        action = (t.get("action") or t.get("side") or "").upper()
-        try:
-            price = float(t.get("price") or 0)
-            qty = float(t.get("quantity") or 0)
-        except (TypeError, ValueError):
-            continue
-        conf = t.get("confidence_score", t.get("confidence"))
-        try:
-            conf = float(conf) if conf is not None else None
-        except (TypeError, ValueError):
-            conf = None
-        if not ticker or price <= 0 or qty <= 0:
-            continue
-        if action == "BUY":
-            buy_queue.setdefault(ticker, []).append(
-                {"price": price, "qty": qty, "conf": conf})
-        elif action == "SELL":
-            remaining = qty
-            while remaining > 0 and buy_queue.get(ticker):
-                buy = buy_queue[ticker][0]
-                if buy["price"] <= 0:
-                    buy_queue[ticker].pop(0)
-                    continue
-                matched = min(remaining, buy["qty"])
-                pnl_pct = (price - buy["price"]) / buy["price"] * 100.0
-                pnl_usd = (price - buy["price"]) * matched
-                closed.append({"pnl_pct": round(pnl_pct, 3),
-                               "pnl_usd": round(pnl_usd, 2),
-                               "confidence": buy["conf"]})
-                remaining -= matched
-                buy["qty"] -= matched
-                if buy["qty"] <= 1e-9:
-                    buy_queue[ticker].pop(0)
-    return closed
+    import trade_analytics
+    return trade_analytics.compute_closed_trades(trades)
 
 
 @app.get("/api/live/edge-tracker")
@@ -6060,6 +6161,157 @@ async def live_edge_tracker():
         }
     except Exception as e:
         logger.error("edge-tracker error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/live/confidence-diagnosis")
+async def live_confidence_diagnosis():
+    """
+    DIAGNOSI della confidence: NON "cura" il problema, lo MOSTRA.
+
+    L'Edge Tracker dice solo SE la confidence discrimina (si'/no). Qui
+    si vede QUALI trade rompono la relazione: i casi "molto sicuro ma
+    perso" e "poco sicuro ma vinto", con ticker, date, return e l'estratto
+    del ragionamento dell'AI all'entrata. Primo passo prima di correggere:
+    capire il PATTERN (es. iper-confidente su trade di consenso/narrativa
+    gia' prezzati) invece di aggiustare alla cieca.
+    """
+    try:
+        trades = database.get_trades(limit=5000) or []
+        closed = _compute_closed_trades_py(trades)
+        wc = [c for c in closed if c.get("confidence") is not None]
+        n = len(wc)
+        if n < 20:
+            return {"available": False,
+                    "reason": (f"Solo {n} trade chiusi con confidence "
+                               "registrata: troppo pochi per una diagnosi "
+                               "affidabile (servono ≥20).")}
+
+        confs = [float(c["confidence"]) for c in wc]
+        rets = [float(c["pnl_pct"]) for c in wc]
+        cmean = sum(confs) / n
+        rmean = sum(rets) / n
+        cvar = sum((x - cmean) ** 2 for x in confs) / n
+        rvar = sum((y - rmean) ** 2 for y in rets) / n
+        cstd = cvar ** 0.5
+        rstd = rvar ** 0.5
+
+        if cstd < 1e-9:
+            return {"available": False,
+                    "reason": ("La confidence e' (quasi) sempre lo stesso "
+                               "valore: non c'e' nulla da diagnosticare "
+                               "finche' il segnale non varia.")}
+
+        cov = sum((confs[i] - cmean) * (rets[i] - rmean)
+                  for i in range(n)) / n
+        corr = (round(cov / (cstd * rstd), 3)
+                if rstd > 1e-9 else None)
+
+        # Terzili per confidence (qualsiasi scala: 0-1, 0-100, 1-10...).
+        order = sorted(range(n), key=lambda i: confs[i])
+        t = n // 3
+        low_idx = order[:t]
+        high_idx = order[-t:] if t else []
+
+        def _tier_stats(idxs):
+            if not idxs:
+                return {"n": 0, "avg_return_pct": None,
+                        "win_rate_pct": None}
+            rr = [rets[i] for i in idxs]
+            wins = sum(1 for x in rr if x > 0)
+            return {
+                "n": len(idxs),
+                "avg_return_pct": round(sum(rr) / len(rr), 2),
+                "win_rate_pct": round(wins / len(rr) * 100, 1),
+                "conf_min": round(min(confs[i] for i in idxs), 3),
+                "conf_max": round(max(confs[i] for i in idxs), 3),
+            }
+
+        mid_idx = order[t:n - t] if t else order
+        tiers = {
+            "low": _tier_stats(low_idx),
+            "mid": _tier_stats(mid_idx),
+            "high": _tier_stats(high_idx),
+        }
+
+        def _row(i):
+            c = wc[i]
+            return {
+                "ticker": c.get("ticker"),
+                "confidence": round(float(c["confidence"]), 3),
+                "return_pct": round(float(c["pnl_pct"]), 2),
+                "return_usd": c.get("pnl_usd"),
+                "buy_date": c.get("buy_date"),
+                "sell_date": c.get("sell_date"),
+                "reason": c.get("reason") or "",
+            }
+
+        # Iper-confidenti che hanno PERSO (terzile alto, peggiori return).
+        overconfident = sorted(
+            [i for i in high_idx if rets[i] < 0],
+            key=lambda i: rets[i])[:15]
+        # Sottostimati che hanno VINTO (terzile basso, migliori return).
+        underrated = sorted(
+            [i for i in low_idx if rets[i] > 0],
+            key=lambda i: -rets[i])[:15]
+
+        # Pattern: quali ticker ricorrono tra gli iper-confidenti in
+        # perdita (un cluster = punto cieco sistematico, non sfortuna).
+        from collections import Counter as _Counter
+        oc_tickers = _Counter(wc[i].get("ticker") for i in overconfident)
+        recurring = [{"ticker": k, "count": v}
+                     for k, v in oc_tickers.most_common(5) if v >= 2]
+
+        hi, lo = tiers["high"], tiers["low"]
+        inverted = (corr is not None and corr < 0) or (
+            hi["avg_return_pct"] is not None
+            and lo["avg_return_pct"] is not None
+            and hi["avg_return_pct"] < lo["avg_return_pct"])
+
+        if inverted:
+            diagnosis = (
+                f"Correlazione confidence↔rendimento = {corr} "
+                "(NEGATIVA = invertita). I trade in cui l'AI era piu' "
+                f"sicura rendono in media {hi['avg_return_pct']}%, quelli "
+                f"in cui era meno sicura {lo['avg_return_pct']}%: la "
+                "sicurezza dichiarata e' un segnale al contrario. Guarda "
+                "i casi 'molto sicuro ma perso' qui sotto e i loro "
+                "ragionamenti: serve capire SU COSA si iper-confida "
+                "(spesso: trade di consenso/narrativa gia' prezzati dal "
+                "mercato) prima di ritarare la confidence.")
+        else:
+            diagnosis = (
+                f"Correlazione confidence↔rendimento = {corr}. In questo "
+                f"campione il terzile alto rende {hi['avg_return_pct']}% "
+                f"vs {lo['avg_return_pct']}% del basso: la confidence "
+                "non e' (piu') invertita, ma controlla i casi anomali "
+                "qui sotto per i residui.")
+
+        return {
+            "available": True,
+            "samples": n,
+            "correlation": corr,
+            "correlation_note": (
+                "Pearson tra confidence e return%. <0 = invertita "
+                "(piu' sicuro → peggio). ~0 = la confidence e' rumore. "
+                ">0 = discrimina correttamente."),
+            "tiers": tiers,
+            "inverted": bool(inverted),
+            "overconfident_losers": [_row(i) for i in overconfident],
+            "underrated_winners": [_row(i) for i in underrated],
+            "recurring_overconfident_tickers": recurring,
+            "diagnosis": diagnosis,
+            "next_levers": [
+                "Loop di calibrazione: mostrare all'AI, al momento della "
+                "decisione, com'e' andata storicamente la SUA confidence "
+                "(feedback sul proprio track record).",
+                "Ridefinire la confidence: non piu' 'quanto mi sento "
+                "sicuro' ma una probabilita' verificabile + stima del "
+                "rapporto rischio/rendimento atteso.",
+            ],
+        }
+    except Exception as e:
+        logger.error("confidence-diagnosis error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

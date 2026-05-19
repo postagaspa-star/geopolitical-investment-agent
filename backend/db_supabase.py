@@ -814,6 +814,53 @@ def get_portfolio_history(days=30):
     return rows
 
 
+def get_first_portfolio_snapshot():
+    """
+    Ritorna il PRIMISSIMO snapshot mai registrato (inizio vita reale del
+    portafoglio), indipendentemente dal limite di 1000 righe.
+
+    Perche' serve: get_portfolio_history() ha .limit(1000); con snapshot
+    inseriti ogni minuto dal price_polling, 1000 righe coprono solo ~10
+    giorni. Quindi return e alpha vs S&P venivano calcolati su una finestra
+    parziale (es. solo da meta' maggio) invece che sulla vita completa del
+    portafoglio (~2 mesi). Questa query prende il punto di partenza vero.
+    """
+    client = _get_client()
+    try:
+        result = (client.table("portfolio_snapshots")
+                  .select("total_value, cash_balance, timestamp")
+                  .order("timestamp", desc=False)
+                  .limit(1)
+                  .execute())
+        rows = result.data or []
+        return rows[0] if rows else None
+    except Exception as exc:
+        logger.warning("get_first_portfolio_snapshot fallita: %s", exc)
+        return None
+
+
+def get_first_snapshot_since(ts_iso):
+    """
+    Primo snapshot con timestamp >= ts_iso (ISO string). Usato per
+    ancorare return/alpha all'inizio UFFICIALE (primo movimento dopo la
+    chiusura di CRWD+LMT), non al primissimo snapshot del periodo
+    inattivo. .limit(1) → nessun problema col cap di 1000 righe.
+    """
+    client = _get_client()
+    try:
+        result = (client.table("portfolio_snapshots")
+                  .select("total_value, cash_balance, timestamp")
+                  .gte("timestamp", ts_iso)
+                  .order("timestamp", desc=False)
+                  .limit(1)
+                  .execute())
+        rows = result.data or []
+        return rows[0] if rows else None
+    except Exception as exc:
+        logger.warning("get_first_snapshot_since fallita: %s", exc)
+        return None
+
+
 # ============================================================
 # Chat Assistant (conversazioni con l'analista AI DeepSeek-R1)
 # ============================================================

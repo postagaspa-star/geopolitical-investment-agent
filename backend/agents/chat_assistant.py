@@ -115,6 +115,14 @@ def build_decisions_context(trades: list) -> str:
     """
     if not trades:
         return ""
+    import trade_analytics
+    # Escludi le chiusure non-AI (confidence 100): non sono decisioni
+    # dell'AI e inquinerebbero l'analisi delle decisioni selezionate.
+    trades = [t for t in trades
+              if not trade_analytics.is_manual_close(
+                  t.get("confidence_score", t.get("confidence")))]
+    if not trades:
+        return ""
     trades = trades[:MAX_TRADES_IN_CONTEXT]
     summarized = [_summarize_trade(t) for t in trades]
     return (
@@ -281,7 +289,15 @@ def build_live_context() -> str:
     # 3. ALL TRADES (compressi, fino a 200)
     try:
         import database
+        import trade_analytics
         all_trades = database.get_trades(limit=TRADES_FULL_LIMIT) or []
+        # Le operazioni a confidence 100 sono chiusure NON-AI
+        # (circuit breaker / auto-exit / manuali): non devono entrare
+        # nel ragionamento dell'AI, falserebbero la lettura del track
+        # record. Stessa regola di edge-tracker e diagnosi.
+        all_trades = [t for t in all_trades
+                      if not trade_analytics.is_manual_close(
+                          t.get("confidence_score", t.get("confidence")))]
         if all_trades:
             compact_trades = [_compact_trade(t) for t in all_trades]
             # Statistiche aggregate

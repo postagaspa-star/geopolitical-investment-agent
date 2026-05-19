@@ -60,8 +60,41 @@ function Row({ k, v, strong }) {
   );
 }
 
+// Una singola operazione nella diagnosi confidence (sicuro-ma-perso /
+// poco-sicuro-ma-vinto): ticker, return, confidence, date, ragionamento.
+function TradeMini({ t, good }) {
+  const col = good ? "#10b981" : "#ef4444";
+  return (
+    <div style={{ background: "#0a1018", borderRadius: 8,
+                  padding: "10px 12px", marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between",
+                    alignItems: "baseline", marginBottom: 4 }}>
+        <span style={{ fontWeight: 700, color: "#e2e8f0",
+                       fontSize: "0.84rem" }}>
+          {t.ticker || "—"}
+        </span>
+        <span style={{ color: col, fontWeight: 700, fontSize: "0.84rem" }}>
+          {t.return_pct >= 0 ? "+" : ""}{t.return_pct}%
+        </span>
+      </div>
+      <div style={{ fontSize: "0.72rem", color: "#94a3b8",
+                    marginBottom: t.reason ? 5 : 0 }}>
+        confidence <strong style={{ color: "#cbd5e1" }}>{t.confidence}</strong>
+        {" · "}{t.buy_date || "?"} → {t.sell_date || "?"}
+      </div>
+      {t.reason && (
+        <div style={{ fontSize: "0.72rem", color: "#7c8aa0",
+                      lineHeight: 1.45, fontStyle: "italic" }}>
+          “{t.reason}”
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EdgeTrackerPage() {
   const [data, setData] = useState(null);
+  const [diag, setDiag] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -83,6 +116,15 @@ export default function EdgeTrackerPage() {
       } finally {
         if (alive) setLoading(false);
       }
+    })();
+    // Diagnosi confidence: fetch separato, non blocca la pagina se fallisce.
+    (async () => {
+      try {
+        const r = await fetch(`${API}/api/live/confidence-diagnosis`);
+        const t = await r.text();
+        if (!alive || !r.ok || !t.trim()) return;
+        try { setDiag(JSON.parse(t)); } catch { /* ignora */ }
+      } catch { /* la diagnosi e' opzionale */ }
     })();
     return () => { alive = false; };
   }, []);
@@ -194,6 +236,136 @@ export default function EdgeTrackerPage() {
         <Criterion label="La confidence dell'AI discrimina"
           ok={data.calibration_ok} detail={data.calibration_detail} />
       </div>
+
+      {/* DIAGNOSI DELLA CONFIDENCE — quali trade rompono la relazione */}
+      {diag && diag.available && (
+        <div style={{ background: "#111827",
+                      border: `1px solid ${diag.inverted ? "#ef4444" : "#1f2937"}55`,
+                      borderLeft: `4px solid ${diag.inverted
+                        ? "#ef4444" : "#10b981"}`,
+                      borderRadius: 10, padding: "16px 18px",
+                      marginBottom: 16 }}>
+          <div style={{ fontSize: "0.95rem", fontWeight: 700,
+                        color: "#e2e8f0", marginBottom: 4 }}>
+            Diagnosi della confidence
+          </div>
+          <div style={{ fontSize: "0.74rem", color: "#64748b",
+                        marginBottom: 10 }}>
+            Non "cura" il problema: mostra <strong>quali</strong> operazioni
+            lo causano, per capire il pattern prima di correggere.
+          </div>
+          <div style={{ fontSize: "0.86rem", color: "#e2e8f0",
+                        lineHeight: 1.6, padding: "10px 12px",
+                        background: "#0d1424", borderRadius: 8,
+                        marginBottom: 14 }}>
+            {diag.diagnosis}
+          </div>
+
+          {/* Terzili: bassa / media / alta confidence */}
+          <div style={{ display: "grid",
+                        gridTemplateColumns: "1fr 1fr 1fr", gap: 10,
+                        marginBottom: 14 }}>
+            {[["Bassa conf.", diag.tiers.low, "#94a3b8"],
+              ["Media conf.", diag.tiers.mid, "#cbd5e1"],
+              ["Alta conf.", diag.tiers.high, "#3b82f6"]].map(
+              ([lab, ti, c]) => (
+                <div key={lab} style={{ background: "#0a1018",
+                              borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ fontSize: "0.74rem", color: c,
+                                fontWeight: 700, marginBottom: 6 }}>
+                    {lab}
+                  </div>
+                  <Row k="Trade" v={ti?.n ?? "—"} />
+                  <Row k="Rend. medio" strong
+                    v={ti?.avg_return_pct != null
+                      ? `${ti.avg_return_pct >= 0 ? "+" : ""}`
+                        + `${ti.avg_return_pct}%` : "—"} />
+                  <Row k="Win rate" v={ti?.win_rate_pct != null
+                    ? `${ti.win_rate_pct}%` : "—"} />
+                </div>
+              ))}
+          </div>
+
+          <div style={{ display: "grid",
+                        gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: "0.8rem", fontWeight: 700,
+                            color: "#ef4444", marginBottom: 8 }}>
+                Troppo sicuro, ma perso ({diag.overconfident_losers.length})
+              </div>
+              {diag.overconfident_losers.length === 0 && (
+                <div style={{ fontSize: "0.76rem", color: "#64748b" }}>
+                  Nessuno nel terzile alto.
+                </div>
+              )}
+              {diag.overconfident_losers.map((t, i) => (
+                <TradeMini key={i} t={t} good={false} />
+              ))}
+            </div>
+            <div>
+              <div style={{ fontSize: "0.8rem", fontWeight: 700,
+                            color: "#10b981", marginBottom: 8 }}>
+                Poco sicuro, ma vinto ({diag.underrated_winners.length})
+              </div>
+              {diag.underrated_winners.length === 0 && (
+                <div style={{ fontSize: "0.76rem", color: "#64748b" }}>
+                  Nessuno nel terzile basso.
+                </div>
+              )}
+              {diag.underrated_winners.map((t, i) => (
+                <TradeMini key={i} t={t} good={true} />
+              ))}
+            </div>
+          </div>
+
+          {diag.recurring_overconfident_tickers
+            && diag.recurring_overconfident_tickers.length > 0 && (
+            <div style={{ marginTop: 14, padding: "10px 12px",
+                          background: "#0d1424", borderRadius: 8 }}>
+              <div style={{ fontSize: "0.78rem", color: "#f59e0b",
+                            fontWeight: 700, marginBottom: 6 }}>
+                Punto cieco ricorrente
+              </div>
+              <div style={{ fontSize: "0.76rem", color: "#cbd5e1",
+                            lineHeight: 1.5 }}>
+                Questi titoli compaiono più volte tra i "troppo sicuro
+                ma perso" — non è sfortuna isolata, è un errore di
+                sistema:{" "}
+                {diag.recurring_overconfident_tickers.map((r) =>
+                  `${r.ticker} (${r.count}×)`).join(", ")}
+              </div>
+            </div>
+          )}
+
+          {diag.next_levers && diag.next_levers.length > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: "0.78rem", fontWeight: 700,
+                            color: "#94a3b8", marginBottom: 6,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.05em" }}>
+                Prossime leve (dopo aver capito il pattern)
+              </div>
+              {diag.next_levers.map((lv, i) => (
+                <div key={i} style={{ fontSize: "0.8rem", color: "#cbd5e1",
+                              lineHeight: 1.55, padding: "4px 0",
+                              display: "flex", gap: 8 }}>
+                  <span style={{ color: "#64748b" }}>{i + 1}.</span>
+                  <span>{lv}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {diag && diag.available === false && (
+        <div style={{ background: "#0d1424", border: "1px solid #1f2937",
+                      borderRadius: 10, padding: "14px 18px",
+                      marginBottom: 16, fontSize: "0.82rem",
+                      color: "#94a3b8", lineHeight: 1.55 }}>
+          <strong style={{ color: "#cbd5e1" }}>Diagnosi confidence:</strong>{" "}
+          {diag.reason}
+        </div>
+      )}
 
       {/* DATI GREZZI DEL CALCOLO — trasparenza totale */}
       {data.raw_calc && (

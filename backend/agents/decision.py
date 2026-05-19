@@ -246,12 +246,24 @@ FILOSOFIA OPERATIVA — ASSERTIVITÀ MASSIMA, NESSUN VINCOLO DI DIVERSIFICAZIONE
      eccessiva è un anti-pattern noto: spara pochi colpi ma azzeccati,
      non zero colpi per paura di sbagliare.
 
-5. **CONFIDENCE FLOORS** (rispetta SEMPRE):
-   - BUY/SELL con segnali concordi: confidence 60-85
-   - BUY/SELL con segnali discordi ma tesi forte: confidence 50-65
-   - HOLD/do_nothing: confidence range 35-55 — sotto e' dato_insufficient
-   - VIETATO confidence "piatta" del 35% su tutto: e' segno di pigrizia
-     analitica, non di prudenza.
+5. **CONFIDENCE = PROBABILITA' CALIBRATA (non una sensazione)**
+   La confidence_level NON e' "quanto mi piace la tesi". E' la tua stima
+   VERIFICABILE che la tesi si avveri come previsto entro l'orizzonte.
+   Test: su 100 trade a cui daresti X, ~X dovrebbero andare in profitto.
+   Devi SEMPRE fornire anche expected_reward_risk: la confidence ha senso
+   solo come probabilita' × payoff (un 55% con R/R 3:1 vale piu' di un
+   80% con R/R 1:1).
+   - Segnali concordi E edge non gia' scontato dal mercato: 60-85
+   - Segnali discordi ma tesi forte e payoff asimmetrico: 50-65
+   - HOLD/do_nothing: 35-55 — sotto e' dato_insufficient
+   - VIETATO confidence "piatta" del 35% su tutto: pigrizia, non prudenza.
+   ANTI-OVERCONFIDENCE (regola dura, da dati reali): se la tesi e' di
+   CONSENSO o segue una narrativa forte/popolare, e' probabilmente GIA'
+   PREZZATA → l'edge e' basso anche se la storia convince: NON salire
+   sopra ~65. La confidence alta si merita solo con un'informazione o
+   una lettura che il mercato NON ha ancora scontato. Storicamente la
+   confidence alta su trade di consenso ha rendimento PEGGIORE: non
+   ripetere l'errore.
 
 ═══════════════════════════════════════════════════════════════════════
 WORKFLOW OBBLIGATORIO A 4 FASI (enforced via tool state machine)
@@ -309,7 +321,9 @@ CONTESTO CHE RICEVI:
 
 REGOLE OPERATIVE Fase ESECUZIONE:
   - ALLOCAZIONE: Fino al 50% del portafoglio per singola operazione
-  - CONFIDENCE: Se geo + tecnico concordano, la confidence aumenta del 15%
+  - CONFIDENCE: la concordanza geo+tecnico alza la probabilita' SOLO se
+    l'informazione non e' gia' pubblica/scontata. Concordare su una tesi
+    di consenso non e' un edge: non gonfiare la confidence per inerzia.
   - Max 15 posizioni aperte contemporaneamente (no vincoli settoriali)
   - GESTIONE POSIZIONI ESISTENTI: nessuna soglia hardcoded di profit-taking
     o stop-loss. Vedi RISK MANAGEMENT PRINCIPLES sotto. Sei tu a decidere
@@ -533,6 +547,59 @@ def _get_decision_prompt(engine: str | None = None) -> str:
     """
     text, _ids = _get_decision_prompt_with_meta(engine)
     return text
+
+
+def _build_confidence_calibration_block(limit: int = 5000) -> str:
+    """
+    LEVER 1 — auto-feedback di calibrazione (chiude il loop).
+
+    Mostra all'agente, AL MOMENTO della decisione, come la SUA confidence
+    ha funzionato sui trade realmente chiusi (chiusure non-AI a conf==100
+    escluse, stessa regola di edge-tracker/diagnosi). Se la confidence e'
+    invertita (alta = rende meno) glielo dice ESPLICITO, cosi' ritara
+    invece di ripetere l'errore. Senza questo blocco l'agente non vede
+    mai il proprio track record di calibrazione e non converge.
+
+    Defensivo: ritorna "" su qualsiasi errore o dati insufficienti.
+    """
+    try:
+        import database as _db
+        import trade_analytics as _ta
+        trades = _db.get_trades(limit=limit) or []
+        closed = _ta.compute_closed_trades(trades)
+        summ = _ta.confidence_calibration_summary(closed)
+    except Exception as exc:
+        logger.debug("calibration block failed: %s", exc)
+        return ""
+    if not summ:
+        return ""
+    corr = summ.get("correlation")
+    lo = summ.get("low_conf_avg_return_pct")
+    hi = summ.get("high_conf_avg_return_pct")
+    n = summ.get("samples")
+    lines = ["═" * 60,
+             "AUTO-CALIBRAZIONE CONFIDENCE — tuo track record reale",
+             "═" * 60]
+    if summ.get("inverted"):
+        lines.append(
+            f"⚠️ Su {n} trade chiusi (decisi da te; chiusure manuali/"
+            f"forzate escluse) la tua confidence e' INVERTITA: i trade ad "
+            f"ALTA confidence rendono in media {hi}%, quelli a BASSA "
+            f"{lo}% (correlazione {corr}). Tradotto: quando ti senti molto "
+            f"sicuro, statisticamente vai PEGGIO — tipico di iper-"
+            f"confidenza su tesi gia' scontate dal mercato. Per QUESTO "
+            f"run: abbassa la confidence sulle tesi di consenso/narrativa, "
+            f"alzala solo con un edge informativo che il mercato non ha "
+            f"ancora. Lega sempre confidence a probabilita' × R/R atteso. "
+            f"NON ripetere il pattern.")
+    else:
+        lines.append(
+            f"Su {n} trade chiusi: confidence alta rende {hi}% vs {lo}% "
+            f"bassa (correlazione {corr}). Direzione corretta: mantieni "
+            f"il rigore, continua a legare la confidence a probabilita' × "
+            f"R/R atteso, non alla bellezza della tesi.")
+    lines.append("═" * 60)
+    return "\n".join(lines) + "\n"
 
 
 def _build_recent_decisions_block(agent_type: str = "standard",
@@ -1546,16 +1613,26 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
         recent_block = ""
     recent_section = (recent_block + "\n" + "═" * 60 + "\n") if recent_block else ""
 
+    # 5b. Auto-calibrazione confidence (LEVER 1): il track record reale
+    #     della SUA confidence. Subito prima del prompt base cosi' e'
+    #     fresco quando assegna confidence_level in FASE 4.
+    try:
+        calib_block = _build_confidence_calibration_block()
+    except Exception as exc:
+        logger.debug("calibration section failed: %s", exc)
+        calib_block = ""
+    calib_section = (calib_block + "\n") if calib_block else ""
+
     # 6. Shared principles (in coda)
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
         text = (directives_block + risk_block + risk_state_block + regime_block
-                + coach_section + recent_section + base_prompt
+                + coach_section + recent_section + calib_section + base_prompt
                 + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
         text = (directives_block + risk_block + risk_state_block + regime_block
-                + coach_section + recent_section + base_prompt)
+                + coach_section + recent_section + calib_section + base_prompt)
     return text, coach_card_ids
 
 
@@ -1612,6 +1689,15 @@ def _get_decision_prompt_split(engine: str | None = None) -> tuple[str, str, lis
         recent_block = ""
     recent_section = (recent_block + "\n" + "═" * 60 + "\n") if recent_block else ""
 
+    # LEVER 1: auto-calibrazione confidence. DYNAMIC (cambia ad ogni run
+    # quando si chiudono trade) → MAI nel blocco statico cacheato 1h.
+    try:
+        calib_block = _build_confidence_calibration_block()
+    except Exception as exc:
+        logger.debug("calibration section failed: %s", exc)
+        calib_block = ""
+    calib_section = (calib_block + "\n") if calib_block else ""
+
     # === STATIC parts (cacheable) ===
     risk_block = _build_risk_block(asset_class="equity")
 
@@ -1644,7 +1730,8 @@ def _get_decision_prompt_split(engine: str | None = None) -> tuple[str, str, lis
     except Exception:
         static_block = risk_block + regime_block + coach_section + base_prompt
 
-    dynamic_block = directives_block + risk_state_block + recent_section
+    dynamic_block = (directives_block + risk_state_block + recent_section
+                     + calib_section)
 
     return static_block, dynamic_block, coach_card_ids
 
@@ -1716,9 +1803,34 @@ DECISION_TOOLS = [
                 "stop_loss": {"type": "number", "description": "Prezzo stop-loss (0 = nessuno)"},
                 "take_profit": {"type": "number", "description": "Prezzo take-profit (0 = nessuno)"},
                 "logic_chain": {"type": "string", "description": "Chain of Thought completo: integra geo+tech reasoning. Per SELL specifica se è profit-taking, stop-loss manuale, rotation, o de-risk."},
-                "confidence_level": {"type": "number", "minimum": 0, "maximum": 100},
+                "confidence_level": {
+                    "type": "number", "minimum": 0, "maximum": 100,
+                    "description": (
+                        "PROBABILITA' CALIBRATA (0-100), non un'emozione. "
+                        "E' la tua stima verificabile che la tesi si "
+                        "realizzi COME PREVISTO entro l'orizzonte dichiarato "
+                        "nel logic_chain. Test operativo: su 100 trade a cui "
+                        "daresti questo numero, ~quel numero dovrebbe "
+                        "chiudere in profitto secondo la tesi. NON gonfiarla "
+                        "perche' la tesi e' 'di consenso' o segue una "
+                        "narrativa forte: se e' gia' prezzata dal mercato "
+                        "l'edge e' BASSO anche se la storia e' convincente. "
+                        "La concordanza geo+tech alza la probabilita' solo "
+                        "se l'informazione NON e' gia' pubblica/scontata.")
+                },
+                "expected_reward_risk": {
+                    "type": "number", "exclusiveMinimum": 0,
+                    "description": (
+                        "Rapporto rendimento/rischio ATTESO del trade = "
+                        "(target atteso − entry) / (entry − stop). Es. 2.0 = "
+                        "punti a guadagnare il doppio di quanto rischi. "
+                        "Stima onesta e coerente con stop_loss/take_profit e "
+                        "con la tesi: serve a rendere la confidence "
+                        "verificabile (probabilita' × payoff), non un "
+                        "numero a sensazione.")
+                },
             },
-            "required": ["ticker", "action", "quantity", "logic_chain", "confidence_level"],
+            "required": ["ticker", "action", "quantity", "logic_chain", "confidence_level", "expected_reward_risk"],
         },
     },
     {
@@ -2061,6 +2173,15 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
             quantity = tool_input["quantity"]
             logic_chain = tool_input["logic_chain"]
             confidence = tool_input["confidence_level"]
+            # R/R atteso (lever 2: confidence = probabilita' × payoff).
+            # Letto in modo difensivo: persistito dentro logic_chain
+            # (gia' salvato nel trade record) — niente migrazione DB.
+            try:
+                expected_rr = tool_input.get("expected_reward_risk")
+                expected_rr = (round(float(expected_rr), 2)
+                               if expected_rr is not None else None)
+            except (TypeError, ValueError):
+                expected_rr = None
             # NOTA: usiamo controllo esplicito (non `or None`) per non confondere
             # 0 con None. Schema dichiara: 0 = "nessun SL/TP esplicito", None
             # equivalente. Se valore > 0, applica.
@@ -2094,11 +2215,17 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     enriched_parts.append(f"[RISCHIO] {risk[:400]}")
                 if enriched_parts and (logic_chain or "").strip():
                     enriched_parts.append(f"[ESECUZIONE] {logic_chain.strip()[:1000]}")
+                if expected_rr is not None:
+                    enriched_parts.append(
+                        f"[R/R ATTESO] {expected_rr} (confidence "
+                        f"{confidence:.0f}% = probabilita' calibrata)")
                 if enriched_parts:
                     logic_chain = "\n\n".join(enriched_parts)
 
-            logger.info("[%s][DECISION] TRADE: %s %d %s (conf: %.0f%%, SL: %s)",
-                        run_id, action, quantity, ticker, confidence, stop_loss)
+            logger.info(
+                "[%s][DECISION] TRADE: %s %d %s (conf: %.0f%%, R/R: %s, SL: %s)",
+                run_id, action, quantity, ticker, confidence,
+                expected_rr if expected_rr is not None else "n/d", stop_loss)
 
             # ── Veto crypto: il Decision normale opera SOLO su equity/ETF.
             # Le crypto sono dominio esclusivo del Decision Crypto agent.
