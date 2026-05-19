@@ -11,6 +11,7 @@ import CoachCardsPage from "./pages/CoachCardsPage";
 import ChatDecisionPage from "./pages/ChatDecisionPage";
 import Settings from "./components/Settings";
 import ChatWidget from "./components/ChatWidget";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 import EntryPage from "./pages/EntryPage";
 import AboutPage from "./pages/AboutPage";
@@ -42,6 +43,10 @@ function LiveApp() {
   const [marketCountdown, setMarketCountdown] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [agentsInfo, setAgentsInfo] = useState({});
+  // true finche' almeno un endpoint risponde; se TUTTI falliscono il
+  // backend e' giu'/in riavvio → banner non bloccante (i dati restano
+  // quelli ultimi noti, non si azzera nulla).
+  const [online, setOnline] = useState(true);
 
   const countdownRef = useRef(null);
 
@@ -61,6 +66,10 @@ function LiveApp() {
       fetchData("/api/agent/status"),
       fetchData("/api/logs"),
     ]);
+    // Online se ALMENO un endpoint ha risposto. Se tutti null →
+    // backend irraggiungibile: non tocchiamo gli stati (restano gli
+    // ultimi dati buoni) e mostriamo solo il banner.
+    setOnline(!!(pData || posData || tData || statusData || logsData));
     if (pData) setPortfolio(pData);
     if (posData) setPositions(Array.isArray(posData) ? posData : []);
     if (tData) setTrades(Array.isArray(tData) ? tData : []);
@@ -192,21 +201,41 @@ function LiveApp() {
       />
 
       <main className="main-content">
-        <Routes>
-          <Route index element={
-            <DashboardPage portfolio={portfolio} positions={positions} trades={trades} logs={logs} />
-          } />
-          <Route path="intelligence" element={<IntelligencePage />} />
-          <Route path="analytics" element={<AnalyticsPage />} />
-          <Route path="edge-tracker" element={<EdgeTrackerPage />} />
-          <Route path="coach-cards" element={<CoachCardsPage />} />
-          <Route path="chat" element={<ChatDecisionPage />} />
-          <Route path="settings" element={<Settings onDataRefresh={fetchAll} />} />
-        </Routes>
+        {!online && (
+          <div style={{
+            background: "#7f1d1d", color: "#fecaca",
+            border: "1px solid #b91c1c", borderRadius: 8,
+            padding: "8px 14px", marginBottom: 14, fontSize: "0.8rem",
+            fontWeight: 600, textAlign: "center",
+          }}>
+            ⚠ Backend non raggiungibile — riprovo automaticamente ogni
+            15s. I dati mostrati sono gli ultimi disponibili, potrebbero
+            non essere aggiornati.
+          </div>
+        )}
+        {/* ErrorBoundary attorno alle pagine: se UNA pagina va in
+            errore (dati parziali da backend instabile) resta viva la
+            shell — niente piu' "schermo blu" su tutta l'app. */}
+        <ErrorBoundary>
+          <Routes>
+            <Route index element={
+              <DashboardPage portfolio={portfolio} positions={positions} trades={trades} logs={logs} />
+            } />
+            <Route path="intelligence" element={<IntelligencePage />} />
+            <Route path="analytics" element={<AnalyticsPage />} />
+            <Route path="edge-tracker" element={<EdgeTrackerPage />} />
+            <Route path="coach-cards" element={<CoachCardsPage />} />
+            <Route path="chat" element={<ChatDecisionPage />} />
+            <Route path="settings" element={<Settings onDataRefresh={fetchAll} />} />
+          </Routes>
+        </ErrorBoundary>
       </main>
 
-      {/* Chat widget flottante: solo nella Live (analizza decisioni reali) */}
-      <ChatWidget />
+      {/* Chat widget flottante isolato: un suo crash NON deve
+          buttare giu' la dashboard. */}
+      <ErrorBoundary>
+        <ChatWidget />
+      </ErrorBoundary>
     </div>
   );
 }
