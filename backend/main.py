@@ -6033,16 +6033,25 @@ _EDGE_PF_KILL = 1.0            # PF sotto 1 + alpha<=0 → ipotesi falsificata
 
 def _compute_closed_trades_py(trades: list) -> list:
     """
-    Vista SKILL/EDGE: delega alla logica canonica con
-    exclude_manual_closes=True. Edge Tracker e diagnosi confidence
-    misurano la BRAVURA dell'AI, quindi le chiusure non-AI (conf 100)
-    non devono inquinare il giudizio. NON e' la vista P&L: il
-    rendimento del portafoglio (Analytics) include TUTTO ed e' calcolato
-    altrove (e' un fatto finanziario, non una misura di bravura).
+    Vista P&L: include TUTTI i round-trip, comprese le chiusure non-AI
+    (circuit breaker / auto-exit / manuali, conf 100). Decisione
+    esplicita: il P&L e' un fatto finanziario, ogni chiusura muove
+    denaro reale e DEVE contare. Edge Tracker, Analytics e diagnosi
+    confidence partono tutti dallo stesso totale di trade chiusi
+    (coerenza dei numeri end-to-end).
+
+    Filtraggio per la calibrazione confidence (conf 100 non e' una
+    confidence reale, e' un marcatore): si fa LOCALMENTE dove serve, NON
+    qui — cosi' i conteggi P&L restano onesti.
+
+    Eccezione: il blocco di auto-calibrazione iniettato nel prompt del
+    Decision Agent chiama trade_analytics.compute_closed_trades(...,
+    exclude_manual_closes=True) direttamente — quella e' una vista
+    intrinsecamente SKILL (l'AI non deve auto-istruirsi su trade non
+    suoi), non un calcolo di P&L.
     """
     import trade_analytics
-    return trade_analytics.compute_closed_trades(
-        trades, exclude_manual_closes=True)
+    return trade_analytics.compute_closed_trades(trades)
 
 
 @app.get("/api/live/edge-tracker")
@@ -6079,7 +6088,16 @@ async def live_edge_tracker():
 
         # Calibrazione del segnale: i trade ad alta confidence rendono
         # piu' di quelli a bassa? (dx vs dy di Michael, in sintesi).
-        with_conf = [c for c in closed if c.get("confidence") is not None]
+        # NB: si escludono i round-trip dove almeno una gamba e' stata
+        # forzata (is_manual=True, marcatore conf 100): l'esito non
+        # riflette il piano dell'AI quando un circuit breaker / SL /
+        # chiusura manuale interrompe il trade. NON e' un calcolo di
+        # P&L (i P&L sopra restano sui 100 trade interi) ma di
+        # calibrazione del segnale: includere round-trip troncati
+        # falserebbe la misura.
+        with_conf = [c for c in closed
+                     if c.get("confidence") is not None
+                     and not c.get("is_manual")]
         calib_ok = None
         calib_detail = "Confidence non registrata su abbastanza trade."
         if len(with_conf) >= 20:
@@ -6210,7 +6228,14 @@ async def live_confidence_diagnosis():
     try:
         trades = database.get_trades(limit=5000) or []
         closed = _compute_closed_trades_py(trades)
-        wc = [c for c in closed if c.get("confidence") is not None]
+        # Diagnosi del SEGNALE confidence: si escludono i round-trip
+        # con una gamba forzata (is_manual=True): l'esito non riflette
+        # l'AI quando una chiusura forzata interrompe il piano. NON e'
+        # un calcolo di P&L (i totali P&L sono altrove e includono
+        # TUTTO) ma di calibrazione del segnale.
+        wc = [c for c in closed
+              if c.get("confidence") is not None
+              and not c.get("is_manual")]
         n = len(wc)
         if n < 20:
             return {"available": False,
