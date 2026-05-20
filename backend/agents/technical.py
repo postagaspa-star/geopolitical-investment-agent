@@ -71,34 +71,53 @@ INSTRUCTIONS:
 - Market regime determinato dal market_structure.structure (preferito) o dal trend pre-calcolato
 
 ═══════════════════════════════════════════════════════════════════════
-OUTPUT — JSON valido (no preamble, solo JSON):
+CRITICAL — ANTI-HALLUCINATION RULE (NON-NEGOTIABLE):
+═══════════════════════════════════════════════════════════════════════
+Tutti i valori NUMERICI (current_price, support, resistance, atr,
+rsi.value, macd.value, stoch.value, suggested_stop_loss) DEVONO essere
+calcolati o copiati dai dati di INPUT del SINGOLO ticker. Ogni ticker
+ha numeri propri.
+
+VIETATO:
+- Riusare gli stessi numeri tra ticker diversi.
+- Inventare valori (es. RSI=35.2, price=105.50) se non corrispondono
+  ai dati di INPUT del ticker in oggetto.
+- Copiare lo schema sotto come se fosse un esempio "da imitare": e' uno
+  SCHEMA, non un campione.
+
+Se la tua risposta produce numeri identici tra ticker diversi (es.
+stesso current_price o stesso RSI), verra' RIFIUTATA come hallucinated
+e il sistema la sovrascrivera' a HOLD con safety override.
+
+═══════════════════════════════════════════════════════════════════════
+OUTPUT — JSON valido (no preamble, solo JSON). SCHEMA (NON un esempio):
 ═══════════════════════════════════════════════════════════════════════
 {
   "analyses": [
     {
-      "ticker": "XOM",
-      "signal": "BUY",
-      "confidence": 72,
-      "current_price": 105.50,
-      "support": 102.00,
-      "resistance": 110.00,
-      "atr": 2.15,
-      "rsi": {"value": 35.2, "signal": "OVERSOLD_BUY"},
-      "macd": {"value": 0.45, "signal": "BULLISH_CROSS"},
-      "stoch": {"value": 22.5, "signal": "OVERSOLD"},
-      "sma_cross": {"signal": "GOLDEN_CROSS"},
-      "volume_trend": "HIGH",
-      "trend": "TRENDING_UP",
-      "structure": "UPTREND",
-      "fib_zone": "between_0.5_and_0.618",
-      "candlestick_setup": "bullish_engulfing on last candle",
-      "mtf_confluence": "BULLISH",
-      "suggested_stop_loss": 102.30,
-      "reasoning": "4 segnali bullish + bullish_engulfing al 0.618 fib + HVN $103 + 1d/1wk BULLISH → BUY conf 78."
+      "ticker": "<simbolo esatto dall'INPUT>",
+      "signal": "<BUY | SELL | HOLD>",
+      "confidence": <numero 50-90 per BUY/SELL, 35-60 per HOLD>,
+      "current_price": <copia ESATTA dall'input di QUESTO ticker>,
+      "support": <livello derivato dai dati di QUESTO ticker>,
+      "resistance": <livello derivato dai dati di QUESTO ticker>,
+      "atr": <copia dall'input di QUESTO ticker>,
+      "rsi": {"value": <numero da input>, "signal": "<OVERSOLD_BUY|OVERBOUGHT_SELL|NEUTRAL|...>"},
+      "macd": {"value": <numero da input>, "signal": "<BULLISH_CROSS|BEARISH_CROSS|NEUTRAL>"},
+      "stoch": {"value": <numero>, "signal": "<OVERSOLD|OVERBOUGHT|NEUTRAL>"},
+      "sma_cross": {"signal": "<GOLDEN_CROSS|DEATH_CROSS|NONE>"},
+      "volume_trend": "<HIGH | LOW | NORMAL>",
+      "trend": "<TRENDING_UP | TRENDING_DOWN | RANGING | UNKNOWN>",
+      "structure": "<UPTREND | DOWNTREND | CONTRACTING | EXPANDING>",
+      "fib_zone": "<etichetta descrittiva specifica di QUESTO ticker>",
+      "candlestick_setup": "<pattern reale o 'none'>",
+      "mtf_confluence": "<BULLISH | BEARISH | MIXED>",
+      "suggested_stop_loss": <livello derivato per QUESTO ticker>,
+      "reasoning": "<sintesi causale che DEVE citare i numeri specifici di QUESTO ticker: RSI X, MACD Y, prezzo Z. Se due 'reasoning' di ticker diversi sono identici la risposta verra' rifiutata.>"
     }
   ],
-  "market_regime": "RANGING",
-  "summary": "2 BUY (XOM, NVDA), 1 SELL (MSFT), 1 HOLD (GLD). Tech sector mostra rotazione positiva."
+  "market_regime": "<RANGING | BULL | BEAR | VOLATILE>",
+  "summary": "<N BUY (tickers), M SELL (tickers), K HOLD (tickers); +1 riga di contesto>"
 }"""
 
 
@@ -745,6 +764,79 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
                 f"insufficient — direzione sovrascritta dal sistema."
             )
 
+    # 5b. SAFETY FALLBACK — HALLUCINATION DETECTION.
+    # DeepSeek-V3 a temperatura bassa con esempio in prompt a volte
+    # rigurgita gli stessi numeri tra ticker diversi (current_price RSI
+    # MACD identici per asset diversi). Bug osservato: "il technical
+    # restituisce gli stessi identici dati per tutti i ticker".
+    #
+    # Difesa in profondita': per ogni analysis confronta current_price
+    # con il GROUND-TRUTH dei raw_indicators (yfinance/Polygon, per
+    # ticker). Se devia oltre tolleranza → output hallucinated → HOLD
+    # forzato + reasoning chiaro. Cosi' anche se il prompt-fix non
+    # bastasse, l'agente Decision NON riceve dati inventati su cui
+    # potrebbe operare.
+    truth_price = {}
+    for td in ticker_data:
+        if isinstance(td, dict) and td.get("ticker"):
+            cp = td.get("current_price")
+            if isinstance(cp, (int, float)) and cp > 0:
+                truth_price[td["ticker"]] = float(cp)
+
+    # Inoltre: rileva DUPLICATI di current_price tra ticker diversi
+    # (segnale chiarissimo di rigurgito).
+    seen_prices: dict[float, str] = {}  # price → primo ticker che l'ha usato
+    hallucinated_tickers: list[str] = []
+
+    for a in (report.get("analyses") or []):
+        tk = a.get("ticker")
+        try:
+            cp_llm = float(a.get("current_price") or 0)
+        except (TypeError, ValueError):
+            cp_llm = 0.0
+
+        cp_truth = truth_price.get(tk)
+        hallucinated_reason = None
+
+        # Check 1: il prezzo del LLM diverge dal ground-truth oltre l'1%.
+        if cp_truth and cp_llm > 0:
+            diff_pct = abs(cp_llm - cp_truth) / cp_truth * 100
+            if diff_pct > 1.0:
+                hallucinated_reason = (
+                    f"current_price del LLM ({cp_llm}) non corrisponde al "
+                    f"ground-truth ({cp_truth}) per {tk} (diff {diff_pct:.1f}%)")
+
+        # Check 2: stesso current_price gia' usato da un altro ticker.
+        if cp_llm > 0 and not hallucinated_reason:
+            rounded = round(cp_llm, 2)
+            prev = seen_prices.get(rounded)
+            if prev and prev != tk:
+                hallucinated_reason = (
+                    f"current_price {cp_llm} identico a quello di {prev}: "
+                    "DeepSeek sta rigurgitando, non analizzando")
+            else:
+                seen_prices[rounded] = tk
+
+        if hallucinated_reason:
+            hallucinated_tickers.append(tk)
+            a["signal"] = "HOLD"
+            a["confidence"] = 35
+            a["data_quality"] = "hallucinated"
+            # current_price corretto al ground-truth se disponibile (per
+            # non lasciare un valore inventato in giro nei log).
+            if cp_truth:
+                a["current_price"] = cp_truth
+            a["reasoning"] = (
+                f"SAFETY OVERRIDE — hallucination rilevata: "
+                f"{hallucinated_reason}. Direzione forzata a HOLD. "
+                "Il Decision Agent NON deve trattare questo segnale come "
+                "tecnico valido.")
+
+    if hallucinated_tickers:
+        logger.error(
+            "[%s][TECH] HALLUCINATION rilevata su %d ticker, forzati a HOLD: %s",
+            run_id, len(hallucinated_tickers), hallucinated_tickers)
+
     # 5. Log con visibilità del contenuto effettivo
     analyses_summary = []
     for a in (report.get("analyses") or [])[:6]:
@@ -757,6 +849,15 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     if forced:
         logger.warning("[%s][TECH] Forzati a HOLD %d ticker con data_quality=insufficient: %s",
                        run_id, len(forced), forced)
+    if hallucinated_tickers:
+        report["hallucination_safety_override"] = {
+            "tickers_overridden": hallucinated_tickers,
+            "count": len(hallucinated_tickers),
+            "note": ("DeepSeek-V3 ha prodotto valori non coerenti con i dati "
+                     "di input. I ticker elencati sono stati forzati a HOLD "
+                     "con data_quality=hallucinated. Il Decision Agent NON "
+                     "deve operare su questi segnali."),
+        }
     database.insert_agent_log(run_id, "TECH_WORKER",
         json.dumps({
             "event": "technical_analysis_complete",
@@ -765,6 +866,7 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
             "tickers_requested": len(tickers),
             "json_parsed": parse_ok,
             "analyses_summary": analyses_summary,
+            "tickers_hallucinated": hallucinated_tickers,
             # Cap aumentato 300 → 2500: i summary tecnici utili (regime,
             # ticker leader, trend) raramente entrano in 300 char, e la
             # Tech card del frontend mostrava sempre sintesi troncate.
