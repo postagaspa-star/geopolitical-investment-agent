@@ -82,6 +82,13 @@ def _get_from_local_cache(run_id: str) -> dict | None:
 # ═══════════════════════════════════════════════════════════════════════
 
 _SIM_RUN_FALLBACK_MODE = False  # True dopo il primo errore di tabella mancante
+_SIM_RUN_FALLBACK_TRIPPED_AT: datetime | None = None
+# Auto-recovery: dopo N secondi dal trip, list_runs ri-prova Tier 1 invece
+# di restare per sempre sul fallback. Un blip transitorio NON deve
+# nascondere lo storico per tutto il ciclo di vita del processo.
+_SIM_RUN_FALLBACK_TTL_SEC = 300
+# Ultima eccezione di Tier 1 (per diagnostica visibile via /api/simulator/health)
+_LAST_SIM_TIER1_ERROR: dict | None = None
 _RUN_FALLBACK_LIST_KEY = "_sim_run_fallback::list"
 _RUN_FALLBACK_RUN_KEY = "_sim_run_fallback::run::{id}"
 _RUN_FALLBACK_MAX_LIST = 300   # cap totale run preservati nel fallback
@@ -213,7 +220,13 @@ def get_storage_mode() -> dict:
     Ritorna lo stato corrente del backend di storage per i sim_runs.
     Usato dall'endpoint /api/simulator/health per diagnostica visibile.
     """
-    info = {"fallback_mode": _SIM_RUN_FALLBACK_MODE}
+    info = {
+        "fallback_mode": _SIM_RUN_FALLBACK_MODE,
+        "fallback_tripped_at": (_SIM_RUN_FALLBACK_TRIPPED_AT.isoformat()
+                                if _SIM_RUN_FALLBACK_TRIPPED_AT else None),
+        "fallback_ttl_sec": _SIM_RUN_FALLBACK_TTL_SEC,
+        "last_tier1_error": _LAST_SIM_TIER1_ERROR,
+    }
     client = _get_client()
     if client is None:
         info["primary_backend"] = "sqlite"
@@ -410,7 +423,7 @@ def insert_run(run_data: dict) -> str:
     saltata). Ora cadiamo automaticamente su sim_settings che e' SEMPRE
     accessibile e persiste tra deploy.
     """
-    global _SIM_RUN_FALLBACK_MODE
+    global _SIM_RUN_FALLBACK_MODE, _SIM_RUN_FALLBACK_TRIPPED_AT
     rid = run_data["id"]
 
     # Tier "background": cache file locale — SEMPRE (no-op se non scrivibile)
@@ -443,12 +456,14 @@ def insert_run(run_data: dict) -> str:
                                "fallback sim_settings (persistente). Errore: %s",
                                str(exc)[:150])
                 _SIM_RUN_FALLBACK_MODE = True
+                _SIM_RUN_FALLBACK_TRIPPED_AT = datetime.now(timezone.utc)
                 # Tentativo recovery one-shot: applica migration e ritenta
                 try:
                     ensure_schema()
                     client.table("sim_runs").insert(payload).execute()
                     logger.info("[SIM] insert_run sim_runs ok DOPO recovery: id=%s", rid)
                     _SIM_RUN_FALLBACK_MODE = False
+                    _SIM_RUN_FALLBACK_TRIPPED_AT = None
                     return rid
                 except Exception as exc2:
                     logger.warning("[SIM] recovery migration fallita: %s", str(exc2)[:120])
@@ -508,7 +523,7 @@ def get_run(run_id: str) -> dict | None:
       4. Local file cache (ephemeral, intra-pod restart only)
       5. In-memory _active_runs del runner (last resort)
     """
-    global _SIM_RUN_FALLBACK_MODE
+    global _SIM_RUN_FALLBACK_MODE, _SIM_RUN_FALLBACK_TRIPPED_AT
     client = _get_client()
 
     # Tier 1: Supabase sim_runs
@@ -527,6 +542,7 @@ def get_run(run_id: str) -> dict | None:
         except Exception as exc:
             if _is_table_missing_error(exc):
                 _SIM_RUN_FALLBACK_MODE = True
+                _SIM_RUN_FALLBACK_TRIPPED_AT = datetime.now(timezone.utc)
                 logger.warning("[SIM] get_run: sim_runs mancante, switch a fallback")
             else:
                 logger.warning("[SIM] get_run Supabase failed: %s", exc)
@@ -620,11 +636,25 @@ def list_runs(category: str | None = None, scenario_type: str | None = None,
     (ottimizzazione egress Supabase). Per il dettaglio completo di un
     singolo run usa get_run(run_id), che carica full_data.
     """
-    global _SIM_RUN_FALLBACK_MODE
+    global _SIM_RUN_FALLBACK_MODE, _SIM_RUN_FALLBACK_TRIPPED_AT
+    global _LAST_SIM_TIER1_ERROR
     client = _get_client()
     primary: list[dict] = []
     used_fallback = False
     _select_cols = "*" if include_full_data else _SIM_RUN_LIGHT_COLS
+
+    # AUTO-RECOVERY: se il flag latcha da piu' di TTL, ri-prova Tier 1.
+    # Un blip transitorio non deve nascondere lo storico per tutto il
+    # ciclo di vita del processo (lo storico utente lo aveva visto).
+    if _SIM_RUN_FALLBACK_MODE and _SIM_RUN_FALLBACK_TRIPPED_AT:
+        elapsed = (datetime.now(timezone.utc)
+                   - _SIM_RUN_FALLBACK_TRIPPED_AT).total_seconds()
+        if elapsed > _SIM_RUN_FALLBACK_TTL_SEC:
+            _SIM_RUN_FALLBACK_MODE = False
+            _SIM_RUN_FALLBACK_TRIPPED_AT = None
+            logger.info(
+                "[SIM] list_runs: auto-recovery dopo %.0fs, riapro Tier 1",
+                elapsed)
 
     # Tier 1: Supabase sim_runs
     if client and not _SIM_RUN_FALLBACK_MODE:
@@ -639,12 +669,45 @@ def list_runs(category: str | None = None, scenario_type: str | None = None,
                 q = q.eq("outcome", outcome)
             r = q.execute()
             primary = r.data or []
+            # successo → azzera l'eventuale ultimo errore tracciato
+            _LAST_SIM_TIER1_ERROR = None
         except Exception as exc:
+            _LAST_SIM_TIER1_ERROR = {
+                "when": datetime.now(timezone.utc).isoformat(),
+                "msg": str(exc)[:300],
+                "select": _select_cols[:60] + ("..." if len(_select_cols) > 60
+                                                else ""),
+            }
             if _is_table_missing_error(exc):
                 _SIM_RUN_FALLBACK_MODE = True
+                _SIM_RUN_FALLBACK_TRIPPED_AT = datetime.now(timezone.utc)
                 logger.warning("[SIM] list_runs: sim_runs mancante, switch a fallback")
             else:
                 logger.warning("[SIM] list_runs sim_runs error: %s", str(exc)[:200])
+                # DEFENSE-IN-DEPTH: se la SELECT con colonne esplicite ha
+                # fallito (es. drift di schema imprevisto), riprova con
+                # SELECT * — paghiamo un po' di egress ma NON nascondiamo
+                # lo storico. Solo quando non in modalita' full_data.
+                if _select_cols != "*":
+                    try:
+                        q2 = client.table("sim_runs").select("*")\
+                            .order("completed_at", desc=True).limit(limit)
+                        if category:
+                            q2 = q2.eq("category", category)
+                        if scenario_type:
+                            q2 = q2.eq("scenario_type", scenario_type)
+                        if outcome:
+                            q2 = q2.eq("outcome", outcome)
+                        r2 = q2.execute()
+                        primary = r2.data or []
+                        logger.info(
+                            "[SIM] list_runs: recovered via SELECT * "
+                            "(%d run, schema drift sospetto)", len(primary))
+                        _LAST_SIM_TIER1_ERROR = None
+                    except Exception as exc2:
+                        logger.warning(
+                            "[SIM] list_runs SELECT * fallback fallito: %s",
+                            str(exc2)[:200])
 
     # Tier 2: Supabase sim_settings (sempre interrogato come merge,
     # cosi' non perdiamo run salvati nel fallback prima della migration)
