@@ -1,0 +1,184 @@
+/* =========================================================================
+ * responsive.css — Layer adattivo per GeoInvest.
+ *
+ * Strategia:
+ *   - File CSS isolato, importato per ULTIMO in index.js così le sue
+ *     regole vincono per specificità/ordine.
+ *   - Override degli inline-style React tramite attribute selectors
+ *     (`[style*="..."]`) + !important. Necessario perché gli inline-style
+ *     hanno specificità superiore alle classi CSS normali.
+ *   - Nessuna modifica al codice React. Per disattivare il responsive
+ *     basta rimuovere `import "./responsive.css"` da `index.js`.
+ *
+ * Breakpoint:
+ *   - 1024px = tablet / desktop ridotto
+ *   - 768px  = tablet portrait / mobile landscape
+ *   - 480px  = phone portrait
+ * ========================================================================= */
+
+/* ── 1024px: layout intermedio ───────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  /* Container delle pagine: riduci padding orizzontale */
+  .main-content {
+    padding: 1rem !important;
+  }
+
+  /* Grid "1fr 1fr 1fr" (3 colonne) → 2 colonne su tablet */
+  [style*="grid-template-columns: 1fr 1fr 1fr"],
+  [style*="grid-template-columns:1fr 1fr 1fr"] {
+    grid-template-columns: 1fr 1fr !important;
+  }
+
+  /* Hero title (About / Entry) ridotto su tablet */
+  h1[style*="font-size: 3.5rem"],
+  h1[style*="fontSize: \"3.5rem\""] {
+    font-size: 2.5rem !important;
+  }
+}
+
+/* ── 768px: tablet portrait / mobile landscape ───────────────────────────── */
+@media (max-width: 768px) {
+  /* App layout: sidebar passa a drawer (l'app gestisce già lo show via
+     `sidebarOpen` state + .mobile-header con hamburger). Forziamo flex
+     column così main occupa larghezza piena quando la sidebar è chiusa. */
+  .app-layout {
+    flex-direction: column !important;
+  }
+
+  .main-content {
+    padding: 0.75rem !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  /* Grid a 2 colonne ("1fr 1fr") → 1 colonna su mobile */
+  [style*="grid-template-columns: 1fr 1fr"],
+  [style*="grid-template-columns:1fr 1fr"] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Grid auto-fit con minmax → forza 1 colonna se gli item sono >= 200px */
+  [style*="grid-template-columns: repeat(auto-fit"],
+  [style*="grid-template-columns:repeat(auto-fit"] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Hero titles più piccoli */
+  h1[style*="font-size: 3.5rem"] { font-size: 2rem !important; }
+  h1[style*="font-size: 2.5rem"] { font-size: 1.6rem !important; }
+
+  /* Section titles e headers */
+  h2[style*="font-size: 1.6rem"] { font-size: 1.2rem !important; }
+  h2[style*="font-size: 1.4rem"] { font-size: 1.1rem !important; }
+
+  /* Section padding ridotto */
+  section[style*="padding: 32px"],
+  section[style*="padding:32px"] {
+    padding: 18px !important;
+  }
+  section[style*="padding: \"32px\""] {
+    padding: 18px !important;
+  }
+
+  /* Cards: padding ridotto, no spreco */
+  [style*="padding: 20px"][style*="border-radius: 12"],
+  [style*="padding: 24px"][style*="border-radius: 12"] {
+    padding: 14px !important;
+  }
+
+  /* Pannello "Ricerca avanzata" + ErrorBoundary modal: full-screen */
+  [style*="position: fixed"][style*="inset: 0"] > div {
+    margin: 0 !important;
+    max-width: 100% !important;
+    border-radius: 8px !important;
+    padding: 14px !important;
+  }
+
+  /* Tastino "Ricerca" in basso a destra: più piccolo */
+  button[title="Ricerca avanzata"] {
+    bottom: 12px !important;
+    right: 12px !important;
+    padding: 7px 12px !important;
+    font-size: 0.72rem !important;
+  }
+
+  /* ChatWidget flottante + Coach Cards floating button: non si sovrappongano */
+  [style*="position: fixed"][style*="top: 1rem"][style*="right: 1rem"] {
+    top: 0.6rem !important;
+    right: 0.6rem !important;
+    width: 36px !important;
+    height: 36px !important;
+  }
+
+  /* Back button (AboutPage, ecc.): non coprire titoli */
+  .back-btn,
+  a[style*="position: fixed"][style*="top: 20px"][style*="left: 20px"] {
+    top: 10px !important;
+    left: 10px !important;
+    padding: 8px 12px !important;
+    font-size: 0.78rem !important;
+  }
+
+  /* Tabelle Recharts e contenuti grafici: lascia scrollare in orizzontale
+     se proprio non si comprimono (meglio scroll che troncare). */
+  table {
+    display: block !important;
+    overflow-x: auto !important;
+    max-width: 100% !important;
+  }
+
+  /* Riduzione font globale per leggibilità senza orizzontalmente troncare */
+  body { font-size: 14px; }
+
+  /* Period selector / chip groups: wrap su più righe */
+  [style*="display: flex"][style*="gap: 4"],
+  [style*="display: flex"][style*="gap: 8"] {
+    flex-wrap: wrap !important;
+  }
+
+  /* Hero chips: centra e wrappa */
+  .hero-chips, [style*="hero-chips"] {
+    justify-content: center !important;
+    flex-wrap: wrap !important;
+  }
+}
+
+/* ── 480px: phone portrait ──────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .main-content { padding: 0.5rem !important; }
+
+  /* Ulteriore riduzione hero + sezioni su schermi molto piccoli */
+  h1[style*="font-size: 3.5rem"] { font-size: 1.7rem !important; }
+  h1[style*="font-size: 2.5rem"] { font-size: 1.4rem !important; }
+
+  section[style*="padding: 32px"],
+  section[style*="padding:32px"] {
+    padding: 14px !important;
+  }
+
+  /* Pulsanti grandi (CTA) più compatti */
+  button[style*="padding: 12px 28px"] {
+    padding: 9px 18px !important;
+    font-size: 0.85rem !important;
+  }
+
+  /* Recharts: forza width 100% e altezza minima */
+  .recharts-responsive-container {
+    min-width: 0 !important;
+    width: 100% !important;
+  }
+
+  /* Tooltip Recharts: non più larghi del viewport */
+  .recharts-tooltip-wrapper {
+    max-width: 90vw !important;
+  }
+}
+
+/* ── Always-on: piccoli aggiustamenti che non rompono nulla ──────────────── */
+img, svg, video, canvas { max-width: 100%; height: auto; }
+input, textarea, select { max-width: 100%; box-sizing: border-box; }
+
+/* Su mobile il body non deve avere overflow orizzontale latente */
+@media (max-width: 768px) {
+  html, body { overflow-x: hidden; }
+}
