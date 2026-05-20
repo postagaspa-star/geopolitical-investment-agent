@@ -335,13 +335,59 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
             "rotation_score": round(score, 2),
         })
 
-    # Ordina per rotation_score desc
+    # ═══════════════════════════════════════════════════════════════════════
+    # SAFETY: detection di "clone fetcher" (≥3 ticker con metriche identiche).
+    # Bug osservato: top-18 con RS5d/20d/60d=0, rotation_score=0, performance
+    # identiche a SPY → fetcher (Polygon rate-limited o yfinance corrotto) ha
+    # restituito la STESSA serie di chiusura per molti ticker diversi. Il
+    # Decision Agent ha gia' diagnosticato la cosa correttamente — non
+    # dobbiamo permettere che decida su questi dati.
+    #
+    # Fingerprint: tuple (c1d, c5d, c20d, c60d) arrotondate. Se >=3 ticker
+    # non-SPY condividono lo STESSO fingerprint, sono cloni del fetcher.
+    # Escludiamo i cloni dal ranking e segnaliamo data_quality=degraded.
+    # ═══════════════════════════════════════════════════════════════════════
+    from collections import Counter as _Counter
+    fp_counts: _Counter = _Counter()
+    for r in rows:
+        if r.get("ticker") == "SPY":
+            continue
+        fp = (r.get("c1d_pct"), r.get("c5d_pct"),
+              r.get("c20d_pct"), r.get("c60d_pct"))
+        if all(v is not None for v in fp):
+            fp_counts[fp] += 1
+    clone_fps = {fp for fp, cnt in fp_counts.items() if cnt >= 3}
+
+    corrupted_tickers: list[str] = []
+    if clone_fps:
+        # Mark e separa i cloni
+        kept_rows: list[dict] = []
+        for r in rows:
+            fp = (r.get("c1d_pct"), r.get("c5d_pct"),
+                  r.get("c20d_pct"), r.get("c60d_pct"))
+            if r.get("ticker") != "SPY" and fp in clone_fps:
+                corrupted_tickers.append(r["ticker"])
+                r["data_quality"] = "corrupted_clone"
+            else:
+                kept_rows.append(r)
+        rows = kept_rows
+        logger.error(
+            "rotation_scan: %d ticker rilevati come CORRUPTED CLONES "
+            "(fingerprint identico tra loro o con SPY), esclusi dal ranking: %s",
+            len(corrupted_tickers), corrupted_tickers[:20])
+
+    # Ordina per rotation_score desc (sui SOLI ticker validi)
     rows.sort(key=lambda r: r["rotation_score"], reverse=True)
 
     data = {
         "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "tickers_total": len(ALL_ROTATION_TICKERS),
         "tickers_scanned": len(rows),
+        # Visibilità della degradazione: il Decision Agent legge questi
+        # campi e adatta il ragionamento (NON usa rotation per scegliere
+        # asset se data_quality != ok).
+        "data_quality": "degraded" if corrupted_tickers else "ok",
+        "corrupted_tickers": corrupted_tickers,
         "spy_benchmark": {
             "c1d_pct": round(spy_1d * 100, 2) if spy_1d is not None else None,
             "c5d_pct": round(spy_5d * 100, 2) if spy_5d is not None else None,
@@ -481,6 +527,27 @@ def format_rotation_for_prompt(data: dict, top_n: int = 18) -> str:
     lines.append("🔄  ROTATION SCAN — UNIVERSO ANTI-CICLICO / SETTORIALE (sempre-on)")
     lines.append("═" * 76)
     lines.append("")
+
+    # ── AVVISO data_quality (se degraded) — ben visibile in cima ──
+    dq = data.get("data_quality", "ok")
+    corrupted = data.get("corrupted_tickers") or []
+    if dq != "ok" and corrupted:
+        lines.append("⚠⚠⚠  AVVISO DATA QUALITY  ⚠⚠⚠")
+        lines.append(
+            f"Il fetcher ha restituito serie OHLCV identiche per "
+            f"{len(corrupted)} ticker — molto probabile rate-limit/cache "
+            "del provider che ha clonato la risposta di SPY su altri ticker."
+        )
+        lines.append(
+            f"Ticker corrotti ESCLUSI dal ranking sottostante: "
+            f"{', '.join(corrupted[:15])}{' …' if len(corrupted) > 15 else ''}"
+        )
+        lines.append(
+            "→ NON usare questa rotation scan per scegliere asset in QUESTO "
+            "run. Affidati a report 4D/8H + tool tecnico ad-hoc."
+        )
+        lines.append("")
+
     lines.append(
         f"Scansione di {data.get('tickers_total', 0)} ticker cross-sector: "
         "defensive, safe-haven, hedge, geopolitical, energy/commodity, "
