@@ -143,6 +143,16 @@ VALID_CATEGORIES: list[str] = list(ROTATION_UNIVERSE.keys())
 _cache: dict[str, Any] = {"timestamp": None, "data": None}
 CACHE_TTL_SEC = 1800  # 30 minuti
 
+# Throttling del fetch — CAUSA RADICE del bug "clone di SPY": fetchare
+# ~90 ticker tutti insieme satura i rate-limit dei provider; le richieste
+# rate-limitate, cadendo su yfinance (libreria NON thread-safe sotto
+# carico), tornavano la serie di SPY clonata su decine di ticker.
+# Limitando la concorrenza i provider non rate-limitano e ogni ticker
+# riceve i propri dati. Scan piu' lento (~45-70s) ma CORRETTO; gira una
+# volta ogni 30 min (cache), quindi la lentezza non e' un problema.
+_FETCH_CONCURRENCY = 6      # max fetch in parallelo
+_FETCH_DELAY_SEC = 0.2     # micro-pausa tra richieste dello stesso slot
+
 
 def invalidate_cache() -> None:
     """Forza il prossimo scan a rifare il fetch (utile per test/manual refresh)."""
@@ -269,19 +279,33 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
             and _cache["data"] is not None):
         return _cache["data"]
 
-    # Fetch SPY + tutti i ticker in parallelo
-    tickers_to_fetch = list(ALL_ROTATION_TICKERS)
-    if "SPY" not in tickers_to_fetch:
-        tickers_to_fetch.append("SPY")
+    # ── Fetch THROTTLED (fix causa-radice del clone di SPY) ──────────────
+    #  1. SPY fetchato PRIMA, da solo → benchmark sempre pulito.
+    #  2. Resto fetchato con concorrenza limitata (semaphore) + micro-pausa
+    #     → i provider non rate-limitano, ogni ticker riceve i SUOI dati.
+    other = [t for t in ALL_ROTATION_TICKERS if t != "SPY"]
 
-    logger.info("rotation_scan: fetching %d tickers (cache miss)...",
-                len(tickers_to_fetch))
+    logger.info("rotation_scan: fetching SPY + %d tickers "
+                "(throttled conc=%d, cache miss)...",
+                len(other), _FETCH_CONCURRENCY)
     fetch_start = datetime.now(timezone.utc).timestamp()
-    results = await asyncio.gather(
-        *[_fetch_ohlcv_async(t) for t in tickers_to_fetch],
+
+    spy_result = await _fetch_ohlcv_async("SPY")
+
+    _sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
+
+    async def _bounded_fetch(tk: str):
+        async with _sem:
+            r = await _fetch_ohlcv_async(tk)
+            await asyncio.sleep(_FETCH_DELAY_SEC)
+            return r
+
+    other_results = await asyncio.gather(
+        *[_bounded_fetch(t) for t in other],
         return_exceptions=False,
     )
-    by_ticker: dict[str, dict | None] = dict(zip(tickers_to_fetch, results))
+    by_ticker: dict[str, dict | None] = {"SPY": spy_result}
+    by_ticker.update(dict(zip(other, other_results)))
     fetch_dur = datetime.now(timezone.utc).timestamp() - fetch_start
     logger.info("rotation_scan: fetch completed in %.1fs", fetch_dur)
 
@@ -292,11 +316,24 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
     spy_20d = _pct_change_n_days(spy_closes, 20)
     spy_60d = _pct_change_n_days(spy_closes, 60)
 
+    # Snapshot della serie SPY per il check di contaminazione diretta.
+    _spy_series_ref = list(spy_closes) if len(spy_closes) >= 10 else None
+
     rows: list[dict] = []
+    spy_contaminated: list[str] = []
     for t in ALL_ROTATION_TICKERS:
         result = by_ticker.get(t)
         closes, highs, lows, volumes = _extract_series(result or {})
         if not closes:
+            continue
+        # CHECK CONTAMINAZIONE DIRETTA: se un ticker non-SPY ha la serie
+        # di chiusura IDENTICA a quella di SPY, il fetcher l'ha clonata
+        # (rate-limit). Per una serie di 280 giorni e' impossibile che
+        # combaci legittimamente — scartiamo subito, prima ancora di
+        # calcolare metriche fasulle.
+        if (t != "SPY" and _spy_series_ref is not None
+                and closes == _spy_series_ref):
+            spy_contaminated.append(t)
             continue
         last = closes[-1]
         c1 = _pct_change_n_days(closes, 1)
@@ -374,9 +411,11 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
             fp_counts[fp] += 1
     clone_fps = {fp for fp, cnt in fp_counts.items() if cnt >= 3}
 
-    corrupted_tickers: list[str] = []
+    # corrupted_tickers parte dai ticker GIA' scartati nel loop perche'
+    # avevano la serie IDENTICA a SPY (check di contaminazione diretta).
+    corrupted_tickers: list[str] = list(spy_contaminated)
     if clone_fps:
-        # Mark e separa i cloni
+        # Mark e separa i cloni rilevati per fingerprint condiviso.
         kept_rows: list[dict] = []
         for r in rows:
             fp = (r.get("c1d_pct"), r.get("c5d_pct"),
@@ -387,10 +426,11 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
             else:
                 kept_rows.append(r)
         rows = kept_rows
+    if corrupted_tickers:
         logger.error(
-            "rotation_scan: %d ticker rilevati come CORRUPTED CLONES "
-            "(fingerprint identico tra loro o con SPY), esclusi dal ranking: %s",
-            len(corrupted_tickers), corrupted_tickers[:20])
+            "rotation_scan: %d ticker CORRUPTED (serie clonata da SPY o "
+            "fingerprint identico), esclusi dal ranking: %s",
+            len(corrupted_tickers), corrupted_tickers[:25])
 
     # Ordina per rotation_score desc (sui SOLI ticker validi)
     rows.sort(key=lambda r: r["rotation_score"], reverse=True)
