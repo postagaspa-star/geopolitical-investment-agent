@@ -539,6 +539,45 @@ def _build_risk_block(asset_class: str = "equity") -> str:
         return ""
 
 
+def _build_short_selling_block() -> str:
+    """
+    Blocco SHORT SELLING — istruisce il Decision Agent a trattare un
+    quadro ribassista come opportunita' SHORT invece di scartarlo.
+    STATICO (non cambia per run). Iniettato SEMPRE nell'assemblaggio del
+    prompt, cosi' la regola vale anche con un prompt base personalizzato
+    dall'utente.
+    """
+    return (
+        "\n" + "=" * 60 + "\n"
+        "SHORT SELLING — SCOMMETTERE AL RIBASSO\n"
+        + "=" * 60 + "\n"
+        "Puoi operare in DUE direzioni, non solo al rialzo:\n"
+        "  - LONG  -> execute_trade(action='BUY'), si chiude con 'SELL'.\n"
+        "  - SHORT -> execute_trade(action='SHORT'), si chiude con 'COVER'.\n"
+        "    Uno SHORT GUADAGNA quando il prezzo SCENDE.\n\n"
+        "REGOLA DI RAGIONAMENTO (obbligatoria):\n"
+        "Se l'analisi tecnica o geopolitica indica che un asset SCENDERA', "
+        "quell'asset NON va scartato. Va valutato come opportunita' SHORT:\n"
+        "  1. Il ribasso e' strutturale e CONTINUERA' (trend down confermato, "
+        "momentum negativo, catalyst ribassista non ancora prezzato)? "
+        "Oppure e' gia' esaurito / vicino a un supporto forte / ipervenduto "
+        "(rischio rimbalzo)?\n"
+        "  2. Se il ribasso ha buona probabilita' di CONTINUARE -> apri uno "
+        "SHORT. Non limitarti a 'evitare' l'asset: lo si shorta.\n"
+        "  3. Se il ribasso e' probabilmente finito -> NON shortare "
+        "(shortare un minimo e' speculare quanto comprare un massimo).\n\n"
+        "RISCHIO SHORT (rigoroso — la perdita di uno short e' teoricamente "
+        "ILLIMITATA se il prezzo sale):\n"
+        "  - Stop-loss OBBLIGATORIO su ogni SHORT, posizionato SOPRA il "
+        "prezzo di entrata (lo short perde se il prezzo SALE).\n"
+        "  - Take-profit SOTTO l'entrata (l'obiettivo e' un prezzo piu' basso).\n"
+        "  - expected_reward_risk = (entry - target) / (stop - entry).\n"
+        "  - Dimensiona come per un long: rispetta il cap del Risk Profile.\n"
+        "  - Un ticker puo' avere UNA sola direzione per volta.\n"
+        + "=" * 60 + "\n"
+    )
+
+
 def _get_decision_prompt(engine: str | None = None) -> str:
     """
     Carica il system prompt del Decision Agent (compat: solo testo).
@@ -1628,15 +1667,21 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
         calib_block = ""
     calib_section = (calib_block + "\n") if calib_block else ""
 
+    # 5c. Short selling: la regola "ribasso = opportunita' short" — STATICA,
+    #     iniettata sempre (vale anche con prompt base personalizzato).
+    short_block = _build_short_selling_block()
+
     # 6. Shared principles (in coda)
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
         text = (directives_block + risk_block + risk_state_block + regime_block
+                + short_block
                 + coach_section + recent_section + calib_section + base_prompt
                 + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
         text = (directives_block + risk_block + risk_state_block + regime_block
+                + short_block
                 + coach_section + recent_section + calib_section + base_prompt)
     return text, coach_card_ids
 
@@ -1727,13 +1772,19 @@ def _get_decision_prompt_split(engine: str | None = None) -> tuple[str, str, lis
 
     coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
 
+    # Short selling: regola "ribasso = opportunita' short" — STATICA
+    # (cacheable), iniettata sempre anche con prompt base personalizzato.
+    short_block = _build_short_selling_block()
+
     try:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
-        static_block = (risk_block + regime_block + coach_section + base_prompt
+        static_block = (risk_block + regime_block + short_block
+                        + coach_section + base_prompt
                         + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
-        static_block = risk_block + regime_block + coach_section + base_prompt
+        static_block = (risk_block + regime_block + short_block
+                        + coach_section + base_prompt)
 
     dynamic_block = (directives_block + risk_state_block + recent_section
                      + calib_section)
@@ -1781,24 +1832,29 @@ DECISION_TOOLS = [
     {
         "name": "execute_trade",
         "description": (
-            "Esegue un ordine sui mercati. Questo è l'UNICO tool per operare e "
-            "copre SIA l'apertura SIA la chiusura/riduzione di posizioni:\n"
-            "  - action='BUY': apre o incrementa una posizione long su `ticker`. "
-            "Allocazione fino al 50% del portafoglio.\n"
-            "  - action='SELL': CHIUDE o RIDUCE una posizione esistente su `ticker`. "
-            "Usa quantity = numero azioni da chiudere (può essere parziale o totale). "
-            "Per chiudere completamente una posizione, leggi prima get_portfolio_state "
-            "per conoscere la quantity esatta detenuta.\n"
-            "Stop-loss e take-profit sono opzionali (decidi tu in base all'ATR e al "
-            "contesto). NON esistono tool separati come 'close_position': la chiusura "
-            "si fa SEMPRE con execute_trade(action='SELL')."
+            "Esegue un ordine sui mercati. UNICO tool per operare — copre "
+            "apertura e chiusura sia su LONG sia su SHORT:\n"
+            "  - action='BUY': apre/incrementa una posizione LONG (scommetti "
+            "al rialzo).\n"
+            "  - action='SELL': CHIUDE o RIDUCE una posizione LONG esistente.\n"
+            "  - action='SHORT': apre/incrementa una posizione SHORT — "
+            "scommetti al RIBASSO, guadagni se il prezzo SCENDE. Usala quando "
+            "il quadro tecnico/geopolitico indica un ribasso che continuera': "
+            "un asset destinato a scendere NON va scartato, va SHORTATO.\n"
+            "  - action='COVER': CHIUDE o RIDUCE una posizione SHORT esistente "
+            "(ricompra le unita' vendute allo scoperto).\n"
+            "Per chiudere completamente una posizione leggi prima "
+            "get_portfolio_state per la quantity esatta. Un ticker puo' avere "
+            "UNA sola direzione per volta. Lo stop-loss su uno SHORT va SOPRA "
+            "l'entry (perdi se sale), su un LONG sotto. NON esistono tool "
+            "separati di chiusura: si usa SEMPRE execute_trade."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "Ticker azionario o crypto (es. AAPL, BTC-USD)"},
-                "action": {"type": "string", "enum": ["BUY", "SELL"],
-                           "description": "BUY = apre/incrementa long. SELL = chiude/riduce posizione esistente."},
+                "action": {"type": "string", "enum": ["BUY", "SELL", "SHORT", "COVER"],
+                           "description": "BUY = apre/incrementa LONG. SELL = chiude/riduce LONG. SHORT = apre/incrementa SHORT (ribasso). COVER = chiude/riduce SHORT."},
                 # FIX: number (non integer). Per equity 1 azione minima e' OK,
                 # ma il Decision standard puo' comprare anche crypto frazionarie
                 # (BTC-USD, ETH-USD), e int blocca queste a quantity=0.
@@ -2288,9 +2344,10 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                 return json.dumps({"error": f"Impossibile ottenere prezzo per {ticker}"})
 
             # ── Risk Profile validation (HARD CONSTRAINTS) ─────────────────
-            # Solo per BUY (SELL = chiusura, non vincolato dal cap allocation).
+            # Per le APERTURE (BUY long, SHORT) — non per le chiusure
+            # (SELL/COVER, non vincolate dal cap allocation).
             # Confidence è 0..100 nel tool schema → normalizza a 0..1.
-            if action == "BUY":
+            if action in ("BUY", "SHORT"):
                 try:
                     import risk_profile as _rp
                     pstate = portfolio.get_portfolio_state()
@@ -2354,7 +2411,17 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     ticker, quantity, current_price,
                     geo_part, tech_part, confidence
                 )
-            else:
+            elif action == "SHORT":
+                result = portfolio.execute_short(
+                    ticker, quantity, current_price,
+                    geo_part, tech_part, confidence
+                )
+            elif action == "COVER":
+                result = portfolio.execute_cover(
+                    ticker, quantity, current_price,
+                    geo_part, tech_part, confidence
+                )
+            else:   # SELL
                 result = portfolio.execute_sell(
                     ticker, quantity, current_price,
                     geo_part, tech_part, confidence
@@ -2376,9 +2443,11 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     "reason": fail_reason, "at": timestamp,
                 }, default=str)
 
-            # Se BUY con SL/TP specificati nel tool: registra anche sui livelli
-            # automatici della posizione (cosi' price_polling li triggera).
-            if action == "BUY" and (stop_loss or take_profit):
+            # Se APERTURA (BUY/SHORT) con SL/TP specificati nel tool: registra
+            # anche sui livelli automatici della posizione. NB: su uno SHORT
+            # lo SL sta SOPRA l'entry — la coerenza direzionale del trigger
+            # auto-exit e' rifinita nello Stadio 3 (auto-exit OFF di default).
+            if action in ("BUY", "SHORT") and (stop_loss or take_profit):
                 try:
                     if stop_loss and stop_loss > 0:
                         portfolio.set_stop_loss(ticker, float(stop_loss), run_id=run_id)

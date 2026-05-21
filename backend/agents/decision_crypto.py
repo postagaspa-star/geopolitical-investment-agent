@@ -295,6 +295,16 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
     except Exception as exc:
         logger.debug("[DEC-CRYPTO] recent decisions block failed: %s", exc)
 
+    # 6b. Short selling: la regola "ribasso = opportunita' short". Vale su
+    #     crypto come su equity (la crypto e' molto volatile → short utile
+    #     ma piu' rischioso). Iniettato sempre, anche con prompt custom.
+    short_block = ""
+    try:
+        from agents.decision import _build_short_selling_block
+        short_block = _build_short_selling_block()
+    except Exception as exc:
+        logger.debug("[DEC-CRYPTO] short block fail: %s", exc)
+
     # 7. Shared principles in coda. Ordine: il blocco regime Standard va
     #    subito dopo il regime_block crypto (il Crypto legge prima il
     #    proprio framework di regime, poi la lettura autorevole dello
@@ -303,11 +313,13 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
         from agents.shared_principles import get_full_risk_block_for_live
         shared = get_full_risk_block_for_live()
         text = (directives_block + risk_block + risk_state_block + regime_block
-                + std_regime_section + coach_section + recent_section + base
+                + std_regime_section + short_block
+                + coach_section + recent_section + base
                 + "\n\n" + "═" * 60 + "\n" + shared)
     except Exception:
         text = (directives_block + risk_block + risk_state_block + regime_block
-                + std_regime_section + coach_section + recent_section + base)
+                + std_regime_section + short_block
+                + coach_section + recent_section + base)
     return text, coach_card_ids
 
 
@@ -373,15 +385,23 @@ CRYPTO_DECISION_TOOLS = [
         "function": {
             "name": "execute_trade",
             "description": (
-                "Esegue un trade crypto. action='BUY' apre/incrementa posizione, "
-                "action='SELL' chiude/riduce. quantity = numero unità (intero)."
+                "Esegue un trade crypto. Copre apertura e chiusura su LONG e "
+                "SHORT:\n"
+                "  - action='BUY': apre/incrementa LONG (scommetti al rialzo).\n"
+                "  - action='SELL': chiude/riduce una posizione LONG.\n"
+                "  - action='SHORT': apre/incrementa SHORT — guadagni se il "
+                "prezzo SCENDE. Una crypto destinata a scendere NON va "
+                "scartata, va SHORTATA.\n"
+                "  - action='COVER': chiude/riduce una posizione SHORT.\n"
+                "quantity = numero unita' (frazionarie ammesse). Un ticker "
+                "puo' avere UNA sola direzione per volta."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string",
                                "description": "Crypto in formato yfinance (BTC-USD, ETH-USD, ...)"},
-                    "action": {"type": "string", "enum": ["BUY", "SELL"]},
+                    "action": {"type": "string", "enum": ["BUY", "SELL", "SHORT", "COVER"]},
                     # number (NON integer): crypto frazionarie obbligatorie.
                     # BTC@$100k: 1 BTC = $100k che eccede risk-cap 30% → l'AI
                     # DEVE poter emettere 0.5 BTC. Lo schema integer bloccava
@@ -720,7 +740,8 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                 return json.dumps({"error": f"Prezzo non disponibile per {ticker}"})
 
             # ── Risk Profile validation (HARD CONSTRAINTS, asset_class=crypto) ─
-            if action == "BUY":
+            # Per le APERTURE (BUY long, SHORT) — non per le chiusure SELL/COVER.
+            if action in ("BUY", "SHORT"):
                 try:
                     import risk_profile as _rp
                     pstate = portfolio.get_portfolio_state()
@@ -785,7 +806,19 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                     geo_reasoning="(crypto-only run)", tech_reasoning=logic_chain,
                     confidence=confidence,
                 )
-            else:
+            elif action == "SHORT":
+                result = portfolio.execute_short(
+                    ticker, quantity, current_price,
+                    geo_reasoning="(crypto-only run)", tech_reasoning=logic_chain,
+                    confidence=confidence,
+                )
+            elif action == "COVER":
+                result = portfolio.execute_cover(
+                    ticker, quantity, current_price,
+                    geo_reasoning="(crypto-only run)", tech_reasoning=logic_chain,
+                    confidence=confidence,
+                )
+            else:   # SELL
                 result = portfolio.execute_sell(
                     ticker, quantity, current_price,
                     geo_reasoning="(crypto-only run)", tech_reasoning=logic_chain,
@@ -807,8 +840,9 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                     "reason": fail_reason, "at": timestamp,
                 }, default=str)
 
-            # Salva SL/TP automatici sulla posizione se BUY con livelli
-            if action == "BUY" and (stop_loss or take_profit):
+            # Salva SL/TP automatici sulla posizione se APERTURA (BUY/SHORT)
+            # con livelli. NB: su uno SHORT lo SL sta SOPRA l'entry.
+            if action in ("BUY", "SHORT") and (stop_loss or take_profit):
                 try:
                     if stop_loss and stop_loss > 0:
                         portfolio.set_stop_loss(ticker, float(stop_loss), run_id=run_id)
