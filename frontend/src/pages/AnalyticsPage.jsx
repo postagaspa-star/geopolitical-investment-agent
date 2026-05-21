@@ -97,7 +97,11 @@ function KpiCard({ label, value, subValue, color, hint }) {
 // Calcola P&L realizzato per coppie BUY-SELL (FIFO).
 // Restituisce array di { ticker, buyPrice, sellPrice, qty, pnl, pnlPct, sellTimestamp, confidence, holdHours }
 function computeClosedTrades(trades) {
-  const buyQueue = {}; // ticker -> [{ price, qty, ts, confidence }]
+  // Due code FIFO separate: long e short non si matchano mai tra loro.
+  // Una gamba APRE se: BUY su book long, oppure SELL su book short.
+  // I trade senza 'direction' → 'LONG' (retro-compatibile).
+  const longQueue = {};  // ticker -> [{ price, qty, ts, confidence }]
+  const shortQueue = {};
   const closed = [];
 
   // Ordino i trade per timestamp crescente
@@ -126,39 +130,52 @@ function computeClosedTrades(trades) {
     // vista SKILL e si applica SOLO dove serve (la calibrazione della
     // confidence, l'Edge Tracker), non al rendimento del portafoglio.
 
-    if (action === 'BUY') {
-      if (!buyQueue[ticker]) buyQueue[ticker] = [];
-      buyQueue[ticker].push({ price, qty, ts, confidence });
-    } else if (action === 'SELL') {
+    const direction = (t.direction ?? 'LONG').toUpperCase();
+    const isShort = direction === 'SHORT';
+    // Una gamba APRE se: BUY su book long, oppure SELL su book short.
+    const opens = isShort ? (action === 'SELL') : (action === 'BUY');
+    const queue = isShort ? shortQueue : longQueue;
+
+    if (opens) {
+      if (!queue[ticker]) queue[ticker] = [];
+      queue[ticker].push({ price, qty, ts, confidence });
+    } else {
+      // Chiusura: matcha contro la coda della direzione corrispondente.
       let remaining = qty;
-      while (remaining > 0 && buyQueue[ticker]?.length) {
-        const buy = buyQueue[ticker][0];
-        // Guard contro buy.price=0 (avrebbe dato NaN su pnlPct)
-        if (!buy.price || buy.price <= 0) {
-          buyQueue[ticker].shift();
+      while (remaining > 0 && queue[ticker]?.length) {
+        const opn = queue[ticker][0];
+        // Guard contro price=0 (avrebbe dato NaN su pnlPct)
+        if (!opn.price || opn.price <= 0) {
+          queue[ticker].shift();
           continue;
         }
-        const matched = Math.min(remaining, buy.qty);
-        const pnl = (price - buy.price) * matched;
-        const pnlPct = ((price - buy.price) / buy.price) * 100;
-        const holdHours = ts && buy.ts
-          ? (new Date(ts).getTime() - new Date(buy.ts).getTime()) / 3600000
+        const matched = Math.min(remaining, opn.qty);
+        // SHORT: guadagni se COPRI piu' basso. LONG: se VENDI piu' alto.
+        const pnl = isShort
+          ? (opn.price - price) * matched
+          : (price - opn.price) * matched;
+        const pnlPct = isShort
+          ? ((opn.price - price) / opn.price) * 100
+          : ((price - opn.price) / opn.price) * 100;
+        const holdHours = ts && opn.ts
+          ? (new Date(ts).getTime() - new Date(opn.ts).getTime()) / 3600000
           : null;
         closed.push({
           ticker,
-          buyPrice: buy.price,
+          direction: isShort ? 'SHORT' : 'LONG',
+          buyPrice: opn.price,
           sellPrice: price,
           qty: matched,
           pnl,
           pnlPct,
-          buyTimestamp: buy.ts,
+          buyTimestamp: opn.ts,
           sellTimestamp: ts,
-          confidence: buy.confidence,
+          confidence: opn.confidence,
           holdHours,
         });
-        buy.qty -= matched;
+        opn.qty -= matched;
         remaining -= matched;
-        if (buy.qty <= 0) buyQueue[ticker].shift();
+        if (opn.qty <= 0) queue[ticker].shift();
       }
     }
   }

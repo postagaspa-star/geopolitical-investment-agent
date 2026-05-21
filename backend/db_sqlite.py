@@ -373,7 +373,17 @@ def update_position_price(ticker, current_price):
     with get_db() as conn:
         pos = conn.execute("SELECT * FROM positions WHERE ticker=?", (ticker,)).fetchone()
         if pos:
-            pnl = (current_price - pos["avg_buy_price"]) * pos["quantity"]
+            # P&L non realizzato DIRECTION-AWARE: una posizione SHORT
+            # guadagna quando il prezzo SCENDE. La formula long avrebbe
+            # mostrato il segno invertito sugli short ad ogni price poll.
+            try:
+                _dir = (pos["direction"] or "LONG").upper()
+            except (KeyError, IndexError):
+                _dir = "LONG"
+            if _dir == "SHORT":
+                pnl = (pos["avg_buy_price"] - current_price) * pos["quantity"]
+            else:
+                pnl = (current_price - pos["avg_buy_price"]) * pos["quantity"]
             conn.execute("UPDATE positions SET current_price=?, unrealized_pnl=? WHERE ticker=?", (current_price, pnl, ticker))
 
 def count_positions():

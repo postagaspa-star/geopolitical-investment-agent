@@ -1160,17 +1160,34 @@ def check_and_execute_auto_exits(prices: dict | None = None) -> list:
 
         # Margine sicurezza: il prezzo deve superare il target di margin_pct%.
         margin = cfg["margin_pct"] / 100.0
-        sl_trigger_price = sl * (1.0 - margin) if sl > 0 else 0
-        tp_trigger_price = tp * (1.0 + margin) if tp > 0 else 0
+        direction = str(p.get("direction") or "LONG").upper()
+        is_short = (direction == "SHORT")
 
         trigger = None
         target_price = None
-        if tp > 0 and cur_price >= tp_trigger_price:
-            trigger = "take_profit"
-            target_price = tp
-        elif sl > 0 and cur_price <= sl_trigger_price:
-            trigger = "stop_loss"
-            target_price = sl
+        if is_short:
+            # SHORT: lo SL sta SOPRA l'entry → si esce in PERDITA se il
+            # prezzo SALE oltre lo SL. Il TP sta SOTTO → si esce in
+            # PROFITTO se il prezzo SCENDE sotto il TP. Logica invertita
+            # rispetto al long.
+            sl_trigger_price = sl * (1.0 + margin) if sl > 0 else 0
+            tp_trigger_price = tp * (1.0 - margin) if tp > 0 else 0
+            if tp > 0 and cur_price <= tp_trigger_price:
+                trigger = "take_profit"
+                target_price = tp
+            elif sl > 0 and cur_price >= sl_trigger_price:
+                trigger = "stop_loss"
+                target_price = sl
+        else:
+            # LONG: SL sotto l'entry, TP sopra.
+            sl_trigger_price = sl * (1.0 - margin) if sl > 0 else 0
+            tp_trigger_price = tp * (1.0 + margin) if tp > 0 else 0
+            if tp > 0 and cur_price >= tp_trigger_price:
+                trigger = "take_profit"
+                target_price = tp
+            elif sl > 0 and cur_price <= sl_trigger_price:
+                trigger = "stop_loss"
+                target_price = sl
 
         if not trigger:
             continue
@@ -1214,14 +1231,24 @@ def check_and_execute_auto_exits(prices: dict | None = None) -> list:
             })
             continue
 
-        # Esegui SELL parziale (o totale se sell_pct=100)
+        # Esegui la chiusura parziale (o totale se sell_pct=100).
+        # SHORT → COVER (ricompra); LONG → SELL. confidence=100 marca
+        # l'operazione come chiusura non-AI (auto-exit).
         try:
-            result = execute_sell(
-                ticker, sell_qty, cur_price,
-                geo_reasoning=f"auto_{trigger}",
-                tech_reasoning=reason,
-                confidence=100,
-            )
+            if is_short:
+                result = execute_cover(
+                    ticker, sell_qty, cur_price,
+                    geo_reasoning=f"auto_{trigger}",
+                    tech_reasoning=reason,
+                    confidence=100,
+                )
+            else:
+                result = execute_sell(
+                    ticker, sell_qty, cur_price,
+                    geo_reasoning=f"auto_{trigger}",
+                    tech_reasoning=reason,
+                    confidence=100,
+                )
             executed.append({
                 "ticker": ticker, "trigger": trigger,
                 "trigger_price": target_price,

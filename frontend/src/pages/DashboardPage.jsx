@@ -424,9 +424,23 @@ export default function DashboardPage({ portfolio, positions, trades, logs }) {
                 const rowClass = pnlPos >= 0 ? "row-positive" : "row-negative";
                 const pnlColor = pnlPos >= 0 ? "#10b981" : "#ef4444";
 
+                const isShortPos =
+                  String(pos.direction || "LONG").toUpperCase() === "SHORT";
+
                 return (
                   <tr key={idx} className={rowClass}>
-                    <td style={{ fontWeight: 600 }}>{pos.ticker}</td>
+                    <td style={{ fontWeight: 600 }}>
+                      {pos.ticker}
+                      {isShortPos && (
+                        <span style={{
+                          marginLeft: 6, fontSize: "0.6rem", fontWeight: 700,
+                          color: "#ef4444", background: "rgba(239,68,68,0.15)",
+                          border: "1px solid rgba(239,68,68,0.45)",
+                          borderRadius: 4, padding: "1px 5px",
+                          verticalAlign: "middle", letterSpacing: "0.03em",
+                        }}>SHORT</span>
+                      )}
+                    </td>
                     <td>{pos.quantity}</td>
                     <td>{formatUSD(pos.avg_buy_price)}</td>
                     <td>{formatUSD(pos.current_price)}</td>

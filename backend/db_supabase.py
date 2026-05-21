@@ -382,7 +382,14 @@ def update_position_price(ticker, current_price):
     client = _get_client()
     pos = get_position(ticker)
     if pos:
-        pnl = (current_price - pos["avg_buy_price"]) * pos["quantity"]
+        # P&L non realizzato DIRECTION-AWARE: una posizione SHORT guadagna
+        # quando il prezzo SCENDE. La formula long avrebbe invertito il
+        # segno sugli short ad ogni aggiornamento prezzo del polling.
+        _dir = str(pos.get("direction") or "LONG").upper()
+        if _dir == "SHORT":
+            pnl = (pos["avg_buy_price"] - current_price) * pos["quantity"]
+        else:
+            pnl = (current_price - pos["avg_buy_price"]) * pos["quantity"]
         client.table("positions").update({
             "current_price": current_price,
             "unrealized_pnl": pnl,
