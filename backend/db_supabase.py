@@ -328,25 +328,49 @@ def get_position(ticker):
     return result.data[0] if result.data else None
 
 
-def upsert_position(ticker, quantity, avg_buy_price, current_price=0):
+def upsert_position(ticker, quantity, avg_buy_price, current_price=0,
+                    direction=None):
     client = _get_client()
-    pnl = (current_price - avg_buy_price) * quantity if current_price > 0 else 0
     existing = get_position(ticker)
-    if existing:
-        client.table("positions").update({
-            "quantity": quantity,
-            "avg_buy_price": avg_buy_price,
-            "current_price": current_price,
-            "unrealized_pnl": pnl,
-        }).eq("ticker", ticker).execute()
+    # direction: se NON passata, PRESERVA quella esistente — un update di
+    # prezzo/ribilanciamento che non specifica direction NON deve
+    # ribaltare uno SHORT a LONG. Nuova posizione senza direction → LONG.
+    if direction is None:
+        direction = (existing.get("direction") if existing else None) or "LONG"
+    direction = "SHORT" if str(direction).upper() == "SHORT" else "LONG"
+    # P&L non realizzato: LONG guadagna se il prezzo SALE, SHORT se SCENDE.
+    if current_price > 0:
+        pnl = ((avg_buy_price - current_price) if direction == "SHORT"
+               else (current_price - avg_buy_price)) * quantity
     else:
-        client.table("positions").insert({
-            "ticker": ticker,
-            "quantity": quantity,
-            "avg_buy_price": avg_buy_price,
-            "current_price": current_price,
-            "unrealized_pnl": pnl,
-        }).execute()
+        pnl = 0
+    base = {
+        "quantity": quantity,
+        "avg_buy_price": avg_buy_price,
+        "current_price": current_price,
+        "unrealized_pnl": pnl,
+    }
+
+    def _write(payload):
+        if existing:
+            client.table("positions").update(payload).eq("ticker", ticker).execute()
+        else:
+            client.table("positions").insert({**payload, "ticker": ticker}).execute()
+
+    try:
+        _write({**base, "direction": direction})
+    except Exception as exc:
+        # Resilienza finestra di deploy: se la colonna 'direction' non
+        # esiste ancora su Supabase (migration add_short_direction.sql
+        # non applicata), NON rompere le posizioni long — riscrivi senza
+        # il tag. Va comunque applicata la migration prima dello Stadio 2.
+        if "direction" in str(exc).lower():
+            logger.warning("upsert_position: colonna 'direction' assente su "
+                           "Supabase — scrivo senza tag (applica la migration "
+                           "add_short_direction.sql)")
+            _write(base)
+        else:
+            raise
 
 
 def delete_position(ticker):
@@ -410,11 +434,17 @@ def count_positions():
 # Trades
 # ============================================================
 
-def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning, final_decision, confidence):
+def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
+                 final_decision, confidence, direction="LONG"):
     """
     Inserisce un trade e ritorna l'ID della riga creata.
+
+    direction = 'LONG' | 'SHORT' — tag che distingue le operazioni sul
+    book long da quelle short (aprire short = SELL+SHORT, coprire =
+    BUY+SHORT). action resta il verbo di mercato 'BUY'/'SELL'.
     """
     client = _get_client()
+    direction = "SHORT" if str(direction).upper() == "SHORT" else "LONG"
     payload = {
         "ticker": ticker,
         "action": action,
@@ -426,7 +456,18 @@ def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
         "final_decision": final_decision,
         "confidence_score": confidence,
     }
-    result = client.table("trades").insert(payload).execute()
+    try:
+        result = client.table("trades").insert({**payload, "direction": direction}).execute()
+    except Exception as exc:
+        # Resilienza finestra di deploy: colonna 'direction' non ancora
+        # presente → inserisci senza tag invece di perdere il trade.
+        if "direction" in str(exc).lower():
+            logger.warning("insert_trade: colonna 'direction' assente su "
+                           "Supabase — inserisco senza tag (applica la "
+                           "migration add_short_direction.sql)")
+            result = client.table("trades").insert(payload).execute()
+        else:
+            raise
     if result.data and len(result.data) > 0:
         return result.data[0].get("id")
     return None

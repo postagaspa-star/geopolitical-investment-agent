@@ -164,7 +164,18 @@ def calculate_total_value():
             else:
                 safe_price = cp
 
-            positions_value += safe_price * qty
+            # SHORT vs LONG: una posizione LONG vale +qty*prezzo; una
+            # SHORT e' una PASSIVITA' (devi ricomprare le azioni) → vale
+            # -qty*prezzo. La cassa contiene gia' i proventi incassati
+            # all'apertura dello short, quindi:
+            #   NAV = cash + Σ_long(qty*prezzo) - Σ_short(qty*prezzo)
+            # Aprire uno short e' NAV-neutro (incassi = passivita'); il
+            # NAV sale solo quando il prezzo scende. Questo evita il bug
+            # della "cassa fantasma" / leva infinita.
+            if str(pos.get("direction") or "LONG").upper() == "SHORT":
+                positions_value -= safe_price * qty
+            else:
+                positions_value += safe_price * qty
         except (TypeError, ValueError) as ex:
             logger.warning("calculate_total_value: error sulla posizione %s: %s",
                            pos.get("ticker"), ex)
@@ -335,6 +346,16 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
     if not allowed:
         return {"success": False, "reason": reason}
 
+    # GUARD direzione: una posizione SHORT su questo ticker va chiusa con
+    # COVER, non con un BUY long (una sola direzione per ticker — la
+    # tabella positions ha UNIQUE su ticker).
+    _exist_dir = get_position(ticker)
+    if (_exist_dir is not None
+            and str(_exist_dir.get("direction") or "LONG").upper() == "SHORT"):
+        return {"success": False, "reason": (
+            f"Esiste una posizione SHORT su {ticker}: chiudila con COVER "
+            "prima di aprire un long. Una sola direzione per ticker.")}
+
     portfolio = get_portfolio()
     gross_cost = quantity * price
     fee = _commission_amount(gross_cost)
@@ -451,6 +472,13 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
             "reason": f"Nessuna posizione aperta per {ticker}",
         }
 
+    # GUARD direzione: SELL chiude un LONG. Una posizione SHORT si chiude
+    # con COVER (execute_cover), non con SELL.
+    if str(existing.get("direction") or "LONG").upper() == "SHORT":
+        return {"success": False, "reason": (
+            f"{ticker} e' una posizione SHORT: per chiuderla usa COVER "
+            "(execute_cover), non SELL.")}
+
     # Verifica che la quantita' da vendere non superi quella posseduta
     if quantity > existing["quantity"]:
         return {
@@ -531,6 +559,224 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
         "remaining_cash": round(new_cash, 2),
         "portfolio_total_value": round(new_total, 2),
         "trade_id": trade_id,   # ID del trade per linkare al mirror status
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SHORT SELLING — apertura/chiusura posizioni allo scoperto
+# ═══════════════════════════════════════════════════════════════════════
+
+def execute_short(ticker, quantity, price, geo_reasoning, tech_reasoning,
+                  confidence):
+    """
+    Apre (o incrementa) una posizione SHORT: 'vende' allo scoperto N azioni
+    a prezzo P incassandone i proventi. Si guadagna se il prezzo SCENDE.
+
+    Contabilita' paper:
+      - cash += proventi netti (gross - commissione).
+      - posizione con direction='SHORT', avg_buy_price = prezzo medio
+        ponderato di SHORT (il prezzo a cui hai 'venduto').
+      - NAV invariato all'apertura (proventi incassati = passivita' assunta),
+        vedi calculate_total_value. Il NAV sale solo se il prezzo scende.
+
+    Guard anti-leva: l'esposizione short lorda totale non puo' superare il
+    NAV corrente (short max 1x, completamente collateralizzato — evita il
+    bug della 'cassa fantasma'/leva infinita).
+    """
+    try:
+        quantity = float(quantity or 0)
+        price = float(price or 0)
+    except (TypeError, ValueError):
+        return {"success": False, "reason": "quantity/price non numerici"}
+    if quantity <= 0:
+        return {"success": False, "reason": f"quantity deve essere > 0 (ricevuto {quantity})"}
+    if price <= 0:
+        return {"success": False, "reason": f"price deve essere > 0 (ricevuto {price})"}
+
+    # Guard direzione: non puoi shortare un ticker su cui sei gia' LONG.
+    existing = get_position(ticker)
+    if (existing is not None
+            and str(existing.get("direction") or "LONG").upper() != "SHORT"):
+        return {"success": False, "reason": (
+            f"Esiste una posizione LONG su {ticker}: chiudila con SELL "
+            "prima di aprire uno short.")}
+
+    portfolio = get_portfolio()
+    if portfolio is None:
+        return {"success": False, "reason": "Portafoglio non inizializzato"}
+
+    gross = quantity * price
+    fee = _commission_amount(gross)
+    net_proceeds = gross - fee
+
+    # Guard anti-leva: esposizione short lorda totale <= NAV.
+    try:
+        nav = calculate_total_value()
+        existing_short_notional = 0.0
+        for p in get_positions():
+            if str(p.get("direction") or "LONG").upper() == "SHORT":
+                existing_short_notional += (
+                    float(p.get("quantity") or 0)
+                    * float(p.get("current_price") or p.get("avg_buy_price") or 0))
+        if nav > 0 and existing_short_notional + gross > nav:
+            return {"success": False, "reason": (
+                f"Esposizione short troppo alta: short totali "
+                f"${existing_short_notional + gross:,.0f} supererebbero il "
+                f"NAV ${nav:,.0f}. Lo short e' limitato a 1x il NAV.")}
+    except Exception as ex:
+        logger.warning("execute_short: leverage guard skipped: %s", ex)
+
+    new_cash = portfolio["cash_balance"] + net_proceeds
+    try:
+        update_portfolio(new_cash, portfolio["total_value"])
+    except Exception as ex:
+        logger.error("execute_short: update_portfolio FAILED %s: %s",
+                     ticker, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}"}
+
+    try:
+        if existing is not None:
+            old_qty = float(existing.get("quantity") or 0)
+            old_avg = float(existing.get("avg_buy_price") or 0)
+            new_qty = old_qty + quantity
+            new_avg = ((old_avg * old_qty + gross) / new_qty
+                       if new_qty > 0 else price)
+            upsert_position(ticker, new_qty, new_avg, price, direction="SHORT")
+        else:
+            upsert_position(ticker, quantity, price, price, direction="SHORT")
+    except Exception as ex:
+        try:
+            update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
+        except Exception:
+            pass
+        logger.error("execute_short: upsert_position FAILED %s: %s",
+                     ticker, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}"}
+
+    new_total = calculate_total_value()
+    _accrue_commission(fee)
+
+    fee_note = f" [fee=${fee:.2f} bps={_get_commission_bps():.1f}]"
+    decision_text = f"SHORT {quantity} {ticker} @ {price:.2f}"
+    try:
+        trade_id = insert_trade(
+            ticker, "SELL", quantity, price, geo_reasoning,
+            (tech_reasoning or "") + fee_note, decision_text, confidence,
+            direction="SHORT",
+        )
+    except Exception as ex:
+        logger.error("execute_short: insert_trade FAILED %s: %s",
+                     ticker, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (trade log): {str(ex)[:200]}"}
+
+    return {
+        "success": True,
+        "action": "SHORT",
+        "direction": "SHORT",
+        "ticker": ticker,
+        "quantity": quantity,
+        "price": price,
+        "gross_proceeds": round(gross, 2),
+        "commission": round(fee, 2),
+        "net_proceeds": round(net_proceeds, 2),
+        "remaining_cash": round(new_cash, 2),
+        "portfolio_total_value": round(new_total, 2),
+        "trade_id": trade_id,
+    }
+
+
+def execute_cover(ticker, quantity, price, geo_reasoning, tech_reasoning,
+                  confidence):
+    """
+    Chiude (o riduce) una posizione SHORT: 'ricompra' N azioni a prezzo P
+    per restituirle. Realized P&L = (prezzo_short - prezzo_cover)*qty - fee
+    → POSITIVO se il prezzo e' SCESO dopo lo short.
+    """
+    try:
+        quantity = float(quantity or 0)
+        price = float(price or 0)
+    except (TypeError, ValueError):
+        return {"success": False, "reason": "quantity/price non numerici"}
+    if quantity <= 0:
+        return {"success": False, "reason": f"quantity deve essere > 0 (ricevuto {quantity})"}
+    if price <= 0:
+        return {"success": False, "reason": f"price deve essere > 0 (ricevuto {price})"}
+
+    existing = get_position(ticker)
+    if existing is None:
+        return {"success": False, "reason": f"Nessuna posizione aperta per {ticker}"}
+    if str(existing.get("direction") or "LONG").upper() != "SHORT":
+        return {"success": False, "reason": (
+            f"{ticker} e' una posizione LONG: per chiuderla usa SELL, non COVER.")}
+
+    held = float(existing.get("quantity") or 0)
+    if quantity > held + 1e-9:
+        return {"success": False, "reason": (
+            f"Quantita' insufficiente: short aperto di {held} {ticker}, "
+            f"richieste {quantity} da coprire.")}
+
+    portfolio = get_portfolio()
+    short_entry = float(existing.get("avg_buy_price") or 0)
+    gross = quantity * price
+    fee = _commission_amount(gross)
+    total_cost = gross + fee
+
+    new_cash = portfolio["cash_balance"] - total_cost
+    try:
+        update_portfolio(new_cash, portfolio["total_value"])
+    except Exception as ex:
+        logger.error("execute_cover: update_portfolio FAILED %s: %s",
+                     ticker, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}"}
+
+    remaining = held - quantity
+    try:
+        if remaining <= 1e-9:
+            delete_position(ticker)
+        else:
+            upsert_position(ticker, remaining, short_entry, price, direction="SHORT")
+    except Exception as ex:
+        try:
+            update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
+        except Exception:
+            pass
+        logger.error("execute_cover: position update FAILED %s: %s",
+                     ticker, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}"}
+
+    new_total = calculate_total_value()
+    _accrue_commission(fee)
+
+    # P&L realizzato SHORT: guadagni se ricompri piu' BASSO del prezzo short.
+    realized_pnl = (short_entry - price) * quantity - fee
+
+    fee_note = f" [fee=${fee:.2f} bps={_get_commission_bps():.1f}]"
+    decision_text = f"COVER {quantity} {ticker} @ {price:.2f}"
+    try:
+        trade_id = insert_trade(
+            ticker, "BUY", quantity, price, geo_reasoning,
+            (tech_reasoning or "") + fee_note, decision_text, confidence,
+            direction="SHORT",
+        )
+    except Exception as ex:
+        logger.error("execute_cover: insert_trade FAILED %s: %s",
+                     ticker, ex, exc_info=True)
+        return {"success": False, "reason": f"DB write fail (trade log): {str(ex)[:200]}"}
+
+    return {
+        "success": True,
+        "action": "COVER",
+        "direction": "SHORT",
+        "ticker": ticker,
+        "quantity": quantity,
+        "price": price,
+        "gross_cost": round(gross, 2),
+        "commission": round(fee, 2),
+        "total_cost": round(total_cost, 2),
+        "realized_pnl": round(realized_pnl, 2),
+        "remaining_cash": round(new_cash, 2),
+        "portfolio_total_value": round(new_total, 2),
+        "trade_id": trade_id,
     }
 
 

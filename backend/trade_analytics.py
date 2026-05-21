@@ -67,13 +67,20 @@ def compute_closed_trades(trades: list,
 
     Coerenza con Analytics: pnl_usd = (sell-buy)*qty, IDENTICO al JS.
     """
-    buy_queue: dict = {}
+    # Due code FIFO separate per ticker: long e short non si matchano
+    # mai tra loro. Classificazione gamba per (action, direction):
+    #   BUY +LONG  → apre long      SELL+LONG  → chiude long
+    #   SELL+SHORT → apre short     BUY +SHORT → chiude short (cover)
+    # I trade storici senza 'direction' → 'LONG' (retro-compatibile).
+    long_queue: dict = {}
+    short_queue: dict = {}
     closed: list = []
 
     srt = sorted(trades or [], key=lambda t: _ts(t.get("timestamp")))
     for t in srt:
         ticker = (t.get("ticker") or "").upper()
         action = (t.get("action") or t.get("side") or "").upper()
+        direction = (t.get("direction") or "LONG").upper()
         try:
             price = float(t.get("price") or 0)
             qty = float(t.get("quantity") or 0)
@@ -87,46 +94,54 @@ def compute_closed_trades(trades: list,
         if not ticker or price <= 0 or qty <= 0:
             continue
         leg_manual = is_manual_close(conf)
-        # NB: NON si salta MAI una gamba qui — nemmeno in vista SKILL.
-        # Saltare un SELL forzato lasciava il BUY corrispondente
-        # "appeso" in coda: un SELL AI successivo lo matchava contro
-        # quantita' gia' liquidate dal circuit breaker → closed-trade
-        # fantasma / quantita' doppie nelle metriche skill. La coda FIFO
-        # deve restare fisicamente coerente. Si TAGGA is_manual e, per
-        # la vista SKILL, si FILTRA l'output a fine funzione.
-        if action == "BUY":
-            # Estratto del ragionamento all'ENTRATA: e' qui che si forma
-            # (o si sbaglia) la confidence. final_decision e' il piu'
-            # sintetico; fallback ai due agenti specialisti.
+        is_short = (direction == "SHORT")
+        # Una gamba APRE se: BUY su book long, oppure SELL su book short.
+        opens = (action == "SELL") if is_short else (action == "BUY")
+
+        # NB: NON si salta MAI una gamba — nemmeno in vista SKILL: la coda
+        # FIFO deve restare fisicamente coerente (saltare una gamba forzata
+        # lascerebbe l'apertura corrispondente "appesa" → closed-trade
+        # fantasma). Si TAGGA is_manual e, per la vista SKILL, si FILTRA
+        # l'output a fine funzione.
+        if opens:
+            # Ragionamento all'ENTRATA (apertura): qui si forma la confidence.
             _reason = (t.get("final_decision") or t.get("technical_reasoning")
                        or t.get("geopolitical_reasoning") or "")
             _reason = " ".join(str(_reason).split())[:240]
-            buy_queue.setdefault(ticker, []).append(
-                {"price": price, "qty": qty, "conf": conf,
-                 "ts": t.get("timestamp"), "reason": _reason,
-                 "manual": leg_manual})
-        elif action == "SELL":
+            leg = {"price": price, "qty": qty, "conf": conf,
+                   "ts": t.get("timestamp"), "reason": _reason,
+                   "manual": leg_manual}
+            (short_queue if is_short else long_queue).setdefault(
+                ticker, []).append(leg)
+        else:
+            q = (short_queue if is_short else long_queue).get(ticker) or []
             remaining = qty
-            while remaining > 0 and buy_queue.get(ticker):
-                buy = buy_queue[ticker][0]
-                if buy["price"] <= 0:
-                    buy_queue[ticker].pop(0)
+            while remaining > 0 and q:
+                opn = q[0]
+                if opn["price"] <= 0:
+                    q.pop(0)
                     continue
-                matched = min(remaining, buy["qty"])
-                pnl_pct = (price - buy["price"]) / buy["price"] * 100.0
-                pnl_usd = (price - buy["price"]) * matched
+                matched = min(remaining, opn["qty"])
+                if is_short:
+                    # SHORT: guadagni se COPRI piu' BASSO del prezzo di short.
+                    pnl_pct = (opn["price"] - price) / opn["price"] * 100.0
+                    pnl_usd = (opn["price"] - price) * matched
+                else:
+                    pnl_pct = (price - opn["price"]) / opn["price"] * 100.0
+                    pnl_usd = (price - opn["price"]) * matched
                 closed.append({"pnl_pct": round(pnl_pct, 3),
                                "pnl_usd": round(pnl_usd, 2),
-                               "confidence": buy["conf"],
+                               "confidence": opn["conf"],
                                "ticker": ticker,
-                               "buy_date": str(buy.get("ts") or "")[:10],
+                               "direction": "SHORT" if is_short else "LONG",
+                               "buy_date": str(opn.get("ts") or "")[:10],
                                "sell_date": str(t.get("timestamp") or "")[:10],
-                               "reason": buy.get("reason") or "",
-                               "is_manual": bool(buy.get("manual")) or leg_manual})
+                               "reason": opn.get("reason") or "",
+                               "is_manual": bool(opn.get("manual")) or leg_manual})
                 remaining -= matched
-                buy["qty"] -= matched
-                if buy["qty"] <= 1e-9:
-                    buy_queue[ticker].pop(0)
+                opn["qty"] -= matched
+                if opn["qty"] <= 1e-9:
+                    q.pop(0)
     if exclude_manual_closes:
         # Vista SKILL: la coda e' stata costruita interamente (corretta),
         # ora si escludono SOLO i round-trip toccati da una gamba non-AI.

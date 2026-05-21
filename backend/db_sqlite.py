@@ -47,6 +47,7 @@ def init_db():
                 ticker TEXT NOT NULL UNIQUE, quantity INTEGER NOT NULL,
                 avg_buy_price REAL NOT NULL, current_price REAL NOT NULL DEFAULT 0,
                 unrealized_pnl REAL NOT NULL DEFAULT 0,
+                direction TEXT NOT NULL DEFAULT 'LONG',
                 opened_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS trades (
@@ -56,6 +57,7 @@ def init_db():
                 quantity INTEGER NOT NULL, price REAL NOT NULL, total_value REAL NOT NULL,
                 geopolitical_reasoning TEXT, technical_reasoning TEXT,
                 final_decision TEXT, confidence_score REAL,
+                direction TEXT NOT NULL DEFAULT 'LONG',
                 timestamp TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS agent_logs (
@@ -228,6 +230,17 @@ def init_db():
             except Exception:
                 pass
 
+        # ── Short selling: tag direction LONG/SHORT su positions e trades ──
+        # 'LONG' di default → tutte le righe esistenti restano corrette
+        # (erano tutte posizioni/trade long).
+        for _tbl in ("positions", "trades"):
+            try:
+                conn.execute(
+                    f"ALTER TABLE {_tbl} ADD COLUMN direction TEXT "
+                    f"NOT NULL DEFAULT 'LONG'")
+            except Exception:
+                pass
+
         # ── Migrazione documenti: aggiunta colonna category ──
         # Permette di separare documenti generici (per Decision normale)
         # da documenti crypto-specific (per Decision Crypto).
@@ -282,16 +295,34 @@ def get_position(ticker):
         row = conn.execute("SELECT * FROM positions WHERE ticker=?", (ticker,)).fetchone()
         return dict(row) if row else None
 
-def upsert_position(ticker, quantity, avg_buy_price, current_price=0):
+def upsert_position(ticker, quantity, avg_buy_price, current_price=0,
+                    direction=None):
     with get_db() as conn:
         existing = conn.execute("SELECT * FROM positions WHERE ticker=?", (ticker,)).fetchone()
-        pnl = (current_price - avg_buy_price) * quantity if current_price > 0 else 0
-        if existing:
-            conn.execute("UPDATE positions SET quantity=?, avg_buy_price=?, current_price=?, unrealized_pnl=? WHERE ticker=?",
-                         (quantity, avg_buy_price, current_price, pnl, ticker))
+        # direction: se NON passata, PRESERVA quella della posizione
+        # esistente — un update di prezzo / ribilanciamento che non
+        # specifica direction NON deve ribaltare uno SHORT a LONG.
+        # Nuova posizione senza direction → LONG.
+        if direction is None:
+            try:
+                direction = existing["direction"] if existing else "LONG"
+            except (KeyError, IndexError):
+                direction = "LONG"
+        direction = "SHORT" if str(direction).upper() == "SHORT" else "LONG"
+        # P&L non realizzato: LONG guadagna se il prezzo SALE, SHORT se SCENDE.
+        if current_price > 0:
+            if direction == "SHORT":
+                pnl = (avg_buy_price - current_price) * quantity
+            else:
+                pnl = (current_price - avg_buy_price) * quantity
         else:
-            conn.execute("INSERT INTO positions (ticker,quantity,avg_buy_price,current_price,unrealized_pnl) VALUES (?,?,?,?,?)",
-                         (ticker, quantity, avg_buy_price, current_price, pnl))
+            pnl = 0
+        if existing:
+            conn.execute("UPDATE positions SET quantity=?, avg_buy_price=?, current_price=?, unrealized_pnl=?, direction=? WHERE ticker=?",
+                         (quantity, avg_buy_price, current_price, pnl, direction, ticker))
+        else:
+            conn.execute("INSERT INTO positions (ticker,quantity,avg_buy_price,current_price,unrealized_pnl,direction) VALUES (?,?,?,?,?,?)",
+                         (ticker, quantity, avg_buy_price, current_price, pnl, direction))
 
 
 def update_position_auto_exit(ticker, stop_loss_price=None, take_profit_price=None, set_by=""):
@@ -349,14 +380,21 @@ def count_positions():
     with get_db() as conn:
         return conn.execute("SELECT COUNT(*) as cnt FROM positions").fetchone()["cnt"]
 
-def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning, final_decision, confidence):
+def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
+                 final_decision, confidence, direction="LONG"):
     """
     Inserisce un trade e ritorna l'ID della riga creata.
+
+    direction = 'LONG' | 'SHORT' — tag che distingue le operazioni sul
+    book long da quelle sul book short. action resta 'BUY'/'SELL' (il
+    verbo di mercato): aprire uno short e' un SELL+SHORT, coprirlo e'
+    un BUY+SHORT.
     """
+    direction = "SHORT" if str(direction).upper() == "SHORT" else "LONG"
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO trades (ticker,action,quantity,price,total_value,geopolitical_reasoning,technical_reasoning,final_decision,confidence_score) VALUES (?,?,?,?,?,?,?,?,?)",
-            (ticker, action, quantity, price, price*quantity, geo_reasoning, tech_reasoning, final_decision, confidence),
+            "INSERT INTO trades (ticker,action,quantity,price,total_value,geopolitical_reasoning,technical_reasoning,final_decision,confidence_score,direction) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ticker, action, quantity, price, price*quantity, geo_reasoning, tech_reasoning, final_decision, confidence, direction),
         )
         return cur.lastrowid
 
