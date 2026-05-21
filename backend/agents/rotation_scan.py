@@ -107,6 +107,22 @@ ROTATION_UNIVERSE: dict[str, list[str]] = {
         "MTUM",  # momentum
         "VLUE",  # value
     ],
+
+    # Singoli titoli ad ALTO MOVIMENTO — semiconduttori, mega-cap tech e
+    # growth ad alta beta. Prima l'universo era quasi solo ETF: uno
+    # scatto +8% su AMD o +7% su INTC era INVISIBILE perche' quei titoli
+    # non venivano nemmeno scansionati. Questi sono i nomi dove gli
+    # spike succedono davvero — vanno tenuti sul radar in OGNI run.
+    "high_movement_equity": [
+        # Semiconduttori (beta alta, movers tipici)
+        "NVDA", "AMD", "INTC", "MU", "AVGO", "QCOM", "TXN", "AMAT",
+        "LRCX", "ARM", "SMCI",
+        # Mega-cap tech / growth
+        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NFLX",
+        "CRM", "ADBE", "ORCL", "NOW", "PLTR", "UBER",
+        # Crypto-correlati equity (si muovono coi cicli BTC)
+        "COIN", "MSTR",
+    ],
 }
 
 # Reverse lookup ticker → categoria
@@ -568,6 +584,31 @@ def format_rotation_for_prompt(data: dict, top_n: int = 18) -> str:
     )
     lines.append(spy_line)
     lines.append("")
+
+    # ── BIGGEST 1-DAY MOVERS ────────────────────────────────────────────
+    # Il rotation_score pesa 5d/20d/60d e NON l'1d: uno scatto fresco di
+    # giornata (es. AMD +8%, INTC +7%) non emergerebbe nei TOP per score.
+    # Questa sezione ordina per |movimento 1d| cosi' gli spike del giorno
+    # sono SEMPRE visibili al Decision Agent, a prescindere dallo score.
+    movers = sorted(
+        [r for r in rows if r.get("c1d_pct") is not None],
+        key=lambda r: abs(r["c1d_pct"]), reverse=True,
+    )[:8]
+    if movers and abs(movers[0]["c1d_pct"]) >= 3.0:
+        lines.append("🚀 BIGGEST 1-DAY MOVERS (scatti di giornata — "
+                     "non filtrati dal rotation_score):")
+        lines.append("")
+        for r in movers:
+            if abs(r["c1d_pct"]) < 3.0:
+                break
+            lines.append(
+                f"  {r['ticker']:<6} ({r.get('category', 'n/a')}): "
+                f"1d {_fmt_pct(r.get('c1d_pct'), 2, True, 6)}%  "
+                f"5d {_fmt_pct(r.get('c5d_pct'), 2, True, 6)}%  "
+                f"RSI {_fmt_num(r.get('rsi14'), 1, 5)}  "
+                f"Vol× {_fmt_num(r.get('vol_ratio_20d'), 2, 4)}"
+            )
+        lines.append("")
 
     # Top N
     n_show = min(top_n, len(rows))
