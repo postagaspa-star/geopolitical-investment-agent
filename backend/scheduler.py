@@ -195,6 +195,30 @@ def is_market_open():
     return False
 
 
+def is_us_market_open() -> bool:
+    """
+    True SOLO se NYSE/NASDAQ e' ORA in orario di contrattazione
+    (9:30-16:00 ET, giorno feriale, no festivita' NYSE).
+
+    DISTINTA da is_market_open(), che ritorna True se UNA QUALSIASI tra
+    NYSE/LSE/XETRA e' aperta. L'universo investibile del bot e'
+    INTERAMENTE USA (azioni ed ETF quotati NYSE/NASDAQ). Per ESEGUIRE
+    un trade equity bisogna gateare su QUESTA funzione: gateare su
+    is_market_open() faceva sì che durante la mattina europea (LSE/XETRA
+    aperte, Wall Street ancora chiusa) il bot aprisse/chiudesse posizioni
+    USA col mercato USA CHIUSO — a prezzi non eseguibili.
+    """
+    now_utc = datetime.now(pytz.utc)
+    if now_utc.weekday() >= 5:
+        return False
+    now_et = now_utc.astimezone(pytz.timezone('America/New_York'))
+    if now_et.strftime("%Y-%m-%d") in NYSE_HOLIDAYS:
+        return False
+    nyse_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    nyse_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    return nyse_open <= now_et <= nyse_close
+
+
 def is_market_holiday() -> bool:
     """
     True se OGGI è un festivo per ALMENO una delle 3 borse target.

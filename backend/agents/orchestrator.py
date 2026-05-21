@@ -102,11 +102,18 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
     equity_focus = [t for t in (focus_tickers or []) if not _is_crypto_ticker(t)]
 
     try:
-        from scheduler import is_market_open, is_standard_agent_active
+        from scheduler import (is_market_open, is_standard_agent_active,
+                               is_us_market_open)
         market_open = is_market_open()
+        # Per ESEGUIRE trade equity serve la borsa USA aperta: l'universo
+        # del bot e' interamente USA. is_market_open() era True anche con
+        # solo LSE/XETRA aperte → il bot chiudeva posizioni USA a mercato
+        # USA chiuso. La route equity gatea su is_us_market_open().
+        us_market_open = is_us_market_open()
         standard_active = is_standard_agent_active()
     except Exception:
         market_open = False
+        us_market_open = False
         standard_active = False
 
     # ─── ROUTE 1: Trigger crypto → Decision Crypto (R1) ───
@@ -171,12 +178,13 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
     #   - is_market_open() True (almeno una borsa target attualmente aperta)
     # Allineato al filtro del Watchdog rebalance: stessi vincoli per evitare
     # disallineamenti che causerebbero spam (watchdog triggera, orchestrator skippa).
-    if not (standard_active and market_open):
+    if not (standard_active and us_market_open):
         block_kind = ("standard_agent_inactive"
                       if not standard_active else "market_closed")
         block_msg = ("Decision Standard non attivo (weekend o festivita' US)"
                      if not standard_active
-                     else "Mercato chiuso (orari NYSE/LSE/XETRA)")
+                     else "Mercato USA chiuso (NYSE/NASDAQ non in orario "
+                          "9:30-16:00 ET) — nessun trade equity eseguibile")
         if _should_emit_block_log(block_kind):
             logger.info("[%s][ORCHESTRATOR] %s — Decision standard skip "
                         "(focus equity: %s)", run_id, block_msg,
@@ -191,6 +199,7 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
                     "equity_focus": equity_focus or focus_tickers,
                     "standard_agent_active": standard_active,
                     "market_open": market_open,
+                    "us_market_open": us_market_open,
                 }))
             except Exception:
                 pass
