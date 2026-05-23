@@ -4145,11 +4145,8 @@ async def portfolio_adjust_cash(
 
         # Ricalcola total con le posizioni attuali
         positions = database.get_positions() or []
-        positions_value = sum(
-            float(p.get("current_price") or 0) * float(p.get("quantity") or 0)
-            for p in positions
-            if float(p.get("current_price") or 0) > 0
-        )
+        # DIRECTION-AWARE: short sottrae, long aggiunge.
+        positions_value = portfolio.compute_positions_value(positions)
         new_total = new_cash + positions_value
 
         database.update_portfolio(round(new_cash, 2), round(new_total, 2))
@@ -4266,11 +4263,8 @@ async def portfolio_restore_cash(
 
         # Calcola nuovo total: cash ripristinato + sum posizioni
         positions = database.get_positions() or []
-        positions_value = sum(
-            float(p.get("current_price") or 0) * float(p.get("quantity") or 0)
-            for p in positions
-            if float(p.get("current_price") or 0) > 0
-        )
+        # DIRECTION-AWARE: short sottrae, long aggiunge.
+        positions_value = portfolio.compute_positions_value(positions)
         new_total = cash + positions_value
 
         database.update_portfolio(round(cash, 2), round(new_total, 2))
@@ -4295,6 +4289,68 @@ async def portfolio_restore_cash(
         }
     except Exception as e:
         logger.error("portfolio_restore_cash error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
+@app.get("/api/admin/portfolio/invariant-check")
+async def portfolio_invariant_check():
+    """Diagnostico read-only: verifica che il `total_value` salvato in
+    portfolio sia coerente con cash + Σ posizioni DIRECTION-AWARE.
+
+    Se delta > $1 c'è un BUG:
+      - cash e' stato mutato senza triggerare un recompute, oppure
+      - una somma di positions_value e' stata fatta senza rispettare
+        la direction (short che doveva sottrarre ha aggiunto).
+
+    Risposta include la scomposizione per ogni posizione, cosi' si vede
+    subito quale contribuisce e con quale segno.
+    """
+    try:
+        p = database.get_portfolio() or {}
+        cash = float(p.get("cash_balance") or 0)
+        saved_total = float(p.get("total_value") or 0)
+        positions = database.get_positions() or []
+        pos_value_truth = portfolio.compute_positions_value(positions)
+        truth_total = cash + pos_value_truth
+        delta = saved_total - truth_total
+        drift_pct = (abs(delta) / abs(truth_total) * 100) if truth_total != 0 else 0
+        ok = abs(delta) < 1.0
+
+        breakdown = []
+        for pos in positions:
+            try:
+                qty = float(pos.get("quantity") or 0)
+                cp = float(pos.get("current_price") or 0)
+                d = str(pos.get("direction") or "LONG").upper()
+                contrib = (-(qty * cp)) if d == "SHORT" else (qty * cp)
+                breakdown.append({
+                    "ticker": pos.get("ticker"),
+                    "direction": d,
+                    "quantity": round(qty, 8),
+                    "current_price": round(cp, 2),
+                    "contribution_to_nav": round(contrib, 2),
+                })
+            except Exception:
+                continue
+
+        return {
+            "ok": ok,
+            "cash_balance": round(cash, 2),
+            "positions_value_truth": round(pos_value_truth, 2),
+            "truth_total_value": round(truth_total, 2),
+            "saved_total_value": round(saved_total, 2),
+            "delta_saved_minus_truth": round(delta, 2),
+            "drift_pct": round(drift_pct, 2),
+            "positions_breakdown": breakdown,
+            "explanation": (
+                "ok=true → il dashboard mostra il valore matematicamente corretto. "
+                "ok=false → bug: cash o positions sono cambiati ma total_value non "
+                "si è aggiornato. Fix: chiama /api/portfolio (forza recompute) "
+                "o cerca NAV_DRIFT_ALERT nei log."
+            ),
+        }
+    except Exception as e:
+        logger.error("portfolio_invariant_check error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
@@ -4329,7 +4385,8 @@ async def portfolio_set_target_total(
         old_cash = float(portfolio_now.get("cash_balance") or 0)
         old_total = float(portfolio_now.get("total_value") or 0)
 
-        # Somma valore di mercato delle posizioni
+        # Somma valore di mercato delle posizioni (DIRECTION-AWARE).
+        # SHORT contribuisce con -qty*cp (passività nel NAV), LONG con +qty*cp.
         positions_value = 0.0
         breakdown = []
         for p in positions:
@@ -4337,10 +4394,12 @@ async def portfolio_set_target_total(
             cp = float(p.get("current_price") or 0)
             if qty <= 0 or cp <= 0:
                 continue
-            mv = qty * cp
+            direction = str(p.get("direction") or "LONG").upper()
+            mv = qty * cp if direction != "SHORT" else -(qty * cp)
             positions_value += mv
             breakdown.append({
                 "ticker": p.get("ticker"),
+                "direction": direction,
                 "quantity": round(qty, 8),
                 "current_price": round(cp, 2),
                 "market_value": round(mv, 2),
@@ -4448,10 +4507,16 @@ async def portfolio_rebuild(confirm: bool = Query(default=False)):
                 logger.warning("rebuild: upsert_position(%s) fallito: %s", tk, ex)
 
         # 2. Compute reconstructed total_value e aggiorna portfolio
-        rec_position_value = sum(
-            current_prices.get(tk, rp["avg_buy_price"]) * rp["quantity"]
-            for tk, rp in rec_positions.items()
-        )
+        # DIRECTION-AWARE: rispetta short come passività (-qty*price).
+        rec_position_value = 0.0
+        for tk, rp in rec_positions.items():
+            price = current_prices.get(tk, rp["avg_buy_price"])
+            qty = rp["quantity"]
+            direction = str(rp.get("direction") or "LONG").upper()
+            if direction == "SHORT":
+                rec_position_value -= price * qty
+            else:
+                rec_position_value += price * qty
         rec_total = rec_cash + rec_position_value
         try:
             database.update_portfolio(round(rec_cash, 2), round(rec_total, 2))

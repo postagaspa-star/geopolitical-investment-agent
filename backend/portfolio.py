@@ -183,20 +183,27 @@ def calculate_total_value():
 
     raw_total = cash + positions_value
 
-    # ── 2. Median sanity (con IQR filter) ──────────────────────────────
-    safe_total = raw_total
+    # ── 2. Drift ALERT (no clamp) ──────────────────────────────────────
+    # PRIMA: se raw_total deviava >25% dalla mediana storica, sostituivo
+    # il valore con la mediana ("safe_total = median_val") e salvavo
+    # quello. Era una toppa che NASCONDEVA i bug invece di mostrarli:
+    # se cash si gonfiava per errore, il dashboard restava al valore
+    # vecchio (mediana) mentre la verita' (cash + positions) era diversa
+    # — il chart usava la verita', il dashboard la versione clampata, e
+    # i due divergevano in silenzio.
+    #
+    # ORA: il valore salvato e' SEMPRE raw_total = cash + Σ posizioni
+    # direction-aware. La verita' della matematica vince. Se rileva un
+    # drift sospetto, si limita a LOGGARE (anche su agent_logs visibile
+    # in dashboard) ma NON modifica il valore. Cosi' i bug si vedono.
     try:
-        from database import get_portfolio_history
+        from database import get_portfolio_history, insert_agent_log
         recent = get_portfolio_history(days=2) or []
-        # Tieni solo gli ultimi 50 snapshot validi (>0)
         recent_vals = sorted(
             float(r["total_value"]) for r in recent
             if r.get("total_value") and float(r["total_value"]) > 0
         )[-50:]
         if len(recent_vals) >= 8:
-            # IQR filter: rimuovi i primi 25% e gli ultimi 25% prima di
-            # calcolare la mediana, per non essere contaminati da snapshot
-            # spurri pre-esistenti.
             n = len(recent_vals)
             q1_idx = n // 4
             q3_idx = (3 * n) // 4
@@ -209,20 +216,61 @@ def calculate_total_value():
                 )
                 if median_val > 0:
                     drift = abs(raw_total - median_val) / median_val
-                    # Soglia 25% (era 30%) — piu' stringente
                     if drift > 0.25:
-                        logger.warning(
-                            "calculate_total_value: raw=%.2f devia %.0f%% dalla mediana "
-                            "trimmed (IQR) %.2f. Uso mediana per display. Audit positions.",
-                            raw_total, drift * 100, median_val,
+                        logger.error(
+                            "NAV_DRIFT_ALERT: raw=%.2f devia %.1f%% dalla mediana "
+                            "trimmed %.2f. cash=%.2f, positions_value=%.2f. "
+                            "Possibile bug cash o posizione corrotta.",
+                            raw_total, drift * 100, median_val, cash, positions_value,
                         )
-                        safe_total = median_val
+                        try:
+                            import json as _json
+                            insert_agent_log("portfolio", "NAV_DRIFT_ALERT", _json.dumps({
+                                "event": "nav_drift_alert",
+                                "raw_total": round(raw_total, 2),
+                                "median_trimmed": round(median_val, 2),
+                                "drift_pct": round(drift * 100, 2),
+                                "cash": round(cash, 2),
+                                "positions_value": round(positions_value, 2),
+                                "open_positions": len(positions),
+                            }, default=str))
+                        except Exception:
+                            pass
     except Exception as ex:
-        logger.debug("calculate_total_value sanity check skipped: %s", ex)
+        logger.debug("calculate_total_value drift check skipped: %s", ex)
 
-    # Persist sempre il safe_total in DB
-    update_portfolio(cash, safe_total)
-    return safe_total
+    # Persist SEMPRE la verita': cash + positions direction-aware
+    update_portfolio(cash, raw_total)
+    return raw_total
+
+
+def compute_positions_value(positions: list) -> float:
+    """Somma DIRECTION-AWARE del valore delle posizioni.
+
+    SHORT è una passività nel NAV → sottrae. LONG aggiunge.
+    Formula:  Σ_long(qty*current_price) - Σ_short(qty*current_price)
+
+    Centralizza la logica per evitare il bug ricorrente di sommare le
+    short come se fossero long (positions_value += qty*cp senza check
+    sulla direzione). Gli endpoint admin di cash management (adjust_cash,
+    restore-cash, target_total, rebuild) la usano per ricalcolare
+    total_value senza re-implementare la logica direction-aware.
+    """
+    total = 0.0
+    for p in positions:
+        try:
+            cp = float(p.get("current_price") or 0)
+            qty = float(p.get("quantity") or 0)
+            if qty <= 0 or cp <= 0:
+                continue
+            direction = str(p.get("direction") or "LONG").upper()
+            if direction == "SHORT":
+                total -= cp * qty
+            else:
+                total += cp * qty
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def get_portfolio_state():
