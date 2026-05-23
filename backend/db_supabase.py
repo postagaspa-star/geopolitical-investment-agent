@@ -830,11 +830,75 @@ def cleanup_old_processed_articles(days=7):
 # ============================================================
 
 def insert_portfolio_snapshot(total_value, cash_balance):
+    """Salva uno snapshot del valore del portafoglio.
+
+    HARD SANITY CAP: rifiuta snapshot con drift >3x (o <1/3x) rispetto
+    all'ultimo snapshot. Movimenti reali non causano mai salti di 3x in
+    pochi minuti; sono sintomo di bug nel calcolo del NAV (es. doppio
+    conteggio di posizioni short prima del fix direction-aware). Le
+    guard piu' fini (IQR median, drift guard del polling) restano i
+    livelli primari di difesa; questo è il backstop al livello DB.
+    """
+    try:
+        tv = float(total_value)
+    except (TypeError, ValueError):
+        logger.warning("insert_portfolio_snapshot: total_value non numerico (%r), skip", total_value)
+        return
+    if tv <= 0:
+        logger.warning("insert_portfolio_snapshot: total_value=%.2f non positivo, skip", tv)
+        return
+
     client = _get_client()
+    # Sanity cap: leggi l'ultimo snapshot e confronta. Se il check fallisce
+    # per errore di rete/DB, fail-open (insert normale) per non degradare
+    # la equity curve in caso di hiccup transitorio.
+    try:
+        last = (client.table("portfolio_snapshots")
+                .select("total_value")
+                .order("timestamp", desc=True)
+                .limit(1).execute())
+        if last.data and last.data[0].get("total_value"):
+            last_val = float(last.data[0]["total_value"])
+            if last_val > 0:
+                ratio = tv / last_val
+                if ratio > 3.0 or ratio < 1 / 3.0:
+                    logger.error(
+                        "insert_portfolio_snapshot REJECT: total_value=%.2f "
+                        "vs last=%.2f (ratio %.2fx). Sintomo di bug nel "
+                        "calcolo NAV — snapshot NON inserito.",
+                        tv, last_val, ratio,
+                    )
+                    return
+    except Exception as exc:
+        logger.debug("insert_portfolio_snapshot sanity check fallita (fail-open): %s", exc)
+
     client.table("portfolio_snapshots").insert({
-        "total_value": total_value,
+        "total_value": tv,
         "cash_balance": cash_balance,
     }).execute()
+
+
+def delete_portfolio_snapshot_by_ts(timestamp_iso):
+    """Cancella uno snapshot specifico per timestamp ISO.
+
+    Usato dall'endpoint admin /api/admin/portfolio-snapshots/outliers
+    per ripulire picchi anomali storici nella equity curve (es. snapshot
+    scritti prima del fix del NAV short-aware). Ritorna True se ha
+    cancellato almeno una riga, False altrimenti.
+    """
+    if not timestamp_iso:
+        return False
+    try:
+        client = _get_client()
+        result = (client.table("portfolio_snapshots")
+                  .delete()
+                  .eq("timestamp", timestamp_iso)
+                  .execute())
+        return bool(result.data)
+    except Exception as exc:
+        logger.warning("delete_portfolio_snapshot_by_ts(%s) fallita: %s",
+                       timestamp_iso, exc)
+        return False
 
 
 def get_portfolio_history(days=30):

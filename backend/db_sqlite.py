@@ -673,11 +673,62 @@ def cleanup_old_processed_articles(days=7):
             (f'-{days} days',))
 
 def insert_portfolio_snapshot(total_value, cash_balance):
-    """Salva uno snapshot del valore del portafoglio."""
-    with get_db() as conn:
-        conn.execute(
-            "INSERT INTO portfolio_snapshots (total_value, cash_balance) VALUES (?,?)",
-            (total_value, cash_balance))
+    """Salva uno snapshot del valore del portafoglio.
+
+    HARD SANITY CAP: rifiuta snapshot con drift >3x (o <1/3x) rispetto
+    all'ultimo snapshot — sintomo di bug nel calcolo NAV. Vedi il
+    commento equivalente in db_supabase.insert_portfolio_snapshot.
+    """
+    try:
+        tv = float(total_value)
+    except (TypeError, ValueError):
+        return
+    if tv <= 0:
+        return
+
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT total_value FROM portfolio_snapshots "
+                "ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+            if row and row[0]:
+                last_val = float(row[0])
+                if last_val > 0:
+                    ratio = tv / last_val
+                    if ratio > 3.0 or ratio < 1 / 3.0:
+                        # Snapshot impossibile per movimenti reali — reject
+                        return
+            conn.execute(
+                "INSERT INTO portfolio_snapshots (total_value, cash_balance) VALUES (?,?)",
+                (tv, cash_balance))
+    except Exception:
+        # Fail-open: preserva comportamento storico se il check si rompe
+        try:
+            with get_db() as conn:
+                conn.execute(
+                    "INSERT INTO portfolio_snapshots (total_value, cash_balance) VALUES (?,?)",
+                    (tv, cash_balance))
+        except Exception:
+            pass
+
+
+def delete_portfolio_snapshot_by_ts(timestamp_iso):
+    """Cancella uno snapshot specifico per timestamp ISO.
+
+    Usato dall'endpoint admin /api/admin/portfolio-snapshots/outliers
+    per ripulire picchi anomali storici nella equity curve.
+    """
+    if not timestamp_iso:
+        return False
+    try:
+        with get_db() as conn:
+            cur = conn.execute(
+                "DELETE FROM portfolio_snapshots WHERE timestamp = ?",
+                (timestamp_iso,))
+            return cur.rowcount > 0
+    except Exception:
+        return False
 
 def get_portfolio_history(days=30):
     """Restituisce lo storico del valore del portafoglio."""

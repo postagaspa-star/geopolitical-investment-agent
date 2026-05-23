@@ -182,7 +182,19 @@ async def get_positions():
                     qty = p.get("quantity", 0)
                     avg = p.get("avg_buy_price", 0)
                     if qty and avg:
-                        p["unrealized_pnl"] = round((quote["price"] - avg) * qty, 2)
+                        # P&L DIRECTION-AWARE: una posizione SHORT guadagna
+                        # quando il prezzo SCENDE → formula invertita.
+                        # Prima di questo fix l'endpoint sovrascriveva al volo
+                        # l'unrealized_pnl corretto (gia' salvato in DB da
+                        # update_position_price) con la formula long-only,
+                        # ribaltando il segno delle posizioni short in dashboard.
+                        direction = str(p.get("direction") or "LONG").upper()
+                        if direction == "SHORT":
+                            p["unrealized_pnl"] = round(
+                                (avg - quote["price"]) * qty, 2)
+                        else:
+                            p["unrealized_pnl"] = round(
+                                (quote["price"] - avg) * qty, 2)
                     p["price_age_seconds"] = quote["age_seconds"]
                     p["price_change_pct"] = quote.get("change_pct", 0)
         except Exception as cache_err:
@@ -4693,6 +4705,116 @@ async def clear_risk_state_auto_sls():
         return result
     except Exception as e:
         logger.error("clear_risk_state_auto_sls: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ============================================================
+# Cleanup snapshot anomali della equity curve
+# ============================================================
+
+def _find_snapshot_outliers(history: list,
+                             drift_threshold: float = 0.30,
+                             stable_threshold: float = 0.10) -> list:
+    """Restituisce i picchi isolati nell'equity curve.
+
+    Un punto è anomalo (= "stub" che esce fuori dal trend) se:
+      - drift verso il precedente > 30%
+      - drift verso il successivo > 30%
+      - prev e next restano stabili tra loro entro il 10%
+        (così sappiamo che è un picco isolato, non un cambio di regime reale)
+
+    Cattura tipicamente snapshot scritti con bug nel calcolo NAV
+    (es. doppio conteggio di posizioni short pre-fix direction-aware).
+    """
+    if len(history) < 3:
+        return []
+    out = []
+    for i in range(1, len(history) - 1):
+        try:
+            prev_v = float(history[i - 1].get("total_value") or 0)
+            cur_v = float(history[i].get("total_value") or 0)
+            next_v = float(history[i + 1].get("total_value") or 0)
+        except (TypeError, ValueError):
+            continue
+        if prev_v <= 0 or cur_v <= 0 or next_v <= 0:
+            continue
+        d_prev = abs(cur_v - prev_v) / prev_v
+        d_next = abs(cur_v - next_v) / next_v
+        d_pn = abs(prev_v - next_v) / max(prev_v, next_v)
+        if (d_prev > drift_threshold
+                and d_next > drift_threshold
+                and d_pn < stable_threshold):
+            out.append({
+                "timestamp": history[i].get("timestamp"),
+                "total_value": cur_v,
+                "prev_value": prev_v,
+                "next_value": next_v,
+                "drift_prev_pct": round(d_prev * 100, 2),
+                "drift_next_pct": round(d_next * 100, 2),
+            })
+    return out
+
+
+@app.get("/api/admin/portfolio-snapshots/outliers")
+async def list_snapshot_outliers(days: int = Query(default=30)):
+    """Preview dei picchi anomali nella equity curve degli ultimi N giorni.
+
+    Sola lettura — non cancella nulla. Usa la DELETE sullo stesso path
+    per fare il cleanup vero.
+    """
+    try:
+        history = database.get_portfolio_history(days=days) or []
+        outliers = _find_snapshot_outliers(history)
+        return {
+            "days": days,
+            "total_snapshots": len(history),
+            "outliers_found": len(outliers),
+            "outliers": outliers,
+        }
+    except Exception as e:
+        logger.error("list_snapshot_outliers fallito: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/api/admin/portfolio-snapshots/outliers")
+async def delete_snapshot_outliers(
+    days: int = Query(default=30),
+    confirm: bool = Query(default=False),
+):
+    """Cancella gli snapshot anomali identificati dalla GET sullo stesso path.
+
+    Safety: confirm=true obbligatorio. Cap di 50 cancellazioni per call.
+
+    Procedura tipica:
+      1. GET  /api/admin/portfolio-snapshots/outliers?days=30           → preview
+      2. DELETE /api/admin/portfolio-snapshots/outliers?days=30&confirm=true
+    """
+    if not confirm:
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "message": "confirm=true richiesto per cancellare",
+        })
+    try:
+        history = database.get_portfolio_history(days=days) or []
+        outliers = _find_snapshot_outliers(history)[:50]
+        deleted = 0
+        for o in outliers:
+            ts = o.get("timestamp")
+            if not ts:
+                continue
+            try:
+                if database.delete_portfolio_snapshot_by_ts(ts):
+                    deleted += 1
+            except Exception as ex:
+                logger.warning("delete snapshot %s fallito: %s", ts, ex)
+        return {
+            "status": "ok",
+            "snapshots_examined": len(history),
+            "outliers_found": len(outliers),
+            "deleted": deleted,
+        }
+    except Exception as e:
+        logger.error("delete_snapshot_outliers fallito: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

@@ -903,6 +903,12 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
         qty = float(p.get("quantity", 0) or 0)
         avg = float(p.get("avg_buy_price", 0) or 0)
         old_current = float(p.get("current_price") or avg)
+        # Direzione (LONG default): serve sotto per il NAV direction-aware.
+        # Una posizione SHORT è una PASSIVITA' nel NAV (-qty*prezzo), non
+        # un asset: senza questo i polling snapshot inflavano l'equity curve
+        # del valore della short (la cassa contiene gia' i proventi
+        # incassati all'apertura → doppio conteggio = picco fittizio).
+        direction = str(p.get("direction") or "LONG").upper()
         if not ticker or qty <= 0:
             continue
         quote = all_quotes.get(ticker)
@@ -936,7 +942,11 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
                                     ticker, old_current, current_price, delta_pct)
             except Exception as e:
                 logger.warning("[POLLING] Errore update_position_price %s: %s", ticker, e)
-            total_position_value += current_price * qty
+            # NAV direction-aware: SHORT sottrae (è passività), LONG aggiunge.
+            if direction == "SHORT":
+                total_position_value -= current_price * qty
+            else:
+                total_position_value += current_price * qty
         else:
             # Quote rifiutato OPPURE non disponibile: usa una FALLBACK SAFE.
             # NON usare old_current (potrebbe essere contaminato da run precedenti
@@ -961,7 +971,11 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
                     cp = avg
             if cp <= 0:
                 cp = avg if avg > 0 else 0
-            total_position_value += cp * qty
+            # NAV direction-aware anche nel fallback path.
+            if direction == "SHORT":
+                total_position_value -= cp * qty
+            else:
+                total_position_value += cp * qty
             if quote is None or "price" not in (quote or {}):
                 logger.debug("[POLLING] %s: nessun quote, fallback %.2f", ticker, cp)
 
