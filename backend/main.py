@@ -4149,7 +4149,16 @@ async def portfolio_adjust_cash(
         positions_value = portfolio.compute_positions_value(positions)
         new_total = new_cash + positions_value
 
-        database.update_portfolio(round(new_cash, 2), round(new_total, 2))
+        database.update_portfolio(
+            round(new_cash, 2), round(new_total, 2),
+            audit_reason="manual_adjust",
+            audit_source="/api/portfolio/adjust-cash",
+            audit_metadata=json.dumps({
+                "delta_requested": round(float(delta), 2),
+                "old_cash": round(old_cash, 2),
+                "positions_value": round(positions_value, 2),
+            }),
+        )
 
         # Scrivi un snapshot subito per allineare il chart
         try:
@@ -4267,7 +4276,16 @@ async def portfolio_restore_cash(
         positions_value = portfolio.compute_positions_value(positions)
         new_total = cash + positions_value
 
-        database.update_portfolio(round(cash, 2), round(new_total, 2))
+        database.update_portfolio(
+            round(cash, 2), round(new_total, 2),
+            audit_reason="manual_restore",
+            audit_source="/api/portfolio/restore-cash",
+            audit_metadata=json.dumps({
+                "old_cash": round(old_cash, 2),
+                "new_cash": round(cash, 2),
+                "positions_value": round(positions_value, 2),
+            }),
+        )
 
         logger.info(
             "Portfolio cash RESTORE: cash %.2f→%.2f, total %.2f→%.2f, positions_value=%.2f",
@@ -4354,6 +4372,54 @@ async def portfolio_invariant_check():
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
+@app.get("/api/admin/portfolio/cash-audit")
+async def portfolio_cash_audit(
+    limit: int = Query(default=100, ge=1, le=1000),
+    days: int | None = Query(default=None, ge=1, le=365),
+    reason: str | None = Query(default=None),
+):
+    """Lista delle ultime mutazioni di cash_balance, piu' recenti per prime.
+
+    Ogni riga ha: timestamp, delta (con segno), old_cash, new_cash,
+    reason (es. 'manual_adjust', 'update_portfolio', 'rebuild_from_trades'),
+    source (path API o funzione), ticker (se ha senso), metadata (JSON).
+
+    Usato per debuggare bug del tipo "cash aggiunto a caso": filtra per
+    finestra temporale e cerca delta sospetti.
+
+    Filtri opzionali:
+      - days: limita agli ultimi N giorni
+      - reason: filtra per motivo esatto (es. "manual_adjust")
+
+    Read-only. Richiede che la migration add_cash_audit_log.sql sia stata
+    applicata; altrimenti ritorna lista vuota.
+    """
+    try:
+        since_iso = None
+        if days:
+            from datetime import datetime, timezone, timedelta
+            since_iso = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = database.get_cash_audit_log(limit=limit, since_iso=since_iso, reason=reason)
+        # Calcola somma dei delta per riassumere
+        total_delta = 0.0
+        for r in rows:
+            try:
+                total_delta += float(r.get("delta") or 0)
+            except (TypeError, ValueError):
+                continue
+        return {
+            "limit": limit,
+            "days": days,
+            "reason": reason,
+            "rows": len(rows),
+            "sum_delta_in_window": round(total_delta, 2),
+            "entries": rows,
+        }
+    except Exception as e:
+        logger.error("portfolio_cash_audit error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
+
+
 @app.post("/api/portfolio/set-target-total")
 async def portfolio_set_target_total(
     target_total: float = Query(..., gt=0, description="Valore target in $ del patrimonio totale"),
@@ -4419,7 +4485,17 @@ async def portfolio_set_target_total(
             })
 
         # Aggiorna portfolio
-        database.update_portfolio(round(new_cash, 2), round(target_total, 2))
+        database.update_portfolio(
+            round(new_cash, 2), round(target_total, 2),
+            audit_reason="manual_target_total",
+            audit_source="/api/portfolio/set-target-total",
+            audit_metadata=json.dumps({
+                "target_total": round(target_total, 2),
+                "old_cash": round(old_cash, 2),
+                "new_cash": round(new_cash, 2),
+                "positions_value": round(positions_value, 2),
+            }),
+        )
 
         logger.info(
             "Portfolio target_total set: target=%.2f, cash %.2f→%.2f, total %.2f→%.2f, "
@@ -4519,7 +4595,16 @@ async def portfolio_rebuild(confirm: bool = Query(default=False)):
                 rec_position_value += price * qty
         rec_total = rec_cash + rec_position_value
         try:
-            database.update_portfolio(round(rec_cash, 2), round(rec_total, 2))
+            database.update_portfolio(
+                round(rec_cash, 2), round(rec_total, 2),
+                audit_reason="rebuild_from_trades",
+                audit_source="/api/admin/rebuild-portfolio-from-trades",
+                audit_metadata=json.dumps({
+                    "rec_cash": round(rec_cash, 2),
+                    "rec_position_value": round(rec_position_value, 2),
+                    "n_positions": len(rec_positions),
+                }),
+            )
         except Exception as ex:
             logger.error("rebuild: update_portfolio fallito: %s", ex)
             return JSONResponse(status_code=500, content={

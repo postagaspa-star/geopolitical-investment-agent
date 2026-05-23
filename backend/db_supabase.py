@@ -300,16 +300,45 @@ def get_portfolio():
     return result.data[0] if result.data else None
 
 
-def update_portfolio(cash_balance, total_value):
+def update_portfolio(cash_balance, total_value,
+                     audit_reason="update_portfolio",
+                     audit_source=None, audit_ticker=None, audit_metadata=None):
+    """Aggiorna cash_balance + total_value e logga ogni variazione di cash
+    nell'audit log (best-effort, no-op se la tabella cash_audit_log non
+    esiste ancora — applica la migration add_cash_audit_log.sql).
+
+    Callers che conoscono il motivo della mutazione (es. execute_buy,
+    adjust_cash, restore_cash) devono passare audit_reason e audit_source
+    per fare un audit ricco. Senza override, la riga di log dice solo
+    "update_portfolio" — utile come traccia ma poco diagnostica.
+    """
     client = _get_client()
-    # Prendi l'id piu' alto
-    row = client.table("portfolio").select("id").order("id", desc=True).limit(1).execute()
-    if row.data:
-        client.table("portfolio").update({
-            "cash_balance": cash_balance,
-            "total_value": total_value,
-            "updated_at": _now_iso(),
-        }).eq("id", row.data[0]["id"]).execute()
+    # Leggi old_cash PRIMA dell'update per calcolare il delta dell'audit.
+    row = (client.table("portfolio")
+           .select("id, cash_balance")
+           .order("id", desc=True).limit(1).execute())
+    if not row.data:
+        return
+    portfolio_id = row.data[0]["id"]
+    try:
+        old_cash = float(row.data[0].get("cash_balance") or 0)
+    except (TypeError, ValueError):
+        old_cash = 0.0
+    client.table("portfolio").update({
+        "cash_balance": cash_balance,
+        "total_value": total_value,
+        "updated_at": _now_iso(),
+    }).eq("id", portfolio_id).execute()
+    # Audit del delta cash (no-op se delta < mezzo cent o tabella missing)
+    try:
+        new_cash = float(cash_balance)
+        delta = new_cash - old_cash
+        if abs(delta) >= 0.005:
+            insert_cash_audit_log(delta, old_cash, new_cash,
+                                  audit_reason, audit_source,
+                                  audit_ticker, audit_metadata)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -876,6 +905,56 @@ def insert_portfolio_snapshot(total_value, cash_balance):
         "total_value": tv,
         "cash_balance": cash_balance,
     }).execute()
+
+
+# ============================================================
+# Cash Audit Log — traccia ogni mutazione di cash_balance
+# ============================================================
+
+def insert_cash_audit_log(delta, old_cash, new_cash, reason,
+                          source=None, ticker=None, metadata=None):
+    """Log di una mutazione di cash. Best-effort: se la tabella non esiste
+    (migration add_cash_audit_log.sql non applicata) la chiamata fa no-op,
+    non rompe il trade.
+    """
+    try:
+        d = float(delta)
+    except (TypeError, ValueError):
+        return
+    if abs(d) < 0.005:
+        return
+    try:
+        client = _get_client()
+        client.table("cash_audit_log").insert({
+            "delta": d,
+            "old_cash": old_cash,
+            "new_cash": new_cash,
+            "reason": reason,
+            "source": source,
+            "ticker": ticker,
+            "metadata": metadata,
+        }).execute()
+    except Exception as exc:
+        logger.debug("cash_audit_log insert skipped (table missing?): %s", exc)
+
+
+def get_cash_audit_log(limit=100, since_iso=None, reason=None):
+    """Ritorna le ultime righe del cash_audit_log, piu' recenti per prime.
+    Se la tabella non esiste ritorna lista vuota.
+    """
+    try:
+        client = _get_client()
+        q = (client.table("cash_audit_log").select("*")
+             .order("timestamp", desc=True)
+             .limit(min(int(limit or 100), 1000)))
+        if since_iso:
+            q = q.gte("timestamp", since_iso)
+        if reason:
+            q = q.eq("reason", reason)
+        return q.execute().data or []
+    except Exception as exc:
+        logger.debug("cash_audit_log read skipped: %s", exc)
+        return []
 
 
 def get_portfolio_history(days=30):

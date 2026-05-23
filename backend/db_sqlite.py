@@ -112,6 +112,23 @@ def init_db():
                 cash_balance REAL NOT NULL,
                 timestamp TEXT NOT NULL DEFAULT (datetime('now'))
             );
+            -- Audit di ogni mutazione di cash_balance del portafoglio.
+            -- Serve per tracciare bug del tipo "cash si aggiunge a caso":
+            -- ogni execute_buy/sell/short/cover e ogni endpoint admin che
+            -- tocca cash scrive una riga qui con delta, reason, source.
+            CREATE TABLE IF NOT EXISTS cash_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                delta REAL NOT NULL,
+                old_cash REAL,
+                new_cash REAL,
+                reason TEXT NOT NULL,
+                source TEXT,
+                ticker TEXT,
+                metadata TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_cash_audit_timestamp
+                ON cash_audit_log (timestamp DESC);
             -- Chat assistant: conversazioni con l'analista AI (DeepSeek-R1).
             -- Ogni conversazione ha un titolo (auto-generato dal primo
             -- messaggio) e una lista di messaggi con ruolo user/assistant.
@@ -282,7 +299,36 @@ def get_portfolio():
         row = conn.execute("SELECT * FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
 
-def update_portfolio(cash_balance, total_value):
+def update_portfolio(cash_balance, total_value,
+                     audit_reason="update_portfolio",
+                     audit_source=None, audit_ticker=None, audit_metadata=None):
+    """Aggiorna cash_balance + total_value e logga ogni variazione cash
+    nell'audit log. Vedi il commento equivalente in db_supabase.
+    """
+    # Leggi old_cash per il delta dell'audit
+    old_cash = 0.0
+    try:
+        with get_db() as conn:
+            r = conn.execute(
+                "SELECT cash_balance FROM portfolio "
+                "ORDER BY id DESC LIMIT 1").fetchone()
+            if r and r[0] is not None:
+                old_cash = float(r[0])
+    except Exception:
+        pass
+    _update_portfolio_raw(cash_balance, total_value)
+    try:
+        new_cash = float(cash_balance)
+        delta = new_cash - old_cash
+        if abs(delta) >= 0.005:
+            insert_cash_audit_log(delta, old_cash, new_cash,
+                                  audit_reason, audit_source,
+                                  audit_ticker, audit_metadata)
+    except Exception:
+        pass
+
+
+def _update_portfolio_raw(cash_balance, total_value):
     with get_db() as conn:
         conn.execute("UPDATE portfolio SET cash_balance=?, total_value=?, updated_at=datetime('now') WHERE id=(SELECT MAX(id) FROM portfolio)", (cash_balance, total_value))
 
@@ -721,6 +767,53 @@ def get_portfolio_history(days=30):
             "WHERE timestamp >= datetime('now', ?) ORDER BY timestamp ASC",
             (f'-{days} days',)).fetchall()
         return [dict(r) for r in rows]
+
+
+# ============================================================
+# Cash Audit Log — traccia ogni mutazione di cash_balance
+# ============================================================
+
+def insert_cash_audit_log(delta, old_cash, new_cash, reason,
+                          source=None, ticker=None, metadata=None):
+    """Log di una mutazione di cash. Best-effort: se la tabella non esiste
+    ancora (migration non applicata) la chiamata fa no-op, non rompe il trade.
+    """
+    try:
+        d = float(delta)
+    except (TypeError, ValueError):
+        return
+    if abs(d) < 0.005:  # rumore < mezzo cent: ignora
+        return
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO cash_audit_log "
+                "(delta, old_cash, new_cash, reason, source, ticker, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (d, old_cash, new_cash, reason, source, ticker, metadata))
+    except Exception:
+        pass
+
+
+def get_cash_audit_log(limit=100, since_iso=None, reason=None):
+    """Ritorna le ultime righe del cash_audit_log, piu' recenti per prime."""
+    try:
+        with get_db() as conn:
+            sql = "SELECT * FROM cash_audit_log WHERE 1=1"
+            params = []
+            if since_iso:
+                sql += " AND timestamp >= ?"
+                params.append(since_iso)
+            if reason:
+                sql += " AND reason = ?"
+                params.append(reason)
+            sql += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(min(int(limit or 100), 1000))
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
 
 def get_first_portfolio_snapshot():
     """Ritorna il primissimo snapshot mai registrato (inizio vita reale).
