@@ -4708,264 +4708,6 @@ async def clear_risk_state_auto_sls():
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-# ============================================================
-# Cleanup snapshot anomali della equity curve
-# ============================================================
-
-def _find_snapshot_outliers(history: list,
-                             window: int = 41,
-                             drift_pct: float = 0.20) -> list:
-    """Restituisce snapshot anomali nell'equity curve usando una sliding
-    window di mediana (robusta sia per picchi isolati che per PLATEAU
-    di snapshot gonfiati).
-
-    Per ogni snapshot calcola la mediana dei `window` punti adiacenti
-    (escluso il centro). Se il valore del punto devia >drift_pct dalla
-    mediana, è un outlier.
-
-    Perché finestra larga (41 = 20 prima + 20 dopo):
-      - Se il bug NAV ha gonfiato il polling per un'ora con polling
-        ogni 5 min, sono ~12 snapshot consecutivi gonfiati. Una finestra
-        di 41 contiene comunque ~29 punti "sani" che dominano la mediana
-        → tutti i 12 punti gonfiati vengono flaggati.
-      - Un cambio di regime reale (es. un trade grosso) muove la
-        mediana gradualmente, quindi non viene flaggato.
-    """
-    n = len(history)
-    if n < 5:
-        return []
-    # Pre-estrai i valori (float, 0 se invalidi)
-    vals: list[float] = []
-    for h in history:
-        try:
-            v = float(h.get("total_value") or 0)
-        except (TypeError, ValueError):
-            v = 0.0
-        vals.append(v)
-
-    half = window // 2
-    out = []
-    for i in range(n):
-        cur = vals[i]
-        if cur <= 0:
-            continue
-        lo = max(0, i - half)
-        hi = min(n, i + half + 1)
-        window_vals = [v for j, v in enumerate(vals[lo:hi], start=lo)
-                       if v > 0 and j != i]
-        if len(window_vals) < 5:
-            continue
-        window_vals.sort()
-        m = len(window_vals)
-        median = (window_vals[m // 2] if m % 2 == 1
-                  else (window_vals[m // 2 - 1] + window_vals[m // 2]) / 2.0)
-        if median <= 0:
-            continue
-        drift = abs(cur - median) / median
-        if drift > drift_pct:
-            out.append({
-                "timestamp": history[i].get("timestamp"),
-                "total_value": round(cur, 2),
-                "window_median": round(median, 2),
-                "drift_pct": round(drift * 100, 2),
-            })
-    return out
-
-
-@app.get("/api/admin/portfolio-snapshots/outliers")
-async def list_snapshot_outliers(
-    days: int = Query(default=30),
-    drift_pct: float = Query(default=0.20),
-):
-    """Preview degli snapshot anomali nella equity curve degli ultimi N giorni.
-
-    drift_pct: soglia di deviazione dalla mediana finestra (default 0.20 = 20%).
-    Abbassala (es. 0.10) per essere piu' sensibile, alzala (es. 0.30) per
-    essere piu' permissivo.
-
-    Sola lettura — usa la DELETE sullo stesso path per il cleanup vero.
-    """
-    try:
-        history = database.get_portfolio_history(days=days) or []
-        outliers = _find_snapshot_outliers(history, drift_pct=drift_pct)
-        return {
-            "days": days,
-            "drift_pct": drift_pct,
-            "total_snapshots": len(history),
-            "outliers_found": len(outliers),
-            "outliers": outliers[:200],  # cap preview a 200 per non sforare risposta
-        }
-    except Exception as e:
-        logger.error("list_snapshot_outliers fallito: %s", e, exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-@app.delete("/api/admin/portfolio-snapshots/outliers")
-async def delete_snapshot_outliers(
-    days: int = Query(default=30),
-    drift_pct: float = Query(default=0.20),
-    confirm: bool = Query(default=False),
-    limit: int = Query(default=500),
-):
-    """Cancella gli snapshot anomali identificati dalla GET sullo stesso path.
-
-    Safety: confirm=true obbligatorio. Cap configurabile via `limit`
-    (default 500 — sufficiente per un plateau di un giorno intero di
-    polling ogni 2-3 min).
-
-    Procedura tipica:
-      1. GET  /api/admin/portfolio-snapshots/outliers?days=30
-      2. DELETE /api/admin/portfolio-snapshots/outliers?days=30&confirm=true
-    """
-    if not confirm:
-        return JSONResponse(status_code=400, content={
-            "status": "error",
-            "message": "confirm=true richiesto per cancellare",
-        })
-    try:
-        history = database.get_portfolio_history(days=days) or []
-        outliers = _find_snapshot_outliers(history, drift_pct=drift_pct)[:max(1, int(limit))]
-        deleted = 0
-        for o in outliers:
-            ts = o.get("timestamp")
-            if not ts:
-                continue
-            try:
-                if database.delete_portfolio_snapshot_by_ts(ts):
-                    deleted += 1
-            except Exception as ex:
-                logger.warning("delete snapshot %s fallito: %s", ts, ex)
-        return {
-            "status": "ok",
-            "snapshots_examined": len(history),
-            "outliers_found": len(outliers),
-            "deleted": deleted,
-        }
-    except Exception as e:
-        logger.error("delete_snapshot_outliers fallito: %s", e, exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-# ── Endpoint a soglia (manual override) ──────────────────────────────────
-# Per quando il detector basato sulla mediana non basta — es. plateau di
-# bug che copre piu' di meta' della finestra, o spike che vuoi taggare
-# direttamente per valore.
-
-@app.get("/api/admin/portfolio-snapshots/by-value")
-async def list_snapshots_by_value(
-    days: int = Query(default=30),
-    min_value: float | None = Query(default=None),
-    max_value: float | None = Query(default=None),
-):
-    """Lista snapshot con total_value entro [min_value, max_value].
-
-    Esempio: portafoglio normale ~100k, vedi spike a 130k.
-      GET ...?days=30&min_value=110000
-      → ti restituisce TUTTI gli snapshot >= 110k (lo spike completo,
-        plateau incluso, indipendentemente da quanto e' largo).
-
-    Sola lettura. Cap a 500 nella risposta per non sforare.
-    """
-    try:
-        history = database.get_portfolio_history(days=days) or []
-        matched = []
-        for h in history:
-            try:
-                v = float(h.get("total_value") or 0)
-            except (TypeError, ValueError):
-                continue
-            if v <= 0:
-                continue
-            if min_value is not None and v < min_value:
-                continue
-            if max_value is not None and v > max_value:
-                continue
-            matched.append({
-                "timestamp": h.get("timestamp"),
-                "total_value": round(v, 2),
-                "cash_balance": h.get("cash_balance"),
-            })
-        return {
-            "days": days,
-            "min_value": min_value,
-            "max_value": max_value,
-            "total_snapshots": len(history),
-            "matched": len(matched),
-            "snapshots": matched[:500],
-        }
-    except Exception as e:
-        logger.error("list_snapshots_by_value fallito: %s", e, exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-@app.delete("/api/admin/portfolio-snapshots/by-value")
-async def delete_snapshots_by_value(
-    days: int = Query(default=30),
-    min_value: float | None = Query(default=None),
-    max_value: float | None = Query(default=None),
-    confirm: bool = Query(default=False),
-    limit: int = Query(default=500),
-):
-    """Cancella snapshot con total_value entro [min_value, max_value].
-
-    Safety:
-      - confirm=true obbligatorio.
-      - Almeno uno tra min_value e max_value DEVE essere specificato
-        (per evitare di cancellare tutto per sbaglio).
-      - Cap configurabile via `limit` (default 500).
-
-    Esempio per pulire un plateau a ~130k su un portafoglio da ~100k:
-      DELETE ...?days=30&min_value=110000&confirm=true
-    """
-    if not confirm:
-        return JSONResponse(status_code=400, content={
-            "status": "error",
-            "message": "confirm=true richiesto per cancellare",
-        })
-    if min_value is None and max_value is None:
-        return JSONResponse(status_code=400, content={
-            "status": "error",
-            "message": "specifica almeno min_value o max_value "
-                       "(safety: evita la cancellazione di tutto)",
-        })
-    try:
-        history = database.get_portfolio_history(days=days) or []
-        cap = max(1, int(limit))
-        deleted = 0
-        examined = 0
-        for h in history:
-            if deleted >= cap:
-                break
-            examined += 1
-            try:
-                v = float(h.get("total_value") or 0)
-            except (TypeError, ValueError):
-                continue
-            if v <= 0:
-                continue
-            if min_value is not None and v < min_value:
-                continue
-            if max_value is not None and v > max_value:
-                continue
-            ts = h.get("timestamp")
-            if not ts:
-                continue
-            try:
-                if database.delete_portfolio_snapshot_by_ts(ts):
-                    deleted += 1
-            except Exception as ex:
-                logger.warning("delete snapshot %s fallito: %s", ts, ex)
-        return {
-            "status": "ok",
-            "snapshots_examined": examined,
-            "deleted": deleted,
-            "limit": cap,
-        }
-    except Exception as e:
-        logger.error("delete_snapshots_by_value fallito: %s", e, exc_info=True)
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-
 class FixEntryPricesPayload(BaseModel):
     """
     Riallinea l'avg_buy_price delle posizioni aperte al vero prezzo
@@ -6822,12 +6564,25 @@ async def live_research_stats():
 
 
 @app.get("/api/portfolio/history")
-async def get_portfolio_history(period: str = Query(default="30d")):
+async def get_portfolio_history(
+    period: str = Query(default="30d"),
+    anchor_tolerance: float = Query(default=0.25),
+):
     """Restituisce lo storico del valore del portafoglio.
 
     Periodi supportati:
       1h, 4h, 1d  -> intraday (ultimo giorno, snapshot ogni minuto via price polling)
       7d/1w, 30d/1m, 90d/3m, all
+
+    ANCHORED SANITIZATION (sola lettura, non modifica il DB):
+    Il `total_value` corrente del portafoglio (tabella `portfolio`) e' la
+    fonte di verita'. Gli snapshot che si scostano da quel valore di piu'
+    di `anchor_tolerance` (default 0.25 = 25%) NON vengono restituiti.
+    Sono quasi sempre artefatti di bug nel calcolo NAV (es. doppio
+    conteggio short pre-fix direction-aware). I dati nel DB restano
+    intoccati: e' solo il chart che vede una versione "pulita".
+
+    Per disabilitare e vedere i dati raw (debug): anchor_tolerance=0.
     """
     try:
         days_map = {
@@ -6838,13 +6593,37 @@ async def get_portfolio_history(period: str = Query(default="30d")):
             "all": 3650,
         }
         days = days_map.get(period.lower(), 30)
-        history = database.get_portfolio_history(days=days)
+        history = database.get_portfolio_history(days=days) or []
+
+        # ── Anchored sanitization ─────────────────────────────────────
+        if anchor_tolerance > 0 and history:
+            try:
+                p_live = database.get_portfolio()
+                anchor = float(p_live.get("total_value", 0)) if p_live else 0
+                if anchor > 0:
+                    filtered = []
+                    for s in history:
+                        try:
+                            v = float(s.get("total_value") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if v <= 0:
+                            continue
+                        # Scostamento dal valore live (ground truth)
+                        if abs(v - anchor) / anchor <= anchor_tolerance:
+                            filtered.append(s)
+                    history = filtered
+            except Exception as anchor_err:
+                # Se l'ancora non si legge, ritorna il raw senza bloccare
+                logger.debug("anchored sanitization skipped: %s", anchor_err)
+
         if not history:
             p = database.get_portfolio()
             val = p["total_value"] if p else 100000
             cash = p["cash_balance"] if p else 100000
             from datetime import datetime, timezone
-            history = [{"total_value": val, "cash_balance": cash, "timestamp": datetime.now(timezone.utc).isoformat()}]
+            history = [{"total_value": val, "cash_balance": cash,
+                        "timestamp": datetime.now(timezone.utc).isoformat()}]
         return history
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})

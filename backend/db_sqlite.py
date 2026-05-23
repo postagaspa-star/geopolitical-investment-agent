@@ -713,23 +713,6 @@ def insert_portfolio_snapshot(total_value, cash_balance):
             pass
 
 
-def delete_portfolio_snapshot_by_ts(timestamp_iso):
-    """Cancella uno snapshot specifico per timestamp ISO.
-
-    Usato dall'endpoint admin /api/admin/portfolio-snapshots/outliers
-    per ripulire picchi anomali storici nella equity curve.
-    """
-    if not timestamp_iso:
-        return False
-    try:
-        with get_db() as conn:
-            cur = conn.execute(
-                "DELETE FROM portfolio_snapshots WHERE timestamp = ?",
-                (timestamp_iso,))
-            return cur.rowcount > 0
-    except Exception:
-        return False
-
 def get_portfolio_history(days=30):
     """Restituisce lo storico del valore del portafoglio."""
     with get_db() as conn:

@@ -878,29 +878,6 @@ def insert_portfolio_snapshot(total_value, cash_balance):
     }).execute()
 
 
-def delete_portfolio_snapshot_by_ts(timestamp_iso):
-    """Cancella uno snapshot specifico per timestamp ISO.
-
-    Usato dall'endpoint admin /api/admin/portfolio-snapshots/outliers
-    per ripulire picchi anomali storici nella equity curve (es. snapshot
-    scritti prima del fix del NAV short-aware). Ritorna True se ha
-    cancellato almeno una riga, False altrimenti.
-    """
-    if not timestamp_iso:
-        return False
-    try:
-        client = _get_client()
-        result = (client.table("portfolio_snapshots")
-                  .delete()
-                  .eq("timestamp", timestamp_iso)
-                  .execute())
-        return bool(result.data)
-    except Exception as exc:
-        logger.warning("delete_portfolio_snapshot_by_ts(%s) fallita: %s",
-                       timestamp_iso, exc)
-        return False
-
-
 def get_portfolio_history(days=30):
     """
     Ritorna gli snapshot di portafoglio degli ultimi N giorni.
