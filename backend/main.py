@@ -6564,25 +6564,12 @@ async def live_research_stats():
 
 
 @app.get("/api/portfolio/history")
-async def get_portfolio_history(
-    period: str = Query(default="30d"),
-    anchor_tolerance: float = Query(default=0.25),
-):
+async def get_portfolio_history(period: str = Query(default="30d")):
     """Restituisce lo storico del valore del portafoglio.
 
     Periodi supportati:
       1h, 4h, 1d  -> intraday (ultimo giorno, snapshot ogni minuto via price polling)
       7d/1w, 30d/1m, 90d/3m, all
-
-    ANCHORED SANITIZATION (sola lettura, non modifica il DB):
-    Il `total_value` corrente del portafoglio (tabella `portfolio`) e' la
-    fonte di verita'. Gli snapshot che si scostano da quel valore di piu'
-    di `anchor_tolerance` (default 0.25 = 25%) NON vengono restituiti.
-    Sono quasi sempre artefatti di bug nel calcolo NAV (es. doppio
-    conteggio short pre-fix direction-aware). I dati nel DB restano
-    intoccati: e' solo il chart che vede una versione "pulita".
-
-    Per disabilitare e vedere i dati raw (debug): anchor_tolerance=0.
     """
     try:
         days_map = {
@@ -6593,37 +6580,13 @@ async def get_portfolio_history(
             "all": 3650,
         }
         days = days_map.get(period.lower(), 30)
-        history = database.get_portfolio_history(days=days) or []
-
-        # ── Anchored sanitization ─────────────────────────────────────
-        if anchor_tolerance > 0 and history:
-            try:
-                p_live = database.get_portfolio()
-                anchor = float(p_live.get("total_value", 0)) if p_live else 0
-                if anchor > 0:
-                    filtered = []
-                    for s in history:
-                        try:
-                            v = float(s.get("total_value") or 0)
-                        except (TypeError, ValueError):
-                            continue
-                        if v <= 0:
-                            continue
-                        # Scostamento dal valore live (ground truth)
-                        if abs(v - anchor) / anchor <= anchor_tolerance:
-                            filtered.append(s)
-                    history = filtered
-            except Exception as anchor_err:
-                # Se l'ancora non si legge, ritorna il raw senza bloccare
-                logger.debug("anchored sanitization skipped: %s", anchor_err)
-
+        history = database.get_portfolio_history(days=days)
         if not history:
             p = database.get_portfolio()
             val = p["total_value"] if p else 100000
             cash = p["cash_balance"] if p else 100000
             from datetime import datetime, timezone
-            history = [{"total_value": val, "cash_balance": cash,
-                        "timestamp": datetime.now(timezone.utc).isoformat()}]
+            history = [{"total_value": val, "cash_balance": cash, "timestamp": datetime.now(timezone.utc).isoformat()}]
         return history
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
