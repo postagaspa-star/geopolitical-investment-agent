@@ -4149,16 +4149,18 @@ async def portfolio_adjust_cash(
         positions_value = portfolio.compute_positions_value(positions)
         new_total = new_cash + positions_value
 
-        database.update_portfolio(
-            round(new_cash, 2), round(new_total, 2),
-            audit_reason="manual_adjust",
-            audit_source="/api/portfolio/adjust-cash",
-            audit_metadata=json.dumps({
-                "delta_requested": round(float(delta), 2),
-                "old_cash": round(old_cash, 2),
-                "positions_value": round(positions_value, 2),
-            }),
-        )
+        database.update_portfolio(round(new_cash, 2), round(new_total, 2))
+        try:
+            database.insert_cash_audit_log(
+                delta=round(float(delta), 2),
+                old_cash=round(old_cash, 2),
+                new_cash=round(new_cash, 2),
+                reason="manual_adjust",
+                source="/api/portfolio/adjust-cash",
+                metadata=json.dumps({"positions_value": round(positions_value, 2)}),
+            )
+        except Exception:
+            pass
 
         # Scrivi un snapshot subito per allineare il chart
         try:
@@ -4276,16 +4278,18 @@ async def portfolio_restore_cash(
         positions_value = portfolio.compute_positions_value(positions)
         new_total = cash + positions_value
 
-        database.update_portfolio(
-            round(cash, 2), round(new_total, 2),
-            audit_reason="manual_restore",
-            audit_source="/api/portfolio/restore-cash",
-            audit_metadata=json.dumps({
-                "old_cash": round(old_cash, 2),
-                "new_cash": round(cash, 2),
-                "positions_value": round(positions_value, 2),
-            }),
-        )
+        database.update_portfolio(round(cash, 2), round(new_total, 2))
+        try:
+            database.insert_cash_audit_log(
+                delta=round(cash - old_cash, 2),
+                old_cash=round(old_cash, 2),
+                new_cash=round(cash, 2),
+                reason="manual_restore",
+                source="/api/portfolio/restore-cash",
+                metadata=json.dumps({"positions_value": round(positions_value, 2)}),
+            )
+        except Exception:
+            pass
 
         logger.info(
             "Portfolio cash RESTORE: cash %.2f→%.2f, total %.2f→%.2f, positions_value=%.2f",
@@ -4485,17 +4489,21 @@ async def portfolio_set_target_total(
             })
 
         # Aggiorna portfolio
-        database.update_portfolio(
-            round(new_cash, 2), round(target_total, 2),
-            audit_reason="manual_target_total",
-            audit_source="/api/portfolio/set-target-total",
-            audit_metadata=json.dumps({
-                "target_total": round(target_total, 2),
-                "old_cash": round(old_cash, 2),
-                "new_cash": round(new_cash, 2),
-                "positions_value": round(positions_value, 2),
-            }),
-        )
+        database.update_portfolio(round(new_cash, 2), round(target_total, 2))
+        try:
+            database.insert_cash_audit_log(
+                delta=round(new_cash - old_cash, 2),
+                old_cash=round(old_cash, 2),
+                new_cash=round(new_cash, 2),
+                reason="manual_target_total",
+                source="/api/portfolio/set-target-total",
+                metadata=json.dumps({
+                    "target_total": round(target_total, 2),
+                    "positions_value": round(positions_value, 2),
+                }),
+            )
+        except Exception:
+            pass
 
         logger.info(
             "Portfolio target_total set: target=%.2f, cash %.2f→%.2f, total %.2f→%.2f, "
@@ -4595,16 +4603,22 @@ async def portfolio_rebuild(confirm: bool = Query(default=False)):
                 rec_position_value += price * qty
         rec_total = rec_cash + rec_position_value
         try:
-            database.update_portfolio(
-                round(rec_cash, 2), round(rec_total, 2),
-                audit_reason="rebuild_from_trades",
-                audit_source="/api/admin/rebuild-portfolio-from-trades",
-                audit_metadata=json.dumps({
-                    "rec_cash": round(rec_cash, 2),
-                    "rec_position_value": round(rec_position_value, 2),
-                    "n_positions": len(rec_positions),
-                }),
-            )
+            old_cash_before_rebuild = float((database.get_portfolio() or {}).get("cash_balance", 0))
+            database.update_portfolio(round(rec_cash, 2), round(rec_total, 2))
+            try:
+                database.insert_cash_audit_log(
+                    delta=round(rec_cash - old_cash_before_rebuild, 2),
+                    old_cash=round(old_cash_before_rebuild, 2),
+                    new_cash=round(rec_cash, 2),
+                    reason="rebuild_from_trades",
+                    source="/api/admin/rebuild-portfolio-from-trades",
+                    metadata=json.dumps({
+                        "rec_position_value": round(rec_position_value, 2),
+                        "n_positions": len(rec_positions),
+                    }),
+                )
+            except Exception:
+                pass
         except Exception as ex:
             logger.error("rebuild: update_portfolio fallito: %s", ex)
             return JSONResponse(status_code=500, content={
@@ -6714,12 +6728,24 @@ async def live_research_stats():
 
 
 @app.get("/api/portfolio/history")
-async def get_portfolio_history(period: str = Query(default="30d")):
+async def get_portfolio_history(
+    period: str = Query(default="30d"),
+    max_points: int = Query(default=500, ge=50, le=5000),
+):
     """Restituisce lo storico del valore del portafoglio.
 
     Periodi supportati:
       1h, 4h, 1d  -> intraday (ultimo giorno, snapshot ogni minuto via price polling)
       7d/1w, 30d/1m, 90d/3m, all
+
+    DOWNSAMPLING SERVER-SIDE (egress reduction):
+    Con polling ogni 10min, 30 giorni = ~4300 snapshot ≈ 350KB per chiamata.
+    Se il dashboard refresha il chart ogni 5 min, sono ~100MB/giorno solo
+    per questo endpoint. Inutile: per il chart bastano ~500 punti uniformi.
+
+    Se `len(history) > max_points`, riduco prendendo un campione ogni
+    `ceil(len/max_points)` punti. Gli ULTIMI 50 punti restano sempre
+    integrali (per non perdere risoluzione vicino a "adesso").
     """
     try:
         days_map = {
@@ -6730,13 +6756,28 @@ async def get_portfolio_history(period: str = Query(default="30d")):
             "all": 3650,
         }
         days = days_map.get(period.lower(), 30)
-        history = database.get_portfolio_history(days=days)
+        history = database.get_portfolio_history(days=days) or []
+
+        # Downsample se troppi punti
+        if len(history) > max_points:
+            tail_keep = min(50, max_points // 4)  # ultimi N punti integrali
+            head_quota = max_points - tail_keep
+            head_history = history[:-tail_keep] if tail_keep else history
+            tail_history = history[-tail_keep:] if tail_keep else []
+            if head_quota > 0 and len(head_history) > head_quota:
+                step = max(1, len(head_history) // head_quota)
+                head_sampled = head_history[::step]
+            else:
+                head_sampled = head_history
+            history = head_sampled + tail_history
+
         if not history:
             p = database.get_portfolio()
             val = p["total_value"] if p else 100000
             cash = p["cash_balance"] if p else 100000
             from datetime import datetime, timezone
-            history = [{"total_value": val, "cash_balance": cash, "timestamp": datetime.now(timezone.utc).isoformat()}]
+            history = [{"total_value": val, "cash_balance": cash,
+                        "timestamp": datetime.now(timezone.utc).isoformat()}]
         return history
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})

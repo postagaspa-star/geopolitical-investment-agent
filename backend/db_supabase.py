@@ -300,45 +300,25 @@ def get_portfolio():
     return result.data[0] if result.data else None
 
 
-def update_portfolio(cash_balance, total_value,
-                     audit_reason="update_portfolio",
-                     audit_source=None, audit_ticker=None, audit_metadata=None):
-    """Aggiorna cash_balance + total_value e logga ogni variazione di cash
-    nell'audit log (best-effort, no-op se la tabella cash_audit_log non
-    esiste ancora — applica la migration add_cash_audit_log.sql).
+def update_portfolio(cash_balance, total_value):
+    """Aggiorna cash_balance + total_value sull'unica riga del portafoglio.
 
-    Callers che conoscono il motivo della mutazione (es. execute_buy,
-    adjust_cash, restore_cash) devono passare audit_reason e audit_source
-    per fare un audit ricco. Senza override, la riga di log dice solo
-    "update_portfolio" — utile come traccia ma poco diagnostica.
+    NOTA egress: questa funzione viene chiamata da OGNI tick di polling
+    e da ogni trade. Per evitare di consumare la quota Supabase fa il
+    minimo indispensabile: una SELECT id (necessaria per identificare
+    la riga) + una UPDATE. Nessun audit log automatico — i callers che
+    vogliono auditare (es. adjust_cash, restore-cash) chiamano
+    `insert_cash_audit_log` direttamente, dato che hanno old_cash in
+    scope senza doverlo rileggere dal DB.
     """
     client = _get_client()
-    # Leggi old_cash PRIMA dell'update per calcolare il delta dell'audit.
-    row = (client.table("portfolio")
-           .select("id, cash_balance")
-           .order("id", desc=True).limit(1).execute())
-    if not row.data:
-        return
-    portfolio_id = row.data[0]["id"]
-    try:
-        old_cash = float(row.data[0].get("cash_balance") or 0)
-    except (TypeError, ValueError):
-        old_cash = 0.0
-    client.table("portfolio").update({
-        "cash_balance": cash_balance,
-        "total_value": total_value,
-        "updated_at": _now_iso(),
-    }).eq("id", portfolio_id).execute()
-    # Audit del delta cash (no-op se delta < mezzo cent o tabella missing)
-    try:
-        new_cash = float(cash_balance)
-        delta = new_cash - old_cash
-        if abs(delta) >= 0.005:
-            insert_cash_audit_log(delta, old_cash, new_cash,
-                                  audit_reason, audit_source,
-                                  audit_ticker, audit_metadata)
-    except Exception:
-        pass
+    row = client.table("portfolio").select("id").order("id", desc=True).limit(1).execute()
+    if row.data:
+        client.table("portfolio").update({
+            "cash_balance": cash_balance,
+            "total_value": total_value,
+            "updated_at": _now_iso(),
+        }).eq("id", row.data[0]["id"]).execute()
 
 
 # ============================================================
@@ -612,13 +592,55 @@ def get_geopolitical_snapshots(limit=20):
 
 
 # ============================================================
-# Settings
+# Settings (con cache in-memory TTL per ridurre l'egress)
 # ============================================================
+# Le settings vengono lette da decine di code path ad ogni ciclo
+# (agenti, polling, decision, ecc.). Senza cache, ogni get_setting
+# è una chiamata API a Supabase → fettissimo del nostro egress era
+# proprio questo. La cache TTL 30s riduce di ~100x il traffico.
+#
+# set_setting() invalida la chiave per non servire valori stantii
+# dopo una scrittura.
+
+import time as _time
+from threading import Lock as _Lock
+_settings_cache: dict = {}
+_settings_cache_lock = _Lock()
+_SETTINGS_TTL = 30  # secondi
+
+
+def _cache_get(key):
+    """Ritorna (hit, value). hit=False se mancante o scaduto."""
+    with _settings_cache_lock:
+        entry = _settings_cache.get(key)
+        if entry and entry[0] > _time.monotonic():
+            return True, entry[1]
+    return False, None
+
+
+def _cache_put(key, value):
+    with _settings_cache_lock:
+        _settings_cache[key] = (_time.monotonic() + _SETTINGS_TTL, value)
+
+
+def _cache_invalidate(key=None):
+    with _settings_cache_lock:
+        if key is None:
+            _settings_cache.clear()
+        else:
+            _settings_cache.pop(key, None)
+            _settings_cache.pop("__all__", None)
+
 
 def get_setting(key, default=None):
+    hit, value = _cache_get(key)
+    if hit:
+        return value if value is not None else default
     client = _get_client()
     result = client.table("settings").select("value").eq("key", key).limit(1).execute()
-    return result.data[0]["value"] if result.data else default
+    value = result.data[0]["value"] if result.data else None
+    _cache_put(key, value)
+    return value if value is not None else default
 
 
 def set_setting(key, value):
@@ -628,12 +650,25 @@ def set_setting(key, value):
         "value": str(value),
         "updated_at": _now_iso(),
     }).execute()
+    # Invalida cache per non servire il valore vecchio al prossimo read
+    _cache_invalidate(key)
 
 
 def get_all_settings():
+    hit, value = _cache_get("__all__")
+    if hit:
+        return value
     client = _get_client()
     result = client.table("settings").select("key, value").execute()
-    return {r["key"]: r["value"] for r in (result.data or [])}
+    data = {r["key"]: r["value"] for r in (result.data or [])}
+    _cache_put("__all__", data)
+    return data
+
+
+def invalidate_settings_cache():
+    """Esportata per test e per /api/admin endpoints che modificano i settings
+    senza passare da set_setting (es. SQL diretto via psycopg2)."""
+    _cache_invalidate()
 
 
 # ============================================================

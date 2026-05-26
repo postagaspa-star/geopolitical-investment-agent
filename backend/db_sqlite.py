@@ -299,36 +299,8 @@ def get_portfolio():
         row = conn.execute("SELECT * FROM portfolio ORDER BY id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
 
-def update_portfolio(cash_balance, total_value,
-                     audit_reason="update_portfolio",
-                     audit_source=None, audit_ticker=None, audit_metadata=None):
-    """Aggiorna cash_balance + total_value e logga ogni variazione cash
-    nell'audit log. Vedi il commento equivalente in db_supabase.
-    """
-    # Leggi old_cash per il delta dell'audit
-    old_cash = 0.0
-    try:
-        with get_db() as conn:
-            r = conn.execute(
-                "SELECT cash_balance FROM portfolio "
-                "ORDER BY id DESC LIMIT 1").fetchone()
-            if r and r[0] is not None:
-                old_cash = float(r[0])
-    except Exception:
-        pass
-    _update_portfolio_raw(cash_balance, total_value)
-    try:
-        new_cash = float(cash_balance)
-        delta = new_cash - old_cash
-        if abs(delta) >= 0.005:
-            insert_cash_audit_log(delta, old_cash, new_cash,
-                                  audit_reason, audit_source,
-                                  audit_ticker, audit_metadata)
-    except Exception:
-        pass
-
-
-def _update_portfolio_raw(cash_balance, total_value):
+def update_portfolio(cash_balance, total_value):
+    """Aggiorna cash_balance + total_value. Vedi commento egress in db_supabase."""
     with get_db() as conn:
         conn.execute("UPDATE portfolio SET cash_balance=?, total_value=?, updated_at=datetime('now') WHERE id=(SELECT MAX(id) FROM portfolio)", (cash_balance, total_value))
 
