@@ -650,6 +650,10 @@ async def _risk_safety_job():
                         cur = float(p.get("current_price") or 0)
                         if avg <= 0 or cur <= 0:
                             continue
+                        # DIRECTION-AWARE: SHORT skipped (lock-in/trailing non
+                        # supportano SHORT, vedi risk_state.py).
+                        if (p.get("direction") or "LONG").upper() == "SHORT":
+                            continue
                         pnl_pct = (cur - avg) / avg * 100.0
                         if pnl_pct < 5.0:
                             continue

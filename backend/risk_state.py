@@ -567,7 +567,13 @@ def compute_lock_in_sl_price(position: dict,
 def apply_lock_in_protection(position: dict, current_price: float | None = None) -> dict:
     """
     Applica lock-in se necessario. Ritorna risultato action.
+
+    SAFETY: la logica lock-in attuale (compute_lock_in_sl_price + le soglie)
+    presume LONG. Per le SHORT i segni vanno invertiti — non e' implementato.
+    Skip esplicito per evitare di settare un SL al posto sbagliato.
     """
+    if (position.get("direction") or "LONG").upper() == "SHORT":
+        return {"applied": False, "reason": "short_lock_in_not_supported"}
     if not should_apply_lock_in(position, current_price):
         return {"applied": False, "reason": "not_eligible"}
     new_sl = compute_lock_in_sl_price(position)
@@ -682,6 +688,14 @@ def apply_trailing_stop_if_needed(position: dict,
     il trailing si MUOVE SU, mai giu'.
     """
     try:
+        # SAFETY: il trailing stop attuale supporta solo LONG (peak/SL sotto).
+        # Per le SHORT servirebbe la logica inversa (floor + SL sopra), che
+        # non e' implementata. Skippo per evitare di settare SL al posto
+        # sbagliato e fermare la short prematuramente.
+        direction = (position.get("direction") or "LONG").upper()
+        if direction == "SHORT":
+            return {"applied": False, "reason": "short_trailing_not_supported"}
+
         avg = float(position.get("avg_buy_price") or 0)
         if avg <= 0:
             return {"applied": False, "reason": "no_avg"}

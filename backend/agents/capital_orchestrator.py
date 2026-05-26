@@ -173,9 +173,17 @@ def _build_full_portfolio_snapshot() -> dict:
         current_price = float(p.get("current_price", 0) or 0)
         if current_price <= 0:
             current_price = avg_buy
-        current_value = qty * current_price
-        pnl_abs = (current_price - avg_buy) * qty
-        pnl_pct = ((current_price / avg_buy) - 1.0) * 100 if avg_buy > 0 else 0.0
+        # DIRECTION-AWARE: SHORT è passività nel NAV → contributo negativo.
+        # P&L SHORT positivo se prezzo scende (avg - cur).
+        direction = (p.get("direction") or "LONG").upper()
+        if direction == "SHORT":
+            current_value = -(qty * current_price)
+            pnl_abs = (avg_buy - current_price) * qty
+            pnl_pct = ((avg_buy - current_price) / avg_buy * 100) if avg_buy > 0 else 0.0
+        else:
+            current_value = qty * current_price
+            pnl_abs = (current_price - avg_buy) * qty
+            pnl_pct = ((current_price / avg_buy) - 1.0) * 100 if avg_buy > 0 else 0.0
 
         # Età posizione
         age_hours = 0
@@ -192,22 +200,27 @@ def _build_full_portfolio_snapshot() -> dict:
         is_crypto = _is_crypto_ticker(ticker)
         positions_data.append({
             "ticker": ticker,
+            "direction": direction,
             "is_crypto": is_crypto,
             "quantity": round(qty, 6),
             "avg_buy_price": round(avg_buy, 4),
             "current_price": round(current_price, 4),
-            "current_value": round(current_value, 2),
+            "current_value": round(current_value, 2),   # firmato (- per SHORT)
             "pnl_abs": round(pnl_abs, 2),
             "pnl_pct": round(pnl_pct, 2),
             "age_hours": age_hours,
             "agent_owner": "crypto" if is_crypto else "standard",
         })
-        total_nav += current_value
+        total_nav += current_value   # gia' firmato direction-aware
 
-    # Aggiorna pct_of_nav ora che conosciamo il totale
+    # Aggiorna pct_of_nav ora che conosciamo il totale (con valore assoluto:
+    # il "peso" di una SHORT nel NAV e' la sua esposizione lorda, non il segno).
     for pos in positions_data:
-        pos["pct_of_nav"] = round((pos["current_value"] / total_nav * 100)
-                                   if total_nav > 0 else 0.0, 2)
+        pos["pct_of_nav"] = round(
+            (abs(pos["current_value"]) / total_nav * 100)
+            if total_nav > 0 else 0.0,
+            2,
+        )
 
     return {
         "total_nav_usd": round(total_nav, 2),

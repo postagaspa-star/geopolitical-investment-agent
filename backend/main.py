@@ -3647,6 +3647,14 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
     positions: dict = {}
     anomalies: list = []
 
+    # DIRECTION-AWARE: ogni trade ha (action, direction). Le 4 combinazioni:
+    #   action=BUY  + direction=LONG   → apre/aumenta LONG, cash -= value
+    #   action=SELL + direction=LONG   → chiude/riduce LONG, cash += value
+    #   action=SELL + direction=SHORT  → apre/aumenta SHORT, cash += value (proventi)
+    #   action=BUY  + direction=SHORT  → cover SHORT, cash -= value (costo riacquisto)
+    # Prima il replay assumeva tutto LONG: per gli SHORT, l'apertura veniva
+    # marcata come "SELL impossibile" anomaly (cash perso) e il cover come
+    # un nuovo LONG fantasma — distorcendo audit e rebuild.
     for t in trades_asc:
         try:
             ticker = (t.get("ticker") or "").upper()
@@ -3654,6 +3662,9 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
             qty = float(t.get("quantity") or 0)
             price = float(t.get("price") or 0)
             tid = t.get("id") or t.get("trade_id")
+            direction = (t.get("direction") or "LONG").upper()
+            if direction not in ("LONG", "SHORT"):
+                direction = "LONG"
 
             if not ticker or qty <= 0 or price <= 0:
                 anomalies.append({
@@ -3665,63 +3676,102 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
                 continue
 
             value = qty * price
+            is_open = (action == "BUY" and direction == "LONG") or \
+                      (action == "SELL" and direction == "SHORT")
+            is_close = (action == "SELL" and direction == "LONG") or \
+                       (action == "BUY" and direction == "SHORT")
 
-            if action == "BUY":
-                # Sanity check: BUY > 90% del cash al momento è sospetto
-                if cash > 0 and value > cash * 0.9:
+            if is_open:
+                # ── Apertura o incremento ─────────────────────────────────
+                if direction == "LONG":
+                    if cash > 0 and value > cash * 0.9:
+                        anomalies.append({
+                            "trade_id": tid, "ticker": ticker, "action": action,
+                            "direction": direction,
+                            "quantity": qty, "price": price, "value": round(value, 2),
+                            "cash_before": round(cash, 2),
+                            "reason": f"BUY anomalo: {value:.0f}$ con cash {cash:.0f}$ "
+                                      f"({100*value/cash:.0f}% del cash)",
+                            "timestamp": t.get("timestamp"),
+                        })
+                    if value > cash:
+                        anomalies.append({
+                            "trade_id": tid, "ticker": ticker, "action": action,
+                            "direction": direction,
+                            "quantity": qty, "price": price, "value": round(value, 2),
+                            "cash_before": round(cash, 2),
+                            "reason": f"IMPOSSIBILE: BUY {value:.2f}$ con cash {cash:.2f}$. Trade ignorato.",
+                            "timestamp": t.get("timestamp"),
+                            "skipped": True,
+                        })
+                        continue
+                    cash -= value
+                else:  # SHORT open
+                    cash += value  # proventi (gross; audit non distingue fee)
+
+                pos = positions.get(ticker)
+                if pos is None:
+                    positions[ticker] = {
+                        "quantity": qty, "avg_buy_price": price, "direction": direction,
+                    }
+                elif (pos.get("direction") or "LONG").upper() != direction:
+                    # Mismatch: tentativo di aprire LONG su un ticker che ha
+                    # gia' una SHORT aperta (o viceversa). Anomalia + undo cash.
+                    if direction == "LONG":
+                        cash += value
+                    else:
+                        cash -= value
                     anomalies.append({
                         "trade_id": tid, "ticker": ticker, "action": action,
-                        "quantity": qty, "price": price, "value": round(value, 2),
-                        "cash_before": round(cash, 2),
-                        "reason": f"BUY anomalo: {value:.0f}$ con cash {cash:.0f}$ "
-                                  f"({100*value/cash:.0f}% del cash)",
-                        "timestamp": t.get("timestamp"),
-                    })
-
-                if value > cash:
-                    # Trade impossibile: avrebbe portato cash negativo
-                    anomalies.append({
-                        "trade_id": tid, "ticker": ticker, "action": action,
-                        "quantity": qty, "price": price, "value": round(value, 2),
-                        "cash_before": round(cash, 2),
-                        "reason": f"IMPOSSIBILE: BUY {value:.2f}$ con cash {cash:.2f}$ "
-                                  f"(cash negativo a {cash - value:.2f}$). Trade ignorato nel replay.",
+                        "direction": direction,
+                        "reason": f"Direction mismatch: posizione esistente {pos.get('direction')} "
+                                  f"per {ticker}, trade tenta di aprire {direction}",
                         "timestamp": t.get("timestamp"),
                         "skipped": True,
                     })
                     continue
-
-                cash -= value
-                if ticker in positions:
-                    p = positions[ticker]
-                    old_total = p["avg_buy_price"] * p["quantity"]
-                    new_qty = p["quantity"] + qty
-                    p["avg_buy_price"] = (old_total + value) / new_qty if new_qty > 0 else price
-                    p["quantity"] = new_qty
                 else:
-                    positions[ticker] = {"quantity": qty, "avg_buy_price": price}
+                    # Media ponderata sul cost basis (gross value)
+                    old_total = pos["avg_buy_price"] * pos["quantity"]
+                    new_qty = pos["quantity"] + qty
+                    pos["avg_buy_price"] = (old_total + value) / new_qty if new_qty > 0 else price
+                    pos["quantity"] = new_qty
 
-            elif action == "SELL":
-                p = positions.get(ticker)
-                if p is None or p["quantity"] < qty - 1e-9:
+            elif is_close:
+                # ── Chiusura o riduzione ──────────────────────────────────
+                pos = positions.get(ticker)
+                pos_dir = (pos.get("direction") if pos else "LONG") or "LONG"
+                if (pos is None
+                        or pos_dir.upper() != direction
+                        or pos["quantity"] < qty - 1e-9):
                     anomalies.append({
                         "trade_id": tid, "ticker": ticker, "action": action,
+                        "direction": direction,
                         "quantity": qty, "price": price,
-                        "reason": f"SELL impossibile: posseduti "
-                                  f"{p['quantity'] if p else 0} {ticker}, venduti {qty}",
+                        "reason": (f"{action} {direction} impossibile: "
+                                   f"{(pos.get('quantity') if pos else 0)} "
+                                   f"{pos_dir if pos else 'NONE'} {ticker} in posizione, "
+                                   f"richiesti {qty} {direction}"),
                         "timestamp": t.get("timestamp"),
                         "skipped": True,
                     })
                     continue
 
-                cash += value
-                p["quantity"] -= qty
-                if p["quantity"] <= 1e-9:
+                if direction == "LONG":
+                    cash += value
+                else:  # SHORT cover
+                    cash -= value
+
+                pos["quantity"] -= qty
+                if pos["quantity"] <= 1e-9:
                     del positions[ticker]
+
             else:
                 anomalies.append({
                     "trade_id": tid, "ticker": ticker, "action": action,
-                    "reason": f"Action sconosciuta: {action!r}",
+                    "direction": direction,
+                    "reason": f"Combinazione action/direction sconosciuta: "
+                              f"action={action!r}, direction={direction!r}",
                     "timestamp": t.get("timestamp"),
                 })
         except Exception as ex:
@@ -3768,15 +3818,19 @@ async def portfolio_audit():
         reconstructed_positions = replay["positions"]
         anomalies = replay["anomalies"]
 
-        # 3. Compute reconstructed total_value usando current_price delle position attuali
+        # 3. Compute reconstructed total_value usando current_price delle position attuali.
+        # DIRECTION-AWARE: per le SHORT il valore di mercato e' una passivita',
+        # contribuisce NEGATIVO al NAV ricostruito.
         current_prices = {p["ticker"]: float(p.get("current_price") or 0) for p in positions}
         reconstructed_position_value = 0.0
         for tk, rp in reconstructed_positions.items():
             cp = current_prices.get(tk, rp["avg_buy_price"])
-            reconstructed_position_value += cp * rp["quantity"]
+            rec_dir = (rp.get("direction") or "LONG").upper()
+            contrib = cp * rp["quantity"]
+            reconstructed_position_value += (-contrib if rec_dir == "SHORT" else contrib)
         reconstructed_total = reconstructed_cash + reconstructed_position_value
 
-        # 4. Diff position-by-position
+        # 4. Diff position-by-position (direction-aware)
         position_diffs = []
         current_pos_map = {p["ticker"]: p for p in positions}
         all_tickers = set(current_pos_map.keys()) | set(reconstructed_positions.keys())
@@ -3787,11 +3841,17 @@ async def portfolio_audit():
             rec_qty = rec["quantity"] if rec else 0.0
             cur_avg = float(cur.get("avg_buy_price") or 0) if cur else 0.0
             rec_avg = rec["avg_buy_price"] if rec else 0.0
+            cur_dir = (cur.get("direction") if cur else "LONG") or "LONG"
+            rec_dir = (rec.get("direction") if rec else "LONG") or "LONG"
             qty_delta = cur_qty - rec_qty
             avg_delta = cur_avg - rec_avg
-            if abs(qty_delta) > 1e-6 or abs(avg_delta) > 0.01:
+            dir_mismatch = cur_dir.upper() != rec_dir.upper()
+            if abs(qty_delta) > 1e-6 or abs(avg_delta) > 0.01 or dir_mismatch:
                 position_diffs.append({
                     "ticker": tk,
+                    "current_direction": cur_dir.upper(),
+                    "reconstructed_direction": rec_dir.upper(),
+                    "direction_mismatch": dir_mismatch,
                     "current_quantity": round(cur_qty, 8),
                     "reconstructed_quantity": round(rec_qty, 8),
                     "quantity_delta": round(qty_delta, 8),
@@ -3801,29 +3861,36 @@ async def portfolio_audit():
                 })
 
         # 4b. Per-position breakdown — chi contribuisce di più al total_value?
-        # Utile per beccare positions con current_price gonfiato che inflano
-        # il calcolo cash + sum(qty*current_price).
+        # DIRECTION-AWARE: per SHORT, market_value/contribution sono negativi.
         position_breakdown = []
         for p in positions:
             qty = float(p.get("quantity") or 0)
             cp = float(p.get("current_price") or 0)
             avg = float(p.get("avg_buy_price") or 0)
-            mkt_value = cp * qty
+            pos_dir = (p.get("direction") or "LONG").upper()
+            raw_mv = cp * qty
+            mkt_value = -raw_mv if pos_dir == "SHORT" else raw_mv
             cost_basis = avg * qty
-            # Flag se current_price devia >50% dall'avg_buy_price (sospetto)
-            price_drift_pct = ((cp - avg) / avg * 100) if avg > 0 else 0
+            # P&L direction-aware: per SHORT guadagni se prezzo scende (avg - cp).
+            if pos_dir == "SHORT":
+                unrealized = (avg - cp) * qty
+                price_drift_pct = ((avg - cp) / avg * 100) if avg > 0 else 0
+            else:
+                unrealized = (cp - avg) * qty
+                price_drift_pct = ((cp - avg) / avg * 100) if avg > 0 else 0
             position_breakdown.append({
                 "ticker": p.get("ticker"),
+                "direction": pos_dir,
                 "quantity": round(qty, 8),
                 "avg_buy_price": round(avg, 2),
                 "current_price": round(cp, 2),
-                "market_value": round(mkt_value, 2),
+                "market_value": round(mkt_value, 2),   # firmato (- per SHORT)
                 "cost_basis": round(cost_basis, 2),
-                "unrealized_pnl": round(mkt_value - cost_basis, 2),
+                "unrealized_pnl": round(unrealized, 2),
                 "price_drift_pct": round(price_drift_pct, 1),
-                "suspicious": abs(price_drift_pct) > 50,  # >50% drift = sospetto
+                "suspicious": abs(price_drift_pct) > 50,
             })
-        position_breakdown.sort(key=lambda x: -x["market_value"])
+        position_breakdown.sort(key=lambda x: -abs(x["market_value"]))
 
         cash_delta = current_cash - reconstructed_cash
         total_delta = current_total - reconstructed_total
@@ -4585,7 +4652,13 @@ async def portfolio_rebuild(confirm: bool = Query(default=False)):
         for tk, rp in rec_positions.items():
             try:
                 cp = current_prices.get(tk, rp["avg_buy_price"])
-                database.upsert_position(tk, rp["quantity"], rp["avg_buy_price"], cp)
+                # DIRECTION-AWARE: senza questo, una SHORT ricostruita veniva
+                # upsertata come LONG (default), corrompendo lo stato.
+                rec_dir = (rp.get("direction") or "LONG").upper()
+                database.upsert_position(
+                    tk, rp["quantity"], rp["avg_buy_price"], cp,
+                    direction=rec_dir,
+                )
                 upserted += 1
             except Exception as ex:
                 logger.warning("rebuild: upsert_position(%s) fallito: %s", tk, ex)

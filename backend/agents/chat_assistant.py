@@ -215,8 +215,20 @@ def build_live_context() -> str:
 
         pnl = total - initial
         pnl_pct = (pnl / initial * 100) if initial > 0 else 0
-        invested = sum((p.get("avg_buy_price") or 0) * (p.get("quantity") or 0) for p in positions)
-        current_value = sum((p.get("current_price") or 0) * (p.get("quantity") or 0) for p in positions)
+        # DIRECTION-AWARE: invested e current_value sono il segno-firmato del NAV.
+        # SHORT contribuisce NEGATIVO (passività): se hai shortato 10 a $100 e
+        # ora vale $80, il "current_value" delle posizioni è -$800 (devi
+        # ricomprare), il "invested" notional è -$1000.
+        invested = 0.0
+        current_value = 0.0
+        for p in positions:
+            qty = float(p.get("quantity") or 0)
+            avg = float(p.get("avg_buy_price") or 0)
+            cur = float(p.get("current_price") or 0)
+            d = (p.get("direction") or "LONG").upper()
+            sign = -1 if d == "SHORT" else 1
+            invested += sign * (avg * qty)
+            current_value += sign * (cur * qty)
 
         port_obj = {
             "total_value_usd": round(total, 2),
@@ -235,17 +247,24 @@ def build_live_context() -> str:
         )
         counters["portfolio"] = "ok"
 
-        # Positions con P&L
+        # Positions con P&L (DIRECTION-AWARE)
         if positions:
             pos_list = []
             for p in positions[:50]:
                 qty = p.get("quantity") or 0
                 avg = p.get("avg_buy_price") or 0
                 cur = p.get("current_price") or 0
-                upnl = (cur - avg) * qty if cur > 0 else 0
-                upnl_pct = ((cur - avg) / avg * 100) if avg > 0 else 0
+                d = (p.get("direction") or "LONG").upper()
+                # SHORT: guadagni se il prezzo SCENDE → P&L = (avg - cur) * qty
+                if d == "SHORT":
+                    upnl = (avg - cur) * qty if cur > 0 else 0
+                    upnl_pct = ((avg - cur) / avg * 100) if avg > 0 else 0
+                else:
+                    upnl = (cur - avg) * qty if cur > 0 else 0
+                    upnl_pct = ((cur - avg) / avg * 100) if avg > 0 else 0
                 pos_list.append({
                     "ticker": p.get("ticker"),
+                    "direction": d,
                     "quantity": qty,
                     "avg_buy_price": round(avg, 4),
                     "current_price": round(cur, 4),

@@ -249,9 +249,15 @@ async def _build_payload(positions: list[dict]) -> dict:
         bars = await loop.run_in_executor(None, _fetch_15m_bars_for_ticker, t, 25)
         avg = float(pos.get("avg_buy_price") or 0)
         cur = float(pos.get("current_price") or avg)
-        pnl_pct = ((cur - avg) / avg * 100.0) if avg > 0 else 0.0
+        direction = (pos.get("direction") or "LONG").upper()
+        # DIRECTION-AWARE: SHORT guadagna se prezzo scende
+        if direction == "SHORT":
+            pnl_pct = ((avg - cur) / avg * 100.0) if avg > 0 else 0.0
+        else:
+            pnl_pct = ((cur - avg) / avg * 100.0) if avg > 0 else 0.0
         return {
             "ticker": t,
+            "direction": direction,
             "avg_buy_price": round(avg, 6),
             "current_price": round(cur, 6),
             "unrealized_pnl_pct": round(pnl_pct, 2),
@@ -399,31 +405,49 @@ def _mark_alert_sent(ticker: str) -> None:
 
 # ─── Action handlers ────────────────────────────────────────────────────────
 
-def _tighten_stop_loss(ticker: str, current_price: float, avg: float) -> dict:
+def _tighten_stop_loss(ticker: str, current_price: float, avg: float,
+                        direction: str = "LONG") -> dict:
     """
     Restringe lo stop-loss attorno al prezzo corrente per proteggere
     profitto (se in profitto) o limitare perdita (se in leggera perdita).
-    Logic:
-      - se PnL > 0: SL = current_price * 0.99 (-1% sotto prezzo corrente)
-      - se PnL < 0 ma > -3%: SL = current_price * 0.985 (-1.5%)
-      - se PnL <= -3%: NON tightenare (gia' rischio elevato, lascia il
-        Decision Agent decidere)
+
+    DIRECTION-AWARE: per le SHORT i segni sono invertiti.
+      - LONG:  SL sotto il prezzo (esce se scende). P&L positivo se prezzo > avg.
+      - SHORT: SL sopra il prezzo (esce se sale). P&L positivo se prezzo < avg.
     """
     if avg <= 0 or current_price <= 0:
         return {"ok": False, "error": "prezzi invalidi"}
-    pnl_pct = (current_price - avg) / avg * 100.0
+    is_short = str(direction or "LONG").upper() == "SHORT"
+
+    if is_short:
+        # SHORT: profitto se cur < avg → P&L pct = (avg - cur)/avg
+        pnl_pct = (avg - current_price) / avg * 100.0
+    else:
+        pnl_pct = (current_price - avg) / avg * 100.0
+
     if pnl_pct <= -3:
         return {"ok": False, "skipped": True, "reason": "pnl_too_negative_for_tighten"}
-    if pnl_pct >= 0:
-        new_sl = round(current_price * 0.99, 6)
+
+    if is_short:
+        # SHORT: SL SOPRA il prezzo. Se in profitto, lo stringo a +1% sopra il
+        # current (lock-in del gain). Se in leggera perdita, +1.5% sopra.
+        if pnl_pct >= 0:
+            new_sl = round(current_price * 1.01, 6)
+        else:
+            new_sl = round(current_price * 1.015, 6)
     else:
-        new_sl = round(current_price * 0.985, 6)
+        # LONG: SL SOTTO il prezzo (logica originale).
+        if pnl_pct >= 0:
+            new_sl = round(current_price * 0.99, 6)
+        else:
+            new_sl = round(current_price * 0.985, 6)
     try:
         import database
         database.update_position_auto_exit(
             ticker, stop_loss_price=new_sl, set_by="crypto_monitor_auto_tighten",
         )
-        return {"ok": True, "new_stop_loss": new_sl, "pnl_pct_at_tighten": round(pnl_pct, 2)}
+        return {"ok": True, "new_stop_loss": new_sl, "pnl_pct_at_tighten": round(pnl_pct, 2),
+                "direction": "SHORT" if is_short else "LONG"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -605,6 +629,7 @@ async def run_crypto_monitor(run_id: str | None = None) -> dict:
                 ticker,
                 current_price=float(p.get("current_price") or 0),
                 avg=float(p.get("avg_buy_price") or 0),
+                direction=(p.get("direction") or "LONG"),
             )
             if res.get("ok"):
                 tightened.append({"ticker": ticker, **res})
