@@ -3646,15 +3646,22 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
     cash = float(initial_balance)
     positions: dict = {}
     anomalies: list = []
+    total_fees_replayed = 0.0
 
-    # DIRECTION-AWARE: ogni trade ha (action, direction). Le 4 combinazioni:
-    #   action=BUY  + direction=LONG   → apre/aumenta LONG, cash -= value
-    #   action=SELL + direction=LONG   → chiude/riduce LONG, cash += value
-    #   action=SELL + direction=SHORT  → apre/aumenta SHORT, cash += value (proventi)
-    #   action=BUY  + direction=SHORT  → cover SHORT, cash -= value (costo riacquisto)
-    # Prima il replay assumeva tutto LONG: per gli SHORT, l'apertura veniva
-    # marcata come "SELL impossibile" anomaly (cash perso) e il cover come
-    # un nuovo LONG fantasma — distorcendo audit e rebuild.
+    # DIRECTION-AWARE + FEE-AWARE: ogni trade ha (action, direction). I 4 casi:
+    #   action=BUY  + direction=LONG   → apre/aumenta LONG, cash -= (value + fee)
+    #   action=SELL + direction=LONG   → chiude/riduce LONG, cash += (value - fee)
+    #   action=SELL + direction=SHORT  → apre SHORT, cash += (value - fee) proventi netti
+    #   action=BUY  + direction=SHORT  → cover SHORT, cash -= (value + fee) costo riacquisto
+    # Prima il replay assumeva tutto LONG e IGNORAVA le fee: ogni trade
+    # lasciava reconstructed_cash sovrastimato di una fee → su 100 trade
+    # con fee media ~$5, reconstructed_cash sballato di ~$500 (e cresce
+    # col tempo). Senza questa correzione l'audit non e' utilizzabile.
+    try:
+        import portfolio as _pf
+        _fee_of = _pf._commission_amount
+    except Exception:
+        _fee_of = lambda v, bps=None: 0.0
     for t in trades_asc:
         try:
             ticker = (t.get("ticker") or "").upper()
@@ -3676,6 +3683,8 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
                 continue
 
             value = qty * price
+            fee = _fee_of(value)
+            total_fees_replayed += fee
             is_open = (action == "BUY" and direction == "LONG") or \
                       (action == "SELL" and direction == "SHORT")
             is_close = (action == "SELL" and direction == "LONG") or \
@@ -3684,30 +3693,32 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
             if is_open:
                 # ── Apertura o incremento ─────────────────────────────────
                 if direction == "LONG":
-                    if cash > 0 and value > cash * 0.9:
+                    if cash > 0 and (value + fee) > cash * 0.9:
                         anomalies.append({
                             "trade_id": tid, "ticker": ticker, "action": action,
                             "direction": direction,
                             "quantity": qty, "price": price, "value": round(value, 2),
+                            "fee": round(fee, 2),
                             "cash_before": round(cash, 2),
-                            "reason": f"BUY anomalo: {value:.0f}$ con cash {cash:.0f}$ "
-                                      f"({100*value/cash:.0f}% del cash)",
+                            "reason": f"BUY anomalo: {value+fee:.0f}$ con cash {cash:.0f}$ "
+                                      f"({100*(value+fee)/cash:.0f}% del cash)",
                             "timestamp": t.get("timestamp"),
                         })
-                    if value > cash:
+                    if value + fee > cash:
                         anomalies.append({
                             "trade_id": tid, "ticker": ticker, "action": action,
                             "direction": direction,
                             "quantity": qty, "price": price, "value": round(value, 2),
+                            "fee": round(fee, 2),
                             "cash_before": round(cash, 2),
-                            "reason": f"IMPOSSIBILE: BUY {value:.2f}$ con cash {cash:.2f}$. Trade ignorato.",
+                            "reason": f"IMPOSSIBILE: BUY {value+fee:.2f}$ con cash {cash:.2f}$. Trade ignorato.",
                             "timestamp": t.get("timestamp"),
                             "skipped": True,
                         })
                         continue
-                    cash -= value
+                    cash -= (value + fee)
                 else:  # SHORT open
-                    cash += value  # proventi (gross; audit non distingue fee)
+                    cash += (value - fee)  # proventi netti
 
                 pos = positions.get(ticker)
                 if pos is None:
@@ -3718,9 +3729,9 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
                     # Mismatch: tentativo di aprire LONG su un ticker che ha
                     # gia' una SHORT aperta (o viceversa). Anomalia + undo cash.
                     if direction == "LONG":
-                        cash += value
+                        cash += (value + fee)
                     else:
-                        cash -= value
+                        cash -= (value - fee)
                     anomalies.append({
                         "trade_id": tid, "ticker": ticker, "action": action,
                         "direction": direction,
@@ -3731,7 +3742,8 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
                     })
                     continue
                 else:
-                    # Media ponderata sul cost basis (gross value)
+                    # Media ponderata sul cost basis (gross value, fee non
+                    # contribuisce al cost basis — coerente con execute_buy)
                     old_total = pos["avg_buy_price"] * pos["quantity"]
                     new_qty = pos["quantity"] + qty
                     pos["avg_buy_price"] = (old_total + value) / new_qty if new_qty > 0 else price
@@ -3758,9 +3770,9 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
                     continue
 
                 if direction == "LONG":
-                    cash += value
+                    cash += (value - fee)
                 else:  # SHORT cover
-                    cash -= value
+                    cash -= (value + fee)
 
                 pos["quantity"] -= qty
                 if pos["quantity"] <= 1e-9:
@@ -3780,7 +3792,8 @@ def _replay_trades_from_history(initial_balance: float, trades_asc: list) -> dic
                 "timestamp": t.get("timestamp"),
             })
 
-    return {"cash": cash, "positions": positions, "anomalies": anomalies}
+    return {"cash": cash, "positions": positions, "anomalies": anomalies,
+            "total_fees_replayed": round(total_fees_replayed, 2)}
 
 
 @app.get("/api/portfolio/audit")
@@ -3812,11 +3825,12 @@ async def portfolio_audit():
 
         positions = database.get_positions() or []
 
-        # 2. Replay cronologico
+        # 2. Replay cronologico (direction-aware + fee-aware)
         replay = _replay_trades_from_history(initial_balance, trades_asc)
         reconstructed_cash = replay["cash"]
         reconstructed_positions = replay["positions"]
         anomalies = replay["anomalies"]
+        total_fees_replayed = replay.get("total_fees_replayed", 0.0)
 
         # 3. Compute reconstructed total_value usando current_price delle position attuali.
         # DIRECTION-AWARE: per le SHORT il valore di mercato e' una passivita',
@@ -3932,6 +3946,7 @@ async def portfolio_audit():
                 "position_value": round(reconstructed_position_value, 2),
                 "total_value": round(reconstructed_total, 2),
                 "positions_count": len(reconstructed_positions),
+                "total_fees_replayed": round(total_fees_replayed, 2),
             },
             "deltas": {
                 "cash": round(cash_delta, 2),

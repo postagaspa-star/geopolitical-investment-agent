@@ -95,7 +95,22 @@ function KpiCard({ label, value, subValue, color, hint }) {
 // ============================================================
 
 // Calcola P&L realizzato per coppie BUY-SELL (FIFO).
-// Restituisce array di { ticker, buyPrice, sellPrice, qty, pnl, pnlPct, sellTimestamp, confidence, holdHours }
+// Restituisce array di { ticker, buyPrice, sellPrice, qty, pnl, pnlPct, sellTimestamp,
+// confidence, holdHours, feesPaid, grossPnl }
+//
+// IMPORTANTE — il P&L e' NETTO (commissioni open + close sottratte).
+// Default commission_bps = 10 (0.10% per gamba). Su un round-trip si pagano
+// DUE fee (BUY apertura + SELL chiusura). Senza questa correzione il P&L
+// mostrato era 'grezzo' e sovrastimava il vero rendimento di ~0.20% per
+// round-trip — significativo su tanti trade piccoli.
+//
+// NOTA: questo deve restare ALLINEATO al backend (trade_analytics.py).
+// Se cambi commission_bps nel DB, aggiorna anche FEE_BPS qui.
+const FEE_BPS = 10.0;
+function feeOf(grossValue) {
+  return Math.abs(grossValue) * (FEE_BPS / 10000.0);
+}
+
 function computeClosedTrades(trades) {
   // Due code FIFO separate: long e short non si matchano mai tra loro.
   // Una gamba APRE se: BUY su book long, oppure SELL su book short.
@@ -150,13 +165,16 @@ function computeClosedTrades(trades) {
           continue;
         }
         const matched = Math.min(remaining, opn.qty);
-        // SHORT: guadagni se COPRI piu' basso. LONG: se VENDI piu' alto.
-        const pnl = isShort
+        // Gross P&L (prima delle fee)
+        const grossPnl = isShort
           ? (opn.price - price) * matched
           : (price - opn.price) * matched;
-        const pnlPct = isShort
-          ? ((opn.price - price) / opn.price) * 100
-          : ((price - opn.price) / opn.price) * 100;
+        // Fee del round-trip: apertura + chiusura, entrambe pro-quota su `matched`.
+        const feeOpen = feeOf(opn.price * matched);
+        const feeClose = feeOf(price * matched);
+        const feesPaid = feeOpen + feeClose;
+        const pnl = grossPnl - feesPaid;
+        const pnlPct = opn.price > 0 ? (pnl / (opn.price * matched)) * 100 : 0;
         const holdHours = ts && opn.ts
           ? (new Date(ts).getTime() - new Date(opn.ts).getTime()) / 3600000
           : null;
@@ -166,8 +184,10 @@ function computeClosedTrades(trades) {
           buyPrice: opn.price,
           sellPrice: price,
           qty: matched,
-          pnl,
-          pnlPct,
+          pnl,             // NETTO (gross - feesPaid)
+          pnlPct,          // NETTO
+          grossPnl,        // diagnostica
+          feesPaid,        // diagnostica
           buyTimestamp: opn.ts,
           sellTimestamp: ts,
           confidence: opn.confidence,

@@ -44,29 +44,41 @@ def _ts(v) -> float:
 
 
 def compute_closed_trades(trades: list,
-                          exclude_manual_closes: bool = False) -> list:
+                          exclude_manual_closes: bool = False,
+                          include_fees: bool = True) -> list:
     """
     Accoppia BUY→SELL per ticker in ordine temporale (FIFO). Ritorna
     [{pnl_pct, pnl_usd, confidence, ticker, buy_date, sell_date, reason,
-      is_manual}].
+      is_manual, fees_paid}].
 
     exclude_manual_closes (default False):
       - False → INCLUDE TUTTO. Il P&L / la performance del portafoglio
         sono un FATTO finanziario: ogni chiusura sposta denaro reale e
-        DEVE contare, anche le chiusure non-AI (circuit breaker,
-        auto-exit, manuali). Questo e' il comportamento per i numeri di
-        rendimento (Analytics, equity, P&L realizzato).
-      - True → vista SKILL/EDGE: salta le gambe a confidence manuale
-        (>=100) cosi' la misura della BRAVURA dell'AI non e' inquinata
-        da interventi non decisi dall'AI. Usato SOLO da Edge Tracker,
-        diagnosi confidence, contesto chat e test di significativita'.
+        DEVE contare, anche le chiusure non-AI.
+      - True → vista SKILL/EDGE: salta le gambe a confidence manuale.
+
+    include_fees (default True):
+      - True  → pnl_usd e pnl_pct sono NETTI (commissione open + close
+        sottratte). Ogni gamba paga commission_bps × gross_value (default
+        10 bps = 0.10%); su un round-trip BUY+SELL si pagano DUE fee.
+        Senza questa correzione il P&L mostrato era 'grezzo' e
+        sovrastimava il vero rendimento (e il rebuild dai trade
+        sovrastimava la cassa).
+      - False → P&L grezzo (cosi' com'era prima del fix). Utile per
+        confronti storici o A/B testing senza commissioni.
 
     Ogni closed-trade porta `is_manual` (True se la gamba BUY o SELL era
-    una chiusura non-AI) cosi' i consumer "performance" mostrano tutto e
-    quelli "skill" possono filtrare senza ricalcolare.
-
-    Coerenza con Analytics: pnl_usd = (sell-buy)*qty, IDENTICO al JS.
+    una chiusura non-AI) e `fees_paid` (commissione totale del round-trip,
+    0 se include_fees=False).
     """
+    # Lazy import per evitare cicli (portfolio importa database)
+    if include_fees:
+        try:
+            from portfolio import _commission_amount as _fee_of
+        except Exception:
+            _fee_of = lambda v: 0.0
+    else:
+        _fee_of = lambda v: 0.0
     # Due code FIFO separate per ticker: long e short non si matchano
     # mai tra loro. Classificazione gamba per (action, direction):
     #   BUY +LONG  → apre long      SELL+LONG  → chiude long
@@ -122,15 +134,30 @@ def compute_closed_trades(trades: list,
                     q.pop(0)
                     continue
                 matched = min(remaining, opn["qty"])
+                # Gross P&L (prima delle fee)
                 if is_short:
-                    # SHORT: guadagni se COPRI piu' BASSO del prezzo di short.
-                    pnl_pct = (opn["price"] - price) / opn["price"] * 100.0
-                    pnl_usd = (opn["price"] - price) * matched
+                    gross_pnl_usd = (opn["price"] - price) * matched
                 else:
-                    pnl_pct = (price - opn["price"]) / opn["price"] * 100.0
-                    pnl_usd = (price - opn["price"]) * matched
-                closed.append({"pnl_pct": round(pnl_pct, 3),
-                               "pnl_usd": round(pnl_usd, 2),
+                    gross_pnl_usd = (price - opn["price"]) * matched
+
+                # Fee del round-trip: una su apertura (opn["price"] * matched),
+                # una su chiusura (price * matched). Le due gambe condividono
+                # `matched`, non l'intera qty della gamba originaria — quindi
+                # le fee si splittano pro-quota tra match successivi.
+                fee_open = _fee_of(opn["price"] * matched)
+                fee_close = _fee_of(price * matched)
+                fees_round_trip = fee_open + fee_close
+                net_pnl_usd = gross_pnl_usd - fees_round_trip
+
+                # pct calcolato sul cost basis dell'open (per coerenza con
+                # le viste precedenti); se include_fees=True, e' netto.
+                net_pnl_pct = (net_pnl_usd / (opn["price"] * matched) * 100.0
+                               if opn["price"] > 0 else 0.0)
+
+                closed.append({"pnl_pct": round(net_pnl_pct, 3),
+                               "pnl_usd": round(net_pnl_usd, 2),
+                               "fees_paid": round(fees_round_trip, 2),
+                               "gross_pnl_usd": round(gross_pnl_usd, 2),
                                "confidence": opn["conf"],
                                "ticker": ticker,
                                "direction": "SHORT" if is_short else "LONG",
