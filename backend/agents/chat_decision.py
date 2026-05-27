@@ -347,7 +347,18 @@ async def _fetch_live_ohlcv(tickers: list[str]) -> dict:
             logger.debug("[CHAT] OHLCV %s failed: %s", t, e)
             return t, None
 
-    results = await asyncio.gather(*[_fetch_one(t) for t in tickers], return_exceptions=True)
+    # Semaforo + delay come technical.py e rotation_scan: senza throttle
+    # yfinance/Polygon possono restituire bar cached identici per piu'
+    # ticker (silent rate-limit).
+    _cd_sem = asyncio.Semaphore(4)
+
+    async def _bounded(t):
+        async with _cd_sem:
+            r = await _fetch_one(t)
+            await asyncio.sleep(0.15)
+            return r
+
+    results = await asyncio.gather(*[_bounded(t) for t in tickers], return_exceptions=True)
     for r in results:
         if isinstance(r, tuple) and r[1] is not None:
             out[r[0]] = r[1]

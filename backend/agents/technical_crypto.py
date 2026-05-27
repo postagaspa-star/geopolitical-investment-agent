@@ -329,9 +329,22 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
     logger.info("[%s][TECH-CRYPTO] Analisi su %d ticker: %s",
                 run_id, len(tickers), tickers)
 
-    # 1. Recupera indicatori per ogni ticker
+    # 1. Recupera indicatori per ogni ticker CON SEMAFORO.
+    # Stesso fix di technical.py: fetch parallelo senza throttle puo' far
+    # rate-limitare yfinance/Polygon → tutti i ticker tornano con la stessa
+    # risposta cached (identical-data bug).
     import asyncio
-    indicators = await asyncio.gather(*[_fetch_crypto_indicators(t) for t in tickers])
+    _CC_FETCH_CONC = 4
+    _CC_FETCH_DELAY_SEC = 0.15
+    _cc_sem = asyncio.Semaphore(_CC_FETCH_CONC)
+
+    async def _bounded_crypto(t):
+        async with _cc_sem:
+            r = await _fetch_crypto_indicators(t)
+            await asyncio.sleep(_CC_FETCH_DELAY_SEC)
+            return r
+
+    indicators = await asyncio.gather(*[_bounded_crypto(t) for t in tickers])
     ticker_data = {t: ind for t, ind in zip(tickers, indicators)
                    if ind and not ind.get("error")}
 

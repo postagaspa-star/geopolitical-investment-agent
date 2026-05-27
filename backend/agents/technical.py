@@ -618,8 +618,22 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
     # Limita a 10 tickers
     tickers = tickers[:10]
 
-    # 1. Recupera indicatori in parallelo
-    tasks = [_fetch_ticker_indicators(t) for t in tickers]
+    # 1. Recupera indicatori in parallelo CON SEMAFORO.
+    # Fix causa-radice del "stessi dati per ticker diversi": yfinance/Polygon
+    # condividono stato HTTP tra thread quando vengono colpiti in parallelo
+    # (10 ticker simultanei → rate-limit silenzioso → ritornano l'ultimo
+    # bar cached, identico per tutti). Stesso pattern di rotation_scan.py.
+    _FETCH_CONC = 4   # piu' restrittivo di rotation_scan (6) per essere safe
+    _FETCH_DELAY_SEC = 0.15
+    _sem = asyncio.Semaphore(_FETCH_CONC)
+
+    async def _bounded(t):
+        async with _sem:
+            r = await _fetch_ticker_indicators(t)
+            await asyncio.sleep(_FETCH_DELAY_SEC)
+            return r
+
+    tasks = [_bounded(t) for t in tickers]
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     ticker_data = []
@@ -634,6 +648,55 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
             continue
         # Solo ticker con dati validi vanno al LLM (evita "?" values nel report)
         ticker_data.append(result)
+
+    # ── SAFETY NET: clone detection cross-ticker ────────────────────────────
+    # Se due ticker hanno (current_price, atr, n_data_points) IDENTICI fino
+    # al 4° decimale, e' praticamente certo che siano un clone (es. yfinance
+    # silent rate-limit che restituisce SPY per tutti). Marca i secondi come
+    # clone e li escludi dal contesto LLM — evita di mandare al modello
+    # numeri identici per 5 ticker diversi che lo confondono.
+    fingerprints: dict = {}
+    clone_tickers: list[str] = []
+    clean_data = []
+    for td in ticker_data:
+        if not isinstance(td, dict):
+            clean_data.append(td)
+            continue
+        try:
+            cp = round(float(td.get("current_price") or 0), 4)
+            atr = round(float(td.get("atr") or 0), 4)
+            n = int(td.get("data_points") or 0)
+        except (TypeError, ValueError):
+            clean_data.append(td)
+            continue
+        fp = (cp, atr, n)
+        if cp > 0 and fp in fingerprints:
+            clone_tickers.append({
+                "ticker": td.get("ticker"),
+                "cloned_from": fingerprints[fp],
+                "fingerprint": {"current_price": cp, "atr": atr, "n_data_points": n},
+            })
+            # Marca esplicitamente e NON inviare al LLM (evita contaminazione)
+            td["data_quality"] = "clone_suspected"
+            td["clone_of"] = fingerprints[fp]
+            continue
+        if cp > 0:
+            fingerprints[fp] = td.get("ticker")
+        clean_data.append(td)
+    if clone_tickers:
+        logger.error(
+            "[%s][TECH] CLONE DETECTED — %d ticker hanno dati identici a un altro: %s",
+            run_id, len(clone_tickers), clone_tickers,
+        )
+        try:
+            database.insert_agent_log(run_id, "TECH_CLONE_DETECTED", json.dumps({
+                "event": "ticker_data_clone_detected",
+                "clones": clone_tickers,
+                "primary_tickers": list(fingerprints.values()),
+            }, default=str))
+        except Exception:
+            pass
+    ticker_data = clean_data
 
     if failed_tickers:
         logger.warning("[%s][TECH] %d/%d ticker senza dati indicatori (saltati): %s",
