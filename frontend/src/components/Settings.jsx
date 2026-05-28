@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import HealthPanel from "./HealthPanel";
 
 // Base URL per le chiamate API (stesso server)
 const API = window.location.origin;
@@ -47,6 +48,9 @@ const PROMPT_AGENTS = [
 function Settings({ onBack, onDataRefresh }) {
   // === Diagnostica ===
   const [diagnostics, setDiagnostics] = useState(INITIAL_DIAGNOSTICS);
+
+  // === Pannello "Stato app" (cruscotto di salute) ===
+  const [healthOpen, setHealthOpen] = useState(false);
 
   // === Prompt per i 5 agenti ===
   const [prompts, setPrompts] = useState({
@@ -490,12 +494,24 @@ function Settings({ onBack, onDataRefresh }) {
       color: "#111827", fontFamily: "'Inter', -apple-system, sans-serif",
     }}>
       <div style={{ maxWidth: "820px", margin: "0 auto" }}>
-        <h1 style={{
-          fontSize: "24px", fontWeight: 700, color: "#111827",
-          marginBottom: "24px", letterSpacing: "-0.02em",
-        }}>
-          Impostazioni
-        </h1>
+        <div style={{ display: "flex", alignItems: "center",
+          justifyContent: "space-between", marginBottom: "24px" }}>
+          <h1 style={{
+            fontSize: "24px", fontWeight: 700, color: "#111827",
+            margin: 0, letterSpacing: "-0.02em",
+          }}>
+            Impostazioni
+          </h1>
+          <button onClick={() => setHealthOpen(true)} style={{
+            background: "#111827", color: "#fff", border: "none",
+            borderRadius: "8px", padding: "8px 14px", cursor: "pointer",
+            fontSize: "13px", fontWeight: 600, whiteSpace: "nowrap",
+          }}>
+            ● Stato app
+          </button>
+        </div>
+
+        <HealthPanel open={healthOpen} onClose={() => setHealthOpen(false)} />
 
         {message && (
           <div style={{
