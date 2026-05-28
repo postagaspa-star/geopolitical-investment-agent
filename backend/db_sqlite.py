@@ -1008,8 +1008,15 @@ def clear_decision_chat(agent_type: str) -> bool:
     return True
 
 
-def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5) -> list:
-    """Ultimi N messaggi UTENTE delle ultime `hours` ore per agent_type."""
+def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5,
+                               since_iso: str | None = None) -> list:
+    """Ultimi N messaggi UTENTE per agent_type.
+
+    since_iso (one-shot): se passato, ritorna SOLO i messaggi dopo quel
+    timestamp (di norma l'ultimo run del Decision Agent), cosi' una
+    direttiva non viene riproposta a ogni run per `hours`. Cutoff effettivo
+    = piu' recente tra (now - hours) e since_iso.
+    """
     agent_type = (agent_type or "standard").lower()
     with get_db() as conn:
         conv = conn.execute(
@@ -1019,13 +1026,24 @@ def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5)
         ).fetchone()
         if not conv:
             return []
-        rows = conn.execute(
-            "SELECT content, created_at FROM decision_chat_messages "
-            "WHERE conversation_id=? AND role='user' "
-            "AND created_at >= datetime('now', ?) "
-            "ORDER BY created_at DESC LIMIT ?",
-            (conv["id"], f"-{hours} hours", limit),
-        ).fetchall()
+        if since_iso:
+            # Cutoff = max(now-hours, since_iso) via due predicati AND
+            rows = conn.execute(
+                "SELECT content, created_at FROM decision_chat_messages "
+                "WHERE conversation_id=? AND role='user' "
+                "AND created_at >= datetime('now', ?) "
+                "AND created_at >= ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (conv["id"], f"-{hours} hours", since_iso, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT content, created_at FROM decision_chat_messages "
+                "WHERE conversation_id=? AND role='user' "
+                "AND created_at >= datetime('now', ?) "
+                "ORDER BY created_at DESC LIMIT ?",
+                (conv["id"], f"-{hours} hours", limit),
+            ).fetchall()
         return [dict(r) for r in rows]
 
 

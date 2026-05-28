@@ -1002,60 +1002,32 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
     except Exception as e:
         logger.warning("[POLLING] check_and_execute_auto_exits failed: %s", e)
 
-    # 3. Salva snapshot del portfolio totale CON DRIFT GUARD
+    # 3. Salva snapshot — UNICA FONTE DI VERITA' = calculate_total_value().
+    #
+    # FIX desync grafico↔dashboard: prima il polling calcolava il proprio
+    # total_value (cash + total_position_value) con un DRIFT GUARD che a
+    # volte SALTAVA lo snapshot, mentre la dashboard usa calculate_total_value()
+    # SENZA guard. Due formule + un guard asimmetrico → chart e numero in
+    # alto divergevano (uno fermo, l'altro aggiornato).
+    #
+    # Ora: dopo aver aggiornato i prezzi delle posizioni (loop sopra),
+    # chiamiamo la STESSA funzione della dashboard. Questa:
+    #   - ricalcola NAV = cash + Σ posizioni direction-aware (con cap
+    #     per-posizione 0.1x–10x dell'avg → protegge da prezzi corrotti),
+    #   - PERSISTE portfolio.total_value (cosi' la dashboard legge lo stesso),
+    #   - logga NAV_DRIFT_ALERT se c'e' uno scostamento sospetto (senza
+    #     pero' falsare il valore).
+    # Lo snapshot registra ESATTAMENTE quel valore → chart == dashboard
+    # by-construction, sempre.
     try:
         import database
-        portfolio = database.get_portfolio()
-        if portfolio:
-            cash = float(portfolio.get("cash_balance", portfolio.get("cash", 0)) or 0)
-            total_value = cash + total_position_value
-
-            # ── SNAPSHOT DRIFT GUARD ──────────────────────────────────────
-            # Confronta col precedente snapshot. Se devia troppo IN ASSENZA
-            # di trade recenti, e' sospetto → skip save (mantiene equity
-            # curve pulita) e logga per audit.
-            should_save = True
-            prev_info = _get_last_snapshot(database)
-            if prev_info is not None and total_value > 0:
-                prev_total, _prev_cash, age_min = prev_info
-                if prev_total > 0:
-                    drift_pct = abs(total_value - prev_total) / prev_total * 100
-                    has_trade = _was_recent_trade(database, _SNAPSHOT_RECENT_TRADE_WINDOW_MIN)
-
-                    # Drift fast (snapshot recente <= 10 min)
-                    if age_min <= 10 and drift_pct > _SNAPSHOT_DRIFT_MAX_PCT_FAST and not has_trade:
-                        logger.error(
-                            "[POLLING] DRIFT FAST anomalo: prev=%.2f → new=%.2f "
-                            "(%+.1f%% in %.0fmin, no trade). SKIP snapshot save per "
-                            "proteggere equity curve. Posizioni rejected_quotes=%d.",
-                            prev_total, total_value, drift_pct, age_min, rejected_count,
-                        )
-                        try:
-                            database.insert_agent_log(
-                                "price_polling", "ERROR",
-                                json.dumps({
-                                    "event": "snapshot_drift_rejected",
-                                    "prev_total": round(prev_total, 2),
-                                    "new_total": round(total_value, 2),
-                                    "drift_pct": round(drift_pct, 2),
-                                    "age_min": round(age_min, 1),
-                                    "rejected_quotes": rejected_count,
-                                }),
-                            )
-                        except Exception:
-                            pass
-                        should_save = False
-                    # Drift slow (1h+) — solo warning, non blocca
-                    elif drift_pct > _SNAPSHOT_DRIFT_MAX_PCT_SLOW and not has_trade:
-                        logger.warning(
-                            "[POLLING] Drift SOSPETTO snapshot: prev=%.2f → new=%.2f "
-                            "(%+.1f%% in %.0fmin, no trade). Snapshot salvato ma indagare.",
-                            prev_total, total_value, drift_pct, age_min,
-                        )
-
-            if should_save:
-                database.insert_portfolio_snapshot(round(total_value, 2), round(cash, 2))
-                snapshot_saved = True
+        import portfolio as _pf
+        canonical_total = _pf.calculate_total_value()
+        portfolio = database.get_portfolio() or {}
+        cash = float(portfolio.get("cash_balance", portfolio.get("cash", 0)) or 0)
+        if canonical_total and canonical_total > 0:
+            database.insert_portfolio_snapshot(round(canonical_total, 2), round(cash, 2))
+            snapshot_saved = True
     except Exception as e:
         logger.debug("Errore insert portfolio_snapshot: %s", e)
 

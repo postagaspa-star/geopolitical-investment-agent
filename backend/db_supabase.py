@@ -1711,11 +1711,18 @@ def clear_decision_chat(agent_type: str) -> bool:
         return False
 
 
-def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5) -> list:
+def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5,
+                               since_iso: str | None = None) -> list:
     """
     Ritorna gli ultimi N messaggi UTENTE (role='user') di una chat decision
-    per un certo agent_type, dalle ultime `hours` ore. Usato dal Decision
-    Agent autonomo per leggere le preferenze recenti dell'utente.
+    per un certo agent_type.
+
+    since_iso (one-shot): se passato, ritorna SOLO i messaggi creati DOPO
+    quel timestamp (tipicamente l'ultimo run del Decision Agent). Cosi' una
+    direttiva viene letta da UN solo run e non riproposta a ogni run per
+    `hours`. Il cutoff effettivo e' il PIU' RECENTE tra (now - hours) e
+    since_iso, cosi' anche con since_iso vecchio non si pescano direttive
+    piu' vecchie della finestra di sicurezza.
 
     Returns: lista di dict con keys {content, created_at}.
     """
@@ -1735,9 +1742,11 @@ def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5)
             if not r.data:
                 return []
             cid = r.data[0]["id"]
-            # Calcola cutoff timestamp
+            # Calcola cutoff timestamp = max(now - hours, since_iso)
             from datetime import datetime, timezone, timedelta
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            if since_iso and since_iso > cutoff:
+                cutoff = since_iso
             r2 = (client.table("decision_chat_messages")
                   .select("content, created_at")
                   .eq("conversation_id", cid)
@@ -1765,6 +1774,15 @@ def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5)
         msgs_str = get_setting(_DEC_CHAT_FALLBACK_KEY_MSGS.format(cid=cid), "[]")
         msgs = json.loads(msgs_str) if msgs_str else []
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        if since_iso:
+            try:
+                since_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+                if since_dt.tzinfo is None:
+                    since_dt = since_dt.replace(tzinfo=timezone.utc)
+                if since_dt > cutoff:
+                    cutoff = since_dt
+            except Exception:
+                pass
         user_msgs = [m for m in msgs if m.get("role") == "user"]
         # Filter by time
         filtered = []

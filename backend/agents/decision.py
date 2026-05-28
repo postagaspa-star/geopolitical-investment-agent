@@ -112,6 +112,39 @@ def is_r1_cooldown_active() -> tuple[bool, int]:
     return False, 0
 
 
+def _directives_cutoff_iso(run_keys: tuple = (SONNET_LAST_RUN_KEY, R1_LAST_RUN_KEY)) -> str:
+    """Cutoff ISO per le direttive chat 'one-shot'.
+
+    Ritorna il timestamp PIU' RECENTE tra gli ultimi run del Decision Agent
+    indicati in run_keys, con un FLOOR a 12h fa. Le direttive chat vengono
+    iniettate nel prompt SOLO se create DOPO questo cutoff: cosi' una
+    direttiva e' letta da UN solo run (il primo successivo a quando l'utente
+    l'ha scritta) e NON viene riproposta a ogni run per 48h.
+
+    Il floor a 12h evita che, dopo un downtime lungo (ultimo run vecchio),
+    si ripeschino direttive ormai obsolete.
+    """
+    from datetime import datetime, timezone, timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=12)
+    try:
+        import database as _db
+        for key in run_keys:
+            iso = _db.get_setting(key, "") or ""
+            if not iso:
+                continue
+            try:
+                dt = datetime.fromisoformat(iso)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt > cutoff:
+                    cutoff = dt
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return cutoff.isoformat()
+
+
 def _get_deepseek_key() -> str:
     """Recupera DEEPSEEK_API_KEY da env o DB settings."""
     key = os.environ.get("DEEPSEEK_API_KEY", "")
@@ -3685,10 +3718,16 @@ def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state,
     try:
         import database as _db
         if hasattr(_db, "get_recent_user_directives"):
-            directives = _db.get_recent_user_directives("standard", hours=48, limit=5)
+            # ONE-SHOT: solo direttive scritte DOPO l'ultimo run del decision
+            # standard. Una direttiva e' applicata da UN run, non riproposta
+            # per 48h (fix: "direttive di giorni fa riprese nei run successivi").
+            directives = _db.get_recent_user_directives(
+                "standard", hours=48, limit=5,
+                since_iso=_directives_cutoff_iso(),
+            )
             if directives:
                 d_lines = ["=" * 60]
-                d_lines.append("📋  DIRETTIVE UTENTE RECENTI (da chat, ultime 48h)")
+                d_lines.append("📋  DIRETTIVE UTENTE NUOVE (da chat, dopo l'ultimo run)")
                 d_lines.append("=" * 60)
                 d_lines.append(
                     "L'utente ha espresso queste preferenze nella chat decision standard. "

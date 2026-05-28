@@ -1185,14 +1185,30 @@ def _build_context(tech_report: dict, recent_buffer: list, portfolio_state: dict
     except Exception as _e:
         logger.debug("decision_crypto: commitments non caricati: %s", _e)
 
-    # === DIRETTIVE UTENTE RECENTI (chat decision crypto) ===
+    # === DIRETTIVE UTENTE NUOVE (chat decision crypto) ===
     try:
         import database as _db
         if hasattr(_db, "get_recent_user_directives"):
-            directives = _db.get_recent_user_directives("crypto", hours=48, limit=5)
+            # ONE-SHOT: solo direttive scritte dopo l'ultimo run crypto, con
+            # floor a 12h. Evita di riproporre la stessa direttiva a ogni run.
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            _cutoff = _dt.now(_tz.utc) - _td(hours=12)
+            try:
+                _iso = _db.get_setting(CRYPTO_COOLDOWN_KEY, "") or ""
+                if _iso:
+                    _last = _dt.fromisoformat(_iso)
+                    if _last.tzinfo is None:
+                        _last = _last.replace(tzinfo=_tz.utc)
+                    if _last > _cutoff:
+                        _cutoff = _last
+            except Exception:
+                pass
+            directives = _db.get_recent_user_directives(
+                "crypto", hours=48, limit=5, since_iso=_cutoff.isoformat()
+            )
             if directives:
                 parts.append("=" * 60)
-                parts.append("📋  DIRETTIVE UTENTE RECENTI (da chat crypto, ultime 48h)")
+                parts.append("📋  DIRETTIVE UTENTE NUOVE (da chat crypto, dopo l'ultimo run)")
                 parts.append("=" * 60)
                 parts.append(
                     "L'utente ha espresso queste preferenze nella chat decision crypto. "
