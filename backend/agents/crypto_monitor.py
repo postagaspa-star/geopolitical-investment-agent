@@ -250,11 +250,8 @@ async def _build_payload(positions: list[dict]) -> dict:
         avg = float(pos.get("avg_buy_price") or 0)
         cur = float(pos.get("current_price") or avg)
         direction = (pos.get("direction") or "LONG").upper()
-        # DIRECTION-AWARE: SHORT guadagna se prezzo scende
-        if direction == "SHORT":
-            pnl_pct = ((avg - cur) / avg * 100.0) if avg > 0 else 0.0
-        else:
-            pnl_pct = ((cur - avg) / avg * 100.0) if avg > 0 else 0.0
+        import accounting as _acc
+        pnl_pct = _acc.unrealized_pnl_pct(avg, cur, direction)   # direction-aware canonico
         return {
             "ticker": t,
             "direction": direction,
@@ -419,11 +416,9 @@ def _tighten_stop_loss(ticker: str, current_price: float, avg: float,
         return {"ok": False, "error": "prezzi invalidi"}
     is_short = str(direction or "LONG").upper() == "SHORT"
 
-    if is_short:
-        # SHORT: profitto se cur < avg → P&L pct = (avg - cur)/avg
-        pnl_pct = (avg - current_price) / avg * 100.0
-    else:
-        pnl_pct = (current_price - avg) / avg * 100.0
+    import accounting as _acc
+    pnl_pct = _acc.unrealized_pnl_pct(avg, current_price,
+                                      "SHORT" if is_short else "LONG")
 
     if pnl_pct <= -3:
         return {"ok": False, "skipped": True, "reason": "pnl_too_negative_for_tighten"}

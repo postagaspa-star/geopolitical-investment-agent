@@ -16,6 +16,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Modulo CANONICO dei conti (puro, nessuna dipendenza dall'app → no cicli).
+import accounting
+
 from database import (
     get_portfolio, update_portfolio,
     get_positions, get_position,
@@ -80,11 +83,11 @@ def _get_commission_bps() -> float:
 def _commission_amount(gross_value: float, bps: float | None = None) -> float:
     """
     Calcola la commissione in $ da un valore lordo (quantity * price).
-    bps None → usa la rate configurata.
+    bps None → usa la rate configurata. Delega ad accounting (canonico).
     """
     if bps is None:
         bps = _get_commission_bps()
-    return abs(float(gross_value)) * (float(bps) / 10_000.0)
+    return accounting.commission(gross_value, bps)
 
 
 def _accrue_commission(amount: float) -> None:
@@ -196,10 +199,9 @@ def calculate_total_value():
             # Aprire uno short e' NAV-neutro (incassi = passivita'); il
             # NAV sale solo quando il prezzo scende. Questo evita il bug
             # della "cassa fantasma" / leva infinita.
-            if str(pos.get("direction") or "LONG").upper() == "SHORT":
-                positions_value -= safe_price * qty
-            else:
-                positions_value += safe_price * qty
+            # Contributo firmato al NAV (canonico): SHORT sottrae, LONG aggiunge.
+            positions_value += accounting.signed_position_value(
+                qty, safe_price, pos.get("direction"))
         except (TypeError, ValueError) as ex:
             logger.warning("calculate_total_value: error sulla posizione %s: %s",
                            pos.get("ticker"), ex)
@@ -274,27 +276,10 @@ def compute_positions_value(positions: list) -> float:
     SHORT è una passività nel NAV → sottrae. LONG aggiunge.
     Formula:  Σ_long(qty*current_price) - Σ_short(qty*current_price)
 
-    Centralizza la logica per evitare il bug ricorrente di sommare le
-    short come se fossero long (positions_value += qty*cp senza check
-    sulla direzione). Gli endpoint admin di cash management (adjust_cash,
-    restore-cash, target_total, rebuild) la usano per ricalcolare
-    total_value senza re-implementare la logica direction-aware.
+    Delega al modulo canonico accounting.positions_value (UN solo posto per
+    la logica direction-aware → niente piu' copie divergenti).
     """
-    total = 0.0
-    for p in positions:
-        try:
-            cp = float(p.get("current_price") or 0)
-            qty = float(p.get("quantity") or 0)
-            if qty <= 0 or cp <= 0:
-                continue
-            direction = str(p.get("direction") or "LONG").upper()
-            if direction == "SHORT":
-                total -= cp * qty
-            else:
-                total += cp * qty
-        except (TypeError, ValueError):
-            continue
-    return total
+    return accounting.positions_value(positions, price_key="current_price")
 
 
 def get_portfolio_state():

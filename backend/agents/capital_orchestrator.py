@@ -173,17 +173,12 @@ def _build_full_portfolio_snapshot() -> dict:
         current_price = float(p.get("current_price", 0) or 0)
         if current_price <= 0:
             current_price = avg_buy
-        # DIRECTION-AWARE: SHORT è passività nel NAV → contributo negativo.
-        # P&L SHORT positivo se prezzo scende (avg - cur).
+        # DIRECTION-AWARE (canonico accounting): SHORT = passività nel NAV.
         direction = (p.get("direction") or "LONG").upper()
-        if direction == "SHORT":
-            current_value = -(qty * current_price)
-            pnl_abs = (avg_buy - current_price) * qty
-            pnl_pct = ((avg_buy - current_price) / avg_buy * 100) if avg_buy > 0 else 0.0
-        else:
-            current_value = qty * current_price
-            pnl_abs = (current_price - avg_buy) * qty
-            pnl_pct = ((current_price / avg_buy) - 1.0) * 100 if avg_buy > 0 else 0.0
+        import accounting as _acc
+        current_value = _acc.signed_position_value(qty, current_price, direction)
+        pnl_abs = _acc.unrealized_pnl(qty, avg_buy, current_price, direction)
+        pnl_pct = _acc.unrealized_pnl_pct(avg_buy, current_price, direction)
 
         # Età posizione
         age_hours = 0

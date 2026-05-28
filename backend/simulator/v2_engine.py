@@ -341,22 +341,20 @@ def compute_portfolio_value(portfolio: dict, prices: dict[str, float]) -> dict:
         side = pos.get("side", "long")
         cur_price = prices.get(asset, entry)
 
-        if side == "long":
-            mkt_value = qty * cur_price
-            pnl = (cur_price - entry) * qty
-            positions_value += mkt_value
-        else:  # short
-            # Per uno short: valore = cash trattenuto al sell, PnL = (entry - current) * qty
-            mkt_value = qty * cur_price  # passivo da ricomprare
-            pnl = (entry - cur_price) * qty
-            positions_value -= mkt_value  # passività
+        # Math canonica (accounting): UN solo posto per NAV/P&L direction-aware.
+        # Il simulator usa side='long'/'short' → mappo a direction.
+        import accounting as _acc
+        _dir = "SHORT" if side == "short" else "LONG"
+        mkt_value = qty * cur_price  # valore lordo (display: sempre positivo)
+        pnl = _acc.unrealized_pnl(qty, entry, cur_price, _dir)
+        positions_value += _acc.signed_position_value(qty, cur_price, _dir)
 
         enriched_positions.append({
             **pos,
             "current_price": cur_price,
             "market_value": round(mkt_value, 2),
             "unrealized_pnl": round(pnl, 2),
-            "unrealized_pnl_pct": round((pnl / (qty * entry) * 100) if (qty and entry) else 0, 2),
+            "unrealized_pnl_pct": round(_acc.unrealized_pnl_pct(entry, cur_price, _dir), 2),
         })
 
     total_value = cash + positions_value

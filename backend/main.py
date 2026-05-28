@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import agent
+import accounting
 import database
 import portfolio
 import scheduler
@@ -3900,16 +3901,11 @@ async def portfolio_audit():
             cp = float(p.get("current_price") or 0)
             avg = float(p.get("avg_buy_price") or 0)
             pos_dir = (p.get("direction") or "LONG").upper()
-            raw_mv = cp * qty
-            mkt_value = -raw_mv if pos_dir == "SHORT" else raw_mv
             cost_basis = avg * qty
-            # P&L direction-aware: per SHORT guadagni se prezzo scende (avg - cp).
-            if pos_dir == "SHORT":
-                unrealized = (avg - cp) * qty
-                price_drift_pct = ((avg - cp) / avg * 100) if avg > 0 else 0
-            else:
-                unrealized = (cp - avg) * qty
-                price_drift_pct = ((cp - avg) / avg * 100) if avg > 0 else 0
+            # Canonico (accounting): valore firmato + P&L direction-aware.
+            mkt_value = accounting.signed_position_value(qty, cp, pos_dir)
+            unrealized = accounting.unrealized_pnl(qty, avg, cp, pos_dir)
+            price_drift_pct = accounting.unrealized_pnl_pct(avg, cp, pos_dir)
             position_breakdown.append({
                 "ticker": p.get("ticker"),
                 "direction": pos_dir,
