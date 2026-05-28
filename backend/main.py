@@ -4431,6 +4431,19 @@ async def admin_health(fresh: bool = Query(default=False)):
         return JSONResponse(status_code=500, content={"status": "ERROR", "error": str(e)})
 
 
+@app.get("/api/admin/memory")
+async def admin_memory(trim: bool = Query(default=False)):
+    """RSS corrente del processo (MB). Con ?trim=true forza gc + malloc_trim
+    e ritorna l'RSS prima/dopo. Utile per monitorare l'OOM su Render 512MB."""
+    try:
+        import memory_utils
+        if trim:
+            return memory_utils.trim_memory("manual_endpoint")
+        return {"rss_mb": memory_utils.get_rss_mb(), "ceiling_mb": 512}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/admin/portfolio/invariant-check")
 async def portfolio_invariant_check():
     """Diagnostico read-only: verifica che il `total_value` salvato in

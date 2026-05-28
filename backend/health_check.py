@@ -202,6 +202,25 @@ def run_health_checks() -> dict:
     except Exception as e:
         checks.append(_check("cash_provenance", "ERROR", f"check fallito: {e}"))
 
+    # ── 6. Memoria (RSS) vicino al tetto 512MB di Render ──
+    try:
+        import memory_utils
+        rss = memory_utils.get_rss_mb()
+        if rss is None:
+            checks.append(_check("memory_rss", "OK", "RSS non determinabile su questa piattaforma"))
+        elif rss >= 480:
+            checks.append(_check("memory_rss", "CRITICAL",
+                                 f"RSS {rss:.0f}MB vicino al tetto 512MB → rischio OOM imminente",
+                                 rss_mb=rss))
+        elif rss >= 400:
+            checks.append(_check("memory_rss", "WARNING",
+                                 f"RSS {rss:.0f}MB (tetto 512MB) — margine ridotto",
+                                 rss_mb=rss))
+        else:
+            checks.append(_check("memory_rss", "OK", f"RSS {rss:.0f}MB / 512MB", rss_mb=rss))
+    except Exception as e:
+        checks.append(_check("memory_rss", "ERROR", f"check fallito: {e}"))
+
     # ── Verdetto complessivo = peggiore tra i singoli ──
     statuses = [c["status"] for c in checks]
     if "CRITICAL" in statuses:

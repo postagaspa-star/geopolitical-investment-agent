@@ -351,6 +351,16 @@ async def _watchdog_job():
             logger.debug("Watchdog: no trigger (reason='%s')", result.get("reason", ""))
     except Exception as e:
         logger.error("Errore nel job Watchdog: %s", e, exc_info=True)
+    finally:
+        # La pipeline (technical multi-ticker + decision) e' il picco di RAM:
+        # restituiamo subito la memoria liberata all'OS per non avvicinarci
+        # al tetto dei 512MB tra un run e l'altro (fix OOM).
+        try:
+            import memory_utils
+            _loop = asyncio.get_running_loop()
+            await _loop.run_in_executor(None, memory_utils.trim_memory, "post_pipeline")
+        except Exception:
+            pass
 
 
 async def _price_polling_job():
@@ -364,6 +374,20 @@ async def _price_polling_job():
         await update_price_cache()
     except Exception as e:
         logger.error("Errore Price Polling: %s", e, exc_info=False)
+
+
+async def _memory_trim_job():
+    """
+    Job riduzione memoria — ogni 30 minuti (backstop al trim post-pipeline).
+    gc.collect() + malloc_trim(0): restituisce all'OS la RAM liberata che
+    glibc altrimenti tratterrebbe → tiene l'RSS lontano dal tetto 512MB.
+    """
+    try:
+        import memory_utils
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, memory_utils.trim_memory, "scheduled_30min")
+    except Exception as e:
+        logger.debug("Memory trim job error: %s", e)
 
 
 async def _health_check_job():
@@ -1147,6 +1171,19 @@ def start_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(pytz.utc) + timedelta(seconds=90),
+    )
+
+    # ── Memory trim: ogni 30 min (fix OOM, backstop al trim post-pipeline) ──
+    _scheduler.add_job(
+        _memory_trim_job,
+        trigger="interval",
+        minutes=30,
+        id="memory_trim_job",
+        name="Memory trim 30min (gc + malloc_trim)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(pytz.utc) + timedelta(seconds=120),
     )
 
     # ── Scout: ogni 20 min lun-ven, ogni 60 min su weekend/festivi ──
