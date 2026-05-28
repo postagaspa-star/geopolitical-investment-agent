@@ -63,7 +63,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS agent_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
-                phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO','MARKET_INTELLIGENCE')),
+                phase TEXT NOT NULL,
                 content TEXT NOT NULL,
                 timestamp TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -197,23 +197,35 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_agent_commit_recent
                 ON agent_commitments (agent_type, created_at DESC);
         """)
-        # Migrazione: ricreare agent_logs se ha il vecchio constraint
-        # (SQLite non supporta ALTER TABLE per modificare CHECK constraint)
+        # Migrazione: la vecchia agent_logs aveva CHECK(phase IN (...)) che
+        # scartava SILENZIOSAMENTE tutte le fasi custom (NAV_DRIFT_ALERT,
+        # TRADE_LOG_FAILED, TECH_CLONE_DETECTED, HEALTH_DIGEST, DECISION_*,
+        # TECH_WORKER, ...). Supabase (prod) NON ha questo vincolo: allineiamo
+        # SQLite. SQLite non supporta ALTER per togliere un CHECK → si ricrea.
+        #
+        # NB: la versione precedente di questa migrazione era INVERTITA —
+        # sondava con 'MARKET_INTELLIGENCE' (sempre accettata dal vecchio
+        # CHECK, quindi non scattava mai) e nel ramo except ricreava la
+        # tabella con lo STESSO CHECK restrittivo. Non ha mai fatto nulla.
         try:
+            # Sonda con una fase NON nella vecchia whitelist: se il CHECK
+            # vecchio c'e' ancora, questo INSERT fallisce.
             conn.execute(
-                "INSERT INTO agent_logs (run_id, phase, content) VALUES ('_migration_test', 'MARKET_INTELLIGENCE', 'test')"
+                "INSERT INTO agent_logs (run_id, phase, content) "
+                "VALUES ('_migration_probe', 'HEALTH_DIGEST', 'probe')"
             )
-            conn.execute("DELETE FROM agent_logs WHERE run_id = '_migration_test'")
+            conn.execute("DELETE FROM agent_logs WHERE run_id = '_migration_probe'")
         except Exception:
-            # Il vecchio constraint non accetta le nuove fasi: ricrea la tabella
-            logger.info("Migrazione agent_logs: aggiornamento constraint phase...")
-            rows = conn.execute("SELECT run_id, phase, content, timestamp FROM agent_logs").fetchall()
+            logger.info("Migrazione agent_logs: rimuovo il vecchio CHECK su phase...")
+            rows = conn.execute(
+                "SELECT run_id, phase, content, timestamp FROM agent_logs"
+            ).fetchall()
             conn.execute("DROP TABLE agent_logs")
             conn.execute("""
                 CREATE TABLE agent_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
-                    phase TEXT NOT NULL CHECK(phase IN ('GEOPOLITICAL','TECHNICAL','DECISION','ERROR','INFO','MARKET_INTELLIGENCE')),
+                    phase TEXT NOT NULL,
                     content TEXT NOT NULL,
                     timestamp TEXT NOT NULL DEFAULT (datetime('now'))
                 )
@@ -226,7 +238,7 @@ def init_db():
                     )
                 except Exception:
                     pass
-            logger.info("Migrazione agent_logs completata.")
+            logger.info("Migrazione agent_logs completata (CHECK rimosso).")
 
         row = conn.execute("SELECT COUNT(*) as cnt FROM portfolio").fetchone()
         if row["cnt"] == 0:

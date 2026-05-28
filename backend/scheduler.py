@@ -366,6 +366,27 @@ async def _price_polling_job():
         logger.error("Errore Price Polling: %s", e, exc_info=False)
 
 
+async def _health_check_job():
+    """
+    Job Cruscotto di salute — ogni 6 ore.
+    Esegue i controlli read-only (invariante cassa, sync grafico, allarmi
+    recenti, provenienza cassa) e scrive un HEALTH_DIGEST su agent_logs.
+    Trasforma i bug silenziosi in allarmi visibili.
+    """
+    try:
+        import asyncio as _asyncio
+        import health_check
+        # I check sono sincroni (query DB) → off-load nel threadpool per non
+        # bloccare l'event loop.
+        loop = _asyncio.get_running_loop()
+        report = await loop.run_in_executor(None, health_check.run_health_checks)
+        if report and report.get("status") != "OK":
+            logger.warning("[HEALTH] stato=%s — %s",
+                           report.get("status"), report.get("summary"))
+    except Exception as e:
+        logger.error("Errore Health Check job: %s", e, exc_info=False)
+
+
 _last_scout_run_ts: float = 0.0
 
 
@@ -1111,6 +1132,21 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+    )
+
+    # ── Health Check: ogni 6 ore (cruscotto di salute) ──
+    # Controlli read-only (invariante cassa, sync grafico, allarmi, provenienza
+    # cassa) → scrive HEALTH_DIGEST su agent_logs. Primo run dopo 90s dal boot.
+    _scheduler.add_job(
+        _health_check_job,
+        trigger="interval",
+        hours=6,
+        id="health_check_job",
+        name="Health Check 6h (cruscotto salute, read-only)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(pytz.utc) + timedelta(seconds=90),
     )
 
     # ── Scout: ogni 20 min lun-ven, ogni 60 min su weekend/festivi ──

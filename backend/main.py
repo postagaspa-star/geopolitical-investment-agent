@@ -4414,6 +4414,27 @@ async def portfolio_restore_cash(
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
+@app.get("/api/admin/health")
+async def admin_health(fresh: bool = Query(default=False)):
+    """Cruscotto di salute del sistema.
+
+    Default: ritorna l'ultimo HEALTH_DIGEST salvato dal job schedulato
+    (lettura leggera). Con ?fresh=true ri-esegue tutti i check al volo.
+
+    Ogni check ha status OK/WARNING/CRITICAL/ERROR; `status` in cima e' il
+    peggiore. Vedi backend/health_check.py per i dettagli dei controlli.
+    """
+    try:
+        import health_check
+        if fresh:
+            return health_check.run_health_checks()
+        cached = health_check.get_latest_digest()
+        return cached if cached else health_check.run_health_checks()
+    except Exception as e:
+        logger.error("admin_health error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "ERROR", "error": str(e)})
+
+
 @app.get("/api/admin/portfolio/invariant-check")
 async def portfolio_invariant_check():
     """Diagnostico read-only: verifica che il `total_value` salvato in
