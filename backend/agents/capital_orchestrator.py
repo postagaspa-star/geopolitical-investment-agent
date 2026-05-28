@@ -483,14 +483,23 @@ def _execute_liquidation(action: dict, run_id: str) -> dict:
             return {"success": False, "ticker": ticker,
                     "error": "current_price not available"}
 
-        result = _pf.execute_sell(
+        # DIRECTION-AWARE: una SHORT si chiude con COVER, non con SELL.
+        # Prima usava sempre execute_sell → su una SHORT veniva rifiutato
+        # ("usa COVER") e la liquidazione falliva silenziosamente, quindi
+        # l'orchestrator non riusciva MAI a ridurre le posizioni short.
+        direction = str(pos.get("direction") or "LONG").upper()
+        common = dict(
             ticker=ticker,
             quantity=qty,
             price=current_price,
-            geo_reasoning=f"[ORCHESTRATOR] Cross-agent capital reallocation",
+            geo_reasoning="[ORCHESTRATOR] Cross-agent capital reallocation",
             tech_reasoning=action.get("rationale", "Capital orchestrator directive"),
             confidence=85,
         )
+        if direction == "SHORT":
+            result = _pf.execute_cover(**common)
+        else:
+            result = _pf.execute_sell(**common)
 
         if not result.get("success"):
             return {"success": False, "ticker": ticker,

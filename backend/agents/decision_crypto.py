@@ -794,8 +794,19 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                             "reason": f"RISK_PROFILE: {reason}",
                             "at": timestamp,
                         })
-                except ImportError:
-                    pass
+                except ImportError as imp_err:
+                    # FAIL-CLOSED: risk_profile e' un governatore di sicurezza.
+                    # Se manca del tutto, blocca il trade invece di eseguirlo
+                    # senza validazione.
+                    logger.error("[%s][DEC-CRYPTO] risk_profile non importabile: BLOCCO il trade. %s",
+                                 run_id, imp_err)
+                    return json.dumps({
+                        "executed": False, "rejected": True,
+                        "ticker": ticker, "action": action,
+                        "reason": "RISK_PROFILE non disponibile (modulo mancante): "
+                                  "trade bloccato per sicurezza.",
+                        "at": timestamp,
+                    })
                 except Exception as rp_err:
                     logger.warning("[%s][DEC-CRYPTO] risk validation error (non-fatal): %s",
                                    run_id, rp_err)

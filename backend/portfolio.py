@@ -102,6 +102,30 @@ def _accrue_commission(amount: float) -> None:
         logger.debug("commissioni: accrue fallito (non critico): %s", ex)
 
 
+def _alert_trade_not_logged(action: str, ticker, quantity, price, ex) -> None:
+    """Allarme CRITICAL: il trade e' avvenuto (cash + posizione gia' scritti)
+    ma insert_trade e' fallito. NON si deve ritornare success=False (il
+    chiamante ritenterebbe e RADDOPPIEREBBE il trade): si logga qui per
+    l'audit e si prosegue come successo con trade_id=None.
+    """
+    logger.critical(
+        "execute_%s: insert_trade FALLITO ma cash+posizione GIA' committati "
+        "(%s qty=%s @ %s): %s. Trade NON loggato — gap di audit.",
+        action, ticker, quantity, price, ex, exc_info=True,
+    )
+    try:
+        from database import insert_agent_log as _ial
+        import json as _json
+        _ial("portfolio", "TRADE_LOG_FAILED", _json.dumps({
+            "event": "trade_executed_but_not_logged",
+            "action": action, "ticker": ticker,
+            "quantity": quantity, "price": price,
+            "error": str(ex)[:300],
+        }, default=str))
+    except Exception:
+        pass
+
+
 def calculate_total_value():
     """
     Ricalcola il valore totale del portafoglio (liquidita' + posizioni aperte).
@@ -463,10 +487,8 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
             decision_text, confidence,
         )
     except Exception as ex:
-        logger.error("execute_buy: insert_trade FAILED for %s qty=%s: %s",
-                     ticker, quantity, ex, exc_info=True)
-        return {"success": False, "reason": f"DB write fail (trade log): {str(ex)[:200]}",
-                "db_error": str(ex)[:500]}
+        _alert_trade_not_logged("buy", ticker, quantity, price, ex)
+        trade_id = None   # prosegue come successo: il trade E' avvenuto
 
     return {
         "success": True,
@@ -589,10 +611,8 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
             decision_text, confidence,
         )
     except Exception as ex:
-        logger.error("execute_sell: insert_trade FAILED for %s qty=%s: %s",
-                     ticker, quantity, ex, exc_info=True)
-        return {"success": False, "reason": f"DB write fail (trade log): {str(ex)[:200]}",
-                "db_error": str(ex)[:500]}
+        _alert_trade_not_logged("sell", ticker, quantity, price, ex)
+        trade_id = None   # prosegue come successo: il trade E' avvenuto
 
     return {
         "success": True,
@@ -713,9 +733,8 @@ def execute_short(ticker, quantity, price, geo_reasoning, tech_reasoning,
             direction="SHORT",
         )
     except Exception as ex:
-        logger.error("execute_short: insert_trade FAILED %s: %s",
-                     ticker, ex, exc_info=True)
-        return {"success": False, "reason": f"DB write fail (trade log): {str(ex)[:200]}"}
+        _alert_trade_not_logged("short", ticker, quantity, price, ex)
+        trade_id = None   # prosegue come successo: il trade E' avvenuto
 
     return {
         "success": True,
@@ -807,9 +826,8 @@ def execute_cover(ticker, quantity, price, geo_reasoning, tech_reasoning,
             direction="SHORT",
         )
     except Exception as ex:
-        logger.error("execute_cover: insert_trade FAILED %s: %s",
-                     ticker, ex, exc_info=True)
-        return {"success": False, "reason": f"DB write fail (trade log): {str(ex)[:200]}"}
+        _alert_trade_not_logged("cover", ticker, quantity, price, ex)
+        trade_id = None   # prosegue come successo: il trade E' avvenuto
 
     return {
         "success": True,

@@ -3486,8 +3486,20 @@ class ResetPayload(BaseModel):
 
 
 @app.post("/api/portfolio/reset")
-async def reset_portfolio(payload: ResetPayload):
-    """Resetta il portafoglio con un nuovo saldo iniziale."""
+async def reset_portfolio(payload: ResetPayload, confirm: bool = Query(default=False)):
+    """Resetta il portafoglio con un nuovo saldo iniziale.
+
+    DISTRUTTIVO: reset_portfolio_data CANCELLA posizioni, trade, snapshot e
+    agent_logs e riporta il cash al saldo iniziale. Richiede confirm=true
+    (come tutti gli altri endpoint admin di mutazione). Senza, e' un no-op
+    400 — evita reset accidentali dell'intero portafoglio.
+    """
+    if not confirm:
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "error": "confirm=true richiesto. Operazione DISTRUTTIVA: cancella "
+                     "posizioni, trade, snapshot e log e azzera lo storico.",
+        })
     try:
         database.reset_portfolio_data(payload.new_balance)
         logger.info(f"Portafoglio resettato con saldo: {payload.new_balance}")
@@ -3501,6 +3513,7 @@ async def reset_portfolio(payload: ResetPayload):
 async def cleanup_portfolio_history(
     threshold_pct: float = Query(default=25.0, ge=10.0, le=100.0),
     mode: str = Query(default="median", regex="^(median|wipe)$"),
+    confirm: bool = Query(default=False),
 ):
     """
     Pulisce portfolio_snapshots rimuovendo righe con total_value anomalo.
@@ -3508,14 +3521,19 @@ async def cleanup_portfolio_history(
     Modalità:
     - mode=median (default): calcola la median degli ultimi 90 giorni e
       cancella righe che deviano oltre threshold_pct%. Conservativo.
-    - mode=wipe: cancella TUTTI gli snapshot. Usalo se il chart è completamente
-      compromesso (più step-jump consecutivi che il filtro mediano non riesce
-      a recuperare). Ricostruzione automatica dal prossimo polling.
+    - mode=wipe: cancella TUTTI gli snapshot. Richiede confirm=true (cancella
+      l'intero storico del grafico). Ricostruzione automatica dal prossimo polling.
 
     Operazione IRREVERSIBILE.
     """
     # Wipe mode: tabula rasa, ricostruzione dal prossimo snapshot
     if mode == "wipe":
+        if not confirm:
+            return JSONResponse(status_code=400, content={
+                "status": "error",
+                "error": "mode=wipe richiede confirm=true: cancella TUTTI gli "
+                         "snapshot (l'intero storico del grafico).",
+            })
         try:
             try:
                 from db_supabase import _get_client

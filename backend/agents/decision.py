@@ -2429,8 +2429,19 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                             "reason": f"RISK_PROFILE: {reason}",
                             "at": timestamp,
                         })
-                except ImportError:
-                    pass   # risk_profile non disponibile → degrade graceful
+                except ImportError as imp_err:
+                    # FAIL-CLOSED: il modulo risk_profile e' un governatore di
+                    # sicurezza. Se manca del tutto (errore di deploy), NON si
+                    # esegue il trade senza validazione — si blocca.
+                    logger.error("[%s][DECISION] risk_profile non importabile: BLOCCO il trade. %s",
+                                 run_id, imp_err)
+                    return json.dumps({
+                        "executed": False, "rejected": True,
+                        "ticker": ticker, "action": action,
+                        "reason": "RISK_PROFILE non disponibile (modulo mancante): "
+                                  "trade bloccato per sicurezza.",
+                        "at": timestamp,
+                    })
                 except Exception as rp_err:
                     logger.warning("[%s][DECISION] risk validation error (non-fatal): %s",
                                    run_id, rp_err)
