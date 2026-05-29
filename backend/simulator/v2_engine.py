@@ -1372,6 +1372,29 @@ async def finalize_run(
             "unrealized_pnl_pct": p["unrealized_pnl_pct"],
         })
 
+    # ── Sanitizza la serie equity PRIMA delle metriche ────────────────────
+    # I punti con value None/NaN/<=0 (es. valuation mancante a uno step)
+    # venivano 'skippati' silenziosamente dentro metrics, degradando
+    # Sharpe/MDD/drawdown senza alcun segnale d'errore. Ora li scartiamo
+    # esplicitamente e logghiamo se la serie e' incompleta.
+    _clean_equity = []
+    _dropped_pts = 0
+    for _pt in portfolio_value_series:
+        try:
+            _vf = float(_pt.get("value"))
+        except (TypeError, ValueError):
+            _vf = None
+        if _vf is None or _vf != _vf or _vf <= 0:
+            _dropped_pts += 1
+            continue
+        _clean_equity.append(_pt)
+    if _dropped_pts:
+        logger.warning("[SIM] finalize: %d/%d punti equity invalidi (None/NaN/<=0) "
+                       "scartati prima delle metriche — risultati su serie ridotta",
+                       _dropped_pts, len(portfolio_value_series))
+    if len(_clean_equity) >= 2:
+        portfolio_value_series = _clean_equity
+
     # ── METRICHE QUANTITATIVE: Sharpe, MDD, Profit Factor, Expectancy, ecc.
     # Calcolate da metrics.py su equity_curve + history.
     from simulator import metrics as _metrics

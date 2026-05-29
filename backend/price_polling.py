@@ -795,6 +795,13 @@ def _validate_price_tiered(ticker: str, new_price: float, prev_close: float,
                 f"[src={source}, extreme outlier — probabile bad data]"
             )
 
+    # Nessun riferimento disponibile (prev_close, old_current, avg tutti <=0):
+    # il prezzo non e' validabile → rifiuta. Senza questo guard un prezzo
+    # potenzialmente corrotto passava silenziosamente su posizioni malformate.
+    if prev_close <= 0 and old_current <= 0 and avg <= 0:
+        return False, (f"prezzo non validabile: nessun riferimento "
+                       f"(prev_close/old_current/avg tutti 0) [src={source}]")
+
     return True, ""
 
 

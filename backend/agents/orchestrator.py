@@ -148,10 +148,11 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
                          run_id, e, exc_info=True)
             crypto_result = {"decision": "ERROR", "trades": [], "error": str(e)}
 
-        # Cooldown rebalance: registra SOLO se il Decision Crypto e' riuscito.
-        # Senza questa guard, una pipeline crashata bloccava 4h una posizione
-        # ancora overweight (il watchdog non poteva ritriggerare).
-        if rebalance_ticker and crypto_result.get("decision") not in ("ERROR", None):
+        # Cooldown rebalance: registra SOLO se il Decision Crypto e' riuscito
+        # E ha eseguito almeno un trade. Prima scattava anche su NO_TRADE/HOLD,
+        # bloccando 4h una posizione ancora overweight su cui non si era agito.
+        if (rebalance_ticker and crypto_result.get("decision") not in ("ERROR", None)
+                and len(crypto_result.get("trades") or []) > 0):
             try:
                 from agents.watchdog import _record_rebalance_trigger
                 _record_rebalance_trigger(database, rebalance_ticker)
@@ -263,8 +264,11 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
 
     duration = round(time.time() - start, 1)
 
-    # Cooldown rebalance equity: registra solo se Decision e' riuscito.
-    if rebalance_ticker and decision_result.get("decision") not in ("ERROR", None):
+    # Cooldown rebalance equity: registra solo se Decision e' riuscito E ha
+    # eseguito almeno un trade (non su NO_TRADE/HOLD → la posizione resta
+    # overweight e il watchdog deve poter ritriggerare).
+    if (rebalance_ticker and decision_result.get("decision") not in ("ERROR", None)
+            and len(decision_result.get("trades") or []) > 0):
         try:
             from agents.watchdog import _record_rebalance_trigger
             _record_rebalance_trigger(database, rebalance_ticker)

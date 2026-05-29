@@ -752,15 +752,22 @@ def _fetch_provider_ohlcv_sync(base_url: str, ticker: str, period_days: int,
         loop = None
 
     if loop and loop.is_running():
-        # Già in event loop: thread pool per evitare deadlock
+        # Già in event loop: thread pool per evitare deadlock.
+        # NB: shutdown(wait=False) nel finally — col 'with ... as pool' il
+        # context manager fa shutdown(wait=True) che su TimeoutError BLOCCA
+        # aspettando il worker orfano (asyncio.run ancora in esecuzione).
         import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            fut = pool.submit(
                 lambda: asyncio.run(
                     _fetch_provider_ohlcv_async(base_url, ticker, period_days,
                                                 api_key, provider)
                 )
-            ).result(timeout=PROVIDER_OHLCV_TIMEOUT + 5)
+            )
+            return fut.result(timeout=PROVIDER_OHLCV_TIMEOUT + 5)
+        finally:
+            pool.shutdown(wait=False)
     return asyncio.run(
         _fetch_provider_ohlcv_async(base_url, ticker, period_days, api_key, provider)
     )

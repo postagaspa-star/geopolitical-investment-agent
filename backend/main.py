@@ -190,7 +190,16 @@ async def get_positions():
                 t = p.get("ticker")
                 if t and t in cached:
                     quote = cached[t]
-                    p["current_price"] = quote["price"]
+                    # Guard NaN/Inf/<=0: un prezzo non finito romperebbe il
+                    # JSON del frontend ($NaN) e il P&L. Se il quote e' sporco
+                    # NON sovrascrivere (tiene il valore gia' in DB).
+                    try:
+                        _px = float(quote.get("price"))
+                    except (TypeError, ValueError):
+                        _px = None
+                    if _px is None or _px != _px or _px in (float("inf"), float("-inf")) or _px <= 0:
+                        continue
+                    p["current_price"] = _px
                     qty = p.get("quantity", 0)
                     avg = p.get("avg_buy_price", 0)
                     if qty and avg:
@@ -202,11 +211,9 @@ async def get_positions():
                         # ribaltando il segno delle posizioni short in dashboard.
                         direction = str(p.get("direction") or "LONG").upper()
                         if direction == "SHORT":
-                            p["unrealized_pnl"] = round(
-                                (avg - quote["price"]) * qty, 2)
+                            p["unrealized_pnl"] = round((avg - _px) * qty, 2)
                         else:
-                            p["unrealized_pnl"] = round(
-                                (quote["price"] - avg) * qty, 2)
+                            p["unrealized_pnl"] = round((_px - avg) * qty, 2)
                     p["price_age_seconds"] = quote["age_seconds"]
                     p["price_change_pct"] = quote.get("change_pct", 0)
         except Exception as cache_err:

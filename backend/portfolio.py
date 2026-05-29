@@ -786,7 +786,9 @@ def execute_cover(ticker, quantity, price, geo_reasoning, tech_reasoning,
             f"{ticker} e' una posizione LONG: per chiuderla usa SELL, non COVER.")}
 
     held = float(existing.get("quantity") or 0)
-    if quantity > held + 1e-9:
+    # Tolleranza 1e-6 (non 1e-9): allineata al round(...,6) di sell_qty negli
+    # auto-exit, cosi' un qty=10.000001 da rounding non viene falso-rifiutato.
+    if quantity > held + 1e-6:
         return {"success": False, "reason": (
             f"Quantita' insufficiente: short aperto di {held} {ticker}, "
             f"richieste {quantity} da coprire.")}
