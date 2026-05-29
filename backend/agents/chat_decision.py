@@ -511,7 +511,7 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
     def _sync():
         return client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=1800,
+            max_tokens=4000,   # era 1800: risposte chat lunghe venivano troncate a meta'
             system=system_blocks,
             messages=messages,
             extra_headers=_BETA_HEADERS,
@@ -560,7 +560,7 @@ async def _call_deepseek_r1(system_prompt: str, history: list, user_message: str
     payload = {
         "model": DEEPSEEK_R1_MODEL,
         "messages": messages,
-        "max_tokens": 3000,
+        "max_tokens": 4000,   # era 3000: R1 ragiona molto, le risposte si troncavano
     }
 
     async with aiohttp.ClientSession() as sess:

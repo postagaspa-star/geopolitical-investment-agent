@@ -930,10 +930,9 @@ async def run_technical_analysis(run_id: str, tickers: list[str]) -> dict:
             "json_parsed": parse_ok,
             "analyses_summary": analyses_summary,
             "tickers_hallucinated": hallucinated_tickers,
-            # Cap aumentato 300 → 2500: i summary tecnici utili (regime,
-            # ticker leader, trend) raramente entrano in 300 char, e la
-            # Tech card del frontend mostrava sempre sintesi troncate.
-            "summary_text": (report.get("summary") or "")[:2500],
+            # Cap generoso (6000): i summary tecnici (regime, ticker leader,
+            # trend) non devono essere troncati nella Tech card del frontend.
+            "summary_text": (report.get("summary") or "")[:6000],
             # Se parse failed, mostra raw response per debug
             "raw_preview": "" if parse_ok else (response_text[:400] if response_text else ""),
         }, default=str))

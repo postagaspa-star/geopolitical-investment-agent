@@ -205,11 +205,10 @@ def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
         sections.append(f"⚠️ RISCHIO PRINCIPALE\n{primary_risk}")
     final = (final_text or "").strip()
     if final:
-        # Cap aumentato 500 → 4000: la conclusione del Decision Agent
-        # contiene rotation analysis, trade rationale, risk mitigation —
-        # truncare a 500 nascondeva l'intero ragionamento finale nella
-        # ReasoningCard del frontend.
-        sections.append(f"✅ CONCLUSIONE\n{final[:4000]}")
+        # Cap generoso (16000): la conclusione del Decision Agent contiene
+        # rotation analysis, trade rationale, risk mitigation. Lo storage non
+        # deve troncare il ragionamento (l'output e' gia' limitato da max_tokens).
+        sections.append(f"✅ CONCLUSIONE\n{final[:16000]}")
 
     if not sections:
         # Fallback: nessuna fase del workflow è stata committed
@@ -2234,10 +2233,10 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
         # ── Tool del workflow a 4 fasi ─────────────────────────────────────
         if tool_name == "commit_initial_assessment":
             payload = {
-                "situation_overview": (tool_input.get("situation_overview") or "")[:6000],
+                "situation_overview": (tool_input.get("situation_overview") or "")[:12000],
                 # rotation_summary: campo obbligatorio della FASE 1 che riassume
                 # cosa il modello ha visto nel rotation scan iniettato in contesto.
-                "rotation_summary": (tool_input.get("rotation_summary") or "")[:2000],
+                "rotation_summary": (tool_input.get("rotation_summary") or "")[:4000],
                 "asset_candidates": tool_input.get("asset_candidates") or [],
                 "technical_questions": tool_input.get("technical_questions") or [],
             }
@@ -2251,9 +2250,9 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
 
         if tool_name == "commit_final_thesis":
             payload = {
-                "thesis": (tool_input.get("thesis") or "")[:6000],
-                "action_plan": (tool_input.get("action_plan") or "")[:2000],
-                "primary_risk": (tool_input.get("primary_risk") or "")[:2000],
+                "thesis": (tool_input.get("thesis") or "")[:12000],
+                "action_plan": (tool_input.get("action_plan") or "")[:8000],
+                "primary_risk": (tool_input.get("primary_risk") or "")[:8000],
             }
             database.insert_agent_log(run_id, "DECISION_PHASE3", json.dumps(payload, default=str))
             return json.dumps({
@@ -3397,14 +3396,14 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             "model": used_model,
             "phase_state": ws.get("phase"),
             "reasoning_text": reasoning_text,   # campo letto dal frontend
-            "situation_overview": (ia.get("situation_overview") or "")[:4000],
-            "rotation_summary": (ia.get("rotation_summary") or "")[:2000],
+            "situation_overview": (ia.get("situation_overview") or "")[:12000],
+            "rotation_summary": (ia.get("rotation_summary") or "")[:4000],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],
-            "thesis": (ft.get("thesis") or "")[:5000],
-            "action_plan": (ft.get("action_plan") or "")[:3000],
-            "primary_risk": (ft.get("primary_risk") or "")[:3000],
-            "final_text": final_text[:8000],
+            "thesis": (ft.get("thesis") or "")[:12000],
+            "action_plan": (ft.get("action_plan") or "")[:8000],
+            "primary_risk": (ft.get("primary_risk") or "")[:8000],
+            "final_text": final_text[:16000],
             "trades": len(trades_executed),
         }
         database.insert_agent_log(run_id, "DECISION_REASONING",
@@ -3614,15 +3613,16 @@ async def _run_deepseek_decision_loop(
             "model": DEEPSEEK_R1_MODEL,
             "phase_state": workflow_state.phase,
             "reasoning_text": _build_reasoning_text(ia, ft, final_text),
-            # Cap field aumentati per evitare troncamento nelle card UI
-            "situation_overview": (ia.get("situation_overview") or "")[:4000],
-            "rotation_summary": (ia.get("rotation_summary") or "")[:2000],
+            # Cap generosi: lo storage NON deve essere il collo di bottiglia
+            # (l'output e' gia' limitato da max_tokens del modello).
+            "situation_overview": (ia.get("situation_overview") or "")[:12000],
+            "rotation_summary": (ia.get("rotation_summary") or "")[:4000],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],
-            "thesis": (ft.get("thesis") or "")[:5000],
-            "action_plan": (ft.get("action_plan") or "")[:3000],
-            "primary_risk": (ft.get("primary_risk") or "")[:3000],
-            "final_text": final_text[:8000],
+            "thesis": (ft.get("thesis") or "")[:12000],
+            "action_plan": (ft.get("action_plan") or "")[:8000],
+            "primary_risk": (ft.get("primary_risk") or "")[:8000],
+            "final_text": final_text[:16000],
             "trades": len(trades_executed),
         }, default=str))
     except Exception:

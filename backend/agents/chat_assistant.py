@@ -32,7 +32,8 @@ DEEPSEEK_R1_MODEL = "deepseek-reasoner"
 
 # Limite di output per evitare risposte fluviali e costi esagerati.
 # R1 generera' un blocco <think> separato che NON viene contato qui.
-MAX_RESPONSE_TOKENS = 2500
+# Alzato 2500 → 4000: le risposte dell'analista venivano troncate a meta'.
+MAX_RESPONSE_TOKENS = 4000
 
 # Massimo numero di trade da iniettare nel contesto (scaglione di sicurezza
 # in caso l'utente selezioni troppi trade — R1 ha un context da 64k token).

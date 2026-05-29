@@ -54,7 +54,7 @@ def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
         if ft.get("thesis"):
             parts.append(f"TESI: {ft['thesis']}")
         if final_text:
-            parts.append(f"CONCLUSIONE: {final_text[:4000]}")
+            parts.append(f"CONCLUSIONE: {final_text[:16000]}")
         return "\n\n".join(parts) or final_text or "(no reasoning)"
 
 
@@ -625,7 +625,7 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
         # ── Tool del workflow a 4 fasi ─────────────────────────────────────
         if tool_name == "commit_initial_assessment":
             payload = {
-                "situation_overview": (tool_input.get("situation_overview") or "")[:6000],
+                "situation_overview": (tool_input.get("situation_overview") or "")[:12000],
                 "asset_candidates": tool_input.get("asset_candidates") or [],
                 "technical_questions": tool_input.get("technical_questions") or [],
             }
@@ -639,9 +639,9 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
 
         if tool_name == "commit_final_thesis":
             payload = {
-                "thesis": (tool_input.get("thesis") or "")[:6000],
-                "action_plan": (tool_input.get("action_plan") or "")[:2000],
-                "primary_risk": (tool_input.get("primary_risk") or "")[:2000],
+                "thesis": (tool_input.get("thesis") or "")[:12000],
+                "action_plan": (tool_input.get("action_plan") or "")[:8000],
+                "primary_risk": (tool_input.get("primary_risk") or "")[:8000],
             }
             database.insert_agent_log(run_id, "DECISION_CRYPTO_PHASE3", json.dumps(payload, default=str))
             return json.dumps({
@@ -1516,16 +1516,16 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
         "iterations": iterations,
         "trades_executed": len(trades),
         "duration_seconds": round(duration, 1),
-        "final_text": final_text[:8000],
+        "final_text": final_text[:16000],
         # reasoning_text e' fallback se la card UI lo richiede (es. quando
         # ft e' vuoto perche' R1 ha terminato senza completare la final_thesis).
-        "reasoning_text": final_text[:8000] if final_text else "",
+        "reasoning_text": final_text[:16000] if final_text else "",
         # Reasoning strutturato (estratto da workflow_state.final_thesis):
-        "thesis": (ft.get("thesis") or "")[:3500],
-        "action_plan": (ft.get("action_plan") or "")[:2000],
-        "primary_risk": (ft.get("primary_risk") or "")[:2000],
+        "thesis": (ft.get("thesis") or "")[:12000],
+        "action_plan": (ft.get("action_plan") or "")[:8000],
+        "primary_risk": (ft.get("primary_risk") or "")[:8000],
         # Initial assessment (utile per debugging / coach cards):
-        "situation_overview": (ia.get("situation_overview") or "")[:2500],
+        "situation_overview": (ia.get("situation_overview") or "")[:12000],
         "asset_candidates": ia.get("asset_candidates") or [],
         "technical_questions": ia.get("technical_questions") or [],
     }, default=str))
