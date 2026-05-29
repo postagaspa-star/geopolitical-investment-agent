@@ -1096,7 +1096,14 @@ def mark_decision_chat_action_executed(message_id: int, action_index: int,
                 current = _json.loads(row["executed_action_results"])
                 if not isinstance(current, dict):
                     current = {}
-            except Exception:
+            except Exception as _je:
+                # Non piu' silenzioso: il JSON corrotto perde le azioni
+                # precedenti, loggalo cosi' l'utente sa che l'audit trail
+                # di quel messaggio e' stato resettato.
+                logger.warning("mark_decision_chat_action_executed: "
+                               "executed_action_results corrotto su msg %s (%s) — "
+                               "ripristino a vuoto, azioni precedenti perse.",
+                               message_id, _je)
                 current = {}
         current[str(action_index)] = result
         conn.execute(

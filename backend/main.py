@@ -121,10 +121,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Abilitazione CORS per tutte le origini (utile per lo sviluppo del frontend)
+# CORS ristretto al frontend (era "*"). La dashboard e' servita dallo stesso
+# backend (same-origin) quindi continua a funzionare; il wildcard apriva
+# l'API a qualunque sito. Override via env ALLOWED_ORIGINS (CSV) per il dev.
+# NOTA SICUREZZA: il CORS ferma solo i browser cross-origin, NON curl/script.
+# Gli endpoint che mutano restano raggiungibili da richieste dirette finche'
+# non si aggiunge un'auth a token (raccomandato prima dei soldi veri).
+_allowed_origins = [
+    o.strip() for o in os.environ.get(
+        "ALLOWED_ORIGINS",
+        "https://geopolitical-investment-agent.onrender.com,http://localhost:3000",
+    ).split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -4208,7 +4219,7 @@ async def portfolio_run_migrations():
 
 @app.post("/api/portfolio/adjust-cash")
 async def portfolio_adjust_cash(
-    delta: float = Query(..., description="Delta da applicare al cash_balance (positivo aggiunge, negativo sottrae)"),
+    delta: float = Query(..., ge=-1e7, le=1e7, description="Delta da applicare al cash_balance (positivo aggiunge, negativo sottrae). Limitato a +/-10M per evitare overflow/errori di battitura."),
     confirm: bool = Query(default=False),
 ):
     """

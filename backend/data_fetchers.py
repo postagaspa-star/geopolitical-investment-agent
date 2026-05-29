@@ -104,6 +104,10 @@ _NEWSAPI_CACHE_TTL = 3600  # 1 ora
 # "potrebbero essere transienti"). Salviamo l'epoch fino a cui restare zitti.
 _newsapi_cooldown_until: float = 0.0
 _NEWSAPI_COOLDOWN_AFTER_429 = 6 * 3600  # 6h
+# Lock per rendere atomici check+set del cooldown: _fetch_newsapi_single gira
+# in parallelo via asyncio.gather, e senza lock task concorrenti leggevano un
+# valore stale (TOCTOU) bypassando il cooldown su 429 multipli.
+_newsapi_cooldown_lock = asyncio.Lock()
 
 
 # ------------------------------------------------------------
@@ -259,7 +263,9 @@ async def _fetch_newsapi_single(
         return {"query": query, "articles": cached[1], "error": None, "cached": True}
 
     # 2. Siamo in cooldown post-429? Ritorna cache stale (se c'è) o lista vuota.
-    if now_ts < _newsapi_cooldown_until:
+    async with _newsapi_cooldown_lock:
+        in_cooldown = now_ts < _newsapi_cooldown_until
+    if in_cooldown:
         if cached:
             logger.debug("NewsAPI in cooldown, uso cache stale per '%s'", query)
             return {"query": query, "articles": cached[1], "error": None,
@@ -277,8 +283,9 @@ async def _fetch_newsapi_single(
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
             if resp.status == 429:
                 # Quota giornaliera esaurita: attiva cooldown per 6h e ritorna
-                # cache stale se disponibile.
-                _newsapi_cooldown_until = now_ts + _NEWSAPI_COOLDOWN_AFTER_429
+                # cache stale se disponibile. Set sotto lock (atomico vs read).
+                async with _newsapi_cooldown_lock:
+                    _newsapi_cooldown_until = now_ts + _NEWSAPI_COOLDOWN_AFTER_429
                 logger.warning(
                     "NewsAPI 429 (quota giornaliera esaurita). Cooldown attivato per 6h. Query: %s",
                     query,

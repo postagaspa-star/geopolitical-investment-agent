@@ -2263,7 +2263,14 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
         if tool_name == "execute_trade":
             ticker = tool_input["ticker"]
             action = tool_input["action"]
-            quantity = tool_input["quantity"]
+            # float() esplicito (come decision_crypto): se il modello passa
+            # una stringa, qui solleva ValueError gestito invece di propagarsi
+            # come TypeError piu' avanti (gross_cost = qty*price).
+            try:
+                quantity = float(tool_input["quantity"])
+            except (TypeError, ValueError):
+                return json.dumps({"executed": False, "rejected": True,
+                                   "reason": f"quantity non numerica: {tool_input.get('quantity')!r}"})
             logic_chain = tool_input["logic_chain"]
             confidence = tool_input["confidence_level"]
             # R/R atteso (lever 2: confidence = probabilita' × payoff).

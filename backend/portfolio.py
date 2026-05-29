@@ -129,6 +129,28 @@ def _alert_trade_not_logged(action: str, ticker, quantity, price, ex) -> None:
         pass
 
 
+def _alert_rollback_failed(action: str, ticker, ex) -> None:
+    """Allarme CRITICAL: il rollback del cash dopo un upsert_position fallito
+    e' a sua volta fallito → cash potenzialmente detratto senza posizione
+    (incoerenza contabile). Prima era 'except: pass' muto; ora si logga e si
+    scrive un agent_log CASH_ROLLBACK_FAILED visibile nel cruscotto/health.
+    """
+    logger.critical(
+        "execute_%s: ROLLBACK del cash FALLITO per %s: %s. Possibile cash "
+        "detratto senza posizione — incoerenza contabile da verificare.",
+        action, ticker, ex, exc_info=True,
+    )
+    try:
+        from database import insert_agent_log as _ial
+        import json as _json
+        _ial("portfolio", "CASH_ROLLBACK_FAILED", _json.dumps({
+            "event": "cash_rollback_failed",
+            "action": action, "ticker": ticker, "error": str(ex)[:300],
+        }, default=str))
+    except Exception:
+        pass
+
+
 def calculate_total_value():
     """
     Ricalcola il valore totale del portafoglio (liquidita' + posizioni aperte).
@@ -448,11 +470,11 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
     except Exception as ex:
         logger.error("execute_buy: upsert_position FAILED for %s qty=%s: %s",
                      ticker, quantity, ex, exc_info=True)
-        # Rollback cash (best effort)
+        # Rollback cash — se fallisce, lo segnaliamo (non piu' 'except: pass' muto)
         try:
             update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
-        except Exception:
-            pass
+        except Exception as rb_ex:
+            _alert_rollback_failed("buy", ticker, rb_ex)
         return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}",
                 "db_error": str(ex)[:500]}
 
@@ -571,11 +593,11 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
     except Exception as ex:
         logger.error("execute_sell: position update FAILED for %s remaining=%s: %s",
                      ticker, remaining, ex, exc_info=True)
-        # Rollback cash
+        # Rollback cash — se fallisce, lo segnaliamo (non piu' 'except: pass' muto)
         try:
             update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
-        except Exception:
-            pass
+        except Exception as rb_ex:
+            _alert_rollback_failed("sell", ticker, rb_ex)
         return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}",
                 "db_error": str(ex)[:500]}
 
@@ -702,8 +724,8 @@ def execute_short(ticker, quantity, price, geo_reasoning, tech_reasoning,
     except Exception as ex:
         try:
             update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
-        except Exception:
-            pass
+        except Exception as rb_ex:
+            _alert_rollback_failed("short", ticker, rb_ex)
         logger.error("execute_short: upsert_position FAILED %s: %s",
                      ticker, ex, exc_info=True)
         return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}"}
@@ -792,8 +814,8 @@ def execute_cover(ticker, quantity, price, geo_reasoning, tech_reasoning,
     except Exception as ex:
         try:
             update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
-        except Exception:
-            pass
+        except Exception as rb_ex:
+            _alert_rollback_failed("cover", ticker, rb_ex)
         logger.error("execute_cover: position update FAILED %s: %s",
                      ticker, ex, exc_info=True)
         return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}"}
