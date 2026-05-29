@@ -6,8 +6,11 @@
 
 import os
 import asyncio
+import json
 import logging
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -386,6 +389,165 @@ def _get_massive_key_ohlcv() -> str:
         except Exception:
             pass
     return key
+
+
+def _get_twelvedata_key() -> str:
+    """API key Twelve Data da env var o DB settings (twelve_data_api_key)."""
+    key = os.environ.get("TWELVE_DATA_API_KEY", "")
+    if not key:
+        try:
+            import database as _db
+            key = _db.get_setting("twelve_data_api_key", "") or ""
+        except Exception:
+            pass
+    return key
+
+
+def _is_crypto_ticker(ticker: str) -> bool:
+    """True se il ticker e' crypto (BTC-USD, X:BTCUSD, BTCUSDT, ...)."""
+    t = (ticker or "").upper()
+    return t.startswith("X:") or (t.endswith("-USD") and len(t) > 4) or t.endswith("USDT")
+
+
+def _http_get_text(url: str, timeout: int = PROVIDER_OHLCV_TIMEOUT) -> str:
+    """GET sincrono via urllib (stdlib, no dipendenze). Ritorna il body testo."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (GeoInvest data fetcher)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+# ── Provider OHLCV equity: Twelve Data (primario) + Stooq (fallback) ─────────
+
+def _fetch_twelvedata_ohlcv_sync(ticker: str, period_days: int) -> Dict[str, Any]:
+    """OHLCV daily da Twelve Data. Free: 800 chiamate/giorno (4h delay, ok per
+    l'analisi tecnica). Ritorna il formato standard {ticker,data,error,source}."""
+    key = _get_twelvedata_key()
+    if not key:
+        return {"ticker": ticker, "data": [], "error": "twelvedata: no API key",
+                "source": "twelvedata"}
+    outputsize = min(max(int(period_days) + 10, 30), 5000)
+    params = urllib.parse.urlencode({
+        "symbol": ticker, "interval": "1day",
+        "outputsize": outputsize, "apikey": key, "format": "JSON",
+    })
+    url = f"https://api.twelvedata.com/time_series?{params}"
+    try:
+        data = json.loads(_http_get_text(url))
+        if isinstance(data, dict) and data.get("status") == "error":
+            return {"ticker": ticker, "data": [],
+                    "error": f"twelvedata: {str(data.get('message',''))[:150]}",
+                    "source": "twelvedata"}
+        values = data.get("values") if isinstance(data, dict) else None
+        if not values:
+            return {"ticker": ticker, "data": [], "error": "twelvedata: no values",
+                    "source": "twelvedata"}
+        records: List[Dict[str, Any]] = []
+        for v in values:   # Twelve Data ritorna newest-first → invertiremo
+            try:
+                records.append({
+                    "date": str(v.get("datetime"))[:10],
+                    "open": float(v.get("open") or 0),
+                    "high": float(v.get("high") or 0),
+                    "low": float(v.get("low") or 0),
+                    "close": float(v.get("close") or 0),
+                    "volume": int(float(v.get("volume") or 0)),
+                })
+            except (TypeError, ValueError):
+                continue
+        records.reverse()   # → ascending per data (come gli altri provider)
+        if not records:
+            return {"ticker": ticker, "data": [], "error": "twelvedata: empty after parse",
+                    "source": "twelvedata"}
+        return {"ticker": ticker, "data": records,
+                "fetched_at": datetime.utcnow().isoformat(),
+                "error": None, "source": "twelvedata"}
+    except Exception as exc:
+        return {"ticker": ticker, "data": [],
+                "error": f"twelvedata: {str(exc)[:200]}", "source": "twelvedata"}
+
+
+def _fetch_stooq_ohlcv_sync(ticker: str, period_days: int) -> Dict[str, Any]:
+    """OHLCV daily da Stooq (CSV, niente API key, NON rate-limita). Fallback
+    affidabile per equity US. Ritorna il formato standard."""
+    sym = ticker.lower().strip()
+    # US equity/ETF: Stooq vuole il suffisso ".us" (es. aapl.us, spy.us)
+    if "." not in sym and "-" not in sym:
+        sym = f"{sym}.us"
+    url = f"https://stooq.com/q/d/l/?s={urllib.parse.quote(sym)}&i=d"
+    try:
+        body = _http_get_text(url)
+        lines = [ln for ln in body.strip().splitlines() if ln.strip()]
+        if len(lines) < 2 or not lines[0].lower().startswith("date"):
+            # Stooq risponde "N/D" o HTML quando il simbolo non esiste
+            return {"ticker": ticker, "data": [], "error": "stooq: no data/format",
+                    "source": "stooq"}
+        records: List[Dict[str, Any]] = []
+        for line in lines[1:]:
+            parts = line.split(",")
+            if len(parts) < 6:
+                continue
+            try:
+                vol_raw = parts[5].strip()
+                records.append({
+                    "date": parts[0].strip(),
+                    "open": float(parts[1]), "high": float(parts[2]),
+                    "low": float(parts[3]), "close": float(parts[4]),
+                    "volume": int(float(vol_raw)) if vol_raw not in ("", "N/A") else 0,
+                })
+            except (TypeError, ValueError):
+                continue
+        # Stooq e' gia' ascending; tieni la coda ~period_days+10
+        if period_days and len(records) > period_days + 10:
+            records = records[-(period_days + 10):]
+        if not records:
+            return {"ticker": ticker, "data": [], "error": "stooq: empty after parse",
+                    "source": "stooq"}
+        return {"ticker": ticker, "data": records,
+                "fetched_at": datetime.utcnow().isoformat(),
+                "error": None, "source": "stooq"}
+    except Exception as exc:
+        return {"ticker": ticker, "data": [],
+                "error": f"stooq: {str(exc)[:200]}", "source": "stooq"}
+
+
+# ── Provider OHLCV crypto: Binance klines (primario, free illimitato) ────────
+
+def _fetch_binance_klines_sync(ticker: str, period_days: int) -> Dict[str, Any]:
+    """OHLCV daily da Binance public klines (no API key, real-time, illimitato).
+    Converte BTC-USD / X:BTCUSD → BTCUSDT. Ritorna il formato standard."""
+    sym = ticker.upper().replace("X:", "").replace("-", "")
+    # yfinance/Polygon usano *USD; Binance quota in *USDT
+    if sym.endswith("USD") and not sym.endswith("USDT"):
+        sym = sym[:-3] + "USDT"
+    limit = min(max(int(period_days) + 10, 30), 1000)
+    params = urllib.parse.urlencode({"symbol": sym, "interval": "1d", "limit": limit})
+    url = f"https://api.binance.com/api/v3/klines?{params}"
+    try:
+        arr = json.loads(_http_get_text(url))
+        if not isinstance(arr, list) or not arr:
+            return {"ticker": ticker, "data": [], "error": "binance: no klines",
+                    "source": "binance"}
+        records: List[Dict[str, Any]] = []
+        for k in arr:   # [openTime, open, high, low, close, volume, ...]
+            try:
+                records.append({
+                    "date": datetime.utcfromtimestamp(k[0] / 1000).date().isoformat(),
+                    "open": float(k[1]), "high": float(k[2]),
+                    "low": float(k[3]), "close": float(k[4]),
+                    "volume": int(float(k[5])),
+                })
+            except (TypeError, ValueError, IndexError):
+                continue
+        if not records:
+            return {"ticker": ticker, "data": [], "error": "binance: empty after parse",
+                    "source": "binance"}
+        return {"ticker": ticker, "data": records,
+                "fetched_at": datetime.utcnow().isoformat(),
+                "error": None, "source": "binance"}
+    except Exception as exc:
+        return {"ticker": ticker, "data": [],
+                "error": f"binance: {str(exc)[:200]}", "source": "binance"}
 
 
 async def _fetch_provider_ohlcv_async(
@@ -805,7 +967,11 @@ def fetch_market_data(ticker: str, period_days: int = 90,
                       bypass_cache: bool = False) -> Dict[str, Any]:
     """
     Scarica i dati OHLCV per un singolo ticker.
-    Cascade: Polygon.io → Massive → yfinance (con corruption check).
+    Cascade per asset class (con corruption check su OGNI fonte):
+      EQUITY: Twelve Data → Stooq → Polygon → Massive → yfinance
+      CRYPTO: Binance klines → Polygon → Massive → yfinance
+    yfinance resta SOLO come ultimissima spiaggia (il suo rate-limit
+    silenzioso era la causa storica dei "dati tecnici identici").
 
     Cache in-memory (5 min TTL) condivisa tra tutte le fonti.
 
@@ -832,41 +998,55 @@ def fetch_market_data(ticker: str, period_days: int = 90,
                          cache_key, cached_result.get("source", "?"))
             return cached_result
 
-    # ── Provider 1: Polygon.io (primario) ────────────────────────────────────
+    # ── Cascata provider ordinata per asset class ───────────────────────────
+    # Il corruption guard (_is_ohlcv_corrupted) e' applicato a OGNI provider,
+    # non solo a yfinance → un clone da qualunque fonte viene scartato e si
+    # passa alla successiva.
     polygon_key = _get_polygon_key()
-    if polygon_key:
-        try:
-            result = _fetch_provider_ohlcv_sync(
-                POLYGON_BASE_URL, ticker, period_days, polygon_key, "polygon"
-            )
-            if result.get("data") and not result.get("error"):
-                logger.debug("Polygon OK per %s (%d bars)", ticker, len(result["data"]))
-                _yfinance_cache[cache_key] = (now, result)
-                return result
-            else:
-                logger.info("Polygon fallito per %s: %s — provo Massive",
-                            ticker, result.get("error"))
-        except Exception as exc:
-            logger.warning("Polygon eccezione per %s: %s — provo Massive", ticker, exc)
-
-    # ── Provider 2: Massive (secondario, Polygon-compatible) ─────────────────
     massive_key = _get_massive_key_ohlcv()
-    if massive_key:
-        try:
-            result = _fetch_provider_ohlcv_sync(
-                MASSIVE_BASE_URL_OHLCV, ticker, period_days, massive_key, "massive"
-            )
-            if result.get("data") and not result.get("error"):
-                logger.debug("Massive OK per %s (%d bars)", ticker, len(result["data"]))
-                _yfinance_cache[cache_key] = (now, result)
-                return result
-            else:
-                logger.info("Massive fallito per %s: %s — provo yfinance",
-                            ticker, result.get("error"))
-        except Exception as exc:
-            logger.warning("Massive eccezione per %s: %s — provo yfinance", ticker, exc)
+    providers: list = []
+    if _is_crypto_ticker(ticker):
+        providers.append(("binance",
+                           lambda: _fetch_binance_klines_sync(ticker, period_days)))
+        if polygon_key:
+            providers.append(("polygon", lambda: _fetch_provider_ohlcv_sync(
+                POLYGON_BASE_URL, ticker, period_days, polygon_key, "polygon")))
+        if massive_key:
+            providers.append(("massive", lambda: _fetch_provider_ohlcv_sync(
+                MASSIVE_BASE_URL_OHLCV, ticker, period_days, massive_key, "massive")))
+    else:
+        if _get_twelvedata_key():
+            providers.append(("twelvedata",
+                              lambda: _fetch_twelvedata_ohlcv_sync(ticker, period_days)))
+        providers.append(("stooq",
+                          lambda: _fetch_stooq_ohlcv_sync(ticker, period_days)))
+        if polygon_key:
+            providers.append(("polygon", lambda: _fetch_provider_ohlcv_sync(
+                POLYGON_BASE_URL, ticker, period_days, polygon_key, "polygon")))
+        if massive_key:
+            providers.append(("massive", lambda: _fetch_provider_ohlcv_sync(
+                MASSIVE_BASE_URL_OHLCV, ticker, period_days, massive_key, "massive")))
 
-    # ── Provider 3: yfinance (ultima spiaggia) ───────────────────────────────
+    for name, fn in providers:
+        try:
+            result = fn()
+        except Exception as exc:
+            logger.warning("OHLCV %s: %s eccezione: %s — provo il prossimo",
+                           ticker, name, exc)
+            continue
+        if not result.get("data") or result.get("error"):
+            logger.info("OHLCV %s: %s fallito (%s) — provo il prossimo",
+                        ticker, name, str(result.get("error"))[:120])
+            continue
+        if _is_ohlcv_corrupted(result["data"]):
+            logger.warning("OHLCV %s: %s CORROTTO (>=90%% close identici) — scarto",
+                           ticker, name)
+            continue
+        logger.debug("OHLCV %s OK da %s (%d bars)", ticker, name, len(result["data"]))
+        _yfinance_cache[cache_key] = (now, result)
+        return result
+
+    # ── Ultima spiaggia: yfinance ────────────────────────────────────────────
     yfinance_error = None
     try:
         # Pausa breve tra richieste consecutive per evitare rate-limit
