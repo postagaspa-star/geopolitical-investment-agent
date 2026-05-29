@@ -11,6 +11,16 @@ services:
         sync: false
       - key: FINNHUB_API_KEY
         sync: false
+      # Dati tecnici equity (primario): registrazione gratuita su twelvedata.com
+      # (free 800 chiamate/giorno). Stooq e Binance NON richiedono key.
+      - key: TWELVE_DATA_API_KEY
+        sync: false
+      # Fallback equity/crypto OHLCV (opzionale): se gia' configurato, resta.
+      - key: POLYGON_API_KEY
+        sync: false
+      # Riduzione memoria glibc (fix OOM 512MB) — vedi start.sh
+      - key: MALLOC_ARENA_MAX
+        value: "2"
       - key: DB_PATH
         value: "/data/portfolio.db"
       - key: DOCUMENTS_PATH
