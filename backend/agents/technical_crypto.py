@@ -222,7 +222,7 @@ async def _call_deepseek(context: str, max_retries: int = 2) -> tuple[str, str]:
         # Temperature 0.4 (era 0.2): meno conservativo, piu' espressivita'
         # nelle confidence senza perdere consistency sui segnali.
         "temperature": 0.4,
-        "max_tokens": 3000,
+        "max_tokens": 6000,   # era 3000 (su richiesta utente): evita tagli sui report crypto
     }
 
     last_error = None

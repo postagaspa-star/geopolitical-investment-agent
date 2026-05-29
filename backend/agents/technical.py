@@ -161,7 +161,7 @@ async def _call_deepseek(context: str, max_retries: int = 3) -> tuple[str, str]:
             {"role": "system", "content": _get_tech_prompt()},
             {"role": "user", "content": context},
         ],
-        "max_tokens": 4096,
+        "max_tokens": 6000,   # era 4096 (su richiesta utente): evita tagli sui report tecnici
         # Temperature 0.4 (era 0.2): piu' espressivita' nelle confidence
         # senza perdere consistency sui segnali. 0.2 era troppo conservativa
         # e produceva HOLD/35% sistematici.
@@ -218,7 +218,7 @@ async def _call_claude_fallback(context: str) -> tuple[str, str]:
     def _sync_call():
         return client.messages.create(
             model=FALLBACK_MODEL,
-            max_tokens=4096,
+            max_tokens=6000,   # era 4096 (su richiesta utente)
             system=_get_tech_prompt(),
             messages=[{"role": "user", "content": context}],
         )

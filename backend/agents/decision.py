@@ -3227,10 +3227,9 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     workflow_state = WorkflowState()
 
     try:
-        # max_tokens: 5000 (era 8000). Il workflow 4-fasi tipicamente
-        # genera 2-4k token totali; 5000 lascia margine senza sprecare
-        # budget. Output costa $15/M token → ogni 1000 tk = $0.015/run.
-        response = await asyncio.to_thread(_create_message, model, 5000)
+        # max_tokens: 6000 (era 5000, su richiesta utente). Margine extra per
+        # ragionamenti lunghi senza tagli. Output ~$15/M tk → +1000tk = +$0.015/run.
+        response = await asyncio.to_thread(_create_message, model, 6000)
         used_model = model
     except Exception as model_err:
         # Circuit breaker: se è un errore di auth/quota, NON tentare il
