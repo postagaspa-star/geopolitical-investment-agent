@@ -497,8 +497,9 @@ def _execute_liquidation(action: dict, run_id: str) -> dict:
             result = _pf.execute_sell(**common)
 
         if not result.get("success"):
+            _op = "execute_cover" if direction == "SHORT" else "execute_sell"
             return {"success": False, "ticker": ticker,
-                    "error": result.get("reason", "execute_sell failed")}
+                    "error": result.get("reason", f"{_op} failed")}
 
         proceeds = qty * current_price
         return {

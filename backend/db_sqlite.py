@@ -316,6 +316,13 @@ def update_portfolio(cash_balance, total_value):
     with get_db() as conn:
         conn.execute("UPDATE portfolio SET cash_balance=?, total_value=?, updated_at=datetime('now') WHERE id=(SELECT MAX(id) FROM portfolio)", (cash_balance, total_value))
 
+
+def update_portfolio_total_value(total_value):
+    """Aggiorna SOLO total_value (NON il cash). Vedi commento in db_supabase:
+    evita la race read-stale-cash → overwrite in calculate_total_value."""
+    with get_db() as conn:
+        conn.execute("UPDATE portfolio SET total_value=?, updated_at=datetime('now') WHERE id=(SELECT MAX(id) FROM portfolio)", (total_value,))
+
 def get_positions():
     with get_db() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM positions ORDER BY opened_at DESC").fetchall()]

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 import accounting
 
 from database import (
-    get_portfolio, update_portfolio,
+    get_portfolio, update_portfolio, update_portfolio_total_value,
     get_positions, get_position,
     upsert_position, delete_position,
     update_position_price, count_positions,
@@ -265,8 +265,10 @@ def calculate_total_value():
     except Exception as ex:
         logger.debug("calculate_total_value drift check skipped: %s", ex)
 
-    # Persist SEMPRE la verita': cash + positions direction-aware
-    update_portfolio(cash, raw_total)
+    # Persist SOLO total_value (NON il cash): calculate_total_value e' una
+    # valutazione. Riscrivere il cash qui (letto a inizio funzione) poteva
+    # sovrascrivere un trade concorrente → perdita silenziosa di denaro.
+    update_portfolio_total_value(raw_total)
     return raw_total
 
 

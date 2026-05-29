@@ -321,6 +321,24 @@ def update_portfolio(cash_balance, total_value):
         }).eq("id", row.data[0]["id"]).execute()
 
 
+def update_portfolio_total_value(total_value):
+    """Aggiorna SOLO total_value (NON il cash).
+
+    Usato da calculate_total_value, che e' una VALUTAZIONE e non deve mai
+    riscrivere il cash: prima faceva update_portfolio(cash, total) col cash
+    letto all'inizio della funzione → se un trade modificava il cash nel
+    frattempo, lo scriveva STALE sovrascrivendo la modifica (perdita
+    silenziosa di denaro). Toccando solo total_value la race sparisce.
+    """
+    client = _get_client()
+    row = client.table("portfolio").select("id").order("id", desc=True).limit(1).execute()
+    if row.data:
+        client.table("portfolio").update({
+            "total_value": total_value,
+            "updated_at": _now_iso(),
+        }).eq("id", row.data[0]["id"]).execute()
+
+
 # ============================================================
 # Positions
 # ============================================================

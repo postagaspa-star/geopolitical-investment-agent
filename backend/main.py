@@ -14,7 +14,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import agent
 import accounting
@@ -5455,14 +5455,24 @@ async def recover_liquidated_positions(payload: RecoverLiquidatedPayload):
 
 class RecoveryReviewPayload(BaseModel):
     """Trigger forced run dei Decision agents con contesto di recovery."""
-    custom_directive: str | None = None   # se None, usa default
+    # max_length: senza limite una direttiva multi-MB finirebbe iniettata nel
+    # system prompt di OGNI agente (token-bomb) e nel DB (DoS).
+    custom_directive: str | None = Field(default=None, max_length=8000)
     trigger_standard: bool = True
     trigger_crypto: bool = True
 
 
 @app.post("/api/admin/recovery-review")
 async def recovery_review(payload: RecoveryReviewPayload,
-                          background_tasks: BackgroundTasks):
+                          background_tasks: BackgroundTasks,
+                          confirm: bool = Query(default=False)):
+    if not confirm:
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "error": "confirm=true richiesto: questo endpoint lancia run forzati "
+                     "dei Decision Agent (azione che muove i soldi) e setta una "
+                     "direttiva persistente nei prompt.",
+        })
     """
     Forza una run dei Decision Agent (Standard + Crypto) con un blocco
     di contesto esplicito sul bug e sul recovery.
