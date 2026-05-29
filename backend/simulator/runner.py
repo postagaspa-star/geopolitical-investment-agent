@@ -1082,10 +1082,15 @@ def _build_run_data(run_id: str, state: dict) -> dict:
 
     main_asset = None
     if asset_actions:
-        # Score per-asset: (n_decisions, -first_step_idx). Piu' decisioni vince;
-        # in caso di tie, l'asset entrato prima vince.
+        # Score per-asset: PRIMA gli asset con trade reali (BUY/SELL), poi per
+        # numero totale di decisioni, poi chi e' entrato prima.
+        # FIX: prima lo score era solo len(decisions) → un asset SOLO-HOLD
+        # (mai tradato davvero) poteva "vincere" l'attribuzione su un asset
+        # con un BUY reale, e il P&L del run veniva attribuito a un HOLD
+        # sull'asset sbagliato. Contare prima i trade reali risolve.
         def _asset_score(actions_list):
-            return (len(actions_list), -actions_list[0][0])
+            n_trades = sum(1 for _, a, _ in actions_list if a in ("BUY", "SELL"))
+            return (n_trades, len(actions_list), -actions_list[0][0])
         main_asset = max(asset_actions.keys(),
                          key=lambda a: _asset_score(asset_actions[a]))
 

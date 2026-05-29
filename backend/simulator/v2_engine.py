@@ -754,10 +754,17 @@ def _parse_response(raw: str) -> dict:
     for t in trades[:5]:
         if not isinstance(t, dict):
             continue
+        # SAFE PARSE: se l'LLM manda allocation_pct non numerico (es. "high"),
+        # float() lanciava ValueError e abortiva il parse dell'INTERO step
+        # (perdendo anche i trade validi). Ora il trade malformato vale 0.
+        try:
+            alloc_pct = float(t.get("allocation_pct", 0) or 0)
+        except (TypeError, ValueError):
+            alloc_pct = 0.0
         trades_norm.append({
             "action": (t.get("action") or "").upper(),
             "asset": (t.get("asset") or "").upper(),
-            "allocation_pct": float(t.get("allocation_pct", 0) or 0),
+            "allocation_pct": alloc_pct,
             "conviction": (t.get("conviction") or "MEDIA").upper(),
             "thesis": (t.get("thesis") or "")[:400],
             # rr: stima R/R dichiarata dall'AU (sezione 6.C del prompt).
