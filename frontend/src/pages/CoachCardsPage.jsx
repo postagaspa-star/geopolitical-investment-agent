@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   BookOpen, Loader2, RefreshCw, Trash2, Sparkles, AlertCircle, Zap,
   Check, X,
@@ -18,6 +18,9 @@ export default function CoachCardsPage() {
   const [cards, setCards] = useState([]);
   const [status, setStatus] = useState({});
   const [loading, setLoading] = useState(true);
+  // Ref al polling di synthesis: serve a fermarlo se l'utente naviga via
+  // (altrimenti setInterval continua a fetchare in background → memory leak).
+  const pollRef = useRef(null);
   const [error, setError] = useState(null);
   const [synthesizing, setSynthesizing] = useState(false);
 
@@ -40,7 +43,11 @@ export default function CoachCardsPage() {
     }
   };
 
-  useEffect(() => { fetchCards(); }, []);
+  useEffect(() => {
+    fetchCards();
+    // Cleanup: ferma il polling di synthesis se il componente si smonta.
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
 
   const triggerSynthesis = async () => {
     if (synthesizing) return;
@@ -50,13 +57,16 @@ export default function CoachCardsPage() {
     setSynthesizing(true);
     try {
       await fetch(`${API}/api/coach-cards/synthesize`, { method: "POST" });
-      // Polling: ricarica ogni 8s per i prossimi 90s
+      // Polling: ricarica ogni 8s per i prossimi 90s. Salvato in pollRef
+      // cosi' il cleanup di useEffect lo ferma se l'utente naviga via.
       let attempts = 0;
-      const poll = setInterval(async () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(async () => {
         attempts++;
         await fetchCards();
         if (attempts >= 12) {
-          clearInterval(poll);
+          clearInterval(pollRef.current);
+          pollRef.current = null;
           setSynthesizing(false);
         }
       }, 8000);
