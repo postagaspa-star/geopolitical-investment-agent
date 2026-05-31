@@ -1465,8 +1465,30 @@ _DEC_CHAT_FALLBACK_KEY_CONV = "dec_chat_conv_{aid}"   # per agent_type
 _DEC_CHAT_FALLBACK_KEY_MSGS = "dec_chat_msgs_{cid}"
 
 
+def _is_missing_column_err(exc: Exception) -> bool:
+    """True per 'colonna inesistente'. A differenza degli errori transitori
+    (schema cache reload), una colonna mancante e' PERSISTENTE: la tabella
+    decision_chat_messages senza le colonne proposed_actions/
+    executed_action_results (aggiunte nel codice ma non migrate su Supabase
+    quando manca DATABASE_URL) fa fallire l'insert con questo errore. Per la
+    decision-chat e' corretto ripiegare sul KV store schema-less, che salva
+    l'intero messaggio (azioni/direttive incluse) senza vincoli di colonna.
+    """
+    s = str(exc).lower()
+    if "pgrst204" in s:                              # PostgREST: column not found
+        return True
+    if "column" in s and "does not exist" in s:      # Postgres canonico
+        return True
+    if "could not find the" in s and "column" in s:  # PostgREST schema cache
+        return True
+    return False
+
+
 def _dec_chat_should_fallback(exc: Exception) -> bool:
-    return _is_missing_table_err(exc)
+    # Tabella mancante OPPURE colonna mancante → schema proper inutilizzabile,
+    # si ripiega sul KV store (preserva proposed_actions/ordini/direttive).
+    # Entrambe le condizioni sono persistenti: il latch su KV e' corretto qui.
+    return _is_missing_table_err(exc) or _is_missing_column_err(exc)
 
 
 def get_or_create_decision_chat_conversation(agent_type: str) -> int | None:

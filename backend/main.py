@@ -184,7 +184,9 @@ async def get_positions():
         try:
             from price_polling import get_cached_prices_bulk
             tickers = [p.get("ticker") for p in positions if p.get("ticker")]
-            cached = get_cached_prices_bulk(tickers, max_age_seconds=700)
+            # 1500s (25 min): allineato al polling 20min, cosi' i prezzi
+            # dell'ultimo giro restano validi e non spariscono dalla dashboard.
+            cached = get_cached_prices_bulk(tickers, max_age_seconds=1500)
 
             for p in positions:
                 t = p.get("ticker")
@@ -319,7 +321,7 @@ async def get_price_quotes(tickers: str = Query(default="")):
         from price_polling import get_cached_prices_bulk
         if tickers:
             ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-            return get_cached_prices_bulk(ticker_list, max_age_seconds=700)
+            return get_cached_prices_bulk(ticker_list, max_age_seconds=1500)
         else:
             client = database.get_client()
             if not client:
@@ -428,31 +430,48 @@ async def get_geopolitical():
 @app.post("/api/agent/run")
 async def trigger_agent_run(background_tasks: BackgroundTasks):
     """
-    Avvia manualmente un'esecuzione singola del pipeline multi-agente.
-    Mercati aperti → run_full_pipeline (Watchdog → Technical → Decision Sonnet).
-    Mercati chiusi → run_crypto_pipeline (Technical Crypto → Decision R1).
+    Avvia manualmente un'esecuzione del pipeline multi-agente.
+
+    Comportamento (fix): il run manuale lancia ENTRAMBI i decisional, con la
+    regola corretta dei mercati:
+      - Crypto pipeline: SEMPRE (mercato crypto 24/7).
+      - Standard (equity/ETF) pipeline: SOLO se il mercato USA e' aperto
+        (a mercati chiusi non ha senso e prima veniva comunque lanciata,
+        oppure — col vecchio either/or — la crypto non partiva affatto).
+    Le due pipeline girano in sequenza (crypto poi standard) per non
+    interferire con la serializzazione dello scheduler.
     """
     run_id = str(uuid.uuid4())
-    mode = scheduler.get_current_mode()
-    market_open = scheduler.is_market_open()
+    us_open = scheduler.is_us_market_open()
 
     async def _run():
+        from agents.orchestrator import run_full_pipeline, run_crypto_pipeline
+        ran = []
+        # 1. Crypto SEMPRE
         try:
-            logger.info(f"Esecuzione manuale pipeline avviata (run_id: {run_id}, mode: {mode}).")
-            from agents.orchestrator import run_full_pipeline, run_crypto_pipeline
-            if market_open:
-                result = await run_full_pipeline(run_id=run_id)
-            else:
-                result = await run_crypto_pipeline(run_id=run_id)
-            logger.info(f"Esecuzione manuale completata (run_id: {run_id}, result: {result.get('decision', '?')}).")
+            logger.info("[%s] Run manuale: avvio crypto pipeline", run_id)
+            await run_crypto_pipeline(run_id=f"{run_id}-crypto")
+            ran.append("crypto")
         except Exception as e:
-            logger.error(
-                f"Errore durante l'esecuzione manuale (run_id: {run_id}): {e}",
-                exc_info=True,
-            )
+            logger.error("[%s] Run manuale crypto fallita: %s", run_id, e, exc_info=True)
+        # 2. Standard SOLO se mercato USA aperto
+        if us_open:
+            try:
+                logger.info("[%s] Run manuale: avvio standard pipeline (mercato USA aperto)", run_id)
+                await run_full_pipeline(run_id=f"{run_id}-std")
+                ran.append("standard")
+            except Exception as e:
+                logger.error("[%s] Run manuale standard fallita: %s", run_id, e, exc_info=True)
+        else:
+            logger.info("[%s] Run manuale: standard SALTATO (mercato USA chiuso)", run_id)
+        logger.info("[%s] Run manuale completata: pipeline eseguite=%s", run_id, ran)
 
     background_tasks.add_task(_run)
-    return {"status": "started", "run_id": run_id, "mode": mode, "market_open": market_open}
+    return {
+        "status": "started", "run_id": run_id,
+        "us_market_open": us_open,
+        "will_run": (["crypto", "standard"] if us_open else ["crypto"]),
+    }
 
 
 @app.post("/api/agent/start")

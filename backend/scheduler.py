@@ -1126,19 +1126,18 @@ def start_scheduler() -> AsyncIOScheduler:
     # scheduler stessa deve operare in UTC per coerenza.
     _scheduler = AsyncIOScheduler(timezone=pytz.utc)
 
-    # ── Price Polling: ogni 10 minuti (yfinance/Massive → Supabase) ──
-    # Frequenza ridotta da 60s a 600s per:
-    #   1. Ridurre la pressione di rate-limit su yfinance (1800/h → 180/h)
-    #   2. Eliminare i "buchi" causati da 429 di yfinance free tier
-    #   3. Allinearsi al delay nativo dei provider (~15 min su free tier)
-    # next_run_time: primo run dopo 15s dall'avvio scheduler — così dopo
-    # un deploy non aspettiamo 10 min per vedere i prezzi aggiornati.
+    # ── Price Polling: ogni 20 minuti (richiesta utente) ──
+    # Cadenza fissa 20 min: i consumatori display usano max_age 25 min (vedi
+    # /api/positions) cosi' i prezzi dell'ultimo poll restano sempre validi
+    # tra un giro e l'altro (prima la finestra 11,6 min < cadenza scartava i
+    # prezzi → apparivano "vecchi"). Provider: twelvedata/stooq/binance/polygon.
+    # next_run_time: primo run dopo 15s dall'avvio (no attesa al deploy).
     _scheduler.add_job(
         _price_polling_job,
         trigger="interval",
-        seconds=600,
+        seconds=1200,
         id="price_polling_job",
-        name="Price Polling 10min (massive+yfinance)",
+        name="Price Polling 20min",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
