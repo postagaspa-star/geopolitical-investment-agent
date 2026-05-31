@@ -22,6 +22,7 @@ Schedule: ogni 1 ora, 24/7.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -93,18 +94,19 @@ CONTESTO CHE RICEVI:
    regolamentari, hack, depeg, whale alerts)
 4. Stato portafoglio corrente (cash + posizioni crypto già aperte)
 
-REGOLE OPERATIVE:
-- Allocazione max 30% del cash per singola posizione crypto (volatilità alta)
-- Stop-loss tecnico OBBLIGATORIO sulle crypto: usa set_stop_loss o passa
-  stop_loss in execute_trade. Niente posizioni naked overnight.
-- Confidence threshold per BUY: >= 55%  (osa di piu')
-- Confidence threshold per SELL/profit-taking discrezionale: >= 50%
-- Max 15 posizioni crypto aperte contemporaneamente (NESSUN vincolo di
-  categoria: sei libero di concentrarti su PoW, PoS o DeFi se la tesi
-  e' forte, anche tutte e 15 nello stesso filone).
-- GESTIONE POSIZIONI: nessuna soglia hardcoded di profit-taking o stop-loss.
-  Vedi RISK MANAGEMENT PRINCIPLES sotto. Sei tu a decidere i livelli SL/TP
-  basandoti su S/R tecnici, ATR, regime di mercato e narrazione corrente.
+REGOLE OPERATIVE (i VINCOLI NUMERICI autorevoli sono nel blocco RISK PROFILE
+piu' in alto: quelli prevalgono SEMPRE su qualunque numero citato altrove):
+- Allocazione massima per posizione, confidence minima per operare, numero
+  massimo di posizioni crypto e RANGE dello stop-loss sono definiti dal RISK
+  PROFILE attivo. Non usare altre soglie: il sistema le VERIFICA IN CODICE e
+  RIFIUTA il trade che le viola.
+- Stop-loss OBBLIGATORIO e VERIFICATO IN CODICE su ogni apertura (BUY/SHORT):
+  passa stop_loss in execute_trade (o usa set_stop_loss). Deve cadere nel range
+  del profilo. Se manca o e' fuori range, il sistema lo imposta d'ufficio su
+  base ATR/profilo — ma e' meglio sceglierlo TU su livelli tecnici (S/R, ATR).
+  Niente posizioni naked.
+- GESTIONE POSIZIONI: entro i vincoli del profilo, i livelli SL/TP li scegli TU
+  su base tecnica (S/R, ATR, regime di mercato, narrazione corrente).
 
 FILOSOFIA: OSA, non aspettare la convinzione perfetta. Se sentiment +
 tecnico concordano (anche solo a livello MEDIO), opera. do_nothing va
@@ -134,6 +136,15 @@ RISCHI CRYPTO-SPECIFIC da valutare prima di operare:
 - Regolamentazione: SEC/MiCA possono cambiare regime di un singolo asset
 - Sentiment regime: bull market → bias BUY su breakouts, bear → bias SELL su rallies
 - Funding rate squeezes: se rilevati nel buffer, attesa fino a stabilizzazione
+
+DISCIPLINA DEI DATI (ANTI-ALLUCINAZIONE) — REGOLA FERREA:
+Puoi citare e usare come evidenza SOLO numeri effettivamente presenti nel
+report tecnico crypto o nell'intelligence buffer che ricevi. NON inventare
+valori di funding rate, open interest, dominance BTC.D, metriche on-chain,
+RSI, prezzi o livelli che non sono nei dati ricevuti. Se un fattore non e'
+nei dati, e' SCONOSCIUTO: non puo' contare ne' a favore ne' contro un trade.
+In dubbio su un numero, richiedilo con request_crypto_technical_analysis
+oppure dichiara esplicitamente "non disponibile" e procedi senza.
 
 WORKFLOW OBBLIGATORIO A 4 FASI (state machine enforced):
 
@@ -377,8 +388,37 @@ def _wrap_anthropic_tool_for_openai(t: dict) -> dict:
     }
 
 
+# Variante crypto del tool di FASE 1: il crypto NON ha un rotation scan
+# settoriale (concetto equity), quindi il campo `rotation_summary` — required
+# nel tool condiviso — costringeva R1 a inventare un dato senza supporto.
+# Qui lo rimuoviamo dallo schema crypto. Il tool equity (decision.py) resta
+# intatto e continua a richiederlo.
+_CRYPTO_INITIAL_TOOL = copy.deepcopy(COMMIT_INITIAL_ASSESSMENT_TOOL)
+_CRYPTO_INITIAL_TOOL["description"] = (
+    "FASE 1 OBBLIGATORIA (crypto). Commit dell'analisi iniziale della situazione "
+    "corrente: portfolio crypto, sentiment buffer (Reddit/X), news regolatorie / "
+    "hack / depeg, catalisti overnight. situation_overview >= 200 char. Se non ti "
+    "servono dati tecnici, passa technical_questions=[]: salti la FASE 2 e vai "
+    "direttamente a commit_final_thesis."
+)
+_cti_props = _CRYPTO_INITIAL_TOOL["input_schema"]["properties"]
+_cti_props.pop("rotation_summary", None)
+_cti_props["situation_overview"]["description"] = (
+    "Analisi della situazione crypto corrente senza dati tecnici (>= 200 char): "
+    "cosa dice il portafoglio crypto, quale tema emerge dal buffer sentiment/news, "
+    "cosa motiva la scelta dei ticker."
+)
+_cti_props["asset_candidates"]["description"] = (
+    "Crypto su cui vuoi indagare (formato BTC-USD, ETH-USD). Puo' essere lista "
+    "vuota se il run e' di puro rebalancing/no-trade."
+)
+_CRYPTO_INITIAL_TOOL["input_schema"]["required"] = [
+    "situation_overview", "asset_candidates", "technical_questions",
+]
+
+
 CRYPTO_DECISION_TOOLS = [
-    _wrap_anthropic_tool_for_openai(COMMIT_INITIAL_ASSESSMENT_TOOL),
+    _wrap_anthropic_tool_for_openai(_CRYPTO_INITIAL_TOOL),
     _wrap_anthropic_tool_for_openai(COMMIT_FINAL_THESIS_TOOL),
     {
         "type": "function",
@@ -611,6 +651,109 @@ CRYPTO_DECISION_TOOLS = [
 ]
 
 
+# ─── Core deterministico (guardrail, flag-gated) ─────────────────────────────
+
+async def _compute_core_guardrails(run_id: str, ticker: str, side: str,
+                                    entry_price: float, llm_units: float,
+                                    llm_sl) -> dict | None:
+    """Esegue il core tecnico deterministico per un ticker e riconcilia con la
+    proposta di R1. Attivo SOLO se settings['crypto_decision_engine']=='core_bound'.
+
+    Filosofia di sicurezza: il core puo' solo RIDURRE il rischio. Se non ha dati
+    strutturati sufficienti (completeness bassa o entry assente) ASTIENE
+    (allowed=True senza modifiche) — non veta mai su un proprio punto cieco; lo
+    stop-loss obbligatorio (gia' enforced a monte) resta comunque garantito.
+
+    Ritorna dict {allowed, reason, size_units, stop_loss, take_profit, log}
+    oppure None se qualunque step fallisce (→ il caller resta sul path legacy).
+    """
+    import portfolio
+    import data_fetchers
+    from agents import crypto_signal_core as _core
+
+    # 1. Indicatori PURI (no LLM): _fetch_crypto_indicators e' deterministico
+    try:
+        from agents.technical_crypto import _fetch_crypto_indicators
+        ind = await _fetch_crypto_indicators(ticker)
+    except Exception as e:
+        logger.warning("[%s][DEC-CRYPTO] core: fetch indicators fail %s: %s",
+                       run_id, ticker, e)
+        return None
+    if not ind or ind.get("error"):
+        return {"allowed": True, "reason": "core abstain: indicatori non disponibili",
+                "size_units": None, "stop_loss": None, "take_profit": None,
+                "log": {"abstained": True, "ticker": ticker,
+                        "why": (ind or {}).get("error", "no_indicators")}}
+
+    details, raw, mkt = _core.core_inputs_from_analysis(ind)
+
+    # 2. Chiusure daily BTC per il filtro di regime
+    btc_closes = None
+    try:
+        md = await asyncio.get_running_loop().run_in_executor(
+            None, data_fetchers.fetch_market_data, "BTC-USD", 250)
+        if md and md.get("data"):
+            btc_closes = [b.get("close") for b in md["data"] if b.get("close")]
+    except Exception:
+        pass
+
+    # 3. NAV + parametri dal risk profile attivo
+    nav = 0.0
+    try:
+        ps = portfolio.get_portfolio_state()
+        nav = float(ps.get("total_value") or ps.get("cash") or 0)
+    except Exception:
+        pass
+    try:
+        import risk_profile as _rp
+        pr = _rp.get_active_profile()
+        params = _core.CoreParams(
+            sl_min_pct=float(pr.get("sl_min_pct_crypto", 12.0)),
+            sl_max_pct=float(pr.get("sl_max_pct_crypto", 25.0)),
+            max_position_pct_nav=float(pr.get("max_position_pct_crypto", 12.0)),
+            min_conviction=float(pr.get("min_confidence", 0.55)),
+        )
+    except Exception:
+        params = _core.CoreParams()
+
+    # Risolvi il regime PRIMA, cosi' lo congeliamo nello snapshot forense
+    # (replay esatto senza riconservare l'intera serie BTC).
+    regime, _regime_detail = _core.classify_btc_regime(btc_closes)
+    decision = _core.decide(ticker=ticker, details=details, nav=nav, raw=raw,
+                            market_ctx=mkt, regime=regime, params=params)
+    snapshot = _core.snapshot_for_replay(
+        ticker=ticker, details=details, nav=nav, raw=raw, market_ctx=mkt,
+        regime=regime, params=params)
+
+    # ASTENSIONE su punto cieco: mai vetare se non abbiamo dati a sufficienza
+    if decision.data_completeness < 0.2 or not decision.entry:
+        return {"allowed": True,
+                "reason": "core abstain: dati strutturati insufficienti",
+                "size_units": None, "stop_loss": None, "take_profit": None,
+                "log": {"abstained": True, "ticker": ticker,
+                        "completeness": decision.data_completeness,
+                        "regime": decision.regime,
+                        "core_version": _core.CORE_VERSION,
+                        "snapshot": snapshot}}
+
+    rec = _core.reconcile(decision, side=side, llm_units=llm_units, llm_sl=llm_sl)
+    rec["log"] = {
+        "ticker": ticker, "side": side, "regime": decision.regime,
+        "conviction": decision.conviction, "core_action": decision.action,
+        "completeness": decision.data_completeness,
+        "bull": decision.bull_score, "bear": decision.bear_score,
+        "core_units": decision.size_units, "core_sl": decision.stop_loss,
+        "allowed": rec.get("allowed"), "reason": rec.get("reason"),
+        # Provenance: quali segnali REALI hanno contribuito (nome+direzione+fonte)
+        "factors": [{"name": f.name, "dir": f.direction, "w": f.weight,
+                     "detail": f.detail} for f in decision.factors],
+        # Riproducibilita': snapshot completo + versione algoritmo
+        "core_version": _core.CORE_VERSION,
+        "snapshot": snapshot,
+    }
+    return rec
+
+
 # ─── Tool handler ───────────────────────────────────────────────────────────
 
 async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
@@ -810,6 +953,90 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                 except Exception as rp_err:
                     logger.warning("[%s][DEC-CRYPTO] risk validation error (non-fatal): %s",
                                    run_id, rp_err)
+
+            # ── STOP-LOSS OBBLIGATORIO (enforced in CODICE) — solo APERTURE ──
+            # Lo SL non e' piu' un "consiglio nel prompt" ma una garanzia: se R1
+            # non passa stop_loss, o lo passa fuori dal range del risk profile,
+            # lo impostiamo d'ufficio (midpoint del range crypto). Nessuna
+            # posizione naked puo' essere aperta. Le chiusure (SELL/COVER) sono
+            # esenti. Variante ATR-based: vedi crypto_signal_core.
+            if action in ("BUY", "SHORT"):
+                _side = "short" if action == "SHORT" else "long"
+                try:
+                    import risk_profile as _rp_sl
+                    _prof = _rp_sl.get_active_profile()
+                    _sl_min = float(_prof.get("sl_min_pct_crypto", 12.0))
+                    _sl_max = float(_prof.get("sl_max_pct_crypto", 25.0))
+                    _sl_mid = (_sl_min + _sl_max) / 2.0
+                    _need_derive = not (stop_loss and stop_loss > 0)
+                    if not _need_derive:
+                        _ok_sl, _sl_why = _rp_sl.validate_sl_range(
+                            asset_class="crypto", entry_price=current_price,
+                            sl_price=stop_loss, side=_side)
+                        _need_derive = not _ok_sl
+                    if _need_derive:
+                        if _side == "short":
+                            stop_loss = round(current_price * (1.0 + _sl_mid / 100.0), 8)
+                        else:
+                            stop_loss = round(current_price * (1.0 - _sl_mid / 100.0), 8)
+                        database.insert_agent_log(run_id, "DECISION_CRYPTO_SL_AUTOSET",
+                            json.dumps({
+                                "ticker": ticker, "action": action,
+                                "entry": current_price, "stop_loss_set": stop_loss,
+                                "sl_pct": round(_sl_mid, 2),
+                                "reason": "SL mancante o fuori range profilo: impostato d'ufficio",
+                            }, default=str))
+                except Exception as _sl_err:
+                    logger.warning("[%s][DEC-CRYPTO] SL enforce error: %s", run_id, _sl_err)
+                    # FAIL-CLOSED: se non posso garantire uno SL, blocco l'apertura
+                    if not (stop_loss and stop_loss > 0):
+                        return json.dumps({
+                            "executed": False, "rejected": True,
+                            "ticker": ticker, "action": action,
+                            "reason": "Impossibile garantire uno stop-loss valido: apertura bloccata.",
+                            "at": timestamp,
+                        })
+
+                # ── Core deterministico (flag-gated, default OFF) ──
+                # settings['crypto_decision_engine']=='core_bound' → il core puo'
+                # VETARE o RIDURRE il trade di R1 (mai aumentarlo, mai aprirlo
+                # contro la direzione del core). Ogni errore → path legacy (che
+                # ha gia' SL obbligatorio + risk_profile a protezione).
+                try:
+                    _engine = (database.get_setting("crypto_decision_engine", "r1_legacy")
+                               or "r1_legacy").strip()
+                except Exception:
+                    _engine = "r1_legacy"
+                if _engine == "core_bound":
+                    try:
+                        _cg = await _compute_core_guardrails(
+                            run_id, ticker, _side, current_price, quantity, stop_loss)
+                    except Exception as _ce:
+                        logger.warning("[%s][DEC-CRYPTO] core guardrails error "
+                                       "(fallback legacy): %s", run_id, _ce)
+                        _cg = None
+                    if _cg is not None:
+                        try:
+                            database.insert_agent_log(run_id, "DECISION_CRYPTO_CORE_GUARDRAILS",
+                                json.dumps(_cg.get("log", {}), default=str))
+                        except Exception:
+                            pass
+                        if not _cg.get("allowed", True):
+                            return json.dumps({
+                                "executed": False, "rejected": True,
+                                "ticker": ticker, "action": action,
+                                "reason": f"CORE VETO: {_cg.get('reason', '')}",
+                                "at": timestamp,
+                            })
+                        # R1 puo' solo RIDURRE: size finale = min(R1, core)
+                        _cu = _cg.get("size_units")
+                        if _cu and _cu > 0 and quantity > _cu:
+                            quantity = float(_cu)
+                        # SL del core e' vincolante (disciplina ATR)
+                        if _cg.get("stop_loss"):
+                            stop_loss = float(_cg["stop_loss"])
+                        if _cg.get("take_profit") and not take_profit:
+                            take_profit = float(_cg["take_profit"])
 
             if action == "BUY":
                 result = portfolio.execute_buy(
