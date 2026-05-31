@@ -305,7 +305,8 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
 
 async def run_crypto_pipeline(run_id: str | None = None,
                                 focus_tickers: list[str] | None = None,
-                                watchdog_reason: str | None = None) -> dict:
+                                watchdog_reason: str | None = None,
+                                force: bool = False) -> dict:
     """
     Pipeline crypto-only ogni 1h, 24/7. Bypassa Watchdog.
 
@@ -332,8 +333,11 @@ async def run_crypto_pipeline(run_id: str | None = None,
     # perche' e' una protezione del rischio, non discrezionale.
     is_rebalance = bool(watchdog_reason and watchdog_reason.upper().startswith("REBALANCE"))
 
-    # 1. Cooldown check (saltato se rebalance)
-    if not is_rebalance:
+    # 1. Cooldown check (saltato se rebalance O se force=True).
+    # force=True = run MANUALE dal bottone: deve SEMPRE partire, anche se il
+    # cooldown 50min e' attivo (il cooldown serve solo a evitare doppi run
+    # automatici dello scheduler, non a bloccare un'azione esplicita dell'utente).
+    if not is_rebalance and not force:
         try:
             from agents.decision_crypto import is_cooldown_active
             active, seconds_left = is_cooldown_active()

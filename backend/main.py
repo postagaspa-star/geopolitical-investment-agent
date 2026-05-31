@@ -447,10 +447,11 @@ async def trigger_agent_run(background_tasks: BackgroundTasks):
     async def _run():
         from agents.orchestrator import run_full_pipeline, run_crypto_pipeline
         ran = []
-        # 1. Crypto SEMPRE
+        # 1. Crypto SEMPRE (force=True → bypassa il cooldown 50min: un click
+        #    manuale deve partire sempre, anche subito dopo un run automatico).
         try:
-            logger.info("[%s] Run manuale: avvio crypto pipeline", run_id)
-            await run_crypto_pipeline(run_id=f"{run_id}-crypto")
+            logger.info("[%s] Run manuale: avvio crypto pipeline (force)", run_id)
+            await run_crypto_pipeline(run_id=f"{run_id}-crypto", force=True)
             ran.append("crypto")
         except Exception as e:
             logger.error("[%s] Run manuale crypto fallita: %s", run_id, e, exc_info=True)
