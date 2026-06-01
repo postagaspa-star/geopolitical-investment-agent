@@ -78,6 +78,79 @@ class ScalperParams:
     # ticker (evita il flip-flop frenetico in micro-rumore).
     min_bars_between_entries: int = 2
 
+    # ── MIGLIORIE v2 (default = comportamento baseline preservato) ───────────
+
+    # (M2) Filtro di trend SUPERIORE: EMA lunga sulla stessa serie come proxy
+    # del trend di fondo (su 5m, EMA200 ~ trend a ~16h). Usato come BIAS, non
+    # come veto duro. 0 = disattivato (baseline).
+    trend_bias_ema: int = 0
+    # (M1) Asimmetria long/short: la soglia d'ingresso SHORT e' moltiplicata
+    # per questo fattore (>1 = piu' difficile shortare). Le crypto hanno bias
+    # rialzista di fondo: shortare ogni ritracciamento e' la causa del -15 edge
+    # in uptrend. 1.0 = simmetrico (baseline).
+    short_roc_mult: float = 1.0
+    # Contro-bias: se il trend di fondo e' UP, lo short richiede un extra di
+    # momentum (e viceversa). 0 = nessun contro-bias (baseline).
+    counter_trend_roc_extra: float = 0.0
+
+    # (M3) Conviction sizing: la size scala con la forza dello slancio (ROC vs
+    # soglia) e con la volatilita'. False = size fissa risk-based (baseline).
+    conviction_sizing: bool = False
+    conviction_max_mult: float = 1.0   # moltiplicatore max della size (1 = off)
+
+    # (M1-aggr) Pyramiding: aggiungi alla posizione vincente se lo slancio
+    # accelera. False = una gamba sola (baseline).
+    allow_pyramiding: bool = False
+    max_pyramid_adds: int = 0
+    pyramid_roc_step: float = 0.50     # ROC extra richiesto per ogni add
+
+    # (M-aggr) Flip "forte" multi-segnale: oltre a ROC+EMA, richiede anche RSI
+    # oltre soglia opposta. Rende il flip piu' affidabile (meno falsi). False
+    # = solo ROC+EMA (baseline).
+    flip_needs_rsi: bool = False
+    flip_rsi_long: float = 55.0
+    flip_rsi_short: float = 45.0
+
+    # (M-aggr) Lascia correre i profitti: in modalita' aggressiva alziamo
+    # exhaust_roc_frac (esce piu' tardi) e allarghiamo il trailing.
+
+    @classmethod
+    def aggressive(cls) -> "ScalperParams":
+        """Profilo AGGRESSIVO richiesto da Andrea: entra deciso sugli sbalzi
+        brevi, carica capitale con conviction, lascia correre, flippa su
+        inversione FORTE multi-segnale, sempre attivo su entrambe le direzioni.
+        L'asimmetria + filtro trend evitano di shortare dentro ai rialzi."""
+        return cls(
+            # entrata piu' rapida su finestre brevi (sbalzi di pochi minuti)
+            roc_len=3,
+            ema_fast=5, ema_slow=13,
+            vol_gate_atr_pct=0.25,        # piu' permissivo: piu' finestre
+            entry_roc_pct=0.30,           # entra prima
+            # asimmetria: short piu' selettivo (bias rialzista crypto)
+            short_roc_mult=1.6,
+            counter_trend_roc_extra=0.40,
+            trend_bias_ema=200,
+            # carica capitale con conviction
+            conviction_sizing=True,
+            conviction_max_mult=2.5,
+            risk_per_trade_pct=0.8,
+            max_position_pct_nav=40.0,    # "molto capitale" (cap esplorato nel sweep)
+            # lascia correre i profitti
+            exhaust_roc_frac=0.12,        # esce molto piu' tardi
+            k_atr_trail=2.5,              # trailing largo: cavalca il movimento
+            k_atr_sl=1.5,
+            # flip deciso ma confermato (multi-segnale = "segnale forte")
+            flip_roc_pct=0.30,
+            flip_needs_ema_cross=True,
+            flip_needs_rsi=True,
+            # pyramiding: aggiunge al vincente
+            allow_pyramiding=True,
+            max_pyramid_adds=2,
+            pyramid_roc_step=0.50,
+            # reattivo: meno attesa tra i trade
+            min_bars_between_entries=1,
+        )
+
 
 # ─── Stato della macchina (un'istanza per ticker) ────────────────────────────
 
@@ -94,6 +167,7 @@ class ScalperState:
     best_price: float = 0.0          # estremo favorevole (per trailing)
     bar_index: int = -1
     units: float = 0.0
+    pyramid_adds: int = 0            # quante volte si e' aggiunto al vincente
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -191,16 +265,32 @@ def roc(closes: list[float], period: int) -> Optional[float]:
 
 # ─── Sizing ──────────────────────────────────────────────────────────────────
 
-def _size_units(nav: float, entry: float, sl: float, p: ScalperParams) -> float:
+def _size_units(nav: float, entry: float, sl: float, p: ScalperParams,
+                conviction: float = 1.0) -> float:
+    """Size risk-based. Se conviction_sizing e' attivo, scala la size col
+    `conviction` (1.0 = base; fino a conviction_max_mult). Sempre cappata dal
+    max_position_pct_nav (il "molto capitale" ha comunque un tetto)."""
     if entry <= 0 or nav <= 0:
         return 0.0
     sl_dist = abs(entry - sl)
     if sl_dist <= 0:
         return 0.0
     risk_usd = nav * p.risk_per_trade_pct / 100.0
+    if p.conviction_sizing:
+        mult = max(1.0, min(conviction, p.conviction_max_mult))
+        risk_usd *= mult
     units = risk_usd / sl_dist
     max_units = (nav * p.max_position_pct_nav / 100.0) / entry
     return max(0.0, min(units, max_units))
+
+
+def _conviction_from_roc(r: float, entry_roc: float, max_mult: float) -> float:
+    """Conviction = quanto lo slancio supera la soglia d'ingresso. ROC al
+    doppio della soglia → conviction ~2. Cappata a max_mult."""
+    if entry_roc <= 0:
+        return 1.0
+    raw = abs(r) / entry_roc
+    return max(1.0, min(raw, max_mult))
 
 
 # ─── Core: valuta UNA candela e decide l'azione ──────────────────────────────
@@ -242,6 +332,24 @@ def step(state: ScalperState, bars: list[dict], nav: float,
     ema_bull = ema_f > ema_s
     ema_bear = ema_f < ema_s
 
+    # (M2) Trend di fondo: prezzo vs EMA lunga. Bias, non veto.
+    trend_up = trend_down = False
+    if p.trend_bias_ema and len(closes) >= p.trend_bias_ema:
+        ema_trend = ema_series(closes, p.trend_bias_ema)[-1]
+        if ema_trend is not None:
+            trend_up = price > ema_trend
+            trend_down = price < ema_trend
+
+    # (M1) Soglia short asimmetrica + contro-bias di trend. Le crypto hanno
+    # bias rialzista: per shortare serve piu' slancio, e ANCORA di piu' se il
+    # trend di fondo e' UP (non shortare i ritracciamenti dentro un rialzo).
+    short_thr = p.entry_roc_pct * p.short_roc_mult
+    long_thr = p.entry_roc_pct
+    if trend_up:
+        short_thr += p.counter_trend_roc_extra
+    if trend_down:
+        long_thr += p.counter_trend_roc_extra
+
     # ── Gestione posizione aperta ────────────────────────────────────────────
     if state.position in (LONG, SHORT):
         is_long = state.position == LONG
@@ -272,18 +380,29 @@ def step(state: ScalperState, bars: list[dict], nav: float,
         if not trending:
             return _close(state, price, "volatilita' rientrata: trend riassestato → FLAT", r, atr_pct, rs, regime)
 
-        # 4) INVERSIONE FORTE in direzione opposta → FLIP
+        # 4) INVERSIONE FORTE in direzione opposta → FLIP ("toglie tutto e
+        #    mette short/long"). "Forte" = multi-segnale: ROC oltre soglia +
+        #    EMA cross + (opz.) RSI oltre soglia opposta. Cosi' scatta sulle
+        #    VERE inversioni, non a ogni sussulto.
         if is_long:
-            strong_rev = (r <= -p.flip_roc_pct) and ((not p.flip_needs_ema_cross) or ema_bear)
+            strong_rev = (r <= -p.flip_roc_pct)
+            if p.flip_needs_ema_cross:
+                strong_rev = strong_rev and ema_bear
+            if p.flip_needs_rsi:
+                strong_rev = strong_rev and (rs <= p.flip_rsi_short)
             if strong_rev:
                 return _flip(state, price, SHORT, nav, p,
-                             f"inversione bearish forte (ROC {r:.2f}%) → FLIP a SHORT",
+                             f"inversione bearish FORTE (ROC {r:.2f}%, RSI {rs:.0f}) → FLIP a SHORT",
                              r, atr_pct, rs, regime)
         else:
-            strong_rev = (r >= p.flip_roc_pct) and ((not p.flip_needs_ema_cross) or ema_bull)
+            strong_rev = (r >= p.flip_roc_pct)
+            if p.flip_needs_ema_cross:
+                strong_rev = strong_rev and ema_bull
+            if p.flip_needs_rsi:
+                strong_rev = strong_rev and (rs >= p.flip_rsi_long)
             if strong_rev:
                 return _flip(state, price, LONG, nav, p,
-                             f"inversione bullish forte (ROC {r:.2f}%) → FLIP a LONG",
+                             f"inversione bullish FORTE (ROC {r:.2f}%, RSI {rs:.0f}) → FLIP a LONG",
                              r, atr_pct, rs, regime)
 
         # 5) MOMENTUM ESAUSTO (il "picco"): ROC sceso sotto frazione del picco,
@@ -293,6 +412,24 @@ def step(state: ScalperState, bars: list[dict], nav: float,
         if exhausted or ema_against:
             why = "momentum esaurito (picco)" if exhausted else "EMA cross contrario"
             return _close(state, price, f"{why} → CLOSE", r, atr_pct, rs, regime)
+
+        # 6) PYRAMIDING: lo slancio ACCELERA nella direzione della posizione →
+        #    aggiungi capitale al vincente (sfrutta al massimo il movimento).
+        if p.allow_pyramiding and state.pyramid_adds < p.max_pyramid_adds:
+            accel = abs(r) >= state.peak_roc + p.pyramid_roc_step
+            aligned = (is_long and r > 0 and ema_bull) or ((not is_long) and r < 0 and ema_bear)
+            if accel and aligned and (i - state.entry_bar) >= 1:
+                conv = _conviction_from_roc(r, p.entry_roc_pct, p.conviction_max_mult)
+                add_units = _size_units(nav, price, state.stop_loss, p, conviction=conv) * 0.5
+                if add_units > 0:
+                    state.units += add_units
+                    state.pyramid_adds += 1
+                    state.peak_roc = abs(r)
+                    return ScalperAction(
+                        action="ADD_LONG" if is_long else "ADD_SHORT",
+                        reason=f"pyramiding #{state.pyramid_adds}: slancio accelera (ROC {r:.2f}%)",
+                        price=price, stop_loss=state.stop_loss, units=add_units,
+                        roc=r, atr_pct=atr_pct, rsi=rs, regime=regime)
 
         return none   # posizione sana, mantieni
 
@@ -306,17 +443,20 @@ def step(state: ScalperState, bars: list[dict], nav: float,
         none.reason = "cooldown anti-overtrading"
         return none
 
-    long_ok = (r >= p.entry_roc_pct) and ema_bull and (rs >= p.entry_rsi_long)
-    short_ok = (r <= -p.entry_roc_pct) and ema_bear and (rs <= p.entry_rsi_short)
+    # Soglie asimmetriche (long_thr/short_thr calcolate sopra col trend-bias)
+    long_ok = (r >= long_thr) and ema_bull and (rs >= p.entry_rsi_long)
+    short_ok = (r <= -short_thr) and ema_bear and (rs <= p.entry_rsi_short)
 
     if long_ok:
+        conv = _conviction_from_roc(r, long_thr, p.conviction_max_mult)
         return _open(state, price, LONG, nav, p,
-                     f"momentum bullish (ROC {r:.2f}%, RSI {rs:.0f}, vol {atr_pct:.2f}%)",
-                     r, atr_pct, rs, regime, a)
+                     f"momentum bullish (ROC {r:.2f}%, RSI {rs:.0f}, vol {atr_pct:.2f}%, conv {conv:.1f}x)",
+                     r, atr_pct, rs, regime, a, conviction=conv)
     if short_ok:
+        conv = _conviction_from_roc(r, short_thr, p.conviction_max_mult)
         return _open(state, price, SHORT, nav, p,
-                     f"momentum bearish (ROC {r:.2f}%, RSI {rs:.0f}, vol {atr_pct:.2f}%)",
-                     r, atr_pct, rs, regime, a)
+                     f"momentum bearish (ROC {r:.2f}%, RSI {rs:.0f}, vol {atr_pct:.2f}%, conv {conv:.1f}x)",
+                     r, atr_pct, rs, regime, a, conviction=conv)
 
     none.reason = "spinta presente ma direzione non confermata"
     return none
@@ -329,9 +469,10 @@ def _atr_now(state: ScalperState, price: float, p: ScalperParams) -> float:
     return abs(price - state.stop_loss) / p.k_atr_sl if state.stop_loss else 0.0
 
 
-def _open(state, price, side, nav, p, reason, r, atr_pct, rs, regime, a) -> ScalperAction:
+def _open(state, price, side, nav, p, reason, r, atr_pct, rs, regime, a,
+          conviction: float = 1.0) -> ScalperAction:
     sl = price - p.k_atr_sl * a if side == LONG else price + p.k_atr_sl * a
-    units = _size_units(nav, price, sl, p)
+    units = _size_units(nav, price, sl, p, conviction=conviction)
     if units <= 0:
         return ScalperAction(action="NONE", reason="size 0 (NAV/SL invalido)",
                              price=price, roc=r, atr_pct=atr_pct, rsi=rs, regime=regime)
@@ -342,6 +483,7 @@ def _open(state, price, side, nav, p, reason, r, atr_pct, rs, regime, a) -> Scal
     state.peak_roc = abs(r)
     state.best_price = price
     state.units = units
+    state.pyramid_adds = 0
     return ScalperAction(
         action="OPEN_LONG" if side == LONG else "OPEN_SHORT",
         reason=reason, price=price, stop_loss=state.stop_loss, units=units,
@@ -357,6 +499,7 @@ def _close(state, price, reason, r, atr_pct, rs, regime) -> ScalperAction:
     state.best_price = 0.0
     state.entry_bar = state.bar_index
     state.units = 0.0
+    state.pyramid_adds = 0
     return ScalperAction(action="CLOSE", reason=reason, price=price, units=units,
                          roc=r, atr_pct=atr_pct, rsi=rs, regime=regime)
 
@@ -367,7 +510,8 @@ def _flip(state, price, new_side, nav, p, reason, r, atr_pct, rs, regime) -> Sca
     # ricostruisci ATR dall'SL corrente per dimensionare la nuova gamba
     a = _atr_now(state, state.entry_price or price, p) or (abs(price) * p.vol_gate_atr_pct / 100.0)
     sl = price - p.k_atr_sl * a if new_side == LONG else price + p.k_atr_sl * a
-    units = _size_units(nav, price, sl, p)
+    conv = _conviction_from_roc(r, p.entry_roc_pct, p.conviction_max_mult)
+    units = _size_units(nav, price, sl, p, conviction=conv)
     state.position = new_side
     state.entry_price = price
     state.entry_bar = state.bar_index
@@ -375,6 +519,7 @@ def _flip(state, price, new_side, nav, p, reason, r, atr_pct, rs, regime) -> Sca
     state.peak_roc = abs(r)
     state.best_price = price
     state.units = units
+    state.pyramid_adds = 0
     return ScalperAction(
         action="FLIP_TO_LONG" if new_side == LONG else "FLIP_TO_SHORT",
         reason=reason, price=price, stop_loss=state.stop_loss, units=units,

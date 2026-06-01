@@ -80,9 +80,11 @@ def _commission(notional: float) -> float:
     return abs(notional) * COMMISSION_BPS / 10_000.0
 
 
-def run_backtest(bars: list[dict], params: ScalperParams | None = None) -> dict:
+def run_backtest(bars: list[dict], params: ScalperParams | None = None,
+                 slippage_bps: float = 0.0) -> dict:
     """Simula la macchina a stati bar-per-bar. Contabilita' cash+posizione,
-    commissione a ogni apertura/chiusura. Ritorna metriche."""
+    commissione a ogni apertura/chiusura, slippage opzionale sui fill.
+    Ritorna metriche."""
     p = params or ScalperParams()
     st = ScalperState()
     cash = INITIAL_NAV
@@ -124,16 +126,35 @@ def run_backtest(bars: list[dict], params: ScalperParams | None = None) -> dict:
 
     def open_pos(side, price, units):
         nonlocal cash, pos_units, pos_side, pos_entry, fees_total
-        notional = units * price
+        # slippage: paghi un po' peggio del close (fill realistico)
+        fill = price * (1 + slippage_bps / 10_000.0) if side == LONG else price * (1 - slippage_bps / 10_000.0)
+        notional = units * fill
         fee = _commission(notional)
         cash -= fee
         if side == LONG:
-            cash -= notional  # immobilizza il controvalore
-        # per lo short non muoviamo cash (margine simulato semplificato)
+            cash -= notional
         fees_total += fee
         pos_units = units
         pos_side = side
-        pos_entry = price
+        pos_entry = fill
+
+    def add_pos(side, price, units):
+        """Pyramiding: aggiunge `units` alla posizione esistente, media il
+        prezzo d'ingresso. Slippage + fee come una nuova apertura."""
+        nonlocal cash, pos_units, pos_side, pos_entry, fees_total
+        if pos_side != side or pos_units <= 0:
+            return
+        fill = price * (1 + slippage_bps / 10_000.0) if side == LONG else price * (1 - slippage_bps / 10_000.0)
+        notional = units * fill
+        fee = _commission(notional)
+        cash -= fee
+        if side == LONG:
+            cash -= notional
+        fees_total += fee
+        # media ponderata dell'entry
+        tot = pos_units + units
+        pos_entry = (pos_entry * pos_units + fill * units) / tot if tot > 0 else fill
+        pos_units = tot
 
     for k in range(warm, len(bars) + 1):
         window = bars[:k]
@@ -150,6 +171,10 @@ def run_backtest(bars: list[dict], params: ScalperParams | None = None) -> dict:
             open_pos(LONG, price, act.units)
         elif act.action == "FLIP_TO_SHORT":
             open_pos(SHORT, price, act.units)
+        elif act.action == "ADD_LONG":
+            add_pos(LONG, price, act.units)
+        elif act.action == "ADD_SHORT":
+            add_pos(SHORT, price, act.units)
 
         equity_curve.append(nav_now(price))
 

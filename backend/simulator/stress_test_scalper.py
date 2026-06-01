@@ -83,10 +83,20 @@ def _classify(bh: float) -> str:
     return "CHOP"
 
 
-def _row(label, symbol, interval, bars):
+def _make_params(profile: str, max_pos: float | None = None):
+    if profile == "aggressive":
+        p = ScalperParams.aggressive()
+    else:
+        p = ScalperParams()
+    if max_pos is not None:
+        p.max_position_pct_nav = max_pos
+    return p
+
+
+def _row(label, symbol, interval, bars, profile="baseline", max_pos=None, slippage=0.0):
     if not bars or len(bars) < 120:
         return {"label": label, "ok": False, "reason": f"dati insuff ({len(bars)})"}
-    res = run_backtest(bars, ScalperParams())
+    res = run_backtest(bars, _make_params(profile, max_pos), slippage_bps=slippage)
     res.update({"label": label, "ok": True, "symbol": symbol, "interval": interval,
                 "regime": _classify(res["buy_hold_pct"]),
                 "edge": round(res["return_pct"] - res["buy_hold_pct"], 2)})
@@ -108,77 +118,118 @@ EVENTS = [
 ]
 
 
-def run_events() -> list[dict]:
-    rows = []
+# ─── Cache dei dati: scarica UNA volta, ri-usa per ogni profilo/sizing ───────
+_BARS_CACHE: dict = {}
+
+
+def _collect_datasets(now_ms: int) -> list[tuple]:
+    """Scarica (con cache) tutti i dataset: 8 segmenti walk-forward + 10 eventi.
+    Ritorna lista di (label, symbol, interval, bars). now_ms passato dal main
+    per non usare il clock dentro la logica."""
+    datasets = []
+    # Walk-forward
+    wf_sym, wf_itv, wf_days, segs = "BTCUSDT", "15m", 120, 8
+    key = f"wf:{wf_sym}:{wf_itv}:{wf_days}"
+    if key not in _BARS_CACHE:
+        print(f"[walk-forward] scarico {wf_sym} {wf_itv} {wf_days}g...")
+        _BARS_CACHE[key] = _fetch(wf_sym, wf_itv, now_ms - wf_days * 86_400_000, now_ms)
+        print(f"    {len(_BARS_CACHE[key])} candele totali")
+    bars = _BARS_CACHE[key]
+    if len(bars) >= segs * 200:
+        seg_len = len(bars) // segs
+        for i in range(segs):
+            datasets.append((f"WF seg {i+1}/{segs}", wf_sym, wf_itv,
+                             bars[i * seg_len:(i + 1) * seg_len]))
+    # Eventi estremi
     for label, sym, itv, d0, d1 in EVENTS:
-        print(f"[evento] {label} ({sym} {itv} {d0}->{d1})")
-        bars = _fetch(sym, itv, _dt_ms(d0), _dt_ms(d1))
-        print(f"    {len(bars)} candele")
-        rows.append(_row(label, sym, itv, bars))
-        time.sleep(0.2)
-    return rows
+        key = f"ev:{label}"
+        if key not in _BARS_CACHE:
+            print(f"[evento] {label} ({sym} {itv} {d0}->{d1})")
+            _BARS_CACHE[key] = _fetch(sym, itv, _dt_ms(d0), _dt_ms(d1))
+            print(f"    {len(_BARS_CACHE[key])} candele")
+            time.sleep(0.15)
+        datasets.append((label, sym, itv, _BARS_CACHE[key]))
+    return datasets
 
 
-# ─── (A) Walk-forward ────────────────────────────────────────────────────────
-def run_walkforward(symbol="BTCUSDT", interval="15m", days=120, segments=8) -> list[dict]:
-    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = end_ms - days * 86_400_000
-    print(f"[walk-forward] scarico {symbol} {interval} {days}g...")
-    bars = _fetch(symbol, interval, start_ms, end_ms)
-    print(f"    {len(bars)} candele totali")
-    rows = []
-    if len(bars) < segments * 200:
-        return [{"label": "walk-forward", "ok": False, "reason": "dati insuff"}]
-    seg_len = len(bars) // segments
-    for i in range(segments):
-        chunk = bars[i * seg_len:(i + 1) * seg_len]
-        rows.append(_row(f"WF seg {i+1}/{segments}", symbol, interval, chunk))
-    return rows
+def run_suite(datasets, profile="baseline", max_pos=None, slippage=0.0) -> list[dict]:
+    return [_row(lbl, sym, itv, bars, profile=profile, max_pos=max_pos, slippage=slippage)
+            for (lbl, sym, itv, bars) in datasets]
 
 
-def _summary(rows: list[dict]):
+def _agg(rows: list[dict]) -> dict:
     ok = [r for r in rows if r.get("ok")]
     if not ok:
-        print("Nessun run valido."); return
-    print("\n" + "=" * 88)
+        return {}
+    n = len(ok)
+    by_reg = {}
+    for r in ok:
+        by_reg.setdefault(r["regime"], []).append(r["edge"])
+    return {
+        "n": n,
+        "avg_edge": sum(r["edge"] for r in ok) / n,
+        "profitable": sum(1 for r in ok if r["return_pct"] > 0),
+        "beat_bh": sum(1 for r in ok if r["edge"] > 0),
+        "worst_dd": min(r["max_drawdown_pct"] for r in ok),
+        "avg_trades": sum(r["trades"] for r in ok) / n,
+        "by_reg": {k: sum(v) / len(v) for k, v in by_reg.items()},
+    }
+
+
+def _summary(rows: list[dict], title: str):
+    ok = [r for r in rows if r.get("ok")]
+    if not ok:
+        print(f"[{title}] nessun run valido."); return
+    print("\n" + "=" * 90)
+    print(f"{title}")
+    print("=" * 90)
     print(f"{'scenario':<22}{'regime':<11}{'scalp%':>8}{'B&H%':>8}{'edge':>8}"
           f"{'trades':>8}{'win%':>7}{'maxDD%':>8}")
-    print("-" * 88)
+    print("-" * 90)
     for r in ok:
         print(f"{r['label'][:21]:<22}{r['regime']:<11}{r['return_pct']:>8.2f}"
               f"{r['buy_hold_pct']:>8.2f}{r['edge']:>8.2f}{r['trades']:>8}"
               f"{r['win_rate_pct']:>7.1f}{r['max_drawdown_pct']:>8.2f}")
-    print("-" * 88)
-    n = len(ok)
-    avg_edge = sum(r["edge"] for r in ok) / n
-    profitable = sum(1 for r in ok if r["return_pct"] > 0)
-    beat_bh = sum(1 for r in ok if r["edge"] > 0)
-    worst_dd = min(r["max_drawdown_pct"] for r in ok)
-    avg_tr = sum(r["trades"] for r in ok) / n
-    by_reg = {}
-    for r in ok:
-        by_reg.setdefault(r["regime"], []).append(r["edge"])
-    print(f"RUN VALIDI: {n}")
-    print(f"  edge medio vs B&H : {avg_edge:+.2f} punti")
-    print(f"  run profittevoli  : {profitable}/{n}  ({profitable/n*100:.0f}%)")
-    print(f"  battono B&H       : {beat_bh}/{n}  ({beat_bh/n*100:.0f}%)")
-    print(f"  worst drawdown    : {worst_dd:.2f}%")
-    print(f"  trade medi/run    : {avg_tr:.0f}")
-    for reg, edges in sorted(by_reg.items()):
-        print(f"  edge medio [{reg:<9}]: {sum(edges)/len(edges):+.2f}  (n={len(edges)})")
-    print("=" * 88)
-    print("NOTA: no slippage/book depth -> reale leggermente peggiore. Baseline as-is.")
+    print("-" * 90)
+    a = _agg(rows)
+    print(f"  RUN={a['n']}  edge medio={a['avg_edge']:+.2f}  "
+          f"profittevoli={a['profitable']}/{a['n']}  battono_B&H={a['beat_bh']}/{a['n']}  "
+          f"worstDD={a['worst_dd']:.2f}%  trade/run={a['avg_trades']:.0f}")
+    for reg, e in sorted(a["by_reg"].items()):
+        print(f"    edge[{reg:<9}]={e:+.2f}")
 
 
 def main(argv):
-    mode = argv[1] if len(argv) > 1 else "all"
-    rows = []
-    if mode in ("all", "wf"):
-        rows += run_walkforward()
-    if mode in ("all", "events"):
-        rows += run_events()
-    print(f"\n>>> TOTALE RUN: {len([r for r in rows if r.get('ok')])} validi / {len(rows)} tentati")
-    _summary(rows)
+    # clock SOLO qui nel CLI (mai nella logica deterministica)
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    datasets = _collect_datasets(now_ms)
+    n_data = len([d for d in datasets if d[3] and len(d[3]) >= 120])
+    print(f"\n>>> DATASET PRONTI: {n_data} (>=15 richiesti)")
+
+    # 1) BASELINE (no slippage, per confronto col run precedente)
+    base = run_suite(datasets, profile="baseline", slippage=0.0)
+    _summary(base, "BASELINE (motore as-is, no slippage)")
+
+    # 2) AGGRESSIVE con slippage realistico 3bps, sizing sweep 12/25/40
+    for mp in (12.0, 25.0, 40.0):
+        rows = run_suite(datasets, profile="aggressive", max_pos=mp, slippage=3.0)
+        _summary(rows, f"AGGRESSIVE  max_pos={mp:.0f}% NAV  (slippage 3bps)")
+
+    # 3) confronto sintetico finale
+    print("\n" + "#" * 90)
+    print("CONFRONTO SINTETICO (edge medio / profittevoli / worstDD / edge UPTREND)")
+    print("#" * 90)
+    def line(name, rows):
+        a = _agg(rows)
+        up = a["by_reg"].get("UPTREND", float("nan"))
+        print(f"  {name:<34} edge={a['avg_edge']:+6.2f}  prof={a['profitable']:>2}/{a['n']}  "
+              f"worstDD={a['worst_dd']:>7.2f}%  upEdge={up:+6.2f}")
+    line("baseline", base)
+    for mp in (12.0, 25.0, 40.0):
+        line(f"aggressive max_pos={mp:.0f}%",
+             run_suite(datasets, profile="aggressive", max_pos=mp, slippage=3.0))
+    print("#" * 90)
+    print("NOTA: slippage 3bps incluso nell'aggressivo. Sim al close, no book depth.")
     return 0
 
 
