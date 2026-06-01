@@ -648,6 +648,7 @@ def _cache_invalidate(key=None):
         else:
             _settings_cache.pop(key, None)
             _settings_cache.pop("__all__", None)
+            _settings_cache.pop("__config__", None)
 
 
 def get_setting(key, default=None):
@@ -672,15 +673,101 @@ def set_setting(key, value):
     _cache_invalidate(key)
 
 
+# Prefisso convenzionale dei valori NON-config serializzati nella tabella
+# `settings`: chat-fallback, sim-progress, sim-scenari, ecc. Tutti contengono
+# "::" e iniziano con "_". NESSUNA chiave di configurazione reale lo usa
+# (verificato: risk_*, prompt_*, *_api_key, user_risk_profile, last_decision_*,
+# crypto_decision_engine, ecc. sono tutti nomi "piatti").
+_TRANSIENT_KEY_MARKER = "::"
+
+
+def _is_config_key(key: str) -> bool:
+    """True se la chiave e' una vera impostazione di config (non stato transitorio).
+
+    Discriminatore robusto: lo stato transitorio (chat-fallback, sim-progress)
+    usa sempre chiavi namespaced con "::". Le config reali non lo fanno mai.
+    """
+    return _TRANSIENT_KEY_MARKER not in (key or "")
+
+
 def get_all_settings():
+    """TUTTE le righe della tabella settings, incluse le chiavi transitorie
+    (_chat_fallback::*, _sim_*::*). Paginerebbe oltre il cap PostgREST di 1000
+    righe. Usato da diagnostica/chat-fallback che DEVONO vedere tutto.
+
+    Per l'endpoint /api/settings e la UI usare get_config_settings()."""
     hit, value = _cache_get("__all__")
     if hit:
         return value
     client = _get_client()
-    result = client.table("settings").select("key, value").execute()
-    data = {r["key"]: r["value"] for r in (result.data or [])}
+    # Paginazione esplicita: PostgREST tronca silenziosamente a 1000 righe.
+    # La tabella settings, col fallback chat/sim serializzato, supera le 1000
+    # → senza .range() chiavi legittime diventavano invisibili (incluso il
+    # flag crypto_decision_engine appena scritto). Ora leggiamo a finestre.
+    data: dict = {}
+    page = 0
+    page_size = 1000
+    while True:
+        lo = page * page_size
+        hi = lo + page_size - 1
+        result = client.table("settings").select("key, value").range(lo, hi).execute()
+        rows = result.data or []
+        for r in rows:
+            data[r["key"]] = r["value"]
+        if len(rows) < page_size:
+            break
+        page += 1
+        if page > 100:   # hard stop di sicurezza (max ~100k righe)
+            logger.warning("get_all_settings: >100k righe, interrompo paginazione")
+            break
     _cache_put("__all__", data)
     return data
+
+
+def get_config_settings():
+    """SOLO le impostazioni di configurazione reali (esclude lo stato
+    transitorio namespaced con "::"). Non puo' mai essere troncato dal cap
+    PostgREST perche' le chiavi di config sono poche decine.
+
+    E' la fonte per l'endpoint GET /api/settings e per la pagina Settings.
+    """
+    hit, value = _cache_get("__config__")
+    if hit:
+        return value
+    all_settings = get_all_settings()
+    config = {k: v for k, v in all_settings.items() if _is_config_key(k)}
+    _cache_put("__config__", config)
+    return config
+
+
+def purge_transient_settings(prefixes=("_sim_run_progress::", "_sim_run_fallback::"),
+                              dry_run: bool = False) -> dict:
+    """Elimina dalla tabella settings le chiavi transitorie con i prefissi dati.
+
+    DEFAULT SICURO: tocca solo lo stato del Simulator (progress/fallback run),
+    che e' rigenerabile e ha gia' un TTL logico. NON include `_chat_fallback::*`
+    (storia chat dell'utente quando le tabelle chat mancano) ne' `_sim_scenario::*`
+    (scenari dinamici salvati) — vanno purgati solo con prefisso esplicito e
+    consapevole.
+
+    dry_run=True → conta soltanto, non cancella. Ritorna {prefix: count}.
+    """
+    client = _get_client()
+    report: dict = {}
+    for pref in prefixes:
+        try:
+            # PostgREST: like con wildcard. Conta prima.
+            sel = client.table("settings").select("key").like("key", f"{pref}%").execute()
+            keys = [r["key"] for r in (sel.data or [])]
+            report[pref] = len(keys)
+            if not dry_run and keys:
+                client.table("settings").delete().like("key", f"{pref}%").execute()
+        except Exception as e:
+            logger.warning("purge_transient_settings(%s) fallita: %s", pref, e)
+            report[pref] = -1
+    if not dry_run:
+        _cache_invalidate()
+    return report
 
 
 def invalidate_settings_cache():

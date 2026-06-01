@@ -536,10 +536,45 @@ def set_setting(key, value):
             (key, value))
 
 def get_all_settings():
-    """Restituisce tutte le impostazioni come dizionario piatto {chiave: valore}."""
+    """Restituisce tutte le impostazioni come dizionario piatto {chiave: valore}.
+    Include lo stato transitorio (_chat_fallback::*, _sim_*::*)."""
     with get_db() as conn:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
         return {r["key"]: r["value"] for r in rows}
+
+
+# Parità con db_supabase: lo stato transitorio (chat-fallback, sim-progress)
+# usa chiavi namespaced con "::"; nessuna config reale lo fa.
+_TRANSIENT_KEY_MARKER = "::"
+
+
+def _is_config_key(key: str) -> bool:
+    """True se la chiave e' config reale (non stato transitorio namespaced)."""
+    return _TRANSIENT_KEY_MARKER not in (key or "")
+
+
+def get_config_settings():
+    """SOLO le impostazioni di configurazione reali (esclude lo stato
+    transitorio con "::"). Fonte per l'endpoint GET /api/settings."""
+    with get_db() as conn:
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        return {r["key"]: r["value"] for r in rows if _is_config_key(r["key"])}
+
+
+def purge_transient_settings(prefixes=("_sim_run_progress::", "_sim_run_fallback::"),
+                              dry_run: bool = False) -> dict:
+    """Elimina le chiavi transitorie con i prefissi dati (default: solo stato
+    Simulator, rigenerabile). dry_run=True conta soltanto."""
+    report: dict = {}
+    with get_db() as conn:
+        for pref in prefixes:
+            rows = conn.execute(
+                "SELECT COUNT(*) AS n FROM settings WHERE key LIKE ?",
+                (pref + "%",)).fetchone()
+            report[pref] = rows["n"] if rows else 0
+            if not dry_run and report[pref]:
+                conn.execute("DELETE FROM settings WHERE key LIKE ?", (pref + "%",))
+    return report
 
 
 # --- Funzioni per i documenti tecnici ---

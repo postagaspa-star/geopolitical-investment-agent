@@ -606,10 +606,19 @@ class SettingsPayload(BaseModel):
 
 @app.get("/api/settings")
 async def get_settings():
-    """Restituisce tutte le impostazioni correnti."""
+    """Restituisce le impostazioni di CONFIG correnti.
+
+    Usa get_config_settings(): esclude lo stato transitorio namespaced ("::",
+    es. _chat_fallback::*, _sim_run_progress::*) che gonfiava la tabella oltre
+    le 1000 righe e faceva troncare silenziosamente la risposta (cap PostgREST),
+    rendendo invisibili chiavi legittime appena salvate. Fallback a
+    get_all_settings() se la funzione non esiste (compat backend più vecchi)."""
     try:
-        all_settings = database.get_all_settings()
-        return {"settings": all_settings}
+        if hasattr(database, "get_config_settings"):
+            settings = database.get_config_settings()
+        else:
+            settings = database.get_all_settings()
+        return {"settings": settings}
     except Exception as e:
         logger.error(f"Errore nel recupero delle impostazioni: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
