@@ -114,6 +114,19 @@ class ScalperParams:
     # (M-aggr) Lascia correre i profitti: in modalita' aggressiva alziamo
     # exhaust_roc_frac (esce piu' tardi) e allarghiamo il trailing.
 
+    # ── HYBRID regime-switching (richiesta Andrea) ──────────────────────────
+    # Se attivo, il motore cambia "personalita'" col regime di fondo:
+    #  - UPTREND (prezzo > EMA trend_bias_ema): TREND-FOLLOWING long-only,
+    #    cavalca con trailing largo, NIENTE short/flip → smette di combattere
+    #    il rialzo (era la causa del -18 edge in uptrend).
+    #  - DOWNTREND/CHOP: logica DIFENSIVA baseline (momentum-reversal con short)
+    #    a basso capitale → protegge e guadagna nei crash.
+    # Default False = comportamento invariato (backward-compat con i 18 test).
+    hybrid_mode: bool = False
+    tf_entry_roc_pct: float = 0.25   # soglia ingresso long nel ramo trend-following
+    tf_k_atr_trail: float = 3.0      # trailing LARGO per cavalcare l'uptrend
+    tf_max_position_pct_nav: float = 12.0  # capitale per il ramo trend-following
+
     @classmethod
     def aggressive(cls) -> "ScalperParams":
         """Profilo AGGRESSIVO richiesto da Andrea: entra deciso sugli sbalzi
@@ -149,6 +162,31 @@ class ScalperParams:
             pyramid_roc_step=0.50,
             # reattivo: meno attesa tra i trade
             min_bars_between_entries=1,
+        )
+
+    @classmethod
+    def hybrid(cls) -> "ScalperParams":
+        """Profilo HYBRID: trend-following in uptrend + difensivo baseline in
+        downtrend/chop. Obiettivo: profittevole in ENTRAMBI i regimi. Capitale
+        contenuto (12%) in entrambi i rami — niente "molto capitale" che ha
+        prodotto i drawdown -40% nei test aggressivi."""
+        return cls(
+            hybrid_mode=True,
+            trend_bias_ema=200,          # EMA200 15m ~ trend a ~2 giorni
+            # ramo difensivo (downtrend/chop): come baseline, capitale 12%
+            roc_len=6, ema_fast=9, ema_slow=21,
+            vol_gate_atr_pct=0.35,
+            entry_roc_pct=0.40,
+            short_roc_mult=1.4,          # short un po' piu' selettivo
+            max_position_pct_nav=12.0,
+            k_atr_sl=1.2, k_atr_trail=1.5,
+            exhaust_roc_frac=0.30,
+            flip_needs_ema_cross=True,
+            # ramo trend-following (uptrend): cavalca, trailing largo
+            tf_entry_roc_pct=0.25,
+            tf_k_atr_trail=3.0,
+            tf_max_position_pct_nav=12.0,
+            min_bars_between_entries=2,
         )
 
 
@@ -350,6 +388,22 @@ def step(state: ScalperState, bars: list[dict], nav: float,
     if trend_down:
         long_thr += p.counter_trend_roc_extra
 
+    # ══ HYBRID: in UPTREND usa trend-following long-only (cavalca, no short) ══
+    # Si attiva solo se abbiamo l'EMA di trend (warmup completo) ed e' uptrend.
+    # In downtrend/chop NON entra in questo ramo → cade nella logica difensiva.
+    if p.hybrid_mode and trend_up:
+        act = _hybrid_uptrend_step(state, price, a, r, atr_pct, rs, regime,
+                                   trending, ema_bull, ema_bear, i, nav, p)
+        if act is not None:
+            return act
+        # se ritorna None significa "nessuna azione in questo ramo": esci pulito
+        none.reason = "hybrid uptrend: nessun setup long"
+        return none
+    # Se siamo in hybrid ma il regime NON e' piu' uptrend e abbiamo un LONG
+    # aperto dal ramo trend-following, chiudilo (il regime e' cambiato).
+    if p.hybrid_mode and state.position == LONG and trend_down:
+        return _close(state, price, "hybrid: regime passato a downtrend → chiudo long", r, atr_pct, rs, regime)
+
     # ── Gestione posizione aperta ────────────────────────────────────────────
     if state.position in (LONG, SHORT):
         is_long = state.position == LONG
@@ -460,6 +514,64 @@ def step(state: ScalperState, bars: list[dict], nav: float,
 
     none.reason = "spinta presente ma direzione non confermata"
     return none
+
+
+# ─── HYBRID: ramo trend-following per l'uptrend (long-only) ───────────────────
+
+def _hybrid_uptrend_step(state, price, a, r, atr_pct, rs, regime,
+                          trending, ema_bull, ema_bear, i, nav, p):
+    """Logica TREND-FOLLOWING usata SOLO in uptrend. Long-only: cavalca il
+    rialzo con trailing largo, non shorta mai. Ritorna ScalperAction oppure
+    None (= nessuna azione, il chiamante restituira' NONE)."""
+    # Se per qualche motivo siamo SHORT in uptrend (ereditato dal ramo
+    # difensivo prima del cambio regime): chiudi subito, niente short in salita.
+    if state.position == SHORT:
+        return _close(state, price, "hybrid uptrend: chiudo short (no short in salita)",
+                      r, atr_pct, rs, regime)
+
+    if state.position == LONG:
+        state.best_price = max(state.best_price, price)
+        # 1) stop-loss
+        if price <= state.stop_loss:
+            return _close(state, price, "hybrid: stop-loss long", r, atr_pct, rs, regime)
+        # 2) trailing LARGO (tf_k_atr_trail): cavalca finche' il trend regge
+        trail = state.best_price - p.tf_k_atr_trail * a
+        if price <= trail and price > state.entry_price:
+            return _close(state, price, "hybrid: trailing-stop (profitto cavalcato)",
+                          r, atr_pct, rs, regime)
+        # 3) rottura struttura: EMA veloce sotto la lenta = trend locale finito
+        if ema_bear:
+            return _close(state, price, "hybrid: EMA cross down → esco dal long",
+                          r, atr_pct, rs, regime)
+        return None   # mantieni il long, cavalca
+
+    # FLAT in uptrend: apri long se c'e' spinta (soglia TF piu' bassa) e vol ok
+    if not trending:
+        return None
+    if i - state.entry_bar < p.min_bars_between_entries:
+        return None
+    if (r >= p.tf_entry_roc_pct) and ema_bull and (rs >= p.entry_rsi_long):
+        # sizing col cap del ramo trend-following
+        sl = price - p.k_atr_sl * a
+        units = _size_units(nav, price, sl, p)
+        cap_units = (nav * p.tf_max_position_pct_nav / 100.0) / price
+        units = min(units, cap_units)
+        if units <= 0:
+            return None
+        state.position = LONG
+        state.entry_price = price
+        state.entry_bar = state.bar_index
+        state.stop_loss = round(sl, 8)
+        state.peak_roc = abs(r)
+        state.best_price = price
+        state.units = units
+        state.pyramid_adds = 0
+        return ScalperAction(
+            action="OPEN_LONG",
+            reason=f"hybrid TREND-FOLLOWING: long in uptrend (ROC {r:.2f}%, RSI {rs:.0f})",
+            price=price, stop_loss=state.stop_loss, units=units,
+            roc=r, atr_pct=atr_pct, rsi=rs, regime=regime)
+    return None
 
 
 # ─── Helper di transizione (mutano lo stato) ─────────────────────────────────

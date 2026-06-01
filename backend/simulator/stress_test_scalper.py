@@ -86,6 +86,8 @@ def _classify(bh: float) -> str:
 def _make_params(profile: str, max_pos: float | None = None):
     if profile == "aggressive":
         p = ScalperParams.aggressive()
+    elif profile == "hybrid":
+        p = ScalperParams.hybrid()
     else:
         p = ScalperParams()
     if max_pos is not None:
@@ -208,28 +210,29 @@ def main(argv):
 
     # 1) BASELINE (no slippage, per confronto col run precedente)
     base = run_suite(datasets, profile="baseline", slippage=0.0)
-    _summary(base, "BASELINE (motore as-is, no slippage)")
+    _summary(base, "BASELINE (difensivo as-is, no slippage)")
 
-    # 2) AGGRESSIVE con slippage realistico 3bps, sizing sweep 12/25/40
-    for mp in (12.0, 25.0, 40.0):
-        rows = run_suite(datasets, profile="aggressive", max_pos=mp, slippage=3.0)
-        _summary(rows, f"AGGRESSIVE  max_pos={mp:.0f}% NAV  (slippage 3bps)")
+    # 2) HYBRID: trend-following in uptrend + difensivo 12% in downtrend
+    hyb = run_suite(datasets, profile="hybrid", slippage=3.0)
+    _summary(hyb, "HYBRID (trend-following uptrend + difensivo 12% downtrend, slippage 3bps)")
 
-    # 3) confronto sintetico finale
-    print("\n" + "#" * 90)
-    print("CONFRONTO SINTETICO (edge medio / profittevoli / worstDD / edge UPTREND)")
-    print("#" * 90)
+    # 3) confronto sintetico finale: l'hybrid deve alzare l'edge UPTREND
+    #    SENZA distruggere l'edge DOWNTREND ne' il drawdown.
+    print("\n" + "#" * 92)
+    print("CONFRONTO (edge medio / profittevoli / worstDD / edge UP / edge DOWN / edge CHOP)")
+    print("#" * 92)
     def line(name, rows):
         a = _agg(rows)
         up = a["by_reg"].get("UPTREND", float("nan"))
-        print(f"  {name:<34} edge={a['avg_edge']:+6.2f}  prof={a['profitable']:>2}/{a['n']}  "
-              f"worstDD={a['worst_dd']:>7.2f}%  upEdge={up:+6.2f}")
-    line("baseline", base)
-    for mp in (12.0, 25.0, 40.0):
-        line(f"aggressive max_pos={mp:.0f}%",
-             run_suite(datasets, profile="aggressive", max_pos=mp, slippage=3.0))
-    print("#" * 90)
-    print("NOTA: slippage 3bps incluso nell'aggressivo. Sim al close, no book depth.")
+        dn = a["by_reg"].get("DOWNTREND", float("nan"))
+        ch = a["by_reg"].get("CHOP", float("nan"))
+        print(f"  {name:<22} edge={a['avg_edge']:+6.2f}  prof={a['profitable']:>2}/{a['n']}  "
+              f"worstDD={a['worst_dd']:>7.2f}%  UP={up:+6.2f}  DOWN={dn:+6.2f}  CHOP={ch:+6.2f}")
+    line("baseline difensivo", base)
+    line("HYBRID", hyb)
+    print("#" * 92)
+    print("OBIETTIVO: HYBRID con UP>0 (trend-following funziona) mantenendo DOWN alto.")
+    print("NOTA: slippage 3bps incluso nell'hybrid. Sim al close, no book depth.")
     return 0
 
 

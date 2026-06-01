@@ -226,3 +226,54 @@ def test_aggressive_runs_end_to_end_on_bars():
     # determinismo anche in aggressivo
     st2, acts2 = _run(closes, vol=0.8, params=p)
     assert [a.action for a in acts] == [a.action for a in acts2]
+
+
+# ─── HYBRID regime-switching ──────────────────────────────────────────────────
+
+def test_hybrid_profile_constructs():
+    p = ScalperParams.hybrid()
+    assert p.hybrid_mode is True
+    assert p.trend_bias_ema == 200
+    assert p.tf_k_atr_trail > p.k_atr_trail   # trailing piu' largo in trend-following
+    assert p.max_position_pct_nav <= 12.0     # capitale contenuto (no -40% DD)
+
+
+def test_hybrid_uptrend_is_long_only():
+    # serie chiaramente rialzista oltre EMA200 → in uptrend NON deve mai shortare
+    p = ScalperParams.hybrid()
+    closes = [100 + i * 0.5 for i in range(260)]   # > trend_bias_ema=200
+    st, acts = _run(closes, vol=0.6, params=p)
+    actions = [a.action for a in acts]
+    assert "OPEN_SHORT" not in actions
+    assert "FLIP_TO_SHORT" not in actions
+    # e in salita deve almeno provare un long
+    assert "OPEN_LONG" in actions
+
+
+def test_hybrid_rides_uptrend_long():
+    # in un uptrend pulito deve APRIRE e MANTENERE un long (cavalcare)
+    p = ScalperParams.hybrid()
+    closes = [100 + i * 0.6 for i in range(280)]
+    st, acts = _run(closes, vol=0.6, params=p)
+    assert any(a.action == "OPEN_LONG" for a in acts)
+    # a fine serie rialzista deve essere ancora LONG (sta cavalcando), non FLAT
+    assert st.position == LONG
+
+
+def test_hybrid_downtrend_still_defends():
+    # sotto EMA200 (downtrend) il ramo difensivo resta attivo: puo' shortare
+    p = ScalperParams.hybrid()
+    # prima sale per costruire EMA200 alta, poi crolla sotto → downtrend
+    closes = [200 + i * 0.2 for i in range(150)] + [230 - i * 1.2 for i in range(120)]
+    st, acts = _run(closes, vol=0.7, params=p)
+    actions = [a.action for a in acts]
+    # nel tratto di crollo il difensivo deve potersi muovere (short o close)
+    assert any(a in ("OPEN_SHORT", "CLOSE", "FLIP_TO_SHORT") for a in actions)
+
+
+def test_hybrid_deterministic():
+    p = ScalperParams.hybrid()
+    closes = [100 + i * 0.5 for i in range(260)]
+    s1, a1 = _run(closes, vol=0.6, params=p)
+    s2, a2 = _run(closes, vol=0.6, params=p)
+    assert [a.action for a in a1] == [a.action for a in a2]
