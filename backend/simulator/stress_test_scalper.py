@@ -167,7 +167,7 @@ def _summary(rows: list[dict]):
     for reg, edges in sorted(by_reg.items()):
         print(f"  edge medio [{reg:<9}]: {sum(edges)/len(edges):+.2f}  (n={len(edges)})")
     print("=" * 88)
-    print("NOTA: no slippage/book depth → reale leggermente peggiore. Baseline as-is.")
+    print("NOTA: no slippage/book depth -> reale leggermente peggiore. Baseline as-is.")
 
 
 def main(argv):
