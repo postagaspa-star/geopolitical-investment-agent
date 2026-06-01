@@ -2899,6 +2899,17 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     logger.info("[%s][DECISION] === Avvio Decision Agent ===", run_id)
     start_time = datetime.now(timezone.utc)
 
+    # ── Prezzi FRESCHI obbligatori prima di decidere ────────────────────
+    # Un decisional che ragiona su prezzi vecchi (polling fino a 20 min fa)
+    # non vede l'andamento reale dell'asset. Rinfresca price_quotes/posizioni/
+    # NAV se l'ultimo polling e' oltre soglia (default 3 min). Bloccante ma
+    # best-effort: se i provider sono giu' non blocca il run.
+    try:
+        from price_polling import ensure_fresh_prices
+        await ensure_fresh_prices(reason=f"decision:{run_id[:8]}")
+    except Exception as _pp_exc:
+        logger.warning("[%s][DECISION] ensure_fresh_prices fallita: %s", run_id, _pp_exc)
+
     # ──────────────────────────────────────────────────────────────
     # Engine selection (hybrid: Claude per market-open, R1 per overnight)
     # Il vecchio gate "market_closed → SKIPPED" è stato RIMOSSO: ora

@@ -1684,6 +1684,17 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
     # Normalizza tech_report (None → {} per evitare AttributeError)
     tech_report = tech_report or {}
 
+    # ── Prezzi FRESCHI obbligatori prima di decidere (crypto 24/7) ──────
+    # Stesso principio del Decision standard: l'agente non puo' valutare
+    # l'andamento reale su prezzi vecchi. Rinfresca price_quotes/posizioni
+    # prima di leggere il portfolio_state qui sotto. Best-effort.
+    try:
+        from price_polling import ensure_fresh_prices
+        await ensure_fresh_prices(reason=f"crypto-decision:{run_id[:8]}")
+    except Exception as _pp_exc:
+        logger.warning("[%s][DECISION-CRYPTO] ensure_fresh_prices fallita: %s",
+                       run_id, _pp_exc)
+
     # Carica contesto specifico crypto
     recent_buffer = get_recent_buffer(database, minutes=60)
     portfolio_state = portfolio.get_portfolio_state()

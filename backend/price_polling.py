@@ -19,12 +19,41 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Iterable
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+# ────────────────────────────────────────────────────────────────────────────
+# Freschezza prezzi pre-decisionale.
+#
+# Timestamp (epoch sec) dell'ULTIMO update_price_cache() completato. Aggiornato
+# in fondo a update_price_cache(). In-memory: si azzera al restart del processo
+# — corretto, perche' dopo un restart il primo decisional forza comunque un
+# refresh (age = inf > soglia).
+_LAST_POLL_TS: float = 0.0
+
+# Lock per serializzare i refresh PRE-decisionali concorrenti: se crypto (:00)
+# e standard (:02) partono ravvicinati, non vogliamo due update_price_cache()
+# sovrapposti. Creato lazy dentro l'event loop (no binding al loop a import-time).
+_PRERUN_POLL_LOCK: "asyncio.Lock | None" = None
+
+
+def _get_prerun_lock() -> "asyncio.Lock":
+    global _PRERUN_POLL_LOCK
+    if _PRERUN_POLL_LOCK is None:
+        _PRERUN_POLL_LOCK = asyncio.Lock()
+    return _PRERUN_POLL_LOCK
+
+
+def seconds_since_last_poll() -> float:
+    """Secondi dall'ultimo polling prezzi completato (inf se mai eseguito)."""
+    if _LAST_POLL_TS <= 0:
+        return float("inf")
+    return max(0.0, time.time() - _LAST_POLL_TS)
 
 MASSIVE_BASE_URL = "https://api.massive.com"
 POLYGON_BASE_URL = "https://api.polygon.io"
@@ -578,6 +607,7 @@ async def update_price_cache() -> dict:
     Returns:
         {tickers, quotes_written, history_written, duration_seconds}
     """
+    global _LAST_POLL_TS
     import time
     start = time.time()
 
@@ -680,6 +710,9 @@ async def update_price_cache() -> dict:
         hw_total, positions_updated, snapshot_saved, duration,
     )
 
+    # Marca il completamento per ensure_fresh_prices() (freschezza pre-decisional).
+    _LAST_POLL_TS = time.time()
+
     return {
         "tickers": len(tickers),
         "quotes_written": qw_total,
@@ -693,6 +726,86 @@ async def update_price_cache() -> dict:
         "duration_seconds": duration,
         "market_state": market_state,
     }
+
+
+# Default soglia freschezza pre-decisionale: 180s (3 min). Sta DENTRO i 5 min
+# richiesti dall'utente, con margine. Sovrascrivibile via setting
+# `price_prerun_max_age_sec`. Floor a 30s (anti-hammering dei provider).
+_PRERUN_MAX_AGE_DEFAULT_SEC = 180
+
+
+async def ensure_fresh_prices(max_age_sec: int | None = None,
+                              reason: str = "") -> dict:
+    """
+    Garantisce prezzi FRESCHI prima di un run decisionale.
+
+    Regola (richiesta utente): i prezzi devono aggiornarsi prima di OGNI run di
+    un qualsiasi decisional — altrimenti l'agente non vede l'andamento reale
+    dell'asset. Questa funzione viene chiamata all'inizio di run_decision_agent
+    (standard) e run_crypto_decision (crypto), quindi copre OGNI trigger:
+    schedulato, watchdog, run manuale, rebalance, recovery.
+
+    Comportamento:
+      - Se l'ultimo polling e' piu' recente di max_age_sec → no-op (prezzi gia'
+        freschi). Questo de-duplica i run ravvicinati (es. crypto :00 + standard
+        :02 = 120s < 180s → il secondo riusa i prezzi del primo).
+      - Altrimenti forza update_price_cache() e lo ASPETTA (bloccante): quando
+        l'agente legge posizioni/NAV/prezzi, sono appena stati aggiornati.
+
+    Best-effort: se il refresh fallisce (provider giu'), logga un warning ma
+    NON solleva — meglio decidere su prezzi leggermente vecchi che bloccare il
+    decisional del tutto. Il Decision Agent ha comunque i suoi guard di
+    data-quality (prezzi rifiutati → fallback cost-basis).
+
+    Returns: dict con {refreshed, reason, age_before_sec, ...}.
+    """
+    if max_age_sec is None:
+        try:
+            import database as _db
+            raw = _db.get_setting("price_prerun_max_age_sec",
+                                  str(_PRERUN_MAX_AGE_DEFAULT_SEC))
+            max_age_sec = int(float(raw or _PRERUN_MAX_AGE_DEFAULT_SEC))
+        except Exception:
+            max_age_sec = _PRERUN_MAX_AGE_DEFAULT_SEC
+    max_age_sec = max(30, int(max_age_sec))  # floor anti-hammering
+
+    age = seconds_since_last_poll()
+    if age <= max_age_sec:
+        logger.info("[PRERUN-PRICES] prezzi freschi (%.0fs <= %ds), skip [%s]",
+                    age, max_age_sec, reason or "?")
+        return {"refreshed": False, "reason": "fresh",
+                "age_before_sec": round(age, 1)}
+
+    lock = _get_prerun_lock()
+    async with lock:
+        # Double-check: un altro task (o il polling schedulato) puo' aver
+        # appena rinfrescato mentre aspettavamo il lock.
+        age = seconds_since_last_poll()
+        if age <= max_age_sec:
+            logger.info("[PRERUN-PRICES] rinfrescati da altro task (%.0fs), skip [%s]",
+                        age, reason or "?")
+            return {"refreshed": False, "reason": "fresh_after_wait",
+                    "age_before_sec": round(age, 1)}
+
+        age_str = "mai" if age == float("inf") else f"{age:.0f}s"
+        logger.info("[PRERUN-PRICES] prezzi vecchi (%s > %ds) → refresh "
+                    "OBBLIGATORIO prima del decisional [%s]",
+                    age_str, max_age_sec, reason or "?")
+        try:
+            res = await update_price_cache()
+            logger.info("[PRERUN-PRICES] refresh OK: %d quotes (%s) [%s]",
+                        res.get("quotes_written", 0), res.get("source", "?"),
+                        reason or "?")
+            return {
+                "refreshed": True, "reason": "stale",
+                "age_before_sec": None if age == float("inf") else round(age, 1),
+                "quotes_written": res.get("quotes_written", 0),
+                "source": res.get("source", "?"),
+            }
+        except Exception as e:
+            logger.warning("[PRERUN-PRICES] refresh FALLITO (%s) — il decisional "
+                           "procede coi prezzi disponibili [%s]", e, reason or "?")
+            return {"refreshed": False, "reason": "error", "error": str(e)[:200]}
 
 
 # ════════════════════════════════════════════════════════════════════════
