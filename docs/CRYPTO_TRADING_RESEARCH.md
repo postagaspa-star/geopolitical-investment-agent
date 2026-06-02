@@ -106,3 +106,82 @@ lento, meta = orchestratore.
    crollo ago-2024 24h).
 3. Solo dopo, e solo su decisione esplicita, valutare l'attivazione live
    (gate sul comportamento di produzione).
+
+---
+
+# AGGIORNAMENTO FINALE (fase rotazione + scudo settimanale + conferma fuori campione)
+
+## 10. La rotazione multi-asset (selezione su universo, non cherry-pick)
+
+Per togliere il cherry-picking (buco #3), il sistema valuta TUTTE le major a
+ogni step e sceglie da solo quante/quali (`crypto_selector.py`). DUE scoperte
+metodologiche fondamentali:
+
+- **Backtest "ballerino" → reso deterministico.** L'allineamento dati con union
+  dei timestamp dava +349% o +287% sugli stessi input. Fix: timeline master +
+  forward-fill (`backtest_portfolio.py:_align`). CONSEGUENZA: l'edge della
+  rotazione momentum crollava da +156 (artefatto) a ~+12 reale. Sul periodo
+  recente pulito (2024+) la rotazione momentum PERDE (edge 14-major −59,
+  50-major −29). **La rotazione momentum NON ha edge.**
+- **Universo 50 peggiora il survivorship bias** (top-50 di oggi sul passato
+  esclude i morti: LUNA era top-10). Va testato solo sul recente. Sulle 50 nel
+  recente: overtrading -76%. Confermato: piu' ampio ≠ meglio.
+
+## 11. Lo SCORER STRUTTURALE e il timeframe (intuizione di Andrea)
+
+- **Struttura+volume > RSI/EMA**, su 4h: `crypto_structural.py` (breakout
+  Donchian + conferma volume). Sul recente 4h/14-major: edge +13,5 (primo
+  positivo del progetto) vs −44 del momentum. MA: stress su 3 periodi normali
+  con costi reali (20bps) → media +32 ma viene da 1 solo periodo fortunato
+  (H2-2024 +129), 2 su 3 negativi → **fortuna-di-periodo, non edge.**
+- **Timeframe: piu' lento = meglio.** 2h (ben tarato: EMA24/84, non EMA60/150
+  che lasciava il regime 95% SIDEWAYS) fa +23-43%, sotto buy&hold; settimanale
+  vince. Confermato in ogni direzione.
+
+## 12. LO SCUDO SETTIMANALE — il risultato vero del progetto
+
+`crypto_regime.py` con `short_confirm_bars` (short solo su crollo MACRO
+confermato, cura il dead-cat-bounce) + resample settimanale
+(`backtest_portfolio_weekly_shield.py`, `confirm_robustness.py`).
+
+**Portafoglio 14-major aggregato, 2021-2024 (deterministico, funding incluso,
+benchmark onesto):**
+- Scudo SHORT settimanale: **+71,9% / max DD −27,5%**
+- Scudo CASH settimanale: **+66,8% / max DD −36,7%**
+- Tieni le 14 equipesate: +21,0% / max DD −80,1%
+
+**CONFERMA FUORI CAMPIONE 2017-2020** (ciclo mai visto, bear −84% del 2018,
+BTC/ETH/LTC — le uniche con dati): scudo CASH batte il buy&hold su tutti e 3
+(BTC +305 vs +206, ETH +11,5 vs −20, LTC +87 vs +25). **Edge robusto su 2 cicli
+indipendenti.**
+
+**MA — walk-forward anno-per-anno (la natura vera):** lo scudo cash perde
+quasi ogni anno SU (2021: −41 edge; 2023: −32) e vince solo nell'anno GIU'
+(2022: +14). Verdetto definitivo:
+
+> **NON e' alpha** (in salita rende MENO del mercato — paghi un "premio").
+> **E' un'ASSICURAZIONE ANTI-CRASH robusta**: ti fa rinunciare a parte dei
+> guadagni in bull, in cambio di NON subire i −80% nei bear (2018, 2022).
+> Brilla quando arriva un bear, costa quando non arriva. Come l'assicurazione
+> sulla casa. Il "+72%/−27%" del 2021-24 riflette il fatto che quel periodo
+> CONTENEVA un grande bear (2022) da cui proteggere.
+
+### Conclusione del progetto (~250 backtest)
+1. **Alpha (battere il mercato in salita): NON ESISTE** con prezzo+volume e
+   regole deterministiche. Ogni "vittoria" era bug, survivorship bias, o
+   fortuna-di-periodo — sparita appena rimossi i bias.
+2. **Assicurazione anti-crash: ESISTE ed e' robusta** (scudo cash settimanale,
+   confermato su 2 cicli). E' l'unico risultato che ha retto a ogni test onesto.
+3. **Per GeoInvest**: integrare lo scudo come MODULO di protezione opzionale
+   (non sostituto del trading), che si attiva su bear confermato settimanale.
+   Versione CASH consigliata (il motore robusto, senza il rischio direzionale
+   dello short — che aggiunge solo +5% guadagno ma puo' far male nei rimbalzi).
+
+## 13. Stato del codice (finale)
+- Branch `main`, commit locali fino a `d33d5db`. **NON pushato. Tutti i flag OFF.**
+- File di ricerca in `backend/simulator/`: backtest_{scalper,swing,regime,
+  meanrev,portfolio,portfolio_weekly_shield}.py, stress_{test_scalper,
+  structural}.py, sweep_portfolio_risk.py, confirm_robustness.py, _cmp/_diag.
+- Motori in `backend/agents/`: crypto_{scalper,swing,regime,meanrev,signal_core,
+  selector,structural}.py. Test in `backend/tests/test_crypto_*.py` (tutti verdi).
+- Governatori di rischio (`risk_profile`, `risk_state`) preservati.
