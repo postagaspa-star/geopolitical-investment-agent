@@ -54,6 +54,13 @@ class RegimeParams:
     confirm_bars: int = 2
     # Scudo in downtrend: 'cash' (esci) o 'short' (scommetti giu')
     shield: str = "cash"
+    # CONFERMA SHORT SEPARATA (idea di Andrea): per APRIRE uno short serve una
+    # conferma di downtrend molto piu' lunga di confirm_bars. Cosi' si shortano
+    # solo i crolli MACRO confermati su giorni/settimane, NON i ritracciamenti
+    # brevi dentro un trend su (che facevano perdere lo short nel 2024 col
+    # dead-cat-bounce). Lo scudo CASH (uscire) resta veloce; solo lo SHORT e'
+    # prudente. 0 = usa confirm_bars (comportamento vecchio).
+    short_confirm_bars: int = 0
     # Capitale investito quando LONG in uptrend (% NAV). "Tieni" = quasi tutto.
     long_pct_nav: float = 95.0
     short_pct_nav: float = 25.0      # se shield='short', size piu' prudente
@@ -164,8 +171,21 @@ def step(state: RegimeState, bars: list[dict], nav: float,
         return RegimeAction(action="CLOSE_ALL", price=price, regime=new_regime,
                             reason="stop di sicurezza colpito (short)")
 
-    # Se il regime non cambia, non fare nulla (mantieni la posizione corrente)
+    # Se il regime non cambia: mantieni — MA se siamo in DOWN con shield='short',
+    # siamo in cash, e il downtrend si e' ORA confermato abbastanza a lungo,
+    # apri lo short in ritardo (la conferma lunga e' scattata dopo la transizione).
     if new_regime == state.regime:
+        if (new_regime == DOWN and p.shield == "short" and state.position == FLAT):
+            short_need = p.short_confirm_bars if p.short_confirm_bars > 0 else p.confirm_bars
+            # qui candidate==DOWN da quando siamo entrati in DOWN; conta le candele
+            if state.candidate == DOWN and state.candidate_count >= short_need:
+                sl = price + p.k_atr_sl * a
+                units = (nav * p.short_pct_nav / 100.0) / price
+                _set_pos(state, SHORT, price, sl, units)
+                return RegimeAction(action="OPEN_SHORT", price=price, regime=DOWN,
+                                    units=units, stop_loss=round(sl, 8),
+                                    reason=f"DOWN confermato ({state.candidate_count}b): "
+                                           f"SCUDO short ritardato (crollo macro)")
         none.regime = new_regime
         return none
 
@@ -199,19 +219,26 @@ def step(state: RegimeState, bars: list[dict], nav: float,
         return none
 
     if new_regime == DOWN:
-        # scudo: chiudi il long; se shield=short apri uno short prudente
+        # SCUDO: prima cosa, chiudi il long (protezione VELOCE, sempre).
         if state.position == LONG:
             _set_flat(state)
-        if p.shield == "short" and state.position != SHORT:
+        # SHORT solo se: shield='short' AND il downtrend e' confermato da
+        # abbastanza candele (short_confirm_bars) = crollo MACRO, non un
+        # ritracciamento breve. Cosi' evitiamo i falsi short del 2024
+        # (dead-cat-bounce). short_confirm_bars=0 → usa la conferma normale.
+        short_need = p.short_confirm_bars if p.short_confirm_bars > 0 else p.confirm_bars
+        down_persisted = state.candidate == DOWN and state.candidate_count >= short_need
+        if p.shield == "short" and state.position != SHORT and down_persisted:
             sl = price + p.k_atr_sl * a
             units = (nav * p.short_pct_nav / 100.0) / price
             _set_pos(state, SHORT, price, sl, units)
             return RegimeAction(action="OPEN_SHORT", price=price, regime=DOWN, units=units,
                                 stop_loss=round(sl, 8),
-                                reason=f"{old}→DOWNTREND: SCUDO short (proteggi + scommetti giu')")
-        # shield=cash: solo chiusura
+                                reason=f"{old}→DOWNTREND confermato ({state.candidate_count}b): "
+                                       f"SCUDO short (crollo macro)")
+        # altrimenti (shield=cash, oppure short non ancora confermato): solo cash
         return RegimeAction(action="CLOSE_ALL", price=price, regime=DOWN,
-                            reason=f"{old}→DOWNTREND: SCUDO cash (esco e aspetto)")
+                            reason=f"{old}→DOWNTREND: SCUDO cash (esco; short attende conferma)")
 
     none.regime = new_regime
     return none
