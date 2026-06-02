@@ -379,18 +379,45 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
             "data_quality": "no_data",
         }
 
+    # ── DEFENSIVE: ordine cronologico ascending PRIMA di tutto ──────────────
+    # current_price = data[-1], _calculate_atr e analyze_ticker assumono che la
+    # serie sia oldest→newest. Se un provider restituisse newest-first (o un
+    # reverse saltasse), avremmo: current_price = barra PIU' VECCHIA, e RSI/MACD
+    # calcolati all'indietro → un titolo bullish letto come oversold (bug
+    # osservato su un run standard). Le date sono ISO "YYYY-MM-DD" → ordinamento
+    # lessicografico == cronologico. Riordina solo se tutte le righe hanno data.
+    _data = market_data["data"]
+    if _data and all(r.get("date") for r in _data):
+        _data = sorted(_data, key=lambda r: str(r.get("date")))
+        market_data["data"] = _data
+
     # Calcola indicatori
     df = pd.DataFrame(market_data["data"])
     df.set_index("date", inplace=True)
     df.columns = [c.capitalize() for c in df.columns]
+    df.sort_index(inplace=True)  # ridondante ma esplicito (belt-and-suspenders)
 
     analysis = technical_analysis.analyze_ticker(df)
 
-    # Aggiungi prezzo corrente e ATR
+    # Aggiungi prezzo corrente e ATR (ora data[-1] e' garantito il piu' recente)
     current_price = market_data["data"][-1]["close"] if market_data["data"] else 0
 
     # Calcola ATR manualmente (14 periodi)
     atr = _calculate_atr(market_data["data"])
+
+    # Freschezza OHLCV: una RSI calcolata su barre vecchie di giorni puo'
+    # contraddire il prezzo live (provider free con ritardo o copertura scarsa
+    # del simbolo). Esponi data/eta' dell'ultima barra cosi' il valore non viene
+    # scambiato per "corrente" (l'altra causa del mismatch indicatore↔prezzo).
+    last_bar_date = market_data["data"][-1].get("date") if market_data["data"] else None
+    data_age_days = None
+    if last_bar_date:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            _d = _dt.strptime(str(last_bar_date)[:10], "%Y-%m-%d").replace(tzinfo=_tz.utc)
+            data_age_days = (_dt.now(_tz.utc) - _d).days
+        except Exception:
+            data_age_days = None
 
     raw = {
         "ticker": ticker,
@@ -399,6 +426,8 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
         "analysis": analysis,
         "data_points": len(market_data["data"]),
         "source": market_data.get("source", "yfinance"),
+        "last_bar_date": last_bar_date,
+        "data_age_days": data_age_days,
     }
 
     # Sanity validation: scrub NaN/Inf, range checks, S/R sanity
@@ -406,6 +435,19 @@ async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
     cleaned, warnings = _validate_indicators(cleaned)
     if warnings:
         logger.warning("[TECH] %s data_quality=degraded: %s", ticker, warnings[:3])
+
+    # Staleness OHLCV: >5 giorni su timeframe daily e' sospetto (weekend = 2-3g).
+    # Non blocca, ma rende VISIBILE che RSI/indicatori potrebbero non riflettere
+    # il prezzo corrente — cosi' un mismatch "RSI oversold ma prezzo bullish"
+    # non passa piu' in silenzio (lo vede sia il log sia l'LLM nel report).
+    if isinstance(data_age_days, int) and data_age_days > 5:
+        logger.warning("[TECH] %s OHLCV STALE: ultima barra %s (%dg fa, src=%s)",
+                       ticker, last_bar_date, data_age_days,
+                       market_data.get("source", "?"))
+        cleaned.setdefault("data_warnings", []).append(
+            f"OHLCV ultima barra {last_bar_date} ({data_age_days}g fa): "
+            "RSI/indicatori potrebbero NON riflettere il prezzo corrente"
+        )
 
     # ─── Advanced enrichment per equity ─────────────────────────────────────
     # Aggiunge candlestick patterns, Fibonacci, volume profile, market
