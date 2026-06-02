@@ -17,11 +17,14 @@ for name, sym, d0, d1 in periods:
     bars = fetch_klines_range(sym, "2h", _dt_ms(d0), _dt_ms(d1))
     if len(bars) < 300:
         print('%-12s skip (%d)' % (name, len(bars))); continue
-    # su 2h: 1 giorno = 12 candele. confirm/short_confirm in candele 2h.
-    p_cash = RegimeParams(shield='cash', ema_fast=60, ema_slow=150, atr_len=60,
-                          confirm_bars=12, short_confirm_bars=60)
-    p_short = RegimeParams(shield='short', ema_fast=60, ema_slow=150, atr_len=60,
-                           confirm_bars=12, short_confirm_bars=60)
+    # TARATURA 2h CORRETTA (la diagnosi ha mostrato che EMA60/150 lasciava il
+    # regime 'incollato' su SIDEWAYS il 95% del tempo → 1 trade). Su 2h: 1g=12
+    # candele. EMA fast 24 (2g) / slow 84 (1 settimana), slope/sep permissivi.
+    base = dict(ema_fast=24, ema_slow=84, atr_len=24, confirm_bars=6,
+                short_confirm_bars=24, slope_min_pct=0.03, sep_min_pct=0.8,
+                range_lookback=84, range_max_pct=10.0)
+    p_cash = RegimeParams(shield='cash', **base)
+    p_short = RegimeParams(shield='short', **base)
     # funding per candela 2h: 0.01%/8h * (2/8) = 0.0025%/bar
     bh = run_regime_backtest(bars, p_cash, funding_daily_pct=0)['buy_hold_pct']
     rc = run_regime_backtest(bars, p_cash, funding_daily_pct=0.0025)
