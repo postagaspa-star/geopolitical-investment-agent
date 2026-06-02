@@ -37,18 +37,39 @@ UNIVERSE_14 = [
     "TRXUSDT", "ATOMUSDT",
 ]
 
+# Universo ESTESO ~top-50 per capitalizzazione (vive oggi). Piu' monete = piu'
+# DISPERSIONE (si muovono in modo meno correlato delle sole major) → la
+# rotazione cross-sectional ha piu' da scegliere e l'edge puo' emergere.
+# ⚠️ SURVIVORSHIP BIAS PIU' GRAVE: queste sono le top-50 di OGGI. Applicate al
+# passato (2021) escludono i MORTI che allora erano grandi (LUNA era top-10,
+# FTT, e molte small-cap sparite). L'edge storico sara' OTTIMISTICO — piu' che
+# con le 14. Da dichiarare sempre nei risultati.
+UNIVERSE_50 = UNIVERSE_14 + [
+    "NEARUSDT", "APTUSDT", "ICPUSDT", "FILUSDT", "ARBUSDT", "OPUSDT",
+    "INJUSDT", "SUIUSDT", "HBARUSDT", "VETUSDT", "IMXUSDT", "RNDRUSDT",
+    "GRTUSDT", "AAVEUSDT", "MKRUSDT", "ALGOUSDT", "QNTUSDT", "EGLDUSDT",
+    "SANDUSDT", "MANAUSDT", "AXSUSDT", "THETAUSDT", "XTZUSDT", "EOSUSDT",
+    "FTMUSDT", "FLOWUSDT", "CHZUSDT", "GALAUSDT", "KAVAUSDT", "ZECUSDT",
+    "DASHUSDT", "ENJUSDT", "CRVUSDT", "1INCHUSDT", "COMPUSDT", "SNXUSDT",
+]
+
 
 @dataclass
 class SelectorParams:
     ema_fast: int = 20
     ema_slow: int = 50
-    roc_len: int = 20          # momentum su ~20 candele
+    roc_len: int = 20          # momentum BREVE (~20 candele)
+    roc_len_med: int = 60      # momentum MEDIO (~60 candele): l'orizzonte che la
+                               # letteratura sul momentum trova piu' robusto.
+                               # Combinare breve+medio riduce il rumore del solo
+                               # breve termine (che dava edge ~+12, quasi rumore).
     atr_len: int = 20
     rsi_len: int = 14
     # pesi della combinazione (somma ~1)
-    w_trend: float = 0.40      # salute del trend
-    w_momentum: float = 0.45   # momentum risk-adjusted
-    w_entry: float = 0.15      # qualita' del punto d'entrata
+    w_trend: float = 0.30      # salute del trend
+    w_momentum: float = 0.30   # momentum BREVE risk-adjusted
+    w_momentum_med: float = 0.30  # momentum MEDIO risk-adjusted (forza relativa)
+    w_entry: float = 0.10      # qualita' del punto d'entrata
     overbought_rsi: float = 80.0
 
 
@@ -61,7 +82,8 @@ def opportunity_score(closes, highs, lows, params: Optional[SelectorParams] = No
     None se warmup insufficiente. Deterministico, no look-ahead."""
     p = params or SelectorParams()
     cs = [c for c in (_f(x) for x in closes) if c is not None]
-    if len(cs) < p.ema_slow + 5:
+    # serve abbastanza storia anche per il momentum MEDIO
+    if len(cs) < max(p.ema_slow, p.roc_len_med) + 5:
         return None
     ef = ema_series(cs, p.ema_fast)[-1]
     es_list = ema_series(cs, p.ema_slow)
@@ -69,9 +91,10 @@ def opportunity_score(closes, highs, lows, params: Optional[SelectorParams] = No
     es_prev = es_list[-5]
     a = atr(highs, lows, cs, p.atr_len)
     r = roc(cs, p.roc_len)
+    r_med = roc(cs, p.roc_len_med)
     rs = rsi(cs, p.rsi_len)
     price = cs[-1]
-    if None in (ef, es, es_prev, a, r, rs) or es <= 0 or price <= 0:
+    if None in (ef, es, es_prev, a, r, r_med, rs) or es <= 0 or price <= 0:
         return None
 
     # 1) TREND-HEALTH 0..1: EMA stack + slope
@@ -85,9 +108,15 @@ def opportunity_score(closes, highs, lows, params: Optional[SelectorParams] = No
     atr_pct = a / price * 100.0
     if atr_pct <= 0:
         return None
-    rar = r / atr_pct          # momentum per unita' di rischio
+    rar = r / atr_pct          # momentum BREVE per unita' di rischio
     # rar tipico in trend sano ~ +0.5..+2; mappiamo: 0→0.5, +1.5→~1, -1.5→~0
     momentum_score = _clamp01(0.5 + rar / 3.0)
+
+    # 2b) MOMENTUM MEDIO risk-adjusted (forza relativa ~60 candele): l'orizzonte
+    #     che la letteratura sul momentum trova piu' robusto. Normalizzato dalla
+    #     volatilita' per non premiare solo chi sbalza.
+    rar_med = r_med / atr_pct
+    momentum_med_score = _clamp01(0.5 + rar_med / 8.0)  # orizzonte piu' lungo → scala maggiore
 
     # 3) ENTRY-QUALITY 0..1: penalizza l'ipercomprato (entrata tardiva)
     if rs >= p.overbought_rsi:
@@ -97,6 +126,7 @@ def opportunity_score(closes, highs, lows, params: Optional[SelectorParams] = No
 
     score = (p.w_trend * trend_health
              + p.w_momentum * momentum_score
+             + p.w_momentum_med * momentum_med_score
              + p.w_entry * entry_score)
     return _clamp01(score)
 

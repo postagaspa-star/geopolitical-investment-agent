@@ -34,7 +34,7 @@ _BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from agents.crypto_selector import UNIVERSE_14, select_top, rank_universe, SelectorParams
+from agents.crypto_selector import UNIVERSE_14, UNIVERSE_50, select_top, rank_universe, SelectorParams
 from agents.crypto_regime import classify_regime, RegimeParams, UP
 from simulator.backtest_swing import fetch_daily, _dt_ms
 from simulator.backtest_scalper import fetch_klines_range
@@ -53,19 +53,47 @@ def _fetch(symbol, interval, start_ms, end_ms):
 
 
 def _align(data: dict) -> tuple[list[int], dict]:
-    """Allinea le serie per timestamp. Ritorna (timestamps_comuni_ordinati,
-    {symbol: {ts: bar}}). Cosi' a ogni step usiamo la candela giusta per asset."""
-    index = {}
+    """Allinea le serie su una TIMELINE MASTER deterministica con FORWARD-FILL.
+
+    Bug precedente: usavo l'UNIONE dei timestamp; le candele mancanti (Binance
+    a volte ne salta) venivano riempite in modo diverso a seconda di micro-
+    differenze tra download → stesso input dava +349% o +287% (backtest
+    'ballerino'). NON deterministico.
+
+    Fix: la timeline master = i timestamp dell'asset PIU' COMPLETO (di norma
+    BTC). Per ogni asset, ogni candela viene mappata al timestamp master >=
+    suo, e ogni buco e' riempito col forward-fill (ultima candela nota). Cosi':
+      - ogni asset ha un prezzo definito a OGNI istante master (l'ultimo reale),
+      - prima della sua nascita su Binance, l'asset semplicemente non esiste
+        (None) → escluso dalla selezione (gestito a valle),
+      - stesso input → SEMPRE stesso output.
+    """
+    # 1. timeline master = unione ordinata, ma il riempimento e' deterministico
+    #    (forward-fill), quindi i buchi non dipendono piu' dall'ordine di scarico.
     all_ts = set()
-    for sym, bars in data.items():
-        m = {}
+    for bars in data.values():
         for b in bars:
-            t = b.get("t")
-            if t is not None:
-                m[t] = b
-                all_ts.add(t)
+            if b.get("t") is not None:
+                all_ts.add(b["t"])
+    timeline = sorted(all_ts)
+
+    index = {}
+    for sym, bars in data.items():
+        bars_sorted = sorted((b for b in bars if b.get("t") is not None),
+                             key=lambda b: b["t"])
+        m = {}
+        bi = 0
+        last = None
+        for t in timeline:
+            # avanza fino all'ultima candela con timestamp <= t
+            while bi < len(bars_sorted) and bars_sorted[bi]["t"] <= t:
+                last = bars_sorted[bi]
+                bi += 1
+            # last = ultima candela reale nota a questo istante (forward-fill);
+            # None se l'asset non era ancora nato → resta assente
+            m[t] = last
         index[sym] = m
-    return sorted(all_ts), index
+    return timeline, index
 
 
 def run_portfolio_backtest(data: dict, interval: str,
@@ -119,9 +147,22 @@ def run_portfolio_backtest(data: dict, interval: str,
         return v
 
     def history_until(sym, ts_pos):
-        """Bars dell'asset fino all'indice temporale corrente (no look-ahead)."""
+        """Bars REALI (de-duplicati) dell'asset fino all'istante corrente, per
+        il calcolo indicatori. Con il forward-fill, m[t] ripete l'ultima candela
+        nei buchi: qui prendiamo ogni candela una sola volta (per timestamp
+        reale 't'), altrimenti i close ripetuti falserebbero ATR/RSI (volatilita'
+        finta zero). No look-ahead: solo fino a ts_pos."""
         m = idx.get(sym, {})
-        return [m[t] for t in timestamps[:ts_pos + 1] if t in m]
+        out = []
+        seen_t = None
+        for t in timestamps[:ts_pos + 1]:
+            b = m.get(t)
+            if b is None:
+                continue
+            if b.get("t") != seen_t:   # candela reale nuova (non un fill ripetuto)
+                out.append(b)
+                seen_t = b.get("t")
+        return out
 
     def _sell(sym, ts, reason_trades=True):
         nonlocal cash, fees, n_trades
@@ -288,8 +329,11 @@ def _equal_weight_hold(data, timestamps, idx, warm) -> dict:
     eq = []
     for ti in range(warm, len(timestamps)):
         ts = timestamps[ti]
-        v = sum(units[s] * idx[s][ts]["close"] for s in avail if idx.get(s, {}).get(ts))
-        # asset senza candela a ts: usa l'ultimo prezzo noto (semplificazione)
+        v = 0.0
+        for s in avail:
+            b = idx.get(s, {}).get(ts)   # forward-filled: ultimo prezzo noto
+            if b:
+                v += units[s] * b["close"]
         eq.append(v)
     peak, dd = INITIAL_NAV, 0.0
     for v in eq:
@@ -303,24 +347,26 @@ def main(argv):
     interval = argv[1] if len(argv) > 1 else "1d"
     d0 = argv[2] if len(argv) > 2 else "2021-01-01"
     d1 = argv[3] if len(argv) > 3 else "2024-12-31"
-    print(f"Scarico universo 14 major {interval} {d0}->{d1} ...")
+    uni_arg = argv[4] if len(argv) > 4 else "14"
+    universe = UNIVERSE_50 if uni_arg == "50" else UNIVERSE_14
+    print(f"Scarico universo {len(universe)} {interval} {d0}->{d1} ...")
     data = {}
-    for sym in UNIVERSE_14:
+    for sym in universe:
         bars = _fetch(sym, interval, _dt_ms(d0), _dt_ms(d1))
         if len(bars) >= 60:
             data[sym] = bars
-        print(f"  {sym}: {len(bars)} candele")
+    print(f"  {len(data)}/{len(universe)} asset con dati sufficienti")
     if len(data) < 5:
         print("Dati insufficienti."); return 1
 
     warm = 60 if interval == "1d" else 120
     r = run_portfolio_backtest(data, interval, warm=warm)
     print("\n" + "=" * 80)
-    print(f"PORTAFOGLIO MULTI-ASSET (il sistema sceglie QUANTI e QUALI + regime UP)  {interval}  {d0}->{d1}")
+    print(f"PORTAFOGLIO MULTI-ASSET ({len(universe)} monete, il sistema sceglie QUANTI/QUALI)  {interval}  {d0}->{d1}")
     print("=" * 80)
     if "error" in r:
         print("  ", r["error"]); return 1
-    print(f"  Asset nell'universo : {r['n_assets']}/14   step simulati: {r['steps']}")
+    print(f"  Asset nell'universo : {r['n_assets']}/{len(universe)}   step simulati: {r['steps']}")
     print(f"  Posizioni aperte    : media {r['avg_positions']}, max {r['max_positions']} (DECISE dal sistema, non imposte)")
     print(f"  Sistema (rotazione) : {r['return_pct']:+.1f}%   max DD {r['max_drawdown_pct']:.1f}%")
     print(f"  Benchmark EW-hold-14: {r['ew_hold_pct']:+.1f}%   max DD {r['ew_max_dd_pct']:.1f}%")
