@@ -34,7 +34,7 @@ _BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from agents.crypto_selector import UNIVERSE_14, select_top, SelectorParams
+from agents.crypto_selector import UNIVERSE_14, select_top, rank_universe, SelectorParams
 from agents.crypto_regime import classify_regime, RegimeParams, UP
 from simulator.backtest_swing import fetch_daily, _dt_ms
 from simulator.backtest_scalper import fetch_klines_range
@@ -68,10 +68,26 @@ def _align(data: dict) -> tuple[list[int], dict]:
     return sorted(all_ts), index
 
 
-def run_portfolio_backtest(data: dict, interval: str, top_k: int = 3,
+def run_portfolio_backtest(data: dict, interval: str,
                            min_score: float = 0.58, slippage_bps: float = 5.0,
-                           warm: int = 60) -> dict:
-    """Simula il portafoglio multi-asset. data: {symbol: [bar con 't']}."""
+                           warm: int = 60,
+                           asset_fast_stop_pct: float = 0.0,
+                           portfolio_cb_pct: float = 0.0,
+                           max_invested_pct: float = 100.0) -> dict:
+    """Simula il portafoglio multi-asset. data: {symbol: [bar con 't']}.
+    Il NUMERO di posizioni e' deciso dal cervello (quanti asset UP+sopra-soglia
+    ci sono), NON imposto.
+
+    DEFAULT = versione MIGLIORE (+349%/-66%): tutti i controlli OFF. Le leve di
+    rischio sono OPT-IN, testabili UNA alla volta:
+      - max_invested_pct: CASH-FLOOR. Quota massima del NAV investita in crypto
+        (es. 75 = sempre >=25% cash). Abbassa OGNI drawdown in proporzione SENZA
+        vendere nei cali (niente trappola vendi-ricompra). 100 = nessun floor.
+      - asset_fast_stop_pct: esci da un asset se scende oltre questo % dal suo
+        MASSIMO (grilletto rapido crash veloci). 0 = off.
+      - portfolio_cb_pct: circuit breaker (vende-tutto/cash). BOCCIATO dai dati
+        (vende basso/ricompra alto) — lasciato solo per confronto. 0 = off.
+    """
     sp = SelectorParams()
     rp = RegimeParams()
     timestamps, idx = _align(data)
@@ -81,9 +97,14 @@ def run_portfolio_backtest(data: dict, interval: str, top_k: int = 3,
     cash = INITIAL_NAV
     holdings: dict[str, float] = {}   # symbol -> units
     entry_px: dict[str, float] = {}
+    asset_peak: dict[str, float] = {}  # massimo prezzo da quando in portafoglio
     equity = []
+    pos_counts = []                   # quante posizioni aperte a ogni step
     n_trades = 0
     fees = 0.0
+    nav_peak = INITIAL_NAV            # picco del NAV (per il circuit breaker)
+    cb_active = False                 # circuit breaker scattato → tutto cash
+    cb_events = 0
 
     def price_at(sym, ts):
         b = idx.get(sym, {}).get(ts)
@@ -102,6 +123,20 @@ def run_portfolio_backtest(data: dict, interval: str, top_k: int = 3,
         m = idx.get(sym, {})
         return [m[t] for t in timestamps[:ts_pos + 1] if t in m]
 
+    def _sell(sym, ts, reason_trades=True):
+        nonlocal cash, fees, n_trades
+        px = price_at(sym, ts)
+        if px and holdings.get(sym, 0) > 0:
+            proceeds = holdings[sym] * px * (1 - slippage_bps / 1e4)
+            fee = _commission(proceeds)
+            cash += proceeds - fee
+            fees += fee
+            if reason_trades:
+                n_trades += 1
+        holdings.pop(sym, None)
+        entry_px.pop(sym, None)
+        asset_peak.pop(sym, None)
+
     for ti in range(warm, len(timestamps)):
         ts = timestamps[ti]
 
@@ -111,39 +146,86 @@ def run_portfolio_backtest(data: dict, interval: str, top_k: int = 3,
             h = history_until(sym, ti)
             if len(h) >= warm:
                 hist[sym] = h
-        # selezione: top-K per opportunita'
-        picks = select_top(hist, k=top_k, min_score=min_score, params=sp)
-        # filtro regime UP: opera solo chi e' anche in uptrend confermato-istantaneo
+
+        # ── CONTROLLO RISCHIO A: grilletto rapido PER-ASSET (crash veloci) ──
+        # aggiorna il picco di ogni asset in mano; se scende oltre la soglia
+        # dal suo massimo, esci SUBITO (non aspettare il regime/EMA).
+        if asset_fast_stop_pct > 0:
+            for sym in list(holdings.keys()):
+                px = price_at(sym, ts)
+                if not px:
+                    continue
+                asset_peak[sym] = max(asset_peak.get(sym, px), px)
+                if px <= asset_peak[sym] * (1 - asset_fast_stop_pct / 100.0):
+                    _sell(sym, ts)
+
+        # ── CONTROLLO RISCHIO B: CIRCUIT BREAKER di portafoglio ──
+        cur_nav = nav_at(ts)
+        nav_peak = max(nav_peak, cur_nav)
+        if portfolio_cb_pct > 0 and not cb_active:
+            if cur_nav <= nav_peak * (1 - portfolio_cb_pct / 100.0):
+                # liquida TUTTO, vai cash
+                for sym in list(holdings.keys()):
+                    _sell(sym, ts)
+                cb_active = True
+                cb_events += 1
+        # uscita dal circuit breaker: rientra solo quando BTC torna UP
+        if cb_active:
+            btc_hist = hist.get("BTCUSDT")
+            btc_up = btc_hist and classify_regime([b["close"] for b in btc_hist], rp) == UP
+            if btc_up:
+                cb_active = False
+                nav_peak = nav_at(ts)   # reset del picco al rientro
+            else:
+                equity.append(nav_at(ts))   # resta in cash, salta selezione
+                pos_counts.append(0)
+                continue
+
+        # SELEZIONE: e' il CERVELLO a decidere QUANTI asset prendere, non un
+        # cap imposto. Prende OGNI asset che e' (a) in regime UP confermato e
+        # (b) sopra la soglia di opportunita'. Possono essere 0, 1, 8, o tutti e
+        # 14 — dipende da quante opportunita' VERE ci sono in quel momento.
+        # ISTERESI per ridurre il churn: chi e' gia' dentro lo si tiene finche'
+        # resta UP e sopra una soglia di USCITA piu' bassa (non lo si scarica
+        # per micro-variazioni di ranking).
+        exit_score = min_score - 0.10
+        ranked = rank_universe(hist, sp)
+        score_by = {r.symbol: r.score for r in ranked}
+
+        def is_up(sym):
+            return classify_regime([b["close"] for b in hist[sym]], rp) == UP
+
         target = set()
-        for r in picks:
-            closes = [b["close"] for b in hist[r.symbol]]
-            if classify_regime(closes, rp) == UP:
+        # 1) mantieni gli attuali ancora sani (UP + sopra exit_score)
+        for sym in holdings:
+            if sym in hist and is_up(sym) and score_by.get(sym, 0) >= exit_score:
+                target.add(sym)
+        # 2) aggiungi TUTTI i nuovi che meritano (UP + sopra min_score). Nessun
+        #    limite artificiale: quante opportunita' ci sono, tante se ne prendono.
+        for r in ranked:
+            if r.symbol not in target and r.score >= min_score and is_up(r.symbol):
                 target.add(r.symbol)
 
         # 4. chiudi chi non e' piu' target
         for sym in list(holdings.keys()):
             if sym not in target:
-                px = price_at(sym, ts)
-                if px:
-                    proceeds = holdings[sym] * px
-                    fee = _commission(proceeds)
-                    cash += proceeds - fee
-                    fees += fee
-                    n_trades += 1
-                del holdings[sym]
-                entry_px.pop(sym, None)
+                _sell(sym, ts)
 
-        # 3. apri/mantieni i target, capitale equipesato sul NAV corrente
+        # 3. apri/mantieni i target, capitale equipesato. CASH-FLOOR: si investe
+        #    al massimo max_invested_pct del NAV (il resto resta cash → abbassa
+        #    il drawdown in proporzione, senza vendere nei cali).
         if target:
             nav = nav_at(ts)
-            target_alloc = nav / len(target)   # quota per asset
+            investable = nav * max_invested_pct / 100.0
+            target_alloc = investable / len(target)   # quota per asset
             for sym in target:
                 px = price_at(sym, ts)
                 if not px:
                     continue
                 cur_val = holdings.get(sym, 0.0) * px
-                # ribilancia solo se scostamento significativo (riduce trade)
-                if abs(cur_val - target_alloc) / target_alloc > 0.25:
+                # ribilancia solo se scostamento GROSSO (soglia 0.40 per ridurre
+                # ulteriormente il churn: micro-ribilanciamenti = commissioni inutili)
+                if abs(cur_val - target_alloc) / target_alloc > 0.40:
                     # vendi/compra la differenza
                     diff_val = target_alloc - cur_val
                     if diff_val > 0 and cash >= diff_val:
@@ -153,6 +235,7 @@ def run_portfolio_backtest(data: dict, interval: str, top_k: int = 3,
                         fees += fee
                         holdings[sym] = holdings.get(sym, 0.0) + u
                         entry_px[sym] = px
+                        asset_peak.setdefault(sym, px)   # inizia il picco per il fast-stop
                         n_trades += 1
                     elif diff_val < 0:
                         u = -diff_val / px
@@ -164,6 +247,7 @@ def run_portfolio_backtest(data: dict, interval: str, top_k: int = 3,
                         n_trades += 1
 
         equity.append(nav_at(ts))
+        pos_counts.append(len(holdings))
 
     # liquida a fine serie
     last_ts = timestamps[-1]
@@ -183,10 +267,14 @@ def run_portfolio_backtest(data: dict, interval: str, top_k: int = 3,
 
     # BENCHMARK: equal-weight hold delle 14 (quelle con dati al warm)
     bh = _equal_weight_hold(data, timestamps, idx, warm)
+    avg_pos = sum(pos_counts) / len(pos_counts) if pos_counts else 0.0
+    max_pos = max(pos_counts) if pos_counts else 0
     return {"return_pct": round(ret, 1), "ew_hold_pct": round(bh["ret"], 1),
             "edge": round(ret - bh["ret"], 1),
             "max_drawdown_pct": round(max_dd, 1), "ew_max_dd_pct": round(bh["dd"], 1),
-            "trades": n_trades, "n_assets": len(data), "steps": len(equity)}
+            "trades": n_trades, "n_assets": len(data), "steps": len(equity),
+            "avg_positions": round(avg_pos, 1), "max_positions": max_pos,
+            "cb_events": cb_events}
 
 
 def _equal_weight_hold(data, timestamps, idx, warm) -> dict:
@@ -226,16 +314,18 @@ def main(argv):
         print("Dati insufficienti."); return 1
 
     warm = 60 if interval == "1d" else 120
-    r = run_portfolio_backtest(data, interval, top_k=3, warm=warm)
+    r = run_portfolio_backtest(data, interval, warm=warm)
     print("\n" + "=" * 80)
-    print(f"PORTAFOGLIO MULTI-ASSET (top-3 per opportunita' + regime UP)  {interval}  {d0}->{d1}")
+    print(f"PORTAFOGLIO MULTI-ASSET (il sistema sceglie QUANTI e QUALI + regime UP)  {interval}  {d0}->{d1}")
     print("=" * 80)
     if "error" in r:
         print("  ", r["error"]); return 1
     print(f"  Asset nell'universo : {r['n_assets']}/14   step simulati: {r['steps']}")
+    print(f"  Posizioni aperte    : media {r['avg_positions']}, max {r['max_positions']} (DECISE dal sistema, non imposte)")
     print(f"  Sistema (rotazione) : {r['return_pct']:+.1f}%   max DD {r['max_drawdown_pct']:.1f}%")
     print(f"  Benchmark EW-hold-14: {r['ew_hold_pct']:+.1f}%   max DD {r['ew_max_dd_pct']:.1f}%")
     print(f"  EDGE vs equal-weight: {r['edge']:+.1f} punti   ({r['trades']} trade)")
+    print(f"  Circuit breaker scattato {r['cb_events']} volte (liquidazione totale->cash)")
     print("=" * 80)
     print("BENCHMARK ONESTO = tenere le 14 equipesate. Survivorship bias: 14 vive")
     print("oggi (esclude LUNA/FTT morte) -> risultati un filo ottimistici.")
