@@ -34,7 +34,25 @@ _BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from agents.crypto_selector import UNIVERSE_14, UNIVERSE_50, select_top, rank_universe, SelectorParams
+from agents.crypto_selector import UNIVERSE_14, UNIVERSE_50, select_top, rank_universe, SelectorParams, Ranked
+from agents.crypto_structural import structural_score, StructuralParams
+
+
+def _rank_structural(data_by_symbol: dict, sp_struct) -> list:
+    """Ranking per score STRUTTURALE (S/R + volume), stessa interfaccia di
+    rank_universe. Esclude chi ha score None (warmup/dati)."""
+    out = []
+    for sym, bars in (data_by_symbol or {}).items():
+        if not bars:
+            continue
+        s = structural_score([b.get("close") for b in bars],
+                             [b.get("high") for b in bars],
+                             [b.get("low") for b in bars],
+                             [b.get("volume") for b in bars], sp_struct)
+        if s is not None:
+            out.append(Ranked(symbol=sym, score=round(s, 4)))
+    out.sort(key=lambda r: r.score, reverse=True)
+    return out
 from agents.crypto_regime import classify_regime, RegimeParams, UP
 from simulator.backtest_swing import fetch_daily, _dt_ms
 from simulator.backtest_scalper import fetch_klines_range
@@ -101,7 +119,8 @@ def run_portfolio_backtest(data: dict, interval: str,
                            warm: int = 60,
                            asset_fast_stop_pct: float = 0.0,
                            portfolio_cb_pct: float = 0.0,
-                           max_invested_pct: float = 100.0) -> dict:
+                           max_invested_pct: float = 100.0,
+                           scorer: str = "momentum") -> dict:
     """Simula il portafoglio multi-asset. data: {symbol: [bar con 't']}.
     Il NUMERO di posizioni e' deciso dal cervello (quanti asset UP+sopra-soglia
     ci sono), NON imposto.
@@ -117,6 +136,7 @@ def run_portfolio_backtest(data: dict, interval: str,
         (vende basso/ricompra alto) — lasciato solo per confronto. 0 = off.
     """
     sp = SelectorParams()
+    sp_struct = StructuralParams()
     rp = RegimeParams()
     timestamps, idx = _align(data)
     if len(timestamps) < warm + 10:
@@ -230,7 +250,10 @@ def run_portfolio_backtest(data: dict, interval: str,
         # resta UP e sopra una soglia di USCITA piu' bassa (non lo si scarica
         # per micro-variazioni di ranking).
         exit_score = min_score - 0.10
-        ranked = rank_universe(hist, sp)
+        if scorer == "structural":
+            ranked = _rank_structural(hist, sp_struct)
+        else:
+            ranked = rank_universe(hist, sp)
         score_by = {r.symbol: r.score for r in ranked}
 
         def is_up(sym):
@@ -348,8 +371,9 @@ def main(argv):
     d0 = argv[2] if len(argv) > 2 else "2021-01-01"
     d1 = argv[3] if len(argv) > 3 else "2024-12-31"
     uni_arg = argv[4] if len(argv) > 4 else "14"
+    scorer = argv[5] if len(argv) > 5 else "momentum"
     universe = UNIVERSE_50 if uni_arg == "50" else UNIVERSE_14
-    print(f"Scarico universo {len(universe)} {interval} {d0}->{d1} ...")
+    print(f"Scarico universo {len(universe)} {interval} {d0}->{d1} (scorer={scorer}) ...")
     data = {}
     for sym in universe:
         bars = _fetch(sym, interval, _dt_ms(d0), _dt_ms(d1))
@@ -360,7 +384,9 @@ def main(argv):
         print("Dati insufficienti."); return 1
 
     warm = 60 if interval == "1d" else 120
-    r = run_portfolio_backtest(data, interval, warm=warm)
+    # lo score strutturale ha baseline ~0.5-0.6 → soglia un filo piu' bassa
+    ms = 0.55 if scorer == "structural" else 0.58
+    r = run_portfolio_backtest(data, interval, warm=warm, scorer=scorer, min_score=ms)
     print("\n" + "=" * 80)
     print(f"PORTAFOGLIO MULTI-ASSET ({len(universe)} monete, il sistema sceglie QUANTI/QUALI)  {interval}  {d0}->{d1}")
     print("=" * 80)
