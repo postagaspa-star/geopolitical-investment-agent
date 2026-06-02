@@ -120,36 +120,41 @@ def main(argv):
     if n < 5:
         print("Dati insuff."); return 1
 
-    # capitale equipesato: ogni asset parte con NAV/n, curva in frazione *quota
-    quota = INITIAL_NAV / n
-    # allinea sul numero minimo di settimane disponibili
-    min_len = min(len(w) for w in weekly.values())
-    sys_curve = [0.0] * min_len
-    bh_curve = [0.0] * min_len
-    warm_ref = None
+    # AGGREGAZIONE EQUIPESATA semplice e robusta: ogni asset gestito dal regime
+    # settimanale produce una sua curva NAV (frazione, base 1.0). Il portafoglio
+    # equipesato e' la MEDIA delle curve (ogni asset pesa 1/n). Cosi' return e
+    # drawdown del portafoglio sono quelli della curva media. Stessa cosa per il
+    # buy&hold (media delle curve prezzo normalizzate).
+    sys_curves = []
+    bh_curves = []
     for sym, wk in weekly.items():
         curve, warm = _run_one_asset(wk, shield)
-        warm_ref = warm
-        # frazione di NAV dell'asset, scalata sulla quota
-        vals = [v for (_, v) in curve][-min_len:] if len(curve) >= min_len else None
-        if vals is None:
+        sys_vals = [v for (_, v) in curve]          # base 1.0
+        if not sys_vals:
             continue
-        for i, v in enumerate(vals):
-            sys_curve[i] += quota * v
-        # buy&hold dello stesso asset (frazione prezzo)
+        sys_curves.append(sys_vals)
         prices = [b["close"] for b in wk][warm:]
-        prices = prices[-min_len:]
         if prices:
             p0 = prices[0]
-            for i, px in enumerate(prices):
-                bh_curve[i] += quota * (px / p0)
+            bh_curves.append([px / p0 for px in prices])
+
+    min_len = min(len(c) for c in sys_curves)
+    bh_min = min(len(c) for c in bh_curves)
+    L = min(min_len, bh_min)
+
+    # curva media (equipesata), in NAV assoluto (base INITIAL_NAV)
+    sys_curve = [INITIAL_NAV * sum(c[i] for c in sys_curves) / len(sys_curves) for i in range(L)]
+    bh_curve = [INITIAL_NAV * sum(c[i] for c in bh_curves) / len(bh_curves) for i in range(L)]
 
     def metrics(curve):
+        if not curve:
+            return 0.0, 0.0
         peak, dd = curve[0], 0.0
         for v in curve:
             peak = max(peak, v)
-            dd = min(dd, (v - peak) / peak * 100.0)
-        ret = (curve[-1] / INITIAL_NAV - 1.0) * 100.0
+            if peak > 0:
+                dd = min(dd, (v - peak) / peak * 100.0)
+        ret = (curve[-1] / curve[0] - 1.0) * 100.0
         return ret, dd
 
     sret, sdd = metrics(sys_curve)
