@@ -73,38 +73,34 @@ def part_A():
 
 def part_B():
     print("\n" + "=" * 78)
-    print("(B) WALK-FORWARD ROLLING su 2021-2024 — edge per sotto-finestra di 6 mesi")
+    print("(B) WALK-FORWARD per ANNO INTERO (12 mesi: warmup + operativita' reale)")
     print("=" * 78)
-    windows = [
-        ("2021 H1", "2021-01-01", "2021-06-30"),
-        ("2021 H2", "2021-07-01", "2021-12-31"),
-        ("2022 H1", "2022-01-01", "2022-06-30"),
-        ("2022 H2", "2022-07-01", "2022-12-31"),
-        ("2023 H1", "2023-01-01", "2023-06-30"),
-        ("2023 H2", "2023-07-01", "2023-12-31"),
-        ("2024 H1", "2024-01-01", "2024-06-30"),
-        ("2024 H2", "2024-07-01", "2024-12-31"),
-    ]
-    # BTC come proxy (serie piena e lunga); 6 mesi = ~26 candele settimanali
-    print(f"{'finestra':<10}{'B&H%':>9}{'cash%':>9}{'edge-cash':>11}{'short%':>9}{'edge-short':>12}")
+    # finestre da 12 mesi: ~52 candele settimanali (26 di warmup + 26 operative).
+    # 6 mesi (~26 candele) erano TROPPO POCHE → tutto warmup → 0 trade (bug).
+    windows = [("2021", "2021-01-01", "2021-12-31"),
+               ("2022", "2022-01-01", "2022-12-31"),
+               ("2023", "2023-01-01", "2023-12-31"),
+               ("2024", "2024-01-01", "2024-12-31")]
+    for sym in ("BTCUSDT", "ETHUSDT"):
+        print(f"\n  --- {sym} ---")
+        print(f"  {'anno':<6}{'B&H%':>9}{'cash%':>9}{'edge-cash':>11}{'short%':>9}{'edge-short':>12}")
+        pos_cash = pos_short = tot = 0
+        for name, d0, d1 in windows:
+            b = fetch_daily(sym, _dt_ms(d0), _dt_ms(d1))
+            wk = _weekly(b)
+            if len(wk) < 45:
+                print(f"  {name:<6} poche candele ({len(wk)})"); continue
+            cr, bh, _ = _run(wk, "cash")
+            sr, _, _ = _run(wk, "short")
+            ec, es = cr - bh, sr - bh
+            tot += 1
+            pos_cash += 1 if ec > 0 else 0
+            pos_short += 1 if es > 0 else 0
+            print(f"  {name:<6}{bh:>9.0f}{cr:>9.1f}{ec:>+11.1f}{sr:>9.1f}{es:>+12.1f}")
+        if tot:
+            print(f"  edge POSITIVO: cash {pos_cash}/{tot}, short {pos_short}/{tot}")
     print("-" * 78)
-    pos_cash = pos_short = tot = 0
-    for name, d0, d1 in windows:
-        b = fetch_daily("BTCUSDT", _dt_ms(d0), _dt_ms(d1))
-        wk = _weekly(b)
-        if len(wk) < 25:
-            print(f"{name:<10} poche candele ({len(wk)})"); continue
-        cr, bh, _ = _run(wk, "cash")
-        sr, _, _ = _run(wk, "short")
-        ec, es = cr - bh, sr - bh
-        tot += 1
-        pos_cash += 1 if ec > 0 else 0
-        pos_short += 1 if es > 0 else 0
-        print(f"{name:<10}{bh:>9.0f}{cr:>9.1f}{ec:>+11.1f}{sr:>9.1f}{es:>+12.1f}")
-    print("-" * 78)
-    if tot:
-        print(f"finestre con edge POSITIVO: cash {pos_cash}/{tot}, short {pos_short}/{tot}")
-        print("Edge VERO se positivo nella maggioranza; se ~meta', e' rumore/fortuna.")
+    print("Edge VERO se positivo nella maggioranza degli anni su entrambi gli asset.")
 
 
 def main(argv):
