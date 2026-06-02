@@ -381,6 +381,19 @@ def analyze_ticker(df):
         if col not in df.columns:
             raise ValueError(f"Colonna mancante nel DataFrame: {col}")
 
+    # DEFENSIVE: questa funzione ASSUME l'ordine cronologico ascending
+    # (oldest→newest) — vedi docstring — ma finora non lo IMPONEVA. rsi()/macd()
+    # usano series.diff(): su una serie invertita (newest-first) ogni indicatore
+    # si calcola ALL'INDIETRO, e un titolo che SALE viene letto come se SCENDESSE
+    # → RSI "oversold" falso su prezzo bullish (bug osservato in produzione).
+    # Riordina solo se necessario (no-op se l'indice e' gia' monotono crescente:
+    # date ISO "YYYY-MM-DD" o RangeIndex). Non altera dati gia' ordinati.
+    try:
+        if not df.index.is_monotonic_increasing:
+            df = df.sort_index()
+    except Exception:
+        pass
+
     # Verifica che ci siano abbastanza dati
     if len(df) < 200:
         # Possiamo procedere ma alcuni indicatori potrebbero essere NaN
