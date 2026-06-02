@@ -34,7 +34,11 @@ INITIAL_NAV = 100_000.0
 def _commission(n): return abs(n) * COMMISSION_BPS / 10_000.0
 
 
-def run_regime_backtest(bars, params=None, slippage_bps=5.0) -> dict:
+def run_regime_backtest(bars, params=None, slippage_bps=5.0,
+                        funding_daily_pct=0.03) -> dict:
+    """funding_daily_pct: costo giornaliero di tenere uno SHORT aperto (% del
+    notional). ~0.03%/giorno = 0.01%/8h, tipico funding crypto. E' il costo che
+    rende lo short multi-giorno MENO redditizio di quanto sembri. 0 = ignora."""
     p = params or RegimeParams()
     st = RegimeState()
     cash = INITIAL_NAV
@@ -44,6 +48,7 @@ def run_regime_backtest(bars, params=None, slippage_bps=5.0) -> dict:
     equity = []
     regime_changes = 0
     fees = 0.0
+    funding_paid = 0.0
     warm = p.ema_slow + 6
 
     def nav_now(price):
@@ -81,6 +86,12 @@ def run_regime_backtest(bars, params=None, slippage_bps=5.0) -> dict:
     for k in range(warm, len(bars) + 1):
         window = bars[:k]
         price = window[-1]["close"]
+        # FUNDING: ogni candela in cui sei SHORT paghi il costo di mantenimento
+        # (% del notional). E' la voce che mancava e gonfiava lo short.
+        if side == SHORT and units > 0 and funding_daily_pct > 0:
+            cost = units * price * funding_daily_pct / 100.0
+            cash -= cost
+            funding_paid += cost
         act = step(st, window, nav=nav_now(price), params=p)
         if act.action == "CLOSE_ALL":
             close(price); regime_changes += 1
@@ -102,7 +113,8 @@ def run_regime_backtest(bars, params=None, slippage_bps=5.0) -> dict:
     ret = (final / INITIAL_NAV - 1.0) * 100.0
     return {"return_pct": round(ret, 2), "buy_hold_pct": round(bh, 2),
             "edge": round(ret - bh, 2), "max_drawdown_pct": round(max_dd, 2),
-            "regime_changes": regime_changes, "bars": len(bars)}
+            "regime_changes": regime_changes, "bars": len(bars),
+            "funding_paid": round(funding_paid, 0)}
 
 
 def main(argv):
