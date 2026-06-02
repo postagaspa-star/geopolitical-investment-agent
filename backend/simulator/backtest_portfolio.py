@@ -120,7 +120,10 @@ def run_portfolio_backtest(data: dict, interval: str,
                            asset_fast_stop_pct: float = 0.0,
                            portfolio_cb_pct: float = 0.0,
                            max_invested_pct: float = 100.0,
-                           scorer: str = "momentum") -> dict:
+                           scorer: str = "momentum",
+                           min_hold_bars: int = 0,
+                           exit_score_gap: float = 0.10,
+                           rebalance_band: float = 0.40) -> dict:
     """Simula il portafoglio multi-asset. data: {symbol: [bar con 't']}.
     Il NUMERO di posizioni e' deciso dal cervello (quanti asset UP+sopra-soglia
     ci sono), NON imposto.
@@ -145,6 +148,7 @@ def run_portfolio_backtest(data: dict, interval: str,
     cash = INITIAL_NAV
     holdings: dict[str, float] = {}   # symbol -> units
     entry_px: dict[str, float] = {}
+    entry_bar: dict[str, int] = {}    # indice candela d'ingresso (per min-hold)
     asset_peak: dict[str, float] = {}  # massimo prezzo da quando in portafoglio
     equity = []
     pos_counts = []                   # quante posizioni aperte a ogni step
@@ -196,6 +200,7 @@ def run_portfolio_backtest(data: dict, interval: str,
                 n_trades += 1
         holdings.pop(sym, None)
         entry_px.pop(sym, None)
+        entry_bar.pop(sym, None)
         asset_peak.pop(sym, None)
 
     for ti in range(warm, len(timestamps)):
@@ -249,7 +254,8 @@ def run_portfolio_backtest(data: dict, interval: str,
         # ISTERESI per ridurre il churn: chi e' gia' dentro lo si tiene finche'
         # resta UP e sopra una soglia di USCITA piu' bassa (non lo si scarica
         # per micro-variazioni di ranking).
-        exit_score = min_score - 0.10
+        # exit_score_gap piu' ampio = piu' "appiccicoso", esce piu' di rado
+        exit_score = min_score - exit_score_gap
         if scorer == "structural":
             ranked = _rank_structural(hist, sp_struct)
         else:
@@ -260,9 +266,17 @@ def run_portfolio_backtest(data: dict, interval: str,
             return classify_regime([b["close"] for b in hist[sym]], rp) == UP
 
         target = set()
-        # 1) mantieni gli attuali ancora sani (UP + sopra exit_score)
+        # 1) mantieni gli attuali ancora sani (UP + sopra exit_score). MIN-HOLD:
+        #    non vendere prima di min_hold_bars candele dall'ingresso (taglia il
+        #    churn: lo score strutturale oscilla sopra/sotto soglia ogni candela
+        #    → senza min-hold si comprava/vendeva di continuo = 1276 trade).
         for sym in holdings:
-            if sym in hist and is_up(sym) and score_by.get(sym, 0) >= exit_score:
+            if sym not in hist:
+                continue
+            held_bars = ti - entry_bar.get(sym, ti)
+            if held_bars < min_hold_bars:
+                target.add(sym)   # troppo presto per uscire: tieni
+            elif is_up(sym) and score_by.get(sym, 0) >= exit_score:
                 target.add(sym)
         # 2) aggiungi TUTTI i nuovi che meritano (UP + sopra min_score). Nessun
         #    limite artificiale: quante opportunita' ci sono, tante se ne prendono.
@@ -287,9 +301,9 @@ def run_portfolio_backtest(data: dict, interval: str,
                 if not px:
                     continue
                 cur_val = holdings.get(sym, 0.0) * px
-                # ribilancia solo se scostamento GROSSO (soglia 0.40 per ridurre
-                # ulteriormente il churn: micro-ribilanciamenti = commissioni inutili)
-                if abs(cur_val - target_alloc) / target_alloc > 0.40:
+                # ribilancia solo se scostamento oltre rebalance_band (piu' ampia
+                # = meno micro-ribilanciamenti = meno commissioni inutili)
+                if abs(cur_val - target_alloc) / target_alloc > rebalance_band:
                     # vendi/compra la differenza
                     diff_val = target_alloc - cur_val
                     if diff_val > 0 and cash >= diff_val:
@@ -299,6 +313,7 @@ def run_portfolio_backtest(data: dict, interval: str,
                         fees += fee
                         holdings[sym] = holdings.get(sym, 0.0) + u
                         entry_px[sym] = px
+                        entry_bar.setdefault(sym, ti)    # registra l'ingresso (per min-hold)
                         asset_peak.setdefault(sym, px)   # inizia il picco per il fast-stop
                         n_trades += 1
                     elif diff_val < 0:
