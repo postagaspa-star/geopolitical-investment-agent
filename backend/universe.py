@@ -308,14 +308,54 @@ ENI.MI), NON tentare execute_trade — verrà rifiutato. Cerca un sostituto
 tradabile dello stesso settore/tema, oppure usa do_nothing motivando."""
 
 
+_SATELLITE_LABELS = {
+    "sector_etf": "ETF settoriali USA",
+    "single_country": "Single-country / Emergenti",
+    "broad_intl_em": "Broad EM / ex-US",
+    "thematic": "Tematici",
+    "commodity_broad": "Materie prime (oltre GLD/SLV/USO)",
+    "size_style": "Size / Style",
+}
+
+
+def build_satellite_addendum() -> str:
+    """
+    Addendum al blocco universo, ATTIVO SOLO in modalità estesa. Risolve la
+    contraddizione del prompt: il blocco core sopra vieta ETF settoriali/esteri,
+    qui dichiariamo esplicitamente che — in modalità estesa — quei satellite
+    SONO tradabili (override mirato), con sizing ridotto. Costruito da SATELLITE
+    così non va mai in deriva rispetto alla cintura reale.
+    """
+    lines = [
+        "MODALITÀ UNIVERSO ESTESO ATTIVA (EXPANDED_UNIVERSE):",
+        "In aggiunta al core sopra, in questa modalità sono ANCHE TRADABILI i",
+        "seguenti ETF 'satellite' — questo SUPERA il divieto del blocco sopra per",
+        "questi specifici strumenti. Trattali con SIZING RIDOTTO (il risk profile",
+        "applica un moltiplicatore satellite + un cap di esposizione aggregata) e",
+        "solo se liquidi:",
+    ]
+    for cat, label in _SATELLITE_LABELS.items():
+        names = SATELLITE.get(cat) or []
+        if names:
+            lines.append(f"  • {label}: {', '.join(names)}")
+    lines.append("I nomi ATTIVI del momento (metriche + liquidità) sono nel blocco")
+    lines.append("'UNIVERSO ESTESO — CANDIDATI'. Le azioni non-USA con suffisso estero")
+    lines.append("(.MI/.PA/.DE/.L/.AS/.HK/.TO) restano NON supportate.")
+    return "\n".join(lines)
+
+
 def build_decision_universe_block() -> str:
     """
     Ritorna il blocco 'UNIVERSO INVESTIBILE' per il prompt del Decision Agent.
 
-    Step 1: ritorna il testo CORE invariato (byte-identico all'originale).
-    Step 2+: qui si potrà appendere la sezione 'satellite' quando
-    expanded_universe_enabled() è True, mantenendo il core in testa.
+    Flag OFF (default): testo CORE invariato, byte-identico all'originale.
+    Flag ON: core + addendum satellite, così il prompt NON è più contraddittorio
+    (il core vieta i settoriali/esteri, l'addendum li riabilita in modalità estesa).
+    NB: letto al momento della chiamata; in produzione il prompt è costruito a
+    import di decision.py, quindi cambiare il flag richiede un restart (vedi runbook).
     """
+    if expanded_universe_enabled():
+        return DECISION_UNIVERSE_BLOCK + "\n\n" + build_satellite_addendum()
     return DECISION_UNIVERSE_BLOCK
 
 
