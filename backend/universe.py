@@ -91,12 +91,69 @@ MEGA_CAP_EQUITY: List[str] = [
 
 
 # ════════════════════════════════════════════════════════════════════════
-# CINTURA SATELLITE — predisposta ma VUOTA (Step 2+). Dietro feature-flag.
-# Quando popolata: small/mid-cap, ETF di nicchia, single-country/EM, materie
-# prime oltre i 3 ETF, e (se deciso) gli ETF settoriali. Ogni nome entrerà
-# solo superando i filtri di liquidità/qualità-dati, con sizing ridotto.
+# CINTURA SATELLITE (Step 2) — universo meno efficiente, dietro feature-flag
+# EXPANDED_UNIVERSE (default OFF). Tutti ETF LIQUIDI (l'inefficienza sta nella
+# minor copertura/efficienza dell'esposizione, non nella illiquidità del
+# veicolo): settoriali, single-country/EM, tematici, materie prime oltre i 3
+# core, size/style. Catturano rotazione + relazioni relative dove il vantaggio
+# macro paga. Ogni nome entra come CANDIDATO solo superando i guardrail di
+# liquidità/qualità (liquidity.py) ed è soggetto a sizing ridotto (risk_profile).
+# Quando il flag è OFF questa cintura è inerte: nessun candidato satellite,
+# nessun cambio di sizing, scan invariato.
 # ════════════════════════════════════════════════════════════════════════
-SATELLITE: Dict[str, List[str]] = {}
+SATELLITE: Dict[str, List[str]] = {
+    # 11 settori SPDR (rotazione settoriale pulita e liquida)
+    "sector_etf": ["XLK", "XLF", "XLE", "XLI", "XLB", "XLRE", "XLC",
+                   "XLU", "XLP", "XLV", "XLY"],
+    # Single-country (decoupling geografico, meno efficiente di SPY)
+    "single_country": ["EWZ", "INDA", "FXI", "EWJ", "EWG", "EWW", "EWY",
+                       "EWT", "EWA", "EWC", "EWU", "TUR", "EZA"],
+    # Broad EM / ex-US
+    "broad_intl_em": ["EEM", "VWO", "EFA", "IEMG", "SCZ"],
+    # Tematici / industrie (alta dispersione, dove il ciclo conta)
+    "thematic": ["SMH", "SOXX", "XBI", "KRE", "JETS", "XOP", "GDX", "GDXJ",
+                 "XME", "TAN", "URA", "KWEB", "ARKK"],
+    # Materie prime oltre i 3 core (GLD/SLV/USO restano core)
+    "commodity_broad": ["DBC", "DBA", "UNG", "USL", "CPER", "DBB", "PALL", "PPLT"],
+    # Size / style (small/mid-cap e value/growth via ETF, non single-name)
+    "size_style": ["IWM", "IJR", "IJH", "IWN", "IWD", "MDY"],
+}
+
+_SATELLITE_TICKER_TO_CAT: Dict[str, str] = {
+    t: cat for cat, ts in SATELLITE.items() for t in ts
+}
+
+
+def satellite_universe_flat() -> List[str]:
+    """Tutti i ticker satellite, dedup e ordinati."""
+    return sorted({t for ts in SATELLITE.values() for t in ts})
+
+
+def is_satellite(ticker: str) -> bool:
+    return (ticker or "").upper().strip() in _SATELLITE_TICKER_TO_CAT
+
+
+def satellite_category(ticker: str):
+    """Bucket satellite del ticker, o None se non è satellite."""
+    return _SATELLITE_TICKER_TO_CAT.get((ticker or "").upper().strip())
+
+
+# ── Parametri della cintura satellite (tunabili; ADV anche via env) ──────
+SATELLITE_MIN_ADV_USD = 5_000_000.0      # floor di liquidità ($/giorno) per ammettere un satellite
+MAX_ROTATION_LEADERS_PER_CATEGORY = 2    # quanti leader per categoria nel blocco-candidati
+MAX_SATELLITE_CANDIDATES = 8             # tetto candidati satellite per run
+ROTATION_PAIR_MIN_SPREAD_PCT = 3.0       # spread RS minimo per segnalare una coppia anti-correlata
+
+
+def satellite_min_adv_usd() -> float:
+    """Floor ADV satellite, override via env SATELLITE_MIN_ADV_USD."""
+    raw = os.getenv("SATELLITE_MIN_ADV_USD", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return SATELLITE_MIN_ADV_USD
 
 
 # ════════════════════════════════════════════════════════════════════════

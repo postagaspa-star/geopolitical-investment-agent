@@ -75,16 +75,27 @@ def test_classify_ticker():
     assert universe.classify_ticker("BTC-USD")["asset_class"] == "crypto"
     assert universe.classify_ticker("BTC-USD")["bucket"] == "crypto_core"
     assert universe.classify_ticker("BNB-USD")["bucket"] == "crypto_excluded"
-    assert universe.classify_ticker("XLU")["bucket"] == "defensive"
-    assert universe.classify_ticker("EWZ")["bucket"] == "international"
+    # In Step 2 il satellite ha priorità sul bucket di rotazione
+    assert universe.classify_ticker("XLU")["tier"] == "satellite"
+    assert universe.classify_ticker("XLU")["bucket"] == "sector_etf"
+    assert universe.classify_ticker("EWZ")["bucket"] == "single_country"
+    # un nome di rotazione NON satellite resta core col suo bucket
+    assert universe.classify_ticker("NEE")["tier"] == "core"
+    assert universe.classify_ticker("NEE")["bucket"] == "defensive"
     assert universe.classify_ticker("AAPL")["is_mega"] is True
+    assert universe.classify_ticker("AAPL")["tier"] == "core"
     assert universe.classify_ticker("ENI.MI")["bucket"] == "international_single"
-    # un nome S&P non in rotation e non mega → core_equity
+    # un nome S&P non in rotation/satellite e non mega → core_equity
     assert universe.classify_ticker("F")["bucket"] == "core_equity"
-    # robustezza
     assert universe.classify_ticker("")["bucket"] == "unknown"
 
 
-def test_satellite_empty_in_step1():
-    assert universe.SATELLITE == {}
+def test_satellite_populated_step2():
+    assert universe.SATELLITE  # popolata in Step 2
+    flat = universe.satellite_universe_flat()
+    assert "IWM" in flat and "EWZ" in flat and "XLE" in flat
+    assert universe.is_satellite("IWM")
+    assert not universe.is_satellite("AAPL")
+    assert universe.satellite_category("XLE") == "sector_etf"
+    assert universe.satellite_min_adv_usd() > 0
     assert universe.expanded_universe_enabled() in (True, False)
