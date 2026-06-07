@@ -31,6 +31,8 @@ from uuid import uuid4
 import aiohttp
 from anthropic import Anthropic
 
+import universe  # fonte unica dell'universo investibile (vedi universe.py)
+
 logger = logging.getLogger(__name__)
 
 # ── Claude Sonnet 4.5 (production) ──────────────────────────────────────────
@@ -362,44 +364,7 @@ REGOLE OPERATIVE Fase ESECUZIONE:
     quando proteggere il profitto o tagliare la perdita basandoti su segnali
     tecnici, news, regime di mercato e tempo trascorso dall'apertura.
 
-UNIVERSO INVESTIBILE — VINCOLO RIGIDO:
-Il portfolio opera su un universo specifico di simboli. Trade su ticker NON
-supportati vengono rifiutati. Rispetta SEMPRE le liste sottostanti.
-
-✓ AZIONI TRADABILI: ~484 titoli S&P 500 (es. NVDA, TSLA, AAPL, XOM, MSFT, AMZN,
-  GOOGL, META, JPM, V, MA, JNJ, UNH, PG, KO, PEP, COST, WMT, HD, CVX, MRK, LLY,
-  AVGO, ORCL, CSCO, ACN, ABT, TMO, NEE, ADBE, NKE, BMY, AMGN, BA, QCOM, IBM,
-  CAT, GS, MS, BLK, AMD, GE, T, AXP, C, BKNG, TXN, SBUX, PFE, MDT, CMCSA, NOW,
-  VZ, ELV, INTU, AMAT, ADI, GILD, PLD, TGT, MO, MU, SCHW, REGN, EOG, MDLZ, FDX,
-  WFC, F, etc.). Se in dubbio: verifica con request_extra_analysis.
-
-✓ ETF COMMODITY: GLD (oro), SLV (argento), USO (petrolio). Solo questi 3.
-
-✗ ETF/INDICI INDICIZZATI **NON SUPPORTATI**: SPY, QQQ, IWM, DIA, VTI, VOO, TLT,
-  XLE, XLF, XLK, XLV, etc. Per esposizione settoriale, scegli SINGOLI titoli
-  rappresentativi (es. invece di XLE → XOM/CVX, invece di XLK → MSFT/NVDA,
-  invece di SPY → mix di top mega-cap).
-
-✗ AZIONI EUROPEE/EXTRA-USA **NON SUPPORTATE**: ENI.MI, SAN.PA, SAP.DE, ASML.AS
-  e qualsiasi suffisso `.MI/.PA/.DE/.L/.AS/.HK/.TO`. Solo NYSE/NASDAQ USA.
-
-✓ CRYPTOVALUTE — SOLO QUESTI 14 TICKER (formato yfinance "X-USD"):
-  BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD, LTC-USD,
-  DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD.
-
-✗ CRYPTO **NON SUPPORTATE** (NON tradare): BNB-USD, SHIB-USD, AAVE-USD,
-  PEPE-USD, FIL-USD, ALGO-USD, XMR-USD, ICP-USD, e qualsiasi altro alt-coin
-  fuori dalla lista sopra. Anche se Scout/Reddit ne parla, ignora i segnali
-  di trading: puoi citarli nell'analisi macro ma non puoi entrare in posizione.
-
-Le crypto restano particolarmente adatte all'analisi tecnica: (1) 24/7 senza
-gap di apertura, (2) volumi alti, (3) rispondono a pattern tecnici e sentiment
-retail. Privilegiale quando il mercato USA è chiuso.
-
-REGOLA DI OPERATIVITÀ:
-Se identifichi un'opportunità su un ticker NON supportato (es. SPY, BNB-USD,
-ENI.MI), NON tentare execute_trade — verrà rifiutato. Cerca un sostituto
-tradabile dello stesso settore/tema, oppure usa do_nothing motivando.
+""" + universe.build_decision_universe_block() + """
 
 REGOLE:
 - Preferisci l'azione all'inazione quando i segnali convergono
