@@ -57,14 +57,12 @@ def _get_news_api_key() -> str:
         pass
     return _NEWS_API_KEY_ENV
 
-# Lista di titoli da monitorare, suddivisi per settore
-WATCHLIST: Dict[str, List[str]] = {
-    "energy": ["XOM", "CVX", "SHEL", "TTE", "ENI"],
-    "defense": ["LMT", "RTX", "NOC", "BA", "LDOS"],
-    "gold_commodities": ["GLD", "SLV", "USO", "UNG"],
-    "etf_broad": ["SPY", "QQQ", "EEM", "VEA"],
-    "europe": ["EWG", "EWI", "EWQ", "EWP"],
-}
+# Lista di titoli da monitorare, suddivisi per settore.
+# Definizione centralizzata in universe.py (fonte unica dell'universo);
+# riesposta qui come data_fetchers.WATCHLIST per i consumatori esistenti
+# (es. multi_agent, fetch_yfinance_news).
+import universe as _universe
+WATCHLIST: Dict[str, List[str]] = _universe.WATCHLIST
 
 # Endpoint base di GDELT per la ricerca di articoli
 # Ridotto maxrecords da 25 a 10 per evitare rate-limit

@@ -558,7 +558,8 @@ def _get_default_tickers() -> list[str]:
             return tickers[:6]
     except Exception:
         pass
-    return ["SPY", "XOM", "LMT", "GLD", "QQQ", "EEM"]
+    import universe as _universe
+    return list(_universe.DEFAULT_FALLBACK_TICKERS)
 
 
 def _extract_hot_tickers(micro_cards: list[dict]) -> list[str]:

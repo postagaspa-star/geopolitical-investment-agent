@@ -34,107 +34,16 @@ logger = logging.getLogger(__name__)
 # ════════════════════════════════════════════════════════════════════════════
 # UNIVERSO DI ROTAZIONE (~60 ticker liquidi cross-sector)
 # ════════════════════════════════════════════════════════════════════════════
-ROTATION_UNIVERSE: dict[str, list[str]] = {
-    # Settori difensivi puri (anti-ciclici, dividend payers, demand inelastica)
-    "defensive": [
-        "XLU", "XLP", "XLV",
-        "NEE", "DUK", "SO", "AEP",          # utilities
-        "KO", "PG", "WMT", "COST", "PEP", "MO",  # consumer staples
-        "JNJ", "UNH", "LLY",                 # healthcare mega-cap
-    ],
-
-    # Safe-haven monetari/reali (oro, treasuries, USD)
-    "safe_haven": [
-        "GLD", "IAU", "GDX",     # oro
-        "SLV",                    # argento
-        "TLT", "IEF", "SHY", "TIP",  # treasuries (long/mid/short/inflation-linked)
-        "UUP",                    # USD index
-    ],
-
-    # Hedge diretti contro il mercato (inverse / volatilità)
-    "hedge": [
-        "SH", "PSQ", "RWM",   # inverse SPY/QQQ/IWM
-        "VIXY",                # volatilità
-    ],
-
-    # Vincitori geopolitici (defense + aerospace)
-    "geopolitical": [
-        "LMT", "RTX", "NOC", "GD", "LHX",
-        "ITA",   # aerospace & defense ETF
-    ],
-
-    # Energy + Commodity (beneficiari di shock supply/inflazione)
-    # NB: rimosso BNO (Brent Oil Fund) — frequentemente segnalato come
-    # delisted da yfinance, causa errori "Expecting value: line 1 column 1"
-    # ad ogni cache-miss. Sostituito da USL (US 12-Month Oil Fund) che è
-    # più liquido. SLB (Schlumberger) per esposizione oilfield services.
-    "energy_commodity": [
-        "XLE", "USO", "USL", "DBC",
-        "OXY", "CVX", "XOM", "COP", "SLB",
-    ],
-
-    # Sector ETF rimanenti (per misurare rotazione settoriale completa)
-    "sectors": [
-        "XLK",   # tech
-        "XLF",   # financials
-        "XLY",   # consumer discretionary
-        "XLI",   # industrials
-        "XLB",   # materials
-        "XLRE",  # real estate
-        "XLC",   # communication
-    ],
-
-    # Bond corporate (segnali di stress credit / risk-on)
-    "bonds": [
-        "HYG",   # high yield (junk) — sale in risk-on, scende in stress
-        "LQD",   # investment grade
-        "AGG",   # aggregate
-    ],
-
-    # International / decoupling (rotazione geografica)
-    "international": [
-        "VGK",   # Europe
-        "EWJ",   # Japan
-        "INDA",  # India
-        "EWZ",   # Brazil
-        "FXI",   # China large cap
-    ],
-
-    # Factor (momentum / value / low-vol / quality)
-    "factor": [
-        "USMV",  # low volatility
-        "QUAL",  # quality
-        "MTUM",  # momentum
-        "VLUE",  # value
-    ],
-
-    # Singoli titoli ad ALTO MOVIMENTO — semiconduttori, mega-cap tech e
-    # growth ad alta beta. Prima l'universo era quasi solo ETF: uno
-    # scatto +8% su AMD o +7% su INTC era INVISIBILE perche' quei titoli
-    # non venivano nemmeno scansionati. Questi sono i nomi dove gli
-    # spike succedono davvero — vanno tenuti sul radar in OGNI run.
-    "high_movement_equity": [
-        # Semiconduttori (beta alta, movers tipici)
-        "NVDA", "AMD", "INTC", "MU", "AVGO", "QCOM", "TXN", "AMAT",
-        "LRCX", "ARM", "SMCI",
-        # Mega-cap tech / growth
-        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NFLX",
-        "CRM", "ADBE", "ORCL", "NOW", "PLTR", "UBER",
-        # Crypto-correlati equity (si muovono coi cicli BTC)
-        "COIN", "MSTR",
-    ],
-}
-
-# Reverse lookup ticker → categoria
-ROTATION_TICKER_TO_CATEGORY: dict[str, str] = {
-    t: cat for cat, ts in ROTATION_UNIVERSE.items() for t in ts
-}
-
-ALL_ROTATION_TICKERS: list[str] = sorted({
-    t for ts in ROTATION_UNIVERSE.values() for t in ts
-})
-
-VALID_CATEGORIES: list[str] = list(ROTATION_UNIVERSE.keys())
+# L'universo di rotazione e i suoi derivati sono ora centralizzati in
+# universe.py (fonte unica). Importati qui per i consumatori interni
+# (scan_rotation_universe, format_rotation_for_prompt) e per decision.py
+# che importa VALID_CATEGORIES da questo modulo.
+from universe import (  # noqa: E402
+    ROTATION_UNIVERSE,
+    ROTATION_TICKER_TO_CATEGORY,
+    ALL_ROTATION_TICKERS,
+    VALID_CATEGORIES,
+)
 
 
 # ════════════════════════════════════════════════════════════════════════════
