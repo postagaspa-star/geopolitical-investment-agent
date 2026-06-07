@@ -65,6 +65,30 @@ def passes_liquidity_floor(adv_usd: Optional[float], min_adv_usd: float) -> bool
     return adv_usd is not None and adv_usd >= min_adv_usd
 
 
+def slippage_bps(
+    adv_usd: Optional[float],
+    trade_value_usd: float,
+    base_bps: float = 5.0,
+    impact_coef: float = 50.0,
+    max_bps: float = 200.0,
+) -> float:
+    """
+    Slippage ONESTO stimato (bps) = base + impact_coef * (trade_value / ADV).
+
+    Più la size del trade è grande rispetto al volume giornaliero in $, più
+    impatto sul prezzo si paga. Per nomi molto liquidi (ADV enorme) il ratio è
+    ~0 → ~base; per nomi sottili cresce, fino a max_bps. ADV ignoto/0 → max_bps
+    (prudente: se non so quanto è liquido, assumo il peggio).
+
+    Usato dal backtest dell'universo esteso, dove un modello realistico è
+    indispensabile: altrimenti i risultati sugli illiquidi mentono per eccesso.
+    """
+    if not adv_usd or adv_usd <= 0:
+        return max_bps
+    ratio = max(0.0, float(trade_value_usd) / float(adv_usd))
+    return min(max_bps, base_bps + impact_coef * ratio)
+
+
 def validate_symbol(ticker: str, *, allow_non_us: bool = False) -> Tuple[bool, str]:
     """
     Validazione formato simbolo. Rifiuta vuoti e — salvo override — i suffissi
