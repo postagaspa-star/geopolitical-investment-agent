@@ -243,7 +243,12 @@ def format_report(m: Dict[str, Any]) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    import sys
     import argparse
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # console Windows (cp1252) non digerisce ═/←
+    except Exception:
+        pass
     p = argparse.ArgumentParser(description="GeoInvest — diversità di copertura (baseline)")
     p.add_argument("--limit", type=int, default=3000, help="quanti agent_logs leggere (default 3000)")
     p.add_argument("--json", action="store_true", help="output JSON invece del report leggibile")

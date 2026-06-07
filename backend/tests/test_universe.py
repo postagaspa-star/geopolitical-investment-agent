@@ -99,3 +99,14 @@ def test_satellite_populated_step2():
     assert universe.satellite_category("XLE") == "sector_etf"
     assert universe.satellite_min_adv_usd() > 0
     assert universe.expanded_universe_enabled() in (True, False)
+
+
+def test_decision_block_addendum_resolves_contradiction(monkeypatch):
+    # OFF (default): blocco core invariato, niente addendum
+    assert universe.build_decision_universe_block() == universe.DECISION_UNIVERSE_BLOCK
+    # ON: il blocco core si auto-corregge dichiarando i satellite tradabili
+    monkeypatch.setenv("EXPANDED_UNIVERSE", "1")
+    b = universe.build_decision_universe_block()
+    assert "MODALITÀ UNIVERSO ESTESO" in b
+    assert "XLE" in b and "EWZ" in b and "IWM" in b
+    assert len(b) > len(universe.DECISION_UNIVERSE_BLOCK)

@@ -217,6 +217,10 @@ def _print_row(label: str, r: Dict[str, object]) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     import sys
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # console Windows (cp1252) non digerisce → / Δ
+    except Exception:
+        pass
     argv = argv if argv is not None else sys.argv[1:]
     from_date = argv[0] if len(argv) > 0 else "2022-01-01"
     to_date = argv[1] if len(argv) > 1 else "2024-12-31"
