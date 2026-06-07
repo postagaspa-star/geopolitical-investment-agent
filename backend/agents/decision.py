@@ -35,6 +35,33 @@ import universe  # fonte unica dell'universo investibile (vedi universe.py)
 
 logger = logging.getLogger(__name__)
 
+
+def _satellite_exposure_pct(pstate: dict) -> float | None:
+    """% del portafoglio in posizioni SATELLITE, per il cap di esposizione
+    aggregata in modalità EXPANDED_UNIVERSE. None se non calcolabile (in tal
+    caso il cap aggregato non scatta, resta il moltiplicatore per-trade)."""
+    try:
+        positions = pstate.get("positions") or []
+
+        def _pval(p: dict) -> float:
+            for k in ("value", "market_value", "current_value"):
+                if p.get(k) is not None:
+                    return float(p.get(k) or 0)
+            q = float(p.get("quantity") or p.get("qty") or 0)
+            px = float(p.get("current_price") or p.get("price") or 0)
+            return q * px
+
+        total = float(pstate.get("total_value") or 0)
+        if total <= 0:
+            total = float(pstate.get("cash", 0) or 0) + sum(_pval(p) for p in positions)
+        if total <= 0:
+            return None
+        sat = sum(_pval(p) for p in positions
+                  if universe.is_satellite(p.get("ticker") or p.get("symbol") or ""))
+        return sat / total * 100.0
+    except Exception:
+        return None
+
 # ── Claude Sonnet 4.5 (production) ──────────────────────────────────────────
 # NOTA: verifica che questo ID sia corretto sulla tua dashboard Anthropic
 DECISION_MODEL = "claude-sonnet-4-5-20250929"
@@ -2374,12 +2401,22 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     except Exception:
                         pass
 
+                    # Step 3: tier satellite → sizing ridotto + cap esposizione
+                    # aggregata. Gated: col flag OFF _tier resta 'core' = identico.
+                    _tier = "core"
+                    _sat_exp = None
+                    if universe.expanded_universe_enabled():
+                        _tier = str(universe.classify_ticker(ticker).get("tier") or "core")
+                        if _tier == "satellite":
+                            _sat_exp = _satellite_exposure_pct(pstate)
                     ok, reason = _rp.validate_trade(
                         asset_class="equity",
                         confidence=conf_norm,
                         allocation_pct=alloc_pct,
                         open_positions_count=open_count,
                         portfolio_drawdown_pct=dd_pct,
+                        tier=_tier,
+                        satellite_exposure_pct=_sat_exp,
                     )
                     if not ok:
                         logger.warning("[%s][DECISION] RISK_PROFILE rejected: %s",
@@ -3650,6 +3687,19 @@ def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state,
                 parts.append(rot_block)
         except Exception as _e:
             logger.debug("rotation block format failed: %s", _e)
+
+    # === UNIVERSO ESTESO — blocco candidati (Step 2, dietro flag) ===
+    # Rotation come DRIVER + candidati satellite liquidi. INERTE se il flag
+    # EXPANDED_UNIVERSE è OFF: build_candidate_block non viene nemmeno chiamato,
+    # quindi il prompt resta byte-identico a oggi.
+    if universe.expanded_universe_enabled():
+        try:
+            import candidates as _cand
+            cand_block = _cand.build_candidate_block(rotation_data, focus_tickers)
+            if cand_block:
+                parts.append(cand_block)
+        except Exception as _ce:
+            logger.debug("candidate block build failed: %s", _ce)
 
     # === OBIETTIVI ATTIVI (impegni dei run precedenti) ===
     # Memoria persistente: gli impegni che il Decision Agent stesso ha preso

@@ -44,6 +44,8 @@ from universe import (  # noqa: E402
     ALL_ROTATION_TICKERS,
     VALID_CATEGORIES,
 )
+import universe  # noqa: E402  (flag EXPANDED_UNIVERSE + satellite_*)
+import liquidity  # noqa: E402  (ADV per la liquidità dei satellite)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -161,9 +163,21 @@ async def _fetch_ohlcv_async(ticker: str, period_days: int = 280) -> dict | None
 # ════════════════════════════════════════════════════════════════════════════
 # SCAN CORE
 # ════════════════════════════════════════════════════════════════════════════
-async def scan_rotation_universe(force_refresh: bool = False) -> dict:
+def _scanned_universe(include_satellite: bool) -> list[str]:
+    """Universo da scansionare: rotazione (sempre) + satellite se modalità estesa."""
+    if not include_satellite:
+        return ALL_ROTATION_TICKERS
+    base = set(ALL_ROTATION_TICKERS)
+    extra = [t for t in universe.satellite_universe_flat() if t not in base]
+    return ALL_ROTATION_TICKERS + extra
+
+
+async def scan_rotation_universe(force_refresh: bool = False,
+                                 include_satellite: bool | None = None) -> dict:
     """
     Esegue una scansione completa dell'universo rotazione.
+    include_satellite=None → auto dal flag EXPANDED_UNIVERSE. Quando esteso,
+    aggiunge la cintura satellite e popola adv_usd_20d per ogni riga.
 
     Restituisce un dict:
       {
@@ -181,18 +195,23 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
       rsi14, dist_50ma_pct, dist_200ma_pct, pos_52w, vol_ratio_20d,
       rotation_score (somma ponderata RS multi-TF + volume bonus).
     """
+    if include_satellite is None:
+        include_satellite = universe.expanded_universe_enabled()
+    scan_tickers = _scanned_universe(include_satellite)
+
     now_ts = datetime.now(timezone.utc).timestamp()
     if (not force_refresh
             and _cache["timestamp"] is not None
             and (now_ts - _cache["timestamp"]) < CACHE_TTL_SEC
-            and _cache["data"] is not None):
+            and _cache["data"] is not None
+            and _cache.get("include_satellite") == include_satellite):
         return _cache["data"]
 
     # ── Fetch THROTTLED (fix causa-radice del clone di SPY) ──────────────
     #  1. SPY fetchato PRIMA, da solo → benchmark sempre pulito.
     #  2. Resto fetchato con concorrenza limitata (semaphore) + micro-pausa
     #     → i provider non rate-limitano, ogni ticker riceve i SUOI dati.
-    other = [t for t in ALL_ROTATION_TICKERS if t != "SPY"]
+    other = [t for t in scan_tickers if t != "SPY"]
 
     logger.info("rotation_scan: fetching SPY + %d tickers "
                 "(throttled conc=%d, cache miss)...",
@@ -230,7 +249,7 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
 
     rows: list[dict] = []
     spy_contaminated: list[str] = []
-    for t in ALL_ROTATION_TICKERS:
+    for t in scan_tickers:
         result = by_ticker.get(t)
         closes, highs, lows, volumes = _extract_series(result or {})
         if not closes:
@@ -262,6 +281,7 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
 
         vol_20 = (sum(volumes[-20:]) / 20.0) if len(volumes) >= 20 else None
         vol_ratio = (volumes[-1] / vol_20) if (vol_20 and vol_20 > 0 and volumes) else None
+        adv_usd = liquidity.compute_adv_usd(closes, volumes, 20)
 
         # Rotation score (in scala %; alto = più forza relativa)
         #  - 5d RS pesa di più (rotazione di breve)
@@ -279,7 +299,8 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
 
         rows.append({
             "ticker": t,
-            "category": ROTATION_TICKER_TO_CATEGORY.get(t, "other"),
+            "category": ROTATION_TICKER_TO_CATEGORY.get(t) or universe.satellite_category(t) or "other",
+            "adv_usd_20d": round(adv_usd, 0) if adv_usd is not None else None,
             "price": round(last, 2),
             "c1d_pct": round(c1 * 100, 2) if c1 is not None else None,
             "c5d_pct": round(c5 * 100, 2) if c5 is not None else None,
@@ -346,7 +367,7 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
 
     data = {
         "scan_timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "tickers_total": len(ALL_ROTATION_TICKERS),
+        "tickers_total": len(scan_tickers),
         "tickers_scanned": len(rows),
         # Visibilità della degradazione: il Decision Agent legge questi
         # campi e adatta il ragionamento (NON usa rotation per scegliere
@@ -363,6 +384,7 @@ async def scan_rotation_universe(force_refresh: bool = False) -> dict:
     }
     _cache["timestamp"] = now_ts
     _cache["data"] = data
+    _cache["include_satellite"] = include_satellite
     return data
 
 

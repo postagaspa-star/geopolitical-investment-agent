@@ -48,6 +48,9 @@ PROFILES: dict[str, dict] = {
         # Crypto-specific position cap (override del generale)
         "max_open_positions_crypto": 2,
         "max_portfolio_drawdown_pct": 6.0,
+        # Satellite (universo esteso): sizing piu' stretto, esposizione aggregata bassa.
+        "satellite_sizing_mult": 0.30,
+        "max_satellite_exposure_pct": 8.0,
         "news_freshness_min_hours": 1,
     },
     "moderate": {
@@ -64,6 +67,8 @@ PROFILES: dict[str, dict] = {
         "max_open_positions": 6,
         "max_open_positions_crypto": 3,
         "max_portfolio_drawdown_pct": 12.0,
+        "satellite_sizing_mult": 0.40,
+        "max_satellite_exposure_pct": 15.0,
         "news_freshness_min_hours": 3,
     },
     "aggressive": {
@@ -80,6 +85,8 @@ PROFILES: dict[str, dict] = {
         "max_open_positions": 10,
         "max_open_positions_crypto": 7,
         "max_portfolio_drawdown_pct": 20.0,
+        "satellite_sizing_mult": 0.50,
+        "max_satellite_exposure_pct": 25.0,
         "news_freshness_min_hours": 6,
     },
 }
@@ -192,6 +199,8 @@ def validate_trade(
     allocation_pct: float | None,
     open_positions_count: int | None,
     portfolio_drawdown_pct: float | None = None,
+    tier: str = "core",
+    satellite_exposure_pct: float | None = None,
 ) -> tuple[bool, str]:
     """
     Validazione hard del trade contro il profilo attivo.
@@ -208,6 +217,11 @@ def validate_trade(
     p = get_active_profile()
     is_crypto = asset_class == "crypto"
     max_pos = p["max_position_pct_crypto"] if is_crypto else p["max_position_pct_equity"]
+
+    # Cintura SATELLITE (universo esteso): sizing ridotto. tier='core' (default)
+    # = comportamento INVARIATO. Non tocca il crypto.
+    if tier == "satellite" and not is_crypto:
+        max_pos = max_pos * float(p.get("satellite_sizing_mult", 0.4))
 
     # 1. Confidence
     if confidence is not None:
@@ -230,6 +244,21 @@ def validate_trade(
                     f"Allocazione {alloc:.1f}% supera il cap del profilo "
                     f"{p['label']} ({max_pos:.1f}% per {asset_class}). "
                     f"Riduci la size."
+                )
+        except (TypeError, ValueError):
+            pass
+
+    # 2b. Cap di esposizione SATELLITE aggregata (solo universo esteso).
+    if (tier == "satellite" and satellite_exposure_pct is not None
+            and allocation_pct is not None):
+        try:
+            cap = float(p.get("max_satellite_exposure_pct", 100.0))
+            projected = float(satellite_exposure_pct) + float(allocation_pct)
+            if projected > cap + 1e-6:
+                return False, (
+                    f"Esposizione satellite {projected:.1f}% (attuale "
+                    f"{float(satellite_exposure_pct):.1f}% + nuovo {float(allocation_pct):.1f}%) "
+                    f"supera il cap del profilo {p['label']} ({cap:.1f}%). Riduci o salta."
                 )
         except (TypeError, ValueError):
             pass
