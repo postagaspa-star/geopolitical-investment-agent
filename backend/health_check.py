@@ -230,10 +230,30 @@ def run_health_checks() -> dict:
     else:
         overall = "OK"
 
+    # Step 6 — visibilità rollout: modalità universo + ultima diversità copertura.
+    try:
+        import universe as _u
+        universe_mode = "EXPANDED" if _u.expanded_universe_enabled() else "CORE"
+    except Exception:
+        universe_mode = "CORE"
+    latest_diversity = None
+    try:
+        import diversity as _div
+        _m = _div.collect_and_compute(limit=1500)
+        latest_diversity = {
+            "breadth": _m.get("breadth"),
+            "effective_n": _m.get("effective_n"),
+            "satellite_share": _m.get("satellite_share"),
+        }
+    except Exception:
+        pass
+
     report = {
         "status": overall,
         "timestamp": now.isoformat(),
         "checks": checks,
+        "universe_mode": universe_mode,
+        "latest_diversity": latest_diversity,
         "summary": "; ".join(
             f"{c['name']}={c['status']}" for c in checks
         ),

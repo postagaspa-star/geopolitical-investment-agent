@@ -62,6 +62,11 @@ except ImportError:
 DEFAULT_COMMISSION_BPS = 10.0
 MAX_COMMISSION_BPS = 100.0   # sanity cap (1% per trade = piu' di qualunque broker)
 
+# Step 4: surcharge di slippage per i nomi SATELLITE (meno liquidi) in modalità
+# EXPANDED_UNIVERSE. Si AGGIUNGE alla commissione, solo per il tier satellite e
+# solo col flag ON. Col flag OFF o sul core/crypto: 0 → esecuzione invariata.
+SATELLITE_SLIPPAGE_BPS = 15.0
+
 
 def _get_commission_bps() -> float:
     """
@@ -88,6 +93,23 @@ def _commission_amount(gross_value: float, bps: float | None = None) -> float:
     if bps is None:
         bps = _get_commission_bps()
     return accounting.commission(gross_value, bps)
+
+
+def _satellite_slippage_fee(gross_value: float, ticker: str) -> float:
+    """
+    Step 4: costo di slippage extra per i nomi SATELLITE in modalità
+    EXPANDED_UNIVERSE. Ritorna 0 col flag OFF o per core/crypto: in quei casi
+    l'esecuzione resta byte-identica a prima.
+    """
+    try:
+        import universe as _u
+        if not _u.expanded_universe_enabled():
+            return 0.0
+        if _u.classify_ticker(ticker).get("tier") != "satellite":
+            return 0.0
+        return accounting.commission(gross_value, SATELLITE_SLIPPAGE_BPS)
+    except Exception:
+        return 0.0
 
 
 def _accrue_commission(amount: float) -> None:
@@ -439,7 +461,7 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
 
     portfolio = get_portfolio()
     gross_cost = quantity * price
-    fee = _commission_amount(gross_cost)
+    fee = _commission_amount(gross_cost) + _satellite_slippage_fee(gross_cost, ticker)
     total_cost = gross_cost + fee
 
     # Aggiorna la liquidita' — log error reale se il DB rifiuta
@@ -570,7 +592,7 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
 
     portfolio = get_portfolio()
     gross_proceeds = quantity * price
-    fee = _commission_amount(gross_proceeds)
+    fee = _commission_amount(gross_proceeds) + _satellite_slippage_fee(gross_proceeds, ticker)
     net_proceeds = gross_proceeds - fee
 
     # Aggiorna la liquidita' — log error reale se il DB rifiuta

@@ -411,6 +411,32 @@ async def _health_check_job():
         logger.error("Errore Health Check job: %s", e, exc_info=False)
 
 
+async def _diversity_snapshot_job():
+    """
+    Step 6 — Shadow-logging della DIVERSITÀ DI COPERTURA (read-only).
+    Calcola la metrica (breadth, effective-N, satellite_share, ...) dagli
+    agent_logs e la scrive come DIVERSITY_SNAPSHOT. Serve a confrontare la
+    copertura reale prima/dopo l'attivazione di EXPANDED_UNIVERSE.
+    """
+    try:
+        import asyncio as _asyncio
+        import json as _json
+        import diversity
+        import universe
+        import database
+        loop = _asyncio.get_running_loop()
+        metrics = await loop.run_in_executor(None, diversity.collect_and_compute, 3000)
+        metrics["universe_mode"] = ("EXPANDED" if universe.expanded_universe_enabled()
+                                    else "CORE")
+        database.insert_agent_log("diversity_snapshot", "DIVERSITY_SNAPSHOT",
+                                  _json.dumps(metrics, default=str))
+        logger.info("[DIVERSITY] snapshot: mode=%s breadth=%s eN=%s sat=%s",
+                    metrics["universe_mode"], metrics.get("breadth"),
+                    metrics.get("effective_n"), metrics.get("satellite_share"))
+    except Exception as e:
+        logger.error("Errore Diversity snapshot job: %s", e, exc_info=False)
+
+
 _last_scout_run_ts: float = 0.0
 
 
@@ -1170,6 +1196,21 @@ def start_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(pytz.utc) + timedelta(seconds=90),
+    )
+
+    # ── Diversity snapshot: ogni 6 ore (Step 6 — shadow-logging copertura) ──
+    # Read-only: calcola la metrica di diversità dagli agent_logs e la logga
+    # come DIVERSITY_SNAPSHOT, per confrontare la copertura nel tempo.
+    _scheduler.add_job(
+        _diversity_snapshot_job,
+        trigger="interval",
+        hours=6,
+        id="diversity_snapshot_job",
+        name="Diversity snapshot 6h (copertura universo, read-only)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(pytz.utc) + timedelta(seconds=120),
     )
 
     # ── Memory trim: ogni 30 min (fix OOM, backstop al trim post-pipeline) ──

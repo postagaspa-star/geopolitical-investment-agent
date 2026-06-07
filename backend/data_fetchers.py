@@ -93,6 +93,39 @@ NEWSAPI_QUERIES: List[str] = [
     "economic sanctions OR energy crisis",   # accorpa le altre due
 ]
 
+# Step 5: query AGGIUNTIVE per la modalità EXPANDED_UNIVERSE — temi che muovono
+# gli asset meno efficienti (EM, materie prime, valute, rotazione settoriale).
+# Usate SOLO col flag ON, per non sforare i limiti free-tier quando è OFF.
+GDELT_KEYWORDS_EXPANDED: List[str] = [
+    "emerging markets currency crisis",
+    "commodity supply metals agriculture",
+    "sector rotation defensive cyclical",
+]
+NEWSAPI_QUERIES_EXPANDED: List[str] = [
+    "emerging markets OR commodities OR copper OR uranium",
+    "sector rotation OR defensive stocks OR small cap",
+]
+
+
+def _active_gdelt_keywords() -> List[str]:
+    try:
+        import universe as _u
+        if _u.expanded_universe_enabled():
+            return GDELT_KEYWORDS + GDELT_KEYWORDS_EXPANDED
+    except Exception:
+        pass
+    return GDELT_KEYWORDS
+
+
+def _active_newsapi_queries() -> List[str]:
+    try:
+        import universe as _u
+        if _u.expanded_universe_enabled():
+            return NEWSAPI_QUERIES + NEWSAPI_QUERIES_EXPANDED
+    except Exception:
+        pass
+    return NEWSAPI_QUERIES
+
 # Cache NewsAPI per query (TTL 1h: NewsAPI free è in delay 1h comunque)
 _newsapi_cache: Dict[str, tuple] = {}  # { query: (timestamp, articles) }
 _NEWSAPI_CACHE_TTL = 3600  # 1 ora
@@ -215,7 +248,7 @@ async def fetch_gdelt_data() -> Dict[str, Any]:
         cleaned: List[Dict[str, Any]] = []
         async with aiohttp.ClientSession(headers=_HTTP_HEADERS) as session:
             # Richieste in sequenza con 2s di pausa tra una e l'altra (era 1s)
-            for kw in GDELT_KEYWORDS:
+            for kw in _active_gdelt_keywords():
                 result = await _fetch_gdelt_single(session, kw)
                 cleaned.append(result)
                 await asyncio.sleep(2.0)
@@ -326,8 +359,9 @@ async def fetch_newsapi_data() -> Dict[str, Any]:
     try:
         async with aiohttp.ClientSession() as session:
             # Lancia tutte le richieste in parallelo
+            _queries = _active_newsapi_queries()
             tasks = [
-                _fetch_newsapi_single(session, q) for q in NEWSAPI_QUERIES
+                _fetch_newsapi_single(session, q) for q in _queries
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -337,11 +371,11 @@ async def fetch_newsapi_data() -> Dict[str, Any]:
             if isinstance(res, Exception):
                 logger.error(
                     "Eccezione nella query NewsAPI '%s': %s",
-                    NEWSAPI_QUERIES[i],
+                    _queries[i],
                     res,
                 )
                 cleaned.append({
-                    "query": NEWSAPI_QUERIES[i],
+                    "query": _queries[i],
                     "articles": [],
                     "error": str(res),
                 })
@@ -1268,6 +1302,19 @@ async def fetch_yfinance_news(max_per_ticker: int = 3, max_tickers: int = 10) ->
             for t in tlist[:2]:
                 if t not in tickers:
                     tickers.append(t)
+        # Step 5: in modalità EXPANDED_UNIVERSE allarga la discovery di news oltre
+        # la watchlist fissa, includendo la cintura satellite (settoriali/
+        # internazionali/tematici) così lo Scout "vede" e può citare nomi meno
+        # coperti. Inerte col flag OFF.
+        try:
+            import universe as _u
+            if _u.expanded_universe_enabled():
+                for t in _u.satellite_universe_flat():
+                    if t not in tickers:
+                        tickers.append(t)
+                max_tickers = max(max_tickers, 24)
+        except Exception:
+            pass
         tickers = tickers[:max_tickers]
 
         # Usa il running loop (non get_event_loop, deprecato e bug-prone in 3.12+)
