@@ -1105,7 +1105,7 @@ async def chat_decision_execute_trade(payload: ChatDecisionExecutePayload):
             quantity = 0
         reasoning = proposed.get("reasoning") or "Trade proposto via chat decision agent"
 
-        if not ticker or action not in ("BUY", "SELL") or quantity <= 0:
+        if not ticker or action not in ("BUY", "SELL", "SHORT", "COVER") or quantity <= 0:
             return JSONResponse(
                 status_code=400,
                 content={"error": "proposed_trade malformato",
@@ -1137,14 +1137,20 @@ async def chat_decision_execute_trade(payload: ChatDecisionExecutePayload):
         geo_reasoning = f"[CHAT-USER-CONFIRMED] {reasoning}"
         tech_reasoning = "(eseguito via chat decision agent)"
 
+        # Dispatch direzione-aware: BUY/SELL (long) + SHORT/COVER (short).
+        # Prima mappava qualunque cosa != BUY su execute_sell → uno SHORT
+        # finiva su execute_sell e falliva ("trade non eseguito").
         try:
-            if action == "BUY":
-                result = _portfolio.execute_buy(
-                    ticker, quantity, current_price,
-                    geo_reasoning, tech_reasoning, 80,
-                )
+            _exec_fn = {
+                "BUY": _portfolio.execute_buy,
+                "SELL": _portfolio.execute_sell,
+                "SHORT": _portfolio.execute_short,
+                "COVER": _portfolio.execute_cover,
+            }.get(action)
+            if _exec_fn is None:
+                result = {"success": False, "reason": f"azione non supportata: {action}"}
             else:
-                result = _portfolio.execute_sell(
+                result = _exec_fn(
                     ticker, quantity, current_price,
                     geo_reasoning, tech_reasoning, 80,
                 )
@@ -1302,7 +1308,7 @@ async def _exec_action_execute_trade(action: dict) -> dict:
         qty = float(action.get("quantity", 0))
     except (TypeError, ValueError):
         return {"ok": False, "error": "quantity non valida"}
-    if not ticker or act not in ("BUY", "SELL") or qty <= 0:
+    if not ticker or act not in ("BUY", "SELL", "SHORT", "COVER") or qty <= 0:
         return {"ok": False, "error": "parametri trade invalidi"}
 
     # Prezzo corrente FRESCO (bypass cache, anti-stale)
@@ -1323,13 +1329,18 @@ async def _exec_action_execute_trade(action: dict) -> dict:
     import portfolio as _portfolio
     geo_reasoning = f"[CHAT-USER-CONFIRMED] {action.get('reasoning') or 'trade via chat'}"
     tech_reasoning = "(eseguito via chat decision agent — proposed_actions)"
+    # Dispatch direzione-aware: BUY/SELL (long) + SHORT/COVER (short).
     try:
-        if act == "BUY":
-            result = _portfolio.execute_buy(
-                ticker, qty, current_price, geo_reasoning, tech_reasoning, 80,
-            )
+        _exec_fn = {
+            "BUY": _portfolio.execute_buy,
+            "SELL": _portfolio.execute_sell,
+            "SHORT": _portfolio.execute_short,
+            "COVER": _portfolio.execute_cover,
+        }.get(act)
+        if _exec_fn is None:
+            result = {"success": False, "reason": f"azione non supportata: {act}"}
         else:
-            result = _portfolio.execute_sell(
+            result = _exec_fn(
                 ticker, qty, current_price, geo_reasoning, tech_reasoning, 80,
             )
     except Exception as e:
