@@ -70,15 +70,20 @@ Ogni azione e' un oggetto con un campo "type" + parametri specifici.
 NIENTE viene eseguito automaticamente: l'utente conferma cliccando.
 Puoi proporre piu' azioni nello stesso messaggio (array).
 
-1) execute_trade — apri o chiudi una posizione
+1) execute_trade — apri o chiudi una posizione (LONG o SHORT)
    {
      "type": "execute_trade",
      "ticker": "NVDA",
-     "action": "BUY" | "SELL",
+     "action": "BUY" | "SELL" | "SHORT" | "COVER",
      "quantity": 5,
      "confidence_level": "HIGH" | "MEDIUM" | "LOW",
      "reasoning": "Sintesi 1-2 frasi"
    }
+   BUY = apri/incrementa una posizione LONG (guadagni se sale).
+   SELL = chiudi/riduci una posizione LONG esistente.
+   SHORT = apri/incrementa una posizione SHORT (guadagni se SCENDE).
+   COVER = chiudi/riduci una posizione SHORT esistente.
+   (SHORT/COVER pienamente supportati anche in crypto.)
 
 2) set_stop_loss — imposta stop-loss su una posizione esistente
    USA stop_loss_pct (es. -5 per -5% sotto entry) OPPURE stop_loss_price (assoluto).
@@ -276,6 +281,82 @@ REGOLE
 
 def _get_system_prompt(agent_type: str) -> str:
     return SYSTEM_PROMPT_CRYPTO if agent_type == "crypto" else SYSTEM_PROMPT_STANDARD
+
+
+def _format_ta_report(ta_report: dict) -> str | None:
+    """
+    Formatta un report del Technical Agent (standard o crypto) in un blocco
+    testuale leggibile, da iniettare nel contesto del decisional. Ritorna None
+    se il report non contiene nulla di utile (nessuna analisi, nessun errore).
+    Estratto come helper per riuso: pre-fetch automatico crypto + second-round.
+    """
+    analyses = (ta_report or {}).get("analyses") or []
+    if analyses:
+        lines = ["═" * 60, "📊 DATI TECHNICAL AGENT (fresh fetch)", "═" * 60, ""]
+        for a in analyses[:10]:
+            if not isinstance(a, dict):
+                continue
+            tkr = a.get("ticker", "?")
+            sig = a.get("signal", a.get("trend", "?"))
+            conf = a.get("confidence", "")
+            rsi = a.get("rsi_14", a.get("rsi", ""))
+            supp = a.get("support", "")
+            res = a.get("resistance", "")
+            sl = a.get("stop_loss_pct", "")
+            reasoning = (a.get("reasoning") or "")[:280]
+            lines.append(f"[{tkr}] signal={sig} conf={conf}")
+            if rsi:
+                lines.append(f"  RSI: {rsi}  Support: {supp}  Resistance: {res}  SL%: {sl}")
+            if reasoning:
+                lines.append(f"  Reasoning: {reasoning}")
+            lines.append("")
+        summary_txt = (ta_report.get("summary") or "")[:400]
+        if summary_txt:
+            lines.append(f"Summary: {summary_txt}")
+        lines.append("═" * 60)
+        return "\n".join(lines)
+    if ta_report.get("error") or ta_report.get("skipped"):
+        return (f"⚠️ Technical Agent: "
+                f"{ta_report.get('error') or ta_report.get('summary', 'no data')}")
+    return None
+
+
+# Simboli/nomi crypto major → ticker X-USD. Serve a riconoscere quando una
+# domanda chat riguarda l'analisi di un asset (es. "come sta BTC?", "ethereum").
+_CRYPTO_SYMBOL_HINTS = {
+    "BTC": "BTC-USD", "BITCOIN": "BTC-USD",
+    "ETH": "ETH-USD", "ETHEREUM": "ETH-USD",
+    "SOL": "SOL-USD", "SOLANA": "SOL-USD",
+    "DOGE": "DOGE-USD", "DOGECOIN": "DOGE-USD",
+    "AVAX": "AVAX-USD", "AVALANCHE": "AVAX-USD",
+    "LINK": "LINK-USD", "CHAINLINK": "LINK-USD",
+    "XRP": "XRP-USD", "RIPPLE": "XRP-USD",
+    "ADA": "ADA-USD", "CARDANO": "ADA-USD",
+    "BNB": "BNB-USD", "MATIC": "MATIC-USD", "POLYGON": "MATIC-USD",
+    "DOT": "DOT-USD", "POLKADOT": "DOT-USD", "LTC": "LTC-USD", "LITECOIN": "LTC-USD",
+}
+
+
+def _extract_crypto_tickers(text: str) -> list[str]:
+    """
+    Estrae i ticker crypto menzionati in un messaggio: sia gli espliciti
+    (BTC-USD, SOL-USD) sia i simboli/nomi major (BTC, ethereum, ...).
+    Usato per pre-caricare AUTOMATICAMENTE il Technical Crypto prima della
+    risposta quando l'utente chiede l'analisi di un asset.
+    """
+    if not text:
+        return []
+    import re as _re
+    up = text.upper()
+    found: list[str] = []
+    for m in _re.findall(r"\b([A-Z]{2,10})-USD\b", up):
+        t = f"{m}-USD"
+        if t not in found:
+            found.append(t)
+    for sym, tk in _CRYPTO_SYMBOL_HINTS.items():
+        if _re.search(rf"\b{sym}\b", up) and tk not in found:
+            found.append(tk)
+    return found[:6]
 
 
 def _get_anthropic_key() -> str:
@@ -597,7 +678,7 @@ def _validate_action(a: dict) -> dict | None:
             qty = float(a.get("quantity", 0))
         except (TypeError, ValueError):
             return None
-        if not ticker or action not in ("BUY", "SELL") or qty <= 0:
+        if not ticker or action not in ("BUY", "SELL", "SHORT", "COVER") or qty <= 0:
             return None
         return {
             "type": "execute_trade",
@@ -829,6 +910,37 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
     live_ohlcv = await _fetch_live_ohlcv(relevant_tickers)
     context_block = _build_context_block(agent_type, live_ohlcv)
 
+    # 4b. CRYPTO: se la domanda riguarda l'analisi di un ticker, interpella
+    # AUTOMATICAMENTE il Technical Crypto PRIMA di rispondere e inietta i dati
+    # nel contesto del primo round. Così il decisional crypto risponde sempre su
+    # dati tecnici freschi senza dover decidere lui di chiederli (richiesta
+    # utente). Il second-round resta come fallback se vuole approfondire altro.
+    auto_ta_done = False
+    if agent_type == "crypto":
+        auto_tickers = _extract_crypto_tickers(user_message)
+        if auto_tickers:
+            try:
+                from uuid import uuid4 as _uuid4
+                from agents.technical_crypto import run_crypto_technical
+                _atid = f"chat-auto-{str(_uuid4())[:8]}"
+                logger.info("[CHAT-DEC] crypto: pre-fetch Technical Crypto auto su %s",
+                            auto_tickers)
+                # Timeout stretto: l'endpoint chat ha un budget di 100s (poi
+                # 504) e gira su 512MB. Il pre-fetch NON deve mangiarsi il budget
+                # del round R1: se il Technical e' lento, si procede senza (R1 ha
+                # comunque l'OHLCV live gia' nel contesto). Evita 504/OOM.
+                _rep = await asyncio.wait_for(
+                    run_crypto_technical(_atid, auto_tickers,
+                                         log_phase="TECH_CRYPTO_CHAT_AUTO"),
+                    timeout=30,
+                )
+                _blk = _format_ta_report(_rep)
+                if _blk:
+                    context_block = (context_block or "") + "\n\n" + _blk
+                    auto_ta_done = True
+            except Exception as _ae:
+                logger.warning("[CHAT-DEC] auto Technical Crypto fallito: %s", _ae)
+
     # 5. Chiama il modello
     system_prompt = _get_system_prompt(agent_type)
     try:
@@ -857,7 +969,7 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
 
     # 6. Parse risposta
     parsed = _parse_response(raw_response)
-    text = parsed["text"] or "(nessuna risposta dal modello)"
+    text = parsed["text"] or ""
     proposed = parsed["proposed_trade"]
     proposed_actions = parsed.get("proposed_actions") or []
     ta_request = parsed.get("needs_technical_analysis")
@@ -893,39 +1005,26 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
                            if not (t.endswith("-USD") or t.startswith("X:"))]
                 if eq_only:
                     ta_report = await run_technical_analysis(ta_run_id, eq_only)
-            # Formatta il report in un blocco testuale leggibile
-            analyses = (ta_report or {}).get("analyses") or []
-            if analyses:
-                lines = ["═" * 60,
-                          "📊 DATI TECHNICAL AGENT (fresh fetch)",
-                          "═" * 60, ""]
-                for a in analyses[:10]:
-                    if not isinstance(a, dict):
-                        continue
-                    tkr = a.get("ticker", "?")
-                    sig = a.get("signal", a.get("trend", "?"))
-                    conf = a.get("confidence", "")
-                    rsi = a.get("rsi_14", a.get("rsi", ""))
-                    supp = a.get("support", "")
-                    res = a.get("resistance", "")
-                    sl = a.get("stop_loss_pct", "")
-                    reasoning = (a.get("reasoning") or "")[:280]
-                    lines.append(f"[{tkr}] signal={sig} conf={conf}")
-                    if rsi: lines.append(f"  RSI: {rsi}  Support: {supp}  Resistance: {res}  SL%: {sl}")
-                    if reasoning: lines.append(f"  Reasoning: {reasoning}")
-                    lines.append("")
-                summary_txt = (ta_report.get("summary") or "")[:400]
-                if summary_txt:
-                    lines.append(f"Summary: {summary_txt}")
-                lines.append("═" * 60)
-                ta_summary_for_ctx = "\n".join(lines)
-            elif ta_report.get("error") or ta_report.get("skipped"):
-                ta_summary_for_ctx = (
-                    f"⚠️ Technical Agent: {ta_report.get('error') or ta_report.get('summary', 'no data')}"
-                )
+            # Formatta il report (helper condiviso con il pre-fetch crypto)
+            ta_summary_for_ctx = _format_ta_report(ta_report)
         except Exception as ta_exc:
             logger.warning("[CHAT-DEC] technical agent failed: %s", ta_exc)
             ta_summary_for_ctx = f"⚠️ Technical Agent fail: {str(ta_exc)[:200]}"
+
+        # FIX "(nessuna risposta dal modello)": se il modello ha CHIESTO la TA ma
+        # non e' tornato nulla di utile (es. dati equity non disponibili),
+        # ta_summary_for_ctx restava None → il second-round NON partiva → il testo
+        # vuoto del primo round arrivava all'utente. Ora garantiamo una nota: il
+        # second-round parte SEMPRE quando la TA e' stata richiesta, cosi' il
+        # modello produce comunque una risposta testuale.
+        if ta_summary_for_ctx is None:
+            ta_summary_for_ctx = (
+                "⚠️ Technical Agent: nessun dato tecnico fresco disponibile per "
+                + ", ".join(ta_request.get("tickers") or [])
+                + ". Rispondi comunque all'utente con quello che sai (macro, "
+                "posizioni aperte), dicendo chiaramente che i dati tecnici live "
+                "non erano disponibili in questo momento."
+            )
 
         # 6c. Se abbiamo i dati, ri-chiama il modello con contesto arricchito
         if ta_summary_for_ctx:
@@ -956,6 +1055,20 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
                 # Tieni il primo round con un hint che la TA e' fallita
                 text = text or "Ho richiesto l'analisi tecnica ma il second-round ha fallito. Riprova."
 
+    # Safety net: non mostrare MAI "(nessuna risposta dal modello)" all'utente.
+    # Se siamo qui con text vuoto, il modello non ha rispettato il formato JSON:
+    # logghiamo il raw per diagnosi e diamo comunque una risposta utile.
+    if not text or not text.strip():
+        logger.warning("[CHAT-DEC] %s: testo finale vuoto (model=%s). raw[:600]=%s",
+                       agent_type, model_used, (raw_response or "")[:600])
+        if proposed_actions:
+            text = ("Ho preparato delle azioni proposte qui sotto da confermare "
+                    "(non ho aggiunto un commento testuale).")
+        else:
+            text = ("Non sono riuscito a formulare una risposta valida. Riprova a "
+                    "riformulare la domanda, oppure chiedimi un'analisi più "
+                    "specifica (ticker, posizione, livello di prezzo).")
+
     # 7. Salva messaggio assistant (con entrambi i campi: legacy + nuovo)
     asst_id = database.insert_decision_chat_message(
         conv_id, "assistant", text,
@@ -970,6 +1083,6 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
         "text": text,
         "proposed_trade": proposed,
         "proposed_actions": proposed_actions,
-        "technical_used": bool(ta_summary_for_ctx),
+        "technical_used": bool(ta_summary_for_ctx) or auto_ta_done,
         "model": model_used,
     }
