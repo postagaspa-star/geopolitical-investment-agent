@@ -110,6 +110,21 @@ Puoi proporre piu' azioni nello stesso messaggio (array).
      "text": "Evita posizioni nel settore tech per la prossima settimana",
      "reasoning": "Su richiesta utente"
    }
+
+═══════════════════════════════════════════════════════════════════════
+REGOLA FERREA SULLE AZIONI
+═══════════════════════════════════════════════════════════════════════
+L'utente vede SOLO le card generate da proposed_actions[]. NON vede mai
+un'azione che descrivi soltanto a parole nel "text". Quindi:
+
+- Se descrivi un trade/stop/take-profit/direttiva nel testo, DEVI metterlo
+  ANCHE in proposed_actions[] nello stesso messaggio. Testo senza l'oggetto
+  strutturato = per l'utente non succede NULLA.
+- Vale ANCHE quando RI-proponi o confermi qualcosa gia' detto prima (es.
+  "ti ripropongo lo short su ETH"): ri-emetti SEMPRE l'azione completa in
+  proposed_actions[]. Non dire mai "come proposto sopra" lasciando l'array
+  vuoto — l'utente non avrebbe nessuna card da confermare.
+- Se invece NON vuoi proporre azioni, lascia proposed_actions: [] e basta.
 """
 
 
@@ -815,6 +830,13 @@ def _parse_response(raw_text: str) -> dict:
             v = _validate_action(a)
             if v:
                 actions.append(v)
+            elif isinstance(a, dict) and a:
+                # Azione emessa dal modello ma scartata dalla validazione: prima
+                # spariva in silenzio (l'utente vedeva il testo ma nessuna card,
+                # senza alcuna traccia). Ora la logghiamo per diagnosticare il
+                # perche' ("non crea le azioni richieste").
+                logger.warning("[CHAT-DEC] azione SCARTATA in parsing (invalida): %s",
+                               json.dumps(a, ensure_ascii=False)[:300])
 
     # ── proposed_trade (formato legacy) → converti in execute_trade ────
     legacy_pt = parsed.get("proposed_trade")
