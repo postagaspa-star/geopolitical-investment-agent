@@ -1018,6 +1018,10 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
     # 3-tier validation: prev_close, old_current, cost_basis.
     total_position_value = 0.0
     rejected_count = 0
+    # Solo i prezzi che PASSANO la validazione 3-tier alimentano l'auto-exit:
+    # un prezzo corrotto (rifiutato) non deve poter far scattare un SL/TP falso
+    # (l'incidente NVDA fu proprio una vendita automatica su un prezzo sballato).
+    validated_prices: dict[str, float] = {}
     for p in positions:
         ticker = p.get("ticker")
         qty = float(p.get("quantity", 0) or 0)
@@ -1050,6 +1054,7 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
 
         if accepted_price is not None:
             current_price = accepted_price
+            validated_prices[ticker] = accepted_price
             try:
                 import database
                 database.update_position_price(ticker, current_price)
@@ -1099,19 +1104,17 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
             if quote is None or "price" not in (quote or {}):
                 logger.debug("[POLLING] %s: nessun quote, fallback %.2f", ticker, cp)
 
-    # 2. AUTO-EXIT TRIGGER: controlla SL/TP usando i prezzi del polling
+    # 2. AUTO-EXIT TRIGGER: controlla SL/TP usando SOLO i prezzi che hanno
+    # passato la validazione 3-tier (validated_prices), NON i quote grezzi.
+    # Un prezzo corrotto su un singolo ticker (decimal-shift, ticker sbagliato)
+    # supererebbe il guard di corruzione batch ma fallisce la validazione
+    # per-posizione: escludendolo qui, l'auto-exit non puo' vendere su bad data.
+    # I ticker non presenti in validated_prices vengono comunque controllati
+    # da check_and_execute_auto_exits sul loro current_price (ultimo validato).
     try:
         import portfolio as _portfolio
-        prices_for_exit: dict[str, float] = {}
-        for ticker, q in (all_quotes or {}).items():
-            try:
-                px = float(q.get("price") or 0)
-                if px > 0:
-                    prices_for_exit[ticker] = px
-            except Exception:
-                continue
-        if prices_for_exit:
-            executed = _portfolio.check_and_execute_auto_exits(prices_for_exit)
+        if validated_prices:
+            executed = _portfolio.check_and_execute_auto_exits(validated_prices)
             if executed:
                 triggered = [e for e in executed if e.get("trigger")]
                 if triggered:
