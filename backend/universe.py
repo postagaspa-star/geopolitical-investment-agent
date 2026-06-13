@@ -44,16 +44,21 @@ def expanded_universe_enabled() -> bool:
 # CINTURA CORE — universo tradabile attuale (INVARIATO).
 # ════════════════════════════════════════════════════════════════════════
 
-# Le 14 crypto supportate (formato yfinance "X-USD"). Ordine = come nel prompt.
+# Le 20 crypto supportate (formato yfinance "X-USD"). Ordine = come nel prompt.
+# COAI-USD (ChainOpera AI) è quotata SOLO su Binance Futures, non sullo spot:
+# il cascade dati la prende dal fallback futures (data_fetchers). È piccola e
+# molto volatile — gestirla con size ridotta (vedi nota nel blocco prompt).
 CORE_CRYPTO: List[str] = [
     "BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "AVAX-USD", "ADA-USD",
     "XRP-USD", "LTC-USD", "DOT-USD", "LINK-USD", "UNI-USD", "ATOM-USD",
-    "MATIC-USD", "NEAR-USD",
+    "MATIC-USD", "NEAR-USD", "BNB-USD", "TRX-USD", "SUI-USD", "TAO-USD",
+    "RENDER-USD", "COAI-USD",
 ]
 
 # Crypto citabili nell'analisi macro ma NON tradabili (allowlist soft).
+# (BNB-USD promossa a CORE_CRYPTO con l'espansione a 20.)
 EXCLUDED_CRYPTO: List[str] = [
-    "BNB-USD", "SHIB-USD", "AAVE-USD", "PEPE-USD", "FIL-USD", "ALGO-USD",
+    "SHIB-USD", "AAVE-USD", "PEPE-USD", "FIL-USD", "ALGO-USD",
     "XMR-USD", "ICP-USD",
 ]
 
@@ -289,11 +294,15 @@ supportati vengono rifiutati. Rispetta SEMPRE le liste sottostanti.
 ✗ AZIONI EUROPEE/EXTRA-USA **NON SUPPORTATE**: ENI.MI, SAN.PA, SAP.DE, ASML.AS
   e qualsiasi suffisso `.MI/.PA/.DE/.L/.AS/.HK/.TO`. Solo NYSE/NASDAQ USA.
 
-✓ CRYPTOVALUTE — SOLO QUESTI 14 TICKER (formato yfinance "X-USD"):
+✓ CRYPTOVALUTE — SOLO QUESTI 20 TICKER (formato yfinance "X-USD"):
   BTC-USD, ETH-USD, SOL-USD, DOGE-USD, AVAX-USD, ADA-USD, XRP-USD, LTC-USD,
-  DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD.
+  DOT-USD, LINK-USD, UNI-USD, ATOM-USD, MATIC-USD, NEAR-USD, BNB-USD, TRX-USD,
+  SUI-USD, TAO-USD, RENDER-USD, COAI-USD.
+  ⚠ COAI-USD (ChainOpera AI): quotata SOLO su Binance Futures (non spot),
+  token NUOVO, piccolo e MOLTO volatile. Tradabile, ma usa size ridotta e
+  stop-loss stretto; non sovra-dimensionare.
 
-✗ CRYPTO **NON SUPPORTATE** (NON tradare): BNB-USD, SHIB-USD, AAVE-USD,
+✗ CRYPTO **NON SUPPORTATE** (NON tradare): SHIB-USD, AAVE-USD,
   PEPE-USD, FIL-USD, ALGO-USD, XMR-USD, ICP-USD, e qualsiasi altro alt-coin
   fuori dalla lista sopra. Anche se Scout/Reddit ne parla, ignora i segnali
   di trading: puoi citarli nell'analisi macro ma non puoi entrare in posizione.

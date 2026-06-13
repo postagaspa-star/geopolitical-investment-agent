@@ -589,6 +589,43 @@ def _fetch_binance_klines_sync(ticker: str, period_days: int) -> Dict[str, Any]:
                 "error": f"binance: {str(exc)[:200]}", "source": "binance"}
 
 
+def _fetch_binance_futures_klines_sync(ticker: str, period_days: int) -> Dict[str, Any]:
+    """OHLCV daily da Binance USD-M FUTURES (fapi). Fallback per token quotati
+    SOLO su futures e non sullo spot — es. ChainOpera AI (COAI), su Binance
+    Futures ma non sullo spot. Stesso mapping/parsing dello spot, altro host."""
+    sym = ticker.upper().replace("X:", "").replace("-", "")
+    if sym.endswith("USD") and not sym.endswith("USDT"):
+        sym = sym[:-3] + "USDT"
+    limit = min(max(int(period_days) + 10, 30), 1000)
+    params = urllib.parse.urlencode({"symbol": sym, "interval": "1d", "limit": limit})
+    url = f"https://fapi.binance.com/fapi/v1/klines?{params}"
+    try:
+        arr = json.loads(_http_get_text(url))
+        if not isinstance(arr, list) or not arr:
+            return {"ticker": ticker, "data": [], "error": "binance_fut: no klines",
+                    "source": "binance_fut"}
+        records: List[Dict[str, Any]] = []
+        for k in arr:
+            try:
+                records.append({
+                    "date": datetime.utcfromtimestamp(k[0] / 1000).date().isoformat(),
+                    "open": float(k[1]), "high": float(k[2]),
+                    "low": float(k[3]), "close": float(k[4]),
+                    "volume": int(float(k[5])),
+                })
+            except (TypeError, ValueError, IndexError):
+                continue
+        if not records:
+            return {"ticker": ticker, "data": [], "error": "binance_fut: empty after parse",
+                    "source": "binance_fut"}
+        return {"ticker": ticker, "data": records,
+                "fetched_at": datetime.utcnow().isoformat(),
+                "error": None, "source": "binance_fut"}
+    except Exception as exc:
+        return {"ticker": ticker, "data": [],
+                "error": f"binance_fut: {str(exc)[:200]}", "source": "binance_fut"}
+
+
 async def _fetch_provider_ohlcv_async(
     base_url: str, ticker: str, period_days: int, api_key: str, provider: str
 ) -> Dict[str, Any]:
@@ -1054,6 +1091,9 @@ def fetch_market_data(ticker: str, period_days: int = 90,
     if _is_crypto_ticker(ticker):
         providers.append(("binance",
                            lambda: _fetch_binance_klines_sync(ticker, period_days)))
+        # Fallback futures: token solo-futures (es. COAI) non sono sullo spot.
+        providers.append(("binance_fut",
+                           lambda: _fetch_binance_futures_klines_sync(ticker, period_days)))
         if polygon_key:
             providers.append(("polygon", lambda: _fetch_provider_ohlcv_sync(
                 POLYGON_BASE_URL, ticker, period_days, polygon_key, "polygon")))

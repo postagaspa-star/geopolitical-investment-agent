@@ -599,6 +599,45 @@ def _upsert_quotes(quotes: dict[str, dict], market_state: str = "REGULAR", sourc
     return written_quotes, written_history
 
 
+def _fetch_binance_quotes_for_polling(tickers: list) -> dict:
+    """
+    Quote correnti per crypto NON coperte da polygon/massive/yfinance, prese dal
+    cascade OHLCV di data_fetchers (Binance spot→futures). Serve per token
+    futures-only come COAI: senza, una posizione su quel token non aggiornerebbe
+    mai current_price/NAV e l'auto-exit non scatterebbe. Quote dalle ultime 2
+    candele daily.
+    """
+    out: dict[str, dict] = {}
+    try:
+        import data_fetchers as _df
+    except Exception:
+        return out
+    for t in tickers:
+        try:
+            md = _df.fetch_market_data(t, period_days=5)
+            data = (md or {}).get("data") or []
+            if not data:
+                continue
+            last = data[-1]
+            price = float(last.get("close") or 0)
+            if price <= 0:
+                continue
+            prev = float(data[-2].get("close") or price) if len(data) >= 2 else price
+            change_pct = ((price - prev) / prev * 100) if prev > 0 else 0
+            out[t.upper()] = {
+                "price": round(price, 6),
+                "prev_close": round(prev, 6),
+                "change_pct": round(change_pct, 4),
+                "volume": int(last.get("volume") or 0),
+                "day_high": round(float(last.get("high") or price), 6),
+                "day_low": round(float(last.get("low") or price), 6),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception:
+            continue
+    return out
+
+
 async def update_price_cache() -> dict:
     """
     Job principale: chiama yfinance per tutti i ticker monitorati,
@@ -668,6 +707,20 @@ async def update_price_cache() -> dict:
     if missing_after_massive:
         yf_quotes = await asyncio.to_thread(_fetch_yfinance_quotes, missing_after_massive)
 
+    # 3b. Fallback Binance per crypto ancora mancanti (token futures-only come
+    # COAI: assenti su polygon/massive/yfinance, presenti solo su Binance). Via
+    # il cascade OHLCV di data_fetchers (spot→futures). Senza, NAV/auto-exit
+    # non tracciano quei token.
+    still_missing_crypto = [
+        t for t in tickers
+        if t not in polygon_quotes and t not in massive_quotes
+        and t not in yf_quotes and _is_crypto_for_polling(t)
+    ]
+    binance_quotes: dict = {}
+    if still_missing_crypto:
+        binance_quotes = await asyncio.to_thread(
+            _fetch_binance_quotes_for_polling, still_missing_crypto)
+
     # 4. Combina e salva con source corretta per ogni ticker
     qw_total, hw_total = 0, 0
     if polygon_quotes:
@@ -679,6 +732,9 @@ async def update_price_cache() -> dict:
     if yf_quotes:
         qw, hw = await asyncio.to_thread(_upsert_quotes, yf_quotes, market_state, "yfinance")
         qw_total += qw; hw_total += hw
+    if binance_quotes:
+        qw, hw = await asyncio.to_thread(_upsert_quotes, binance_quotes, market_state, "binance")
+        qw_total += qw; hw_total += hw
 
     # 5. Aggiorna current_price + unrealized_pnl di ogni posizione aperta
     #    e salva uno snapshot del portfolio (per popolare l'equity curve).
@@ -688,7 +744,7 @@ async def update_price_cache() -> dict:
     #        comunque corretto aggiornare current_price = last close
     #        e mantenere snapshot continui per l'equity curve.
     # Precedenza in caso di sovrapposizioni: Polygon > Massive > yfinance
-    all_quotes = {**yf_quotes, **massive_quotes, **polygon_quotes}
+    all_quotes = {**binance_quotes, **yf_quotes, **massive_quotes, **polygon_quotes}
     positions_updated, snapshot_saved = await asyncio.to_thread(
         _update_positions_and_snapshot, all_quotes
     )
@@ -696,7 +752,8 @@ async def update_price_cache() -> dict:
     sources_active = [
         s for s, q in [("polygon", polygon_quotes),
                        ("massive", massive_quotes),
-                       ("yfinance", yf_quotes)] if q
+                       ("yfinance", yf_quotes),
+                       ("binance", binance_quotes)] if q
     ]
     source_used = "+".join(sources_active) if sources_active else "none"
 
