@@ -62,6 +62,14 @@ EXCLUDED_CRYPTO: List[str] = [
     "XMR-USD", "ICP-USD",
 ]
 
+# Token ULTRA-VOLATILI: la loro volatilità REALE supera i bound della
+# validazione prezzi crypto normale (±50% vs prev_close, ±15% vs old_current).
+# Sono esentati dai tier RELATIVI in price_polling._validate_price_tiered, così
+# uno spike LEGITTIMO non viene scartato come "dato corrotto" e resta nel
+# prezzo/NAV. Mantengono solo un guard grezzo contro garbage estremo
+# (decimal-shift / zero). COAI (ChainOpera AI) può fare ±60-90% al giorno.
+ULTRA_VOLATILE_CRYPTO: List[str] = ["COAI-USD"]
+
 # Gli unici 3 ETF commodity ammessi.
 COMMODITY_ETFS: List[str] = ["GLD", "SLV", "USO"]
 

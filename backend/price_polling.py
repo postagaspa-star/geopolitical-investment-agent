@@ -908,6 +908,24 @@ def _is_crypto_for_polling(ticker: str) -> bool:
     return t.startswith("X:") or (t.endswith("-USD") and len(t) > 4)
 
 
+# Fallback se l'import di universe fallisce (universe è la fonte di verità).
+_ULTRA_VOLATILE_FALLBACK = {"COAI-USD"}
+
+
+def _is_ultra_volatile(ticker: str) -> bool:
+    """True per token la cui volatilità reale supera i bound crypto normali
+    (es. COAI): esenti dai tier RELATIVI della validazione prezzi, così uno
+    spike legittimo non viene 'tagliato'."""
+    t = (ticker or "").upper().strip()
+    try:
+        import universe
+        if t in {x.upper() for x in getattr(universe, "ULTRA_VOLATILE_CRYPTO", [])}:
+            return True
+    except Exception:
+        pass
+    return t in _ULTRA_VOLATILE_FALLBACK
+
+
 def _validate_price_tiered(ticker: str, new_price: float, prev_close: float,
                             old_current: float, avg: float,
                             source: str = "?") -> tuple[bool, str]:
@@ -926,6 +944,22 @@ def _validate_price_tiered(ticker: str, new_price: float, prev_close: float,
         return False, "prezzo nullo/negativo"
     if new_price != new_price:  # NaN check
         return False, "prezzo NaN"
+
+    # ── Token ULTRA-VOLATILI (es. COAI) ─────────────────────────────────────
+    # La loro volatilità REALE (±60-90%/giorno) sfonda i tier relativi crypto
+    # (±50% prev_close, ±15% old_current): senza esenzione uno spike LEGITTIMO
+    # verrebbe RIFIUTATO e il prezzo resterebbe fermo (NAV sbagliato). Per
+    # questi accettiamo lo spike e teniamo SOLO un guard grezzo contro garbage
+    # estremo (decimal-shift / valore assurdo), non i tier relativi.
+    if _is_ultra_volatile(ticker):
+        if avg > 0:
+            r = new_price / avg
+            if r < 0.005 or r > 200.0:
+                return False, (
+                    f"ultra-vol {ticker}: nuovo={new_price:.6f} avg={avg:.6f} "
+                    f"ratio={r:.3f} — outlier estremo (probabile bad data) [src={source}]"
+                )
+        return True, ""
 
     is_crypto = _is_crypto_for_polling(ticker)
 
