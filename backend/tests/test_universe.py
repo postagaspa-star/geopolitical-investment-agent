@@ -12,10 +12,12 @@ Verifica:
 import universe
 
 
-def test_core_crypto_14():
-    assert len(universe.CORE_CRYPTO) == 14
+def test_core_crypto_20():
+    assert len(universe.CORE_CRYPTO) == 20
     assert universe.CORE_CRYPTO[0] == "BTC-USD"
     assert "NEAR-USD" in universe.CORE_CRYPTO
+    assert "COAI-USD" in universe.CORE_CRYPTO  # ChainOpera AI (via Binance Futures)
+    assert "BNB-USD" in universe.CORE_CRYPTO   # promossa da esclusa a core
 
 
 def test_commodity_etfs_exact():
@@ -74,7 +76,8 @@ def test_decision_block_consistent_with_lists():
 def test_classify_ticker():
     assert universe.classify_ticker("BTC-USD")["asset_class"] == "crypto"
     assert universe.classify_ticker("BTC-USD")["bucket"] == "crypto_core"
-    assert universe.classify_ticker("BNB-USD")["bucket"] == "crypto_excluded"
+    assert universe.classify_ticker("BNB-USD")["bucket"] == "crypto_core"  # promossa a core
+    assert universe.classify_ticker("SHIB-USD")["bucket"] == "crypto_excluded"
     # In Step 2 il satellite ha priorità sul bucket di rotazione
     assert universe.classify_ticker("XLU")["tier"] == "satellite"
     assert universe.classify_ticker("XLU")["bucket"] == "sector_etf"
