@@ -19,6 +19,65 @@ def test_live_context_includes_risk_state(monkeypatch):
     assert "RISK_STATE_MARKER_XYZ" in ctx
 
 
+def _fake_req(method, headers=None):
+    class _R:
+        pass
+    r = _R()
+    r.method = method
+    r.headers = headers or {}
+    return r
+
+
+async def _passthrough(_req):
+    return "PASSED"
+
+
+def test_admin_guard_disabled_without_env(monkeypatch):
+    # #1 auth OPT-IN: senza ADMIN_API_TOKEN nessuna auth (app invariata)
+    import asyncio
+    import main
+    monkeypatch.delenv("ADMIN_API_TOKEN", raising=False)
+    out = asyncio.run(main._admin_token_guard(_fake_req("POST"), _passthrough))
+    assert out == "PASSED"
+
+
+def test_admin_guard_blocks_post_without_token(monkeypatch):
+    import asyncio
+    import main
+    from fastapi.responses import JSONResponse
+    monkeypatch.setenv("ADMIN_API_TOKEN", "sekret-123")
+    out = asyncio.run(main._admin_token_guard(_fake_req("POST"), _passthrough))
+    assert isinstance(out, JSONResponse) and out.status_code == 401
+
+
+def test_admin_guard_allows_post_with_token(monkeypatch):
+    import asyncio
+    import main
+    monkeypatch.setenv("ADMIN_API_TOKEN", "sekret-123")
+    out = asyncio.run(main._admin_token_guard(
+        _fake_req("POST", {"x-admin-token": "sekret-123"}), _passthrough))
+    assert out == "PASSED"
+
+
+def test_admin_guard_rejects_wrong_token(monkeypatch):
+    import asyncio
+    import main
+    from fastapi.responses import JSONResponse
+    monkeypatch.setenv("ADMIN_API_TOKEN", "sekret-123")
+    out = asyncio.run(main._admin_token_guard(
+        _fake_req("POST", {"x-admin-token": "sbagliato"}), _passthrough))
+    assert isinstance(out, JSONResponse) and out.status_code == 401
+
+
+def test_admin_guard_ignores_get(monkeypatch):
+    # le GET di sola lettura non sono toccate dall'auth
+    import asyncio
+    import main
+    monkeypatch.setenv("ADMIN_API_TOKEN", "sekret-123")
+    out = asyncio.run(main._admin_token_guard(_fake_req("GET"), _passthrough))
+    assert out == "PASSED"
+
+
 def test_settings_get_redacts_secrets(monkeypatch):
     # #2 sicurezza: GET /api/settings non deve esporre i segreti in chiaro,
     # ma deve lasciare intatti prompt/flag (la UI carica i prompt da qui).

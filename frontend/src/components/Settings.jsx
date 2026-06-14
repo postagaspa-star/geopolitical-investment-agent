@@ -45,6 +45,52 @@ const PROMPT_AGENTS = [
   },
 ];
 
+// Campo "Admin token" (sicurezza): salva il token in localStorage
+// ("gi_admin_token"), che l'interceptor in index.js invia come X-Admin-Token a
+// ogni richiesta. Serve solo se sul backend è impostato l'env ADMIN_API_TOKEN.
+// Self-contained (stato proprio) per non perdere il valore ai re-render.
+function AdminTokenField() {
+  const [token, setToken] = useState(() => {
+    try { return localStorage.getItem("gi_admin_token") || ""; } catch { return ""; }
+  });
+  const [saved, setSaved] = useState(false);
+  const save = () => {
+    try {
+      if (token) localStorage.setItem("gi_admin_token", token);
+      else localStorage.removeItem("gi_admin_token");
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    } catch { /* localStorage non disponibile */ }
+  };
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12,
+                  padding: "20px", marginBottom: "16px" }}>
+      <div style={{ fontSize: "15px", fontWeight: 700, color: "#111827", marginBottom: "6px" }}>
+        🔐 Admin token (sicurezza)
+      </div>
+      <p style={{ fontSize: "13px", color: "#6b7280", marginTop: 0, marginBottom: "12px", lineHeight: 1.5 }}>
+        Se sul backend imposti l'env <code>ADMIN_API_TOKEN</code>, le azioni che muovono
+        soldi/stato (trade, reset, liquidazioni, chiavi) richiedono questo token. Incollalo
+        qui (resta solo nel TUO browser) e verrà inviato automaticamente a ogni richiesta.
+        Lascia vuoto se non usi l'auth.
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input type="password" value={token} onChange={(e) => setToken(e.target.value)}
+          placeholder="incolla il token…"
+          style={{ flex: 1, padding: "9px 12px", borderRadius: 8, border: "1px solid #d1d5db",
+                   fontSize: "14px", color: "#111827" }} />
+        <button onClick={save}
+          style={{ background: "#111827", color: "#fff", border: "none", borderRadius: 8,
+                   padding: "9px 16px", cursor: "pointer", fontSize: "13px", fontWeight: 600,
+                   whiteSpace: "nowrap" }}>
+          {saved ? "✓ Salvato" : "Salva nel browser"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 function Settings({ onBack, onDataRefresh }) {
   // === Diagnostica ===
   const [diagnostics, setDiagnostics] = useState(INITIAL_DIAGNOSTICS);
@@ -531,6 +577,9 @@ function Settings({ onBack, onDataRefresh }) {
             {message.text}
           </div>
         )}
+
+        {/* === ADMIN TOKEN (sicurezza, opt-in) === */}
+        <AdminTokenField />
 
         {/* === DIAGNOSTICA SISTEMA === */}
         <div style={cardStyle}>

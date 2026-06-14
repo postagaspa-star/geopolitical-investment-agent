@@ -142,6 +142,31 @@ app.add_middleware(
 )
 
 
+# --- Auth admin OPT-IN (token) ────────────────────────────────────────────
+# Protegge TUTTI gli endpoint che MUTANO stato (POST/PUT/PATCH/DELETE) con un
+# token segreto, ma ATTIVA SOLO se l'env ADMIN_API_TOKEN è impostato. Senza env
+# → comportamento invariato (nessuna auth, nessuna rottura dell'app in uso). Col
+# token impostato sul backend, il frontend lo invia via header X-Admin-Token
+# (interceptor globale di fetch, vedi frontend/src/index.js).
+# Risolve i critici di sicurezza: chiunque conoscesse l'URL poteva eseguire
+# trade / azzerare il portafoglio / liquidare / sovrascrivere chiavi e prompt
+# (il CORS NON ferma curl/script). Le GET di sola lettura non sono toccate.
+import secrets as _secrets
+
+
+@app.middleware("http")
+async def _admin_token_guard(request: Request, call_next):
+    token = os.environ.get("ADMIN_API_TOKEN", "").strip()
+    if token and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        provided = request.headers.get("x-admin-token", "")
+        if not provided or not _secrets.compare_digest(str(provided), token):
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Non autorizzato: admin token mancante o errato"},
+            )
+    return await call_next(request)
+
+
 # --- Endpoint di controllo ---
 
 
