@@ -635,6 +635,21 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
     return text
 
 
+def _parse_r1_response(data: dict) -> str:
+    """Estrae il testo dalla risposta DeepSeek-R1 in modo difensivo.
+    R1 può rispondere 200 con corpo senza 'choices' (o lista vuota): prima
+    data['choices'][0] sollevava KeyError/IndexError e l'utente vedeva
+    'Errore tecnico' invece di un messaggio gestito (vedi pattern già presente
+    in chat_assistant)."""
+    choices = (data or {}).get("choices") or []
+    if not choices:
+        raise ValueError(f"DeepSeek-R1: risposta senza 'choices': {str(data)[:300]}")
+    msg = (choices[0] or {}).get("message") or {}
+    text = msg.get("content") or ""
+    # Strip <think>...</think> blocks (R1 reasoning)
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 async def _call_deepseek_r1(system_prompt: str, history: list, user_message: str,
                             context_block: str) -> str:
     """DeepSeek-R1 (deepseek-reasoner) — per crypto."""
@@ -669,10 +684,7 @@ async def _call_deepseek_r1(system_prompt: str, history: list, user_message: str
                 raise ValueError(f"DeepSeek-R1 HTTP {resp.status}: {body[:300]}")
             data = await resp.json()
 
-    text = data["choices"][0]["message"].get("content") or ""
-    # Strip <think>...</think> blocks (R1 reasoning)
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    return text
+    return _parse_r1_response(data)
 
 
 # ─── Response parser ────────────────────────────────────────────────────────

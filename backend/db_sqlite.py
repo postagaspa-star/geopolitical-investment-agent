@@ -1032,9 +1032,13 @@ def get_decision_chat_messages(conversation_id: int, limit: int = 100) -> list:
             "proposed_actions, executed_trade_id, executed_action_results, "
             "created_at "
             "FROM decision_chat_messages WHERE conversation_id=? "
-            "ORDER BY created_at ASC LIMIT ?",
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
             (conversation_id, limit),
         ).fetchall()
+        # Prende i piu' RECENTI N (DESC+LIMIT), poi li rimette in ordine
+        # cronologico. Prima ORDER BY ASC LIMIT restituiva i piu' VECCHI N →
+        # oltre N messaggi il modello riceveva l'inizio della conversazione.
+        rows = list(reversed(rows))
         return [_deserialize_decision_chat_row(dict(r)) for r in rows]
 
 

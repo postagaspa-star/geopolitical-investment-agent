@@ -1756,10 +1756,14 @@ def get_decision_chat_messages(conversation_id: int, limit: int = 100) -> list:
             result = (client.table("decision_chat_messages")
                       .select("*")
                       .eq("conversation_id", conversation_id)
-                      .order("created_at", desc=False)
+                      .order("created_at", desc=True)
+                      .order("id", desc=True)
                       .limit(limit)
                       .execute())
+            # Prende i piu' RECENTI N (DESC+LIMIT) poi li rimette in ordine
+            # cronologico. Prima ASC+LIMIT restituiva i piu' VECCHI N.
             db_rows = result.data or []
+            db_rows.reverse()
             for r in db_rows:
                 _dec_chat_decode_row(r)
             db_ok = True

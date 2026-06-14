@@ -473,14 +473,14 @@ def _record_commitment_for_decision(ticker: str, analysis: dict, run_id: str) ->
             try:
                 database.add_agent_commitment(
                     agent_type="crypto",
-                    commitment_type="monitor_alert",
-                    commitment_text=text[:500],
-                    related_ticker=ticker,
+                    commitment_type="monitor",
+                    condition_text=text[:500],
+                    ticker=ticker,
                     expires_in_hours=4,
                 )
                 return
             except Exception as e:
-                logger.debug("[CRYPTO-MONITOR] add_agent_commitment fail: %s", e)
+                logger.warning("[CRYPTO-MONITOR] add_agent_commitment fail: %s", e)
         # Fallback: insert agent_log come signal persistente
         database.insert_agent_log(run_id, "CRYPTO_MONITOR_ALERT", json.dumps({
             "event": "monitor_alert",

@@ -814,14 +814,33 @@ async def _execute_scalper_action(portfolio, database, run_id, ticker, act) -> b
 
     loop = asyncio.get_running_loop()
     try:
+        async def _set_sl_or_close(open_side: str) -> bool:
+            """Setta lo SL dopo un'apertura; se fallisce chiude SUBITO la
+            posizione appena aperta (fail-closed: niente naked). Prima l'esito
+            di set_stop_loss era ignorato → short senza hard-stop persistito.
+            Ritorna False se ha dovuto chiudere."""
+            if not act.stop_loss:
+                return True
+            sl_res = await loop.run_in_executor(
+                None, lambda: portfolio.set_stop_loss(ticker, float(act.stop_loss), run_id=run_id))
+            if isinstance(sl_res, dict) and sl_res.get("success"):
+                return True
+            logger_warn(f"[SCALPER {run_id}] SL non settato su {ticker} ({open_side}) "
+                        f"→ chiusura fail-closed")
+            if open_side == "SHORT":
+                await loop.run_in_executor(None, _cover_all)
+            else:
+                await loop.run_in_executor(None, _sell_all)
+            return False
+
         if act.action == "OPEN_LONG":
             await loop.run_in_executor(None, _buy)
-            if act.stop_loss:
-                await loop.run_in_executor(None, lambda: portfolio.set_stop_loss(ticker, float(act.stop_loss), run_id=run_id))
+            if not await _set_sl_or_close("LONG"):
+                return False
         elif act.action == "OPEN_SHORT":
             await loop.run_in_executor(None, _short)
-            if act.stop_loss:
-                await loop.run_in_executor(None, lambda: portfolio.set_stop_loss(ticker, float(act.stop_loss), run_id=run_id))
+            if not await _set_sl_or_close("SHORT"):
+                return False
         elif act.action == "CLOSE":
             # chiudi qualunque lato aperto
             await loop.run_in_executor(None, _sell_all)
@@ -829,13 +848,13 @@ async def _execute_scalper_action(portfolio, database, run_id, ticker, act) -> b
         elif act.action == "FLIP_TO_SHORT":
             await loop.run_in_executor(None, _sell_all)
             await loop.run_in_executor(None, _short)
-            if act.stop_loss:
-                await loop.run_in_executor(None, lambda: portfolio.set_stop_loss(ticker, float(act.stop_loss), run_id=run_id))
+            if not await _set_sl_or_close("SHORT"):
+                return False
         elif act.action == "FLIP_TO_LONG":
             await loop.run_in_executor(None, _cover_all)
             await loop.run_in_executor(None, _buy)
-            if act.stop_loss:
-                await loop.run_in_executor(None, lambda: portfolio.set_stop_loss(ticker, float(act.stop_loss), run_id=run_id))
+            if not await _set_sl_or_close("LONG"):
+                return False
         return True
     except Exception as e:
         logger_warn(f"[SCALPER {run_id}] execute {act.action} {ticker} fallito: {e}")

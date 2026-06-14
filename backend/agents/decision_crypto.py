@@ -756,6 +756,46 @@ async def _compute_core_guardrails(run_id: str, ticker: str, side: str,
 
 # ─── Tool handler ───────────────────────────────────────────────────────────
 
+def _enforce_open_has_stop(action, ticker, quantity, current_price,
+                           stop_loss, sl_result, run_id, portfolio, database):
+    """Fail-closed su apertura con SL OBBLIGATORIO non settato.
+
+    Se l'apertura (BUY/SHORT) richiedeva uno stop-loss (stop_loss>0) ma
+    set_stop_loss NON è andato a buon fine, la posizione resta NAKED (rischio
+    illimitato sulle SHORT): la chiude SUBITO (SHORT→cover, LONG→sell).
+    Ritorna None se ok, altrimenti dict {aborted, reason, close_success}."""
+    needs_sl = bool(stop_loss and float(stop_loss) > 0)
+    sl_ok = bool(isinstance(sl_result, dict) and sl_result.get("success"))
+    if not needs_sl or sl_ok:
+        return None
+    reason = (sl_result or {}).get("reason", "sconosciuto") if isinstance(sl_result, dict) else str(sl_result)
+    try:
+        if str(action).upper() == "SHORT":
+            close_res = portfolio.execute_cover(
+                ticker, quantity, current_price,
+                geo_reasoning="FAIL-CLOSED: SL obbligatorio non settabile",
+                tech_reasoning=str(reason), confidence=0)
+        else:
+            close_res = portfolio.execute_sell(
+                ticker, quantity, current_price,
+                geo_reasoning="FAIL-CLOSED: SL obbligatorio non settabile",
+                tech_reasoning=str(reason), confidence=0)
+    except Exception as exc:
+        close_res = {"success": False, "reason": f"close exception: {exc}"}
+    close_ok = bool(isinstance(close_res, dict) and close_res.get("success"))
+    try:
+        database.insert_agent_log(run_id, "DECISION_CRYPTO_NAKED_ABORT", json.dumps({
+            "ticker": ticker, "action": action, "qty": quantity,
+            "sl_fail_reason": str(reason)[:300], "close_success": close_ok,
+        }, default=str))
+    except Exception:
+        pass
+    logger.error("[%s][DEC-CRYPTO] apertura %s %s NAKED (SL non settato: %s) → "
+                 "chiusura fail-closed (success=%s)",
+                 run_id, action, ticker, str(reason)[:120], close_ok)
+    return {"aborted": True, "reason": reason, "close_success": close_ok}
+
+
 async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                         workflow_state=None) -> str:
     import data_fetchers
@@ -1081,14 +1121,30 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             # Salva SL/TP automatici sulla posizione se APERTURA (BUY/SHORT)
             # con livelli. NB: su uno SHORT lo SL sta SOPRA l'entry.
             if action in ("BUY", "SHORT") and (stop_loss or take_profit):
+                sl_result = None
                 try:
                     if stop_loss and stop_loss > 0:
-                        portfolio.set_stop_loss(ticker, float(stop_loss), run_id=run_id)
+                        sl_result = portfolio.set_stop_loss(ticker, float(stop_loss), run_id=run_id)
                     if take_profit and take_profit > 0:
                         portfolio.set_take_profit(ticker, float(take_profit), run_id=run_id)
                 except Exception as exc:
                     logger.warning("[%s][DEC-CRYPTO] auto SL/TP set fallito %s: %s",
                                    run_id, ticker, exc)
+                    sl_result = {"success": False, "reason": f"exception: {exc}"}
+
+                # FAIL-CLOSED: apertura con SL obbligatorio ma non settato =
+                # posizione naked (rischio illimitato sulle SHORT) → chiudi subito.
+                _abort = _enforce_open_has_stop(
+                    action, ticker, quantity, current_price, stop_loss,
+                    sl_result, run_id, portfolio, database)
+                if _abort is not None:
+                    return json.dumps({
+                        "executed": False, "ticker": ticker, "action": action,
+                        "fail_closed": True, "close_success": _abort["close_success"],
+                        "reason": f"SL obbligatorio non settato → posizione chiusa "
+                                  f"(fail-closed): {_abort['reason']}",
+                        "at": timestamp,
+                    }, default=str)
 
             database.insert_agent_log(run_id, "DECISION_CRYPTO_TRADE", json.dumps({
                 "ticker": ticker, "action": action, "qty": quantity,
