@@ -2189,7 +2189,16 @@ async def sim_get_auto_mode():
 async def sim_set_auto_mode(payload: dict):
     from simulator import db as sim_db
     enabled = bool(payload.get("enabled"))
-    cap = int(payload.get("daily_cap", 5))
+    # Validazione: daily_cap non numerico non deve diventare un 500 con stack
+    # trace. int("abc") sollevava ValueError non gestita.
+    try:
+        cap = int(payload.get("daily_cap", 5))
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400,
+                            content={"error": "daily_cap deve essere un intero"})
+    if cap < 0:
+        return JSONResponse(status_code=400,
+                            content={"error": "daily_cap deve essere >= 0"})
     sim_db.set_setting("auto_mode_enabled", "true" if enabled else "false")
     sim_db.set_setting("auto_mode_daily_cap", str(cap))
     return {"enabled": enabled, "daily_cap": cap}

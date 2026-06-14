@@ -179,6 +179,13 @@ def detect_scenario_key(run_or_scenario: dict) -> tuple[str, dict]:
             ctx = (steps[0] or {}).get("context") or {}
             market_data = ctx.get("market_data") or []
             asset_universe = ctx.get("asset_universe") or []
+        if not market_data:
+            # Run v2: niente steps[].context — i dati stanno in
+            # full_data.scenario.market_data (prima → regime sempre 'neutral'
+            # e memoria advisor frammentata su bucket diversi per lo stesso run).
+            scen = full.get("scenario") or {}
+            market_data = scen.get("market_data") or market_data
+            asset_universe = scen.get("asset_universe") or asset_universe
 
     regime = _detect_market_regime(market_data)
     asset_class = _detect_asset_class(asset_universe)

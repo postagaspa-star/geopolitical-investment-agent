@@ -325,8 +325,11 @@ async def handle_tool_call(tool_name: str, tool_input: dict, run_id: str) -> str
 
             # Ottieni il prezzo corrente del titolo (in executor per non bloccare)
             loop = asyncio.get_event_loop()
+            # bypass_cache=True: il fill di un trade deve usare il prezzo FRESCO,
+            # non quello in cache (entry/exit altrimenti su prezzi incoerenti →
+            # PnL fittizio in paper, fill stale dietro il gate live).
             price_data = await loop.run_in_executor(
-                None, data_fetchers.fetch_market_data, ticker, 5,
+                None, lambda: data_fetchers.fetch_market_data(ticker, 5, bypass_cache=True),
             )
             if price_data.get("data"):
                 current_price = price_data["data"][-1]["close"]

@@ -386,9 +386,17 @@ def _check_position_overweight(database) -> tuple[bool, str, float, list[tuple[s
                         cur = avg
                 if cur <= 0:
                     continue
-                value = cur * qty
-                position_values[ticker] = value
-                total_pos_value += value
+                # Direction-aware: una SHORT è una PASSIVITÀ → sottrae dal NAV,
+                # non lo gonfia. E non si "vende per ridurre concentrazione":
+                # escludila dagli overweight (il rebalance trigger vale solo sui
+                # LONG). Prima `value = cur*qty` su una SHORT gonfiava il NAV e
+                # poteva far scattare un REBALANCE TRIGGER privo di senso.
+                direction = str(p.get("direction") or "LONG").upper()
+                if direction == "SHORT":
+                    total_pos_value -= cur * qty
+                else:
+                    total_pos_value += cur * qty
+                    position_values[ticker] = cur * qty
             except (TypeError, ValueError):
                 continue
 
@@ -905,8 +913,14 @@ async def run_watchdog(run_id: str) -> dict:
     # 4. Chiama DeepSeek
     result = await _call_deepseek(context)
 
-    urgency = result.get("urgency", 0)
-    trigger = result.get("trigger", False) and urgency >= URGENCY_THRESHOLD
+    # Coercizione difensiva: l'LLM può rendere urgency come "8" o null →
+    # "8" >= 5 solleva TypeError, non era in try/except e disattivava il
+    # watchdog per quel ciclo (perdendo eventi critici).
+    try:
+        urgency = float(result.get("urgency", 0) or 0)
+    except (TypeError, ValueError):
+        urgency = 0.0
+    trigger = bool(result.get("trigger", False)) and urgency >= URGENCY_THRESHOLD
     reason = result.get("reason", "")
     focus_tickers = result.get("focus_tickers", [])
 
