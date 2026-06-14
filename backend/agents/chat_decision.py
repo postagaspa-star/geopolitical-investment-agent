@@ -1106,6 +1106,26 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
             except Exception as _ae:
                 logger.warning("[CHAT-DEC] auto Technical Crypto fallito: %s", _ae)
 
+    # 4c. BENCHMARK vs S&P 500 ("sto battendo il mercato?"): la domanda n.1
+    # dell'utente, prima senza risposta in chat. Riusiamo l'endpoint async
+    # (le route FastAPI restituiscono la funzione originale) con timeout corto
+    # per non intaccare il budget dell'endpoint chat (no 504). Best-effort.
+    try:
+        from main import get_portfolio_benchmark as _bench
+        _b = await asyncio.wait_for(_bench(period="all"), timeout=8)
+        if isinstance(_b, dict) and _b.get("available") is not False:
+            _bl = {k: v for k, v in _b.items()
+                   if not isinstance(v, (list, dict)) and k != "available"}
+            if _bl:
+                context_block = (context_block or "") + (
+                    "\n\n─── BENCHMARK vs S&P 500 (rendimento tuo vs mercato) ───\n"
+                    "Usa QUESTI numeri reali per rispondere a \"sto battendo l'S&P?\"; "
+                    "non inventare. `alpha` positivo = sovraperformi; leggi il "
+                    "`verdict` per distinguere bravura da beta.\n```json\n"
+                    + json.dumps(_bl, indent=2, ensure_ascii=False, default=str) + "\n```")
+    except Exception as _be:
+        logger.debug("[CHAT-DEC] benchmark context fallito: %s", _be)
+
     # 5. Chiama il modello
     system_prompt = _get_system_prompt(agent_type)
     try:

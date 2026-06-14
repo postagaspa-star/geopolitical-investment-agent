@@ -271,6 +271,20 @@ def build_live_context() -> str:
         logger.warning("build_live_context[portfolio/positions]: %s", e)
         counters["portfolio"] = f"error: {e}"
 
+    # 1b. RISK STATE LIVE (governor): recovery mode, drawdown 24h, win-rate
+    # ultime 10, concentrazione max, circuit breaker, feature-flag automatici.
+    # È un blocco-stringa GIÀ formattato. Prima la chat non lo vedeva → a
+    # "siamo in recovery?" / "drawdown 24h?" / "quanto sono concentrato?"
+    # inventava o non sapeva. Ora risponde coi numeri reali del governor.
+    try:
+        import risk_state as _rs
+        _rs_block = _rs.build_risk_state_prompt_block()
+        if _rs_block:
+            sections.append(_rs_block)
+            counters["risk_state"] = "ok"
+    except Exception as e:
+        logger.debug("build_live_context[risk_state]: %s", e)
+
     # 2. Market State
     try:
         from scheduler import is_market_open, get_next_market_open
