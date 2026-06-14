@@ -13,6 +13,23 @@ import sys
 import types
 import importlib
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_polluted_modules():
+    """Questo file inietta fake in sys.modules['database'|'portfolio'] (vedi
+    _install_fakes). Senza ripristino restano in cache e rompono altri test
+    (es. test_crypto_core_guardrails). Snapshot+restore intorno a ogni test."""
+    keys = ("database", "portfolio")
+    saved = {k: sys.modules.get(k) for k in keys}
+    yield
+    for k in keys:
+        if saved[k] is None:
+            sys.modules.pop(k, None)
+        else:
+            sys.modules[k] = saved[k]
+
 
 def _install_fakes(enabled=True, regime="UPTREND", positions=None, state="armed"):
     """Inietta fake per database/portfolio/agents.crypto_regime fetch, e
