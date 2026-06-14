@@ -1009,9 +1009,9 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                 _side = "short" if action == "SHORT" else "long"
                 try:
                     import risk_profile as _rp_sl
-                    _prof = _rp_sl.get_active_profile()
-                    _sl_min = float(_prof.get("sl_min_pct_crypto", 12.0))
-                    _sl_max = float(_prof.get("sl_max_pct_crypto", 25.0))
+                    # Range effettivo (clampato per recovery, #13): coerente con
+                    # validate_sl_range qui sotto e con l'auto-set equity.
+                    _sl_min, _sl_max = _rp_sl.effective_sl_bounds("crypto")
                     _sl_mid = (_sl_min + _sl_max) / 2.0
                     _need_derive = not (stop_loss and stop_loss > 0)
                     if not _need_derive:

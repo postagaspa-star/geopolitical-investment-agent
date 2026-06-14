@@ -193,6 +193,43 @@ def build_risk_block(asset_class: str = "equity") -> str:
 
 # ─── Validazione execute_trade ──────────────────────────────────────────────
 
+def _resolve_recovery(recovery: bool | None) -> bool:
+    """Recovery mode attivo? Se il chiamante non lo specifica (None), lo legge
+    dal governor (risk_state.is_in_recovery_mode), così l'enforcement #13 vale
+    per TUTTI i path senza che ogni chiamante debba ricordarsi di passarlo.
+    Fail-safe: su errore → False (resta il profilo base, niente over-block)."""
+    if recovery is not None:
+        return bool(recovery)
+    try:
+        import risk_state as _rs
+        return bool(_rs.is_in_recovery_mode())
+    except Exception:
+        return False
+
+
+def effective_sl_bounds(asset_class: str, recovery: bool | None = None) -> tuple[float, float]:
+    """Range SL [min, max]% del profilo attivo, GIÀ clampato per recovery mode
+    (#13: in recovery lo SL massimo scende a DEFAULT_RECOVERY_SL_MAX_PCT).
+
+    Unica fonte di verità: la usano sia validate_sl_range sia l'auto-set
+    d'ufficio dei Decision (equity e crypto), così il midpoint impostato non
+    viola mai il range poi verificato. Il clamp NON inverte il range: se
+    sl_min > rec_max collassa a [sl_min, sl_min] = lo SL più stretto consentito.
+    """
+    p = get_active_profile()
+    is_crypto = asset_class == "crypto"
+    sl_min = float(p["sl_min_pct_crypto"] if is_crypto else p["sl_min_pct_equity"])
+    sl_max = float(p["sl_max_pct_crypto"] if is_crypto else p["sl_max_pct_equity"])
+    if _resolve_recovery(recovery):
+        try:
+            import risk_state as _rs
+            rec_max = float(getattr(_rs, "DEFAULT_RECOVERY_SL_MAX_PCT", 5.0))
+        except Exception:
+            rec_max = 5.0
+        sl_max = min(sl_max, max(rec_max, sl_min))
+    return sl_min, sl_max
+
+
 def validate_trade(
     *,
     asset_class: str,
@@ -202,9 +239,13 @@ def validate_trade(
     portfolio_drawdown_pct: float | None = None,
     tier: str = "core",
     satellite_exposure_pct: float | None = None,
+    recovery: bool | None = None,
 ) -> tuple[bool, str]:
     """
     Validazione hard del trade contro il profilo attivo.
+
+    recovery: se True (o None + recovery attivo nel governor) il pavimento di
+              confidence sale a DEFAULT_RECOVERY_CONFIDENCE_FLOOR (#13).
 
     Ritorna (ok: bool, reason: str). Se ok=False, reason spiega la violazione.
 
@@ -228,6 +269,17 @@ def validate_trade(
     # FAIL-CLOSED: un governatore di rischio non deve MAI saltare un controllo
     # su input anomalo (prima `except: pass` lasciava passare il trade; un NaN
     # passava perché ogni confronto con NaN è False).
+    # #13: in RECOVERY mode il pavimento di confidence sale al floor recovery
+    # (prima il vincolo stava SOLO nel prompt, mai applicato in codice).
+    in_recovery = _resolve_recovery(recovery)
+    min_conf = float(p["min_confidence"])
+    if in_recovery:
+        try:
+            import risk_state as _rs
+            min_conf = max(min_conf,
+                           float(getattr(_rs, "DEFAULT_RECOVERY_CONFIDENCE_FLOOR", 0.75)))
+        except Exception:
+            min_conf = max(min_conf, 0.75)
     if confidence is not None:
         try:
             cf = float(confidence)
@@ -235,10 +287,11 @@ def validate_trade(
             return False, f"Confidence non valida ({confidence!r}) — blocco per sicurezza."
         if math.isnan(cf) or math.isinf(cf):
             return False, "Confidence non finita (NaN/Inf) — blocco per sicurezza."
-        if cf < p["min_confidence"] - 1e-6:
+        if cf < min_conf - 1e-6:
+            _rec = " (RECOVERY)" if in_recovery else ""
             return False, (
                 f"Confidence {cf:.2f} sotto il minimo del profilo "
-                f"{p['label']} ({p['min_confidence']:.2f}). NO TRADE."
+                f"{p['label']}{_rec} ({min_conf:.2f}). NO TRADE."
             )
 
     # 2. Allocation
@@ -335,16 +388,18 @@ def validate_sl_range(
     entry_price: float,
     sl_price: float,
     side: str = "long",
+    recovery: bool | None = None,
 ) -> tuple[bool, str]:
     """
     Verifica che la distanza SL sia nel range [min, max] del profilo.
 
     side: 'long' o 'short'
+    recovery: None = auto (legge il governor). In recovery il max si stringe (#13).
     """
     p = get_active_profile()
-    is_crypto = asset_class == "crypto"
-    sl_min = p["sl_min_pct_crypto"] if is_crypto else p["sl_min_pct_equity"]
-    sl_max = p["sl_max_pct_crypto"] if is_crypto else p["sl_max_pct_equity"]
+    # Range effettivo, già clampato per recovery mode (#13). Unica fonte di
+    # verità condivisa con l'auto-set d'ufficio dei Decision (equity + crypto).
+    sl_min, sl_max = effective_sl_bounds(asset_class, recovery=recovery)
 
     if entry_price <= 0 or sl_price <= 0:
         return False, "Prezzo entry o SL non valido"
@@ -356,12 +411,16 @@ def validate_sl_range(
         # Long: SL sotto l'entry
         dist_pct = ((entry_price - sl_price) / entry_price) * 100.0
 
-    if dist_pct < sl_min:
+    # Tolleranza 1e-6 sul bordo (coerente con validate_trade): uno SL esattamente
+    # al limite non va rifiutato per rumore float — conta soprattutto quando il
+    # range recovery collassa a un punto (sl_min == sl_max) e l'auto-set mette
+    # proprio il midpoint = quel bordo.
+    if dist_pct < sl_min - 1e-6:
         return False, (
             f"SL troppo stretto ({dist_pct:.1f}%); profilo {p['label']} "
             f"richiede min {sl_min:.1f}% ({asset_class})."
         )
-    if dist_pct > sl_max:
+    if dist_pct > sl_max + 1e-6:
         return False, (
             f"SL troppo ampio ({dist_pct:.1f}%); profilo {p['label']} "
             f"limita a max {sl_max:.1f}% ({asset_class})."

@@ -2463,6 +2463,49 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                         "at": timestamp,
                     })
 
+            # ── STOP-LOSS OBBLIGATORIO su EQUITY (enforced in CODICE, #14) ──
+            # Prima lo SL equity veniva settato senza validazione e una posizione
+            # poteva restare NAKED se il modello non passava stop_loss. Ora, come
+            # nel path crypto, su BUY/SHORT lo SL è garantito: se manca o è fuori
+            # dal range EFFETTIVO del profilo (recovery incluso, #13) lo
+            # impostiamo d'ufficio al midpoint; se non riusciamo a garantirlo,
+            # blocchiamo l'apertura (fail-closed). Le chiusure (SELL/COVER) esenti.
+            if action in ("BUY", "SHORT"):
+                _eq_side = "short" if action == "SHORT" else "long"
+                try:
+                    import risk_profile as _rp_sl
+                    _esl_min, _esl_max = _rp_sl.effective_sl_bounds("equity")
+                    _esl_mid = (_esl_min + _esl_max) / 2.0
+                    _eneed = not (stop_loss and stop_loss > 0)
+                    if not _eneed:
+                        _eok, _ewhy = _rp_sl.validate_sl_range(
+                            asset_class="equity", entry_price=current_price,
+                            sl_price=float(stop_loss), side=_eq_side)
+                        _eneed = not _eok
+                    if _eneed:
+                        if _eq_side == "short":
+                            stop_loss = round(current_price * (1.0 + _esl_mid / 100.0), 4)
+                        else:
+                            stop_loss = round(current_price * (1.0 - _esl_mid / 100.0), 4)
+                        database.insert_agent_log(run_id, "DECISION_SL_AUTOSET",
+                            json.dumps({
+                                "ticker": ticker, "action": action,
+                                "entry": current_price, "stop_loss_set": stop_loss,
+                                "sl_pct": round(_esl_mid, 2),
+                                "reason": "SL equity mancante o fuori range profilo: impostato d'ufficio",
+                            }, default=str))
+                except Exception as _esl_err:
+                    logger.warning("[%s][DECISION] SL equity enforce error: %s",
+                                   run_id, _esl_err)
+                    # FAIL-CLOSED: se non posso garantire uno SL, blocco l'apertura
+                    if not (stop_loss and stop_loss > 0):
+                        return json.dumps({
+                            "executed": False, "rejected": True,
+                            "ticker": ticker, "action": action,
+                            "reason": "Impossibile garantire uno stop-loss valido: apertura bloccata.",
+                            "at": timestamp,
+                        })
+
             # Esegui trade
             geo_part = logic_chain[:500] if logic_chain else ""
             tech_part = logic_chain[500:] if len(logic_chain) > 500 else ""
