@@ -741,13 +741,19 @@ async def run_crypto_scalper(run_id: str | None = None) -> dict:
             # internamente; per il cooldown anti-overtrading basta la coerenza
             # relativa tra tick, quindi ripartiamo dall'indice salvato).
             act = step(st, bars, nav=nav, params=params)
-            save_state(ticker, st)
 
             if act.action == "NONE":
+                save_state(ticker, st)   # nessun ordine: persisti solo l'avanzamento stato
                 continue
 
             price = act.price
             res = await _execute_scalper_action(portfolio, database, rid, ticker, act)
+            # Persisti lo stato (che riflette la nuova posizione) SOLO se l'ordine
+            # è confermato. Prima save_state PRECEDEVA l'esecuzione → su ordine
+            # rifiutato (cash insuff., anti-leva) restava una posizione FANTASMA
+            # nello stato, su cui il tick successivo ragionava.
+            if res:
+                save_state(ticker, st)
             actions_taken.append({"ticker": ticker, "action": act.action,
                                    "price": price, "reason": act.reason,
                                    "ok": res})

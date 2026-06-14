@@ -1132,6 +1132,16 @@ async def chat_decision_execute_trade(payload: ChatDecisionExecutePayload):
                 content={"error": f"prezzo non disponibile per {ticker}"},
             )
 
+        # Prenotazione ATOMICA anti doppia-esecuzione: se un'altra richiesta con
+        # lo stesso message_id ha già prenotato/eseguito, blocca. Prima il check
+        # executed_trade_id (sopra) e il mark (sotto) NON erano atomici → doppio
+        # click / retry / richiesta duplicata = trade eseguito DUE volte.
+        if not database.reserve_decision_chat_message(payload.message_id):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "trade già in esecuzione o eseguito"},
+            )
+
         # Esegui il trade
         import portfolio as _portfolio
         geo_reasoning = f"[CHAT-USER-CONFIRMED] {reasoning}"
@@ -1156,12 +1166,14 @@ async def chat_decision_execute_trade(payload: ChatDecisionExecutePayload):
                 )
         except Exception as e:
             logger.error("chat_decision execute_trade failed: %s", e, exc_info=True)
+            database.clear_decision_chat_reservation(payload.message_id)
             return JSONResponse(
                 status_code=500,
                 content={"error": f"esecuzione fallita: {e}"},
             )
 
         if not result or not result.get("success"):
+            database.clear_decision_chat_reservation(payload.message_id)
             return JSONResponse(
                 status_code=400,
                 content={"error": "trade non eseguito",

@@ -1119,6 +1119,31 @@ def mark_decision_chat_trade_executed(message_id: int, trade_id: int) -> bool:
     return True
 
 
+def reserve_decision_chat_message(message_id: int) -> bool:
+    """Prenotazione ATOMICA anti doppia-esecuzione concorrente: marca
+    executed_trade_id=-1 (sentinella "in esecuzione") SOLO se ancora NULL.
+    Ritorna True se ha prenotato (1 riga). Due richieste concorrenti con lo
+    stesso message_id: solo la prima prenota, la seconda riceve False."""
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE decision_chat_messages SET executed_trade_id=-1 "
+            "WHERE id=? AND executed_trade_id IS NULL",
+            (message_id,),
+        )
+        return cur.rowcount == 1
+
+
+def clear_decision_chat_reservation(message_id: int) -> None:
+    """Rilascia la prenotazione (-1 → NULL) se l'esecuzione è fallita, così
+    l'utente può ritentare."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE decision_chat_messages SET executed_trade_id=NULL "
+            "WHERE id=? AND executed_trade_id=-1",
+            (message_id,),
+        )
+
+
 def mark_decision_chat_action_executed(message_id: int, action_index: int,
                                        result: dict) -> bool:
     """

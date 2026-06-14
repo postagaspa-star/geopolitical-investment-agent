@@ -1953,6 +1953,47 @@ def mark_decision_chat_trade_executed(message_id: int, trade_id: int) -> bool:
     return True
 
 
+def reserve_decision_chat_message(message_id: int) -> bool:
+    """Prenotazione ATOMICA anti doppia-esecuzione: marca executed_trade_id=-1
+    solo se ancora NULL. True se ha prenotato 1 riga. In errore ritorna False
+    (fail-closed: meglio bloccare che eseguire il trade due volte)."""
+    global _DECISION_CHAT_FALLBACK_MODE
+    if not _DECISION_CHAT_FALLBACK_MODE:
+        try:
+            client = _get_client()
+            res = (client.table("decision_chat_messages")
+                   .update({"executed_trade_id": -1})
+                   .eq("id", message_id)
+                   .is_("executed_trade_id", "null")
+                   .execute())
+            return bool(res.data)
+        except Exception as e:
+            if _dec_chat_should_fallback(e):
+                _DECISION_CHAT_FALLBACK_MODE = True
+            else:
+                logger.warning("reserve_decision_chat_message fallita: %s", e)
+                return False
+    # Fallback store: niente prenotazione atomica → consenti (degradato; resta
+    # come guardia debole il check executed_trade_id a monte).
+    return True
+
+
+def clear_decision_chat_reservation(message_id: int) -> None:
+    """Rilascia la prenotazione (-1 → NULL) se l'esecuzione è fallita."""
+    global _DECISION_CHAT_FALLBACK_MODE
+    if _DECISION_CHAT_FALLBACK_MODE:
+        return
+    try:
+        client = _get_client()
+        (client.table("decision_chat_messages")
+         .update({"executed_trade_id": None})
+         .eq("id", message_id)
+         .eq("executed_trade_id", -1)
+         .execute())
+    except Exception as e:
+        logger.warning("clear_decision_chat_reservation fallita: %s", e)
+
+
 def _dec_chat_fallback_find_message(message_id: int) -> tuple[dict | None, int, list]:
     """
     Cerca un messaggio nel fallback settings store. Ritorna (msg, conv_id, msgs_list).
