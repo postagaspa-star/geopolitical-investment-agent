@@ -19,6 +19,26 @@ def test_live_context_includes_risk_state(monkeypatch):
     assert "RISK_STATE_MARKER_XYZ" in ctx
 
 
+def test_apply_cash_delta_is_additive_and_returns_new():
+    # #4 cash atomico: applica un DELTA (non un valore assoluto) e ritorna il
+    # nuovo saldo. conftest resetta il portafoglio a 100000 prima di ogni test.
+    import database
+    assert database.apply_cash_delta(-2500.0) == 97500.0
+    assert database.apply_cash_delta(1000.0) == 98500.0
+    # rollback = delta inverso → ripristina
+    assert database.apply_cash_delta(-1000.0) == 97500.0
+
+
+def test_apply_cash_delta_deltas_accumulate():
+    # due delta consecutivi si SOMMANO: col vecchio read-modify-write (valore
+    # assoluto) un update concorrente poteva essere perso (denaro creato/distrutto)
+    import database
+    database.apply_cash_delta(-1000.0)
+    database.apply_cash_delta(-1000.0)
+    p = database.get_portfolio()
+    assert float(p["cash_balance"]) == 98000.0
+
+
 def _fake_req(method, headers=None):
     class _R:
         pass

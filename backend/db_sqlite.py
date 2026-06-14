@@ -323,6 +323,28 @@ def update_portfolio_total_value(total_value):
     with get_db() as conn:
         conn.execute("UPDATE portfolio SET total_value=?, updated_at=datetime('now') WHERE id=(SELECT MAX(id) FROM portfolio)", (total_value,))
 
+
+def apply_cash_delta(delta: float) -> float:
+    """Applica un DELTA al cash_balance in modo ATOMICO (UPDATE ... SET
+    cash_balance = cash_balance + delta) e ritorna il nuovo saldo.
+
+    Risolve la race read-modify-write: prima ogni trade faceva
+    get_portfolio()→calcolo valore assoluto→update_portfolio() in step separati;
+    due writer concorrenti (pipeline schedulata, auto-exit polling, chat) si
+    sovrascrivevano → denaro CREATO o DISTRUTTO. Col delta atomico le scritture
+    concorrenti si sommano correttamente; anche il rollback usa il delta inverso
+    invece di riscrivere un valore assoluto stale."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE portfolio SET cash_balance = cash_balance + ?, "
+            "updated_at=datetime('now') WHERE id=(SELECT MAX(id) FROM portfolio)",
+            (float(delta),),
+        )
+        row = conn.execute(
+            "SELECT cash_balance FROM portfolio WHERE id=(SELECT MAX(id) FROM portfolio)"
+        ).fetchone()
+        return float(row["cash_balance"]) if row else 0.0
+
 def get_positions():
     with get_db() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM positions ORDER BY opened_at DESC").fetchall()]

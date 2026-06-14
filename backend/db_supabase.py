@@ -339,6 +339,29 @@ def update_portfolio_total_value(total_value):
         }).eq("id", row.data[0]["id"]).execute()
 
 
+def apply_cash_delta(delta: float) -> float:
+    """Applica un DELTA al cash_balance in modo ATOMICO via RPC Postgres
+    apply_cash_delta (UPDATE ... SET cash_balance = cash_balance + p_delta
+    RETURNING). Risolve la race read-modify-write (vedi
+    db_sqlite.apply_cash_delta). La RPC va creata UNA volta in Supabase
+    (backend/migrations/add_apply_cash_delta.sql)."""
+    client = _get_client()
+    res = client.rpc("apply_cash_delta", {"p_delta": float(delta)}).execute()
+    data = res.data
+    if isinstance(data, (int, float)):
+        return float(data)
+    if isinstance(data, list) and data:
+        v = data[0]
+        if isinstance(v, dict):
+            return float(v.get("cash_balance", v.get("apply_cash_delta", 0)) or 0)
+        return float(v)
+    if isinstance(data, dict):
+        return float(data.get("cash_balance", data.get("apply_cash_delta", 0)) or 0)
+    # fallback difensivo: rileggi il saldo
+    p = get_portfolio() or {}
+    return float(p.get("cash_balance", 0) or 0)
+
+
 # ============================================================
 # Positions
 # ============================================================

@@ -21,6 +21,7 @@ import accounting
 
 from database import (
     get_portfolio, update_portfolio, update_portfolio_total_value,
+    apply_cash_delta,
     get_positions, get_position,
     upsert_position, delete_position,
     update_position_price, count_positions,
@@ -465,11 +466,12 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
     total_cost = gross_cost + fee
 
     # Aggiorna la liquidita' — log error reale se il DB rifiuta
-    new_cash = portfolio["cash_balance"] - total_cost
+    # Cash ATOMICO: applica il DELTA (-total_cost) invece di riscrivere un valore
+    # assoluto letto prima → niente race read-modify-write (denaro creato/distrutto).
     try:
-        update_portfolio(new_cash, portfolio["total_value"])
+        new_cash = apply_cash_delta(-total_cost)
     except Exception as ex:
-        logger.error("execute_buy: update_portfolio FAILED for %s qty=%s price=%s: %s",
+        logger.error("execute_buy: apply_cash_delta FAILED for %s qty=%s price=%s: %s",
                      ticker, quantity, price, ex, exc_info=True)
         return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}",
                 "db_error": str(ex)[:500]}
@@ -494,7 +496,7 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
                      ticker, quantity, ex, exc_info=True)
         # Rollback cash — se fallisce, lo segnaliamo (non piu' 'except: pass' muto)
         try:
-            update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
+            apply_cash_delta(total_cost)   # rollback = delta inverso (no clobber)
         except Exception as rb_ex:
             _alert_rollback_failed("buy", ticker, rb_ex)
         return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}",
@@ -596,11 +598,11 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
     net_proceeds = gross_proceeds - fee
 
     # Aggiorna la liquidita' — log error reale se il DB rifiuta
-    new_cash = portfolio["cash_balance"] + net_proceeds
+    # Cash ATOMICO: applica il DELTA (+net_proceeds) — vedi execute_buy.
     try:
-        update_portfolio(new_cash, portfolio["total_value"])
+        new_cash = apply_cash_delta(net_proceeds)
     except Exception as ex:
-        logger.error("execute_sell: update_portfolio FAILED for %s qty=%s price=%s: %s",
+        logger.error("execute_sell: apply_cash_delta FAILED for %s qty=%s price=%s: %s",
                      ticker, quantity, price, ex, exc_info=True)
         return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}",
                 "db_error": str(ex)[:500]}
@@ -617,7 +619,7 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
                      ticker, remaining, ex, exc_info=True)
         # Rollback cash — se fallisce, lo segnaliamo (non piu' 'except: pass' muto)
         try:
-            update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
+            apply_cash_delta(-net_proceeds)   # rollback = delta inverso (no clobber)
         except Exception as rb_ex:
             _alert_rollback_failed("sell", ticker, rb_ex)
         return {"success": False, "reason": f"DB write fail (position): {str(ex)[:200]}",
@@ -725,11 +727,11 @@ def execute_short(ticker, quantity, price, geo_reasoning, tech_reasoning,
     except Exception as ex:
         logger.warning("execute_short: leverage guard skipped: %s", ex)
 
-    new_cash = portfolio["cash_balance"] + net_proceeds
+    # Cash ATOMICO: applica il DELTA (+net_proceeds) — vedi execute_buy.
     try:
-        update_portfolio(new_cash, portfolio["total_value"])
+        new_cash = apply_cash_delta(net_proceeds)
     except Exception as ex:
-        logger.error("execute_short: update_portfolio FAILED %s: %s",
+        logger.error("execute_short: apply_cash_delta FAILED %s: %s",
                      ticker, ex, exc_info=True)
         return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}"}
 
@@ -745,7 +747,7 @@ def execute_short(ticker, quantity, price, geo_reasoning, tech_reasoning,
             upsert_position(ticker, quantity, price, price, direction="SHORT")
     except Exception as ex:
         try:
-            update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
+            apply_cash_delta(-net_proceeds)   # rollback = delta inverso (no clobber)
         except Exception as rb_ex:
             _alert_rollback_failed("short", ticker, rb_ex)
         logger.error("execute_short: upsert_position FAILED %s: %s",
@@ -821,11 +823,11 @@ def execute_cover(ticker, quantity, price, geo_reasoning, tech_reasoning,
     fee = _commission_amount(gross)
     total_cost = gross + fee
 
-    new_cash = portfolio["cash_balance"] - total_cost
+    # Cash ATOMICO: applica il DELTA (-total_cost) — vedi execute_buy.
     try:
-        update_portfolio(new_cash, portfolio["total_value"])
+        new_cash = apply_cash_delta(-total_cost)
     except Exception as ex:
-        logger.error("execute_cover: update_portfolio FAILED %s: %s",
+        logger.error("execute_cover: apply_cash_delta FAILED %s: %s",
                      ticker, ex, exc_info=True)
         return {"success": False, "reason": f"DB write fail (portfolio): {str(ex)[:200]}"}
 
@@ -837,7 +839,7 @@ def execute_cover(ticker, quantity, price, geo_reasoning, tech_reasoning,
             upsert_position(ticker, remaining, short_entry, price, direction="SHORT")
     except Exception as ex:
         try:
-            update_portfolio(portfolio["cash_balance"], portfolio["total_value"])
+            apply_cash_delta(total_cost)   # rollback = delta inverso (no clobber)
         except Exception as rb_ex:
             _alert_rollback_failed("cover", ticker, rb_ex)
         logger.error("execute_cover: position update FAILED %s: %s",
