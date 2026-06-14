@@ -209,6 +209,32 @@ function ResultView({ run, runId, nav }) {
         </div>
       </div>
 
+      {/* Lezioni apprese — generate da _generate_lessons_learned, salvate in
+          full.lessons_learned ma prima mai renderizzate dove servono davvero */}
+      {Array.isArray(full.lessons_learned) && full.lessons_learned.length > 0 && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>📚 Lezioni apprese</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem", marginTop: "0.5rem" }}>
+            {full.lessons_learned.map((l, i) => (
+              <div key={i} style={{ borderLeft: "3px solid #3b82f6", paddingLeft: "0.7rem" }}>
+                <div style={{ fontWeight: 700, color: "#f1f5f9", fontSize: "0.85rem" }}>
+                  {l.title || `Lezione ${i + 1}`}
+                  {l.type && (
+                    <span style={{ marginLeft: 8, fontSize: "0.68rem", color: "#94a3b8",
+                                   background: "#1f2937", padding: "2px 7px", borderRadius: 6 }}>
+                      {l.type}
+                    </span>
+                  )}
+                </div>
+                {l.text && (
+                  <div style={{ color: "#cbd5e1", fontSize: "0.8rem", marginTop: "0.2rem" }}>{l.text}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* PREZZI ENTRY/EXIT + P&L $$ */}
       {(full.entry_price != null) && (
         <div style={S.card}>

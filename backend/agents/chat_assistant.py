@@ -341,6 +341,28 @@ def build_live_context() -> str:
                 + json.dumps(compact_trades, ensure_ascii=False, default=str)
                 + "\n```"
             )
+            # #4: TESI dei trade più RECENTI (geopolitical/technical reasoning)
+            # per rispondere a "perché hai comprato X?" col reasoning ORIGINALE,
+            # non una ricostruzione inventata. Solo i primi ~12 (ordine desc =
+            # più recenti) per non sfondare il cap ~35k char. Prima _compact_trade
+            # buttava via il reasoning.
+            thesis = []
+            for t in all_trades[:12]:
+                geo = str(t.get("geopolitical_reasoning") or "")[:280]
+                tech = str(t.get("technical_reasoning") or "")[:280]
+                if geo or tech:
+                    thesis.append({
+                        "ts": str(t.get("timestamp", ""))[:19],
+                        "tk": t.get("ticker"), "a": t.get("action"),
+                        "geo": geo, "tech": tech,
+                    })
+            if thesis:
+                sections.append(
+                    "TESI DEI TRADE RECENTI (per spiegare PERCHÉ una posizione è "
+                    "stata aperta — usa QUESTO reasoning, non inventarne uno):\n```json\n"
+                    + json.dumps(thesis, ensure_ascii=False, default=str)
+                    + "\n```"
+                )
             counters["trades"] = str(len(compact_trades))
     except Exception as e:
         logger.warning("build_live_context[trades]: %s", e)

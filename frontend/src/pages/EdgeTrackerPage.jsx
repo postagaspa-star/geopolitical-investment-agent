@@ -95,6 +95,7 @@ function TradeMini({ t, good }) {
 export default function EdgeTrackerPage() {
   const [data, setData] = useState(null);
   const [diag, setDiag] = useState(null);
+  const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -125,6 +126,16 @@ export default function EdgeTrackerPage() {
         if (!alive || !r.ok || !t.trim()) return;
         try { setDiag(JSON.parse(t)); } catch { /* ignora */ }
       } catch { /* la diagnosi e' opzionale */ }
+    })();
+    // Significatività statistica (p-value): vive in /api/live/research-stats,
+    // prima solo nella modale ResearchPanel. Best-effort, opzionale.
+    (async () => {
+      try {
+        const r = await fetch(`${API}/api/live/research-stats`);
+        const t = await r.text();
+        if (!alive || !r.ok || !t.trim()) return;
+        try { setStats(JSON.parse(t)); } catch { /* ignora */ }
+      } catch { /* opzionale */ }
     })();
     return () => { alive = false; };
   }, []);
@@ -235,6 +246,15 @@ export default function EdgeTrackerPage() {
             + `${data.avg_loss_pct}% · win rate ${data.win_rate_pct}%`} />
         <Criterion label="La confidence dell'AI discrimina"
           ok={data.calibration_ok} detail={data.calibration_detail} />
+        {stats && stats.significance && stats.significance.testable && (
+          <Criterion
+            label="Significatività statistica (bravura o caso?)"
+            ok={!!stats.significance.significant_5pct}
+            detail={`pearson r=${stats.significance.pearson_r} · p-value=${stats.significance.p_value} — `
+              + (stats.significance.significant_5pct
+                  ? "significativo al 5%: la confidence predice l'esito (è bravura, non caso)"
+                  : "NON significativo: l'edge potrebbe essere caso")} />
+        )}
       </div>
 
       {/* DIAGNOSI DELLA CONFIDENCE — quali trade rompono la relazione */}
