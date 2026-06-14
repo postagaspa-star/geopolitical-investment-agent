@@ -1223,8 +1223,13 @@ def _exec_action_set_stop_loss(action: dict) -> dict:
         )
         if entry <= 0:
             return {"ok": False, "error": "prezzo medio di carico non disponibile"}
-        # pct negativo per BUY (long), positivo per SHORT — qui assumiamo long
-        sl_price = round(entry * (1 + pct / 100.0), 4)
+        # Direction-aware: lo SL sta SOTTO l'entry per un LONG, SOPRA per uno
+        # SHORT. Calcolo dalla MAGNITUDINE del pct ignorando il segno fornito
+        # dall'LLM (prima assumeva sempre long → su una SHORT lo stop finiva
+        # sotto l'entry: non proteggeva / chiudeva subito in perdita).
+        is_short = str(pos.get("direction") or "LONG").upper() == "SHORT"
+        mag = abs(pct)
+        sl_price = round(entry * (1 + mag / 100.0), 4) if is_short else round(entry * (1 - mag / 100.0), 4)
 
     if sl_price <= 0:
         return {"ok": False, "error": "stop_loss_price calcolato non valido"}
@@ -1263,7 +1268,11 @@ def _exec_action_set_take_profit(action: dict) -> dict:
         )
         if entry <= 0:
             return {"ok": False, "error": "prezzo medio di carico non disponibile"}
-        tp_price = round(entry * (1 + pct / 100.0), 4)
+        # Direction-aware: il TP sta SOPRA l'entry per un LONG, SOTTO per uno
+        # SHORT. Calcolo dalla magnitudine del pct (prima assumeva sempre long).
+        is_short = str(pos.get("direction") or "LONG").upper() == "SHORT"
+        mag = abs(pct)
+        tp_price = round(entry * (1 - mag / 100.0), 4) if is_short else round(entry * (1 + mag / 100.0), 4)
 
     if tp_price <= 0:
         return {"ok": False, "error": "take_profit_price calcolato non valido"}
@@ -4864,7 +4873,10 @@ async def close_position(payload: ClosePositionPayload):
         if current_price <= 0:
             return JSONResponse(status_code=400, content={"error": "Impossibile ottenere il prezzo corrente"})
 
-        result = portfolio.execute_sell(
+        # Instrada per direzione: una SHORT si chiude con COVER, non con SELL.
+        # Prima usava sempre execute_sell → su una SHORT tornava success=False
+        # ma l'endpoint rispondeva 200 (UI: "chiusa" mentre restava aperta).
+        result = portfolio.close_position_market(
             ticker=payload.ticker,
             quantity=pos["quantity"],
             price=current_price,
@@ -4873,6 +4885,9 @@ async def close_position(payload: ClosePositionPayload):
             confidence=100,
         )
 
+        if not (isinstance(result, dict) and result.get("success")):
+            reason = (result or {}).get("reason", "chiusura fallita") if isinstance(result, dict) else "chiusura fallita"
+            return JSONResponse(status_code=400, content={"error": reason, "result": result})
         return result
     except Exception as e:
         logger.error(f"Errore nella chiusura della posizione: {e}", exc_info=True)
@@ -5263,8 +5278,14 @@ async def manual_liquidate_all(payload: ManualLiquidatePayload):
         import portfolio as _portfolio
         reason = (payload.reason or "manual_admin_action").strip()[:200]
         executed = _portfolio.liquidate_all_positions(reason=f"MANUAL: {reason}")
-        ok_count = len([e for e in executed if not e.get("error")])
-        err_count = len([e for e in executed if e.get("error")])
+        # Conta come liquidata SOLO se la chiusura è davvero riuscita
+        # (result.success). Prima bastava l'assenza di 'error' → una SHORT che
+        # tornava success=False senza eccezione veniva contata come chiusa pur
+        # restando aperta: in emergenza l'utente si credeva flat.
+        def _liq_ok(e):
+            return bool(isinstance(e.get("result"), dict) and e["result"].get("success"))
+        ok_count = len([e for e in executed if _liq_ok(e)])
+        err_count = len(executed) - ok_count
         return {
             "executed": True,
             "positions_liquidated": ok_count,

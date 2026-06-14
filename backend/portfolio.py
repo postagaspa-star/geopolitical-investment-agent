@@ -1004,10 +1004,13 @@ def set_stop_loss(ticker: str, stop_price: float, run_id: str = "") -> dict:
         # stale o None per posizioni appena aperte.
         pos_cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
         cur = _refresh_current_price(ticker, pos_cur)
-        # Per il sistema attuale tutte le posizioni sono LONG (BUY); il
-        # validatore copre comunque il caso SHORT futuro.
+        # Direction-aware: lo SL di uno SHORT sta SOPRA il prezzo, quello di un
+        # LONG sotto. Prima era hardcoded is_long=True → ogni SL di SHORT veniva
+        # rifiutato e la posizione restava naked. La direzione si legge dalla
+        # posizione (default LONG).
+        is_long = str(pos.get("direction") or "LONG").upper() != "SHORT"
         ok, reason = _validate_sltp_level(
-            float(stop_price), float(cur), kind="SL", is_long=True,
+            float(stop_price), float(cur), kind="SL", is_long=is_long,
             ticker=ticker,
         )
         if not ok:
@@ -1049,8 +1052,11 @@ def set_take_profit(ticker: str, target_price: float, run_id: str = "") -> dict:
     if float(target_price) > 0:
         pos_cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
         cur = _refresh_current_price(ticker, pos_cur)
+        # Direction-aware (vedi set_stop_loss): il TP di uno SHORT sta SOTTO il
+        # prezzo corrente, quello di un LONG sopra.
+        is_long = str(pos.get("direction") or "LONG").upper() != "SHORT"
         ok, reason = _validate_sltp_level(
-            float(target_price), float(cur), kind="TP", is_long=True,
+            float(target_price), float(cur), kind="TP", is_long=is_long,
             ticker=ticker,
         )
         if not ok:
@@ -1076,6 +1082,23 @@ def set_take_profit(ticker: str, target_price: float, run_id: str = "") -> dict:
         "avg_buy_price": pos.get("avg_buy_price"),
         "note": "Il take-profit verra' eseguito automaticamente al raggiungimento.",
     }
+
+
+def close_position_market(ticker, quantity, price, geo_reasoning,
+                          tech_reasoning, confidence=100):
+    """Chiude (a mercato) una posizione instradando per DIREZIONE:
+    SHORT → execute_cover, LONG → execute_sell. Prima close_position e
+    liquidate_all chiamavano sempre execute_sell, che su una SHORT torna
+    success=False senza chiudere nulla (posizione lasciata aperta ma
+    contata come chiusa → in emergenza l'utente si credeva flat)."""
+    existing = get_position(ticker)
+    if existing is None:
+        return {"success": False, "reason": f"Nessuna posizione aperta per {ticker}"}
+    if str(existing.get("direction") or "LONG").upper() == "SHORT":
+        return execute_cover(ticker, quantity, price, geo_reasoning,
+                             tech_reasoning, confidence)
+    return execute_sell(ticker, quantity, price, geo_reasoning,
+                        tech_reasoning, confidence)
 
 
 def liquidate_all_positions(reason: str = "circuit_breaker",
@@ -1123,10 +1146,10 @@ def liquidate_all_positions(reason: str = "circuit_breaker",
             continue
 
         try:
-            result = execute_sell(
+            result = close_position_market(
                 ticker, qty, cur,
                 geo_reasoning=f"CIRCUIT_BREAKER_LIQUIDATE: {reason}",
-                tech_reasoning=f"(forced sell, qty={qty}, price={cur:.4f})",
+                tech_reasoning=f"(forced close, qty={qty}, price={cur:.4f})",
                 confidence=100,
             )
             executed.append({
