@@ -146,8 +146,15 @@ function Settings({ onBack, onDataRefresh }) {
     // Scheduler
     try {
       const data = await safeFetchJson("/api/agent/status");
-      const running = data.is_running || data.scheduler_running || data.status === "running";
-      setDiagItem("scheduler", "ok", running ? "In esecuzione" : "Attivo (idle)");
+      // FIX: l'endpoint può tornare {error} con HTTP 200 → prima il pallino
+      // restava VERDE ignorando il payload (cruscotto che mente). is_running
+      // era dead code (operandi reali: scheduler_running + status).
+      if (data && data.error) {
+        setDiagItem("scheduler", "error", String(data.error));
+      } else {
+        const running = data.scheduler_running || data.status === "running";
+        setDiagItem("scheduler", "ok", running ? "In esecuzione" : "Attivo (idle)");
+      }
     } catch (err) {
       setDiagItem("scheduler", "error", err.message);
     }

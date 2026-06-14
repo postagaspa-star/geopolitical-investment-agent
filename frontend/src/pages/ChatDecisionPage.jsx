@@ -826,7 +826,9 @@ export default function ChatDecisionPage() {
         90000,
       );
       const data = r.data || {};
-      if (!r.ok && !data.result) {
+      // FIX: guardia con OR (prima `&&` non scattava MAI su HTTP 200) → marca
+      // l'azione "eseguita" SOLO se il backend ha restituito davvero un result.
+      if (!r.ok || !data.result) {
         throw new Error(data.error || r.error || `HTTP ${r.status}`);
       }
       // FIX: aggiorna direttamente lo state del msg con il nuovo
@@ -837,7 +839,7 @@ export default function ChatDecisionPage() {
         const ear = (m.executed_action_results && typeof m.executed_action_results === "object")
                      ? { ...m.executed_action_results }
                      : {};
-        ear[String(actionIndex)] = data.result || { ok: true };
+        ear[String(actionIndex)] = data.result;   // result garantito dalla guardia — niente {ok:true} finto
         return { ...m, executed_action_results: ear };
       }));
       if (data.result && data.result.ok === false) {

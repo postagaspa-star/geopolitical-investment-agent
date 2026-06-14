@@ -54,7 +54,12 @@ function LiveApp() {
     try {
       const res = await fetch(`${API}${endpoint}`);
       if (!res.ok) return null;
-      return await res.json();
+      const data = await res.json();
+      // Alcuni endpoint ritornano {error:...} con HTTP 200: trattalo come
+      // fallimento, altrimenti {error} verrebbe salvato come portafoglio →
+      // dashboard con $0 e P&L -100% FINTO (dati di errore scambiati per reali).
+      if (data && typeof data === "object" && !Array.isArray(data) && data.error) return null;
+      return data;
     } catch { return null; }
   }, []);
 
