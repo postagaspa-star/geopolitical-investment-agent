@@ -18,6 +18,7 @@ Validato in execute_trade prima di eseguire (rifiuta se viola hard caps).
 from __future__ import annotations
 
 import logging
+import math
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -224,29 +225,36 @@ def validate_trade(
         max_pos = max_pos * float(p.get("satellite_sizing_mult", 0.4))
 
     # 1. Confidence
+    # FAIL-CLOSED: un governatore di rischio non deve MAI saltare un controllo
+    # su input anomalo (prima `except: pass` lasciava passare il trade; un NaN
+    # passava perché ogni confronto con NaN è False).
     if confidence is not None:
         try:
             cf = float(confidence)
-            if cf < p["min_confidence"] - 1e-6:
-                return False, (
-                    f"Confidence {cf:.2f} sotto il minimo del profilo "
-                    f"{p['label']} ({p['min_confidence']:.2f}). NO TRADE."
-                )
         except (TypeError, ValueError):
-            pass
+            return False, f"Confidence non valida ({confidence!r}) — blocco per sicurezza."
+        if math.isnan(cf) or math.isinf(cf):
+            return False, "Confidence non finita (NaN/Inf) — blocco per sicurezza."
+        if cf < p["min_confidence"] - 1e-6:
+            return False, (
+                f"Confidence {cf:.2f} sotto il minimo del profilo "
+                f"{p['label']} ({p['min_confidence']:.2f}). NO TRADE."
+            )
 
     # 2. Allocation
     if allocation_pct is not None:
         try:
             alloc = float(allocation_pct)
-            if alloc > max_pos + 1e-6:
-                return False, (
-                    f"Allocazione {alloc:.1f}% supera il cap del profilo "
-                    f"{p['label']} ({max_pos:.1f}% per {asset_class}). "
-                    f"Riduci la size."
-                )
         except (TypeError, ValueError):
-            pass
+            return False, f"Allocazione non valida ({allocation_pct!r}) — blocco per sicurezza."
+        if math.isnan(alloc) or math.isinf(alloc):
+            return False, "Allocazione non finita (NaN/Inf) — blocco per sicurezza."
+        if alloc > max_pos + 1e-6:
+            return False, (
+                f"Allocazione {alloc:.1f}% supera il cap del profilo "
+                f"{p['label']} ({max_pos:.1f}% per {asset_class}). "
+                f"Riduci la size."
+            )
 
     # 2b. Cap di esposizione SATELLITE aggregata (solo universo esteso).
     if (tier == "satellite" and satellite_exposure_pct is not None
@@ -254,14 +262,14 @@ def validate_trade(
         try:
             cap = float(p.get("max_satellite_exposure_pct", 100.0))
             projected = float(satellite_exposure_pct) + float(allocation_pct)
-            if projected > cap + 1e-6:
-                return False, (
-                    f"Esposizione satellite {projected:.1f}% (attuale "
-                    f"{float(satellite_exposure_pct):.1f}% + nuovo {float(allocation_pct):.1f}%) "
-                    f"supera il cap del profilo {p['label']} ({cap:.1f}%). Riduci o salta."
-                )
         except (TypeError, ValueError):
-            pass
+            return False, "Esposizione satellite non valida — blocco per sicurezza."
+        if projected > cap + 1e-6:
+            return False, (
+                f"Esposizione satellite {projected:.1f}% (attuale "
+                f"{float(satellite_exposure_pct):.1f}% + nuovo {float(allocation_pct):.1f}%) "
+                f"supera il cap del profilo {p['label']} ({cap:.1f}%). Riduci o salta."
+            )
 
     # 3. Max open positions: per crypto usiamo il cap specifico (piu' stretto),
     # per equity il generale. NB: open_positions_count deve essere il count
@@ -269,37 +277,39 @@ def validate_trade(
     if open_positions_count is not None:
         try:
             n = int(open_positions_count)
-            if is_crypto:
-                # Crypto cap dedicato (Conservativo 2 / Moderato 3 / Aggressivo 5)
-                cap = int(p.get("max_open_positions_crypto", p["max_open_positions"]))
-                if n >= cap:
-                    return False, (
-                        f"Già {n} posizioni CRYPTO aperte; il profilo "
-                        f"{p['label']} limita a {cap} posizioni crypto. "
-                        f"Chiudine una prima di aprirne un'altra."
-                    )
-            else:
-                # Equity/ETF: cap generale
-                if n >= p["max_open_positions"]:
-                    return False, (
-                        f"Già {n} posizioni aperte; il profilo {p['label']} "
-                        f"limita a {p['max_open_positions']}. Chiudi prima."
-                    )
         except (TypeError, ValueError):
-            pass
+            return False, f"Conteggio posizioni non valido ({open_positions_count!r}) — blocco per sicurezza."
+        if is_crypto:
+            # Crypto cap dedicato (Conservativo 2 / Moderato 3 / Aggressivo 5)
+            cap = int(p.get("max_open_positions_crypto", p["max_open_positions"]))
+            if n >= cap:
+                return False, (
+                    f"Già {n} posizioni CRYPTO aperte; il profilo "
+                    f"{p['label']} limita a {cap} posizioni crypto. "
+                    f"Chiudine una prima di aprirne un'altra."
+                )
+        else:
+            # Equity/ETF: cap generale
+            if n >= p["max_open_positions"]:
+                return False, (
+                    f"Già {n} posizioni aperte; il profilo {p['label']} "
+                    f"limita a {p['max_open_positions']}. Chiudi prima."
+                )
 
     # 4. Portfolio drawdown stop
     if portfolio_drawdown_pct is not None:
         try:
             dd = float(portfolio_drawdown_pct)
-            if dd > p["max_portfolio_drawdown_pct"]:
-                return False, (
-                    f"Drawdown portfolio {dd:.1f}% supera il limite del "
-                    f"profilo {p['label']} ({p['max_portfolio_drawdown_pct']:.1f}%). "
-                    f"Solo chiusure ammesse, NESSUNA nuova posizione."
-                )
         except (TypeError, ValueError):
-            pass
+            return False, f"Drawdown non valido ({portfolio_drawdown_pct!r}) — blocco per sicurezza."
+        if math.isnan(dd) or math.isinf(dd):
+            return False, "Drawdown non finito (NaN/Inf) — blocco per sicurezza."
+        if dd > p["max_portfolio_drawdown_pct"]:
+            return False, (
+                f"Drawdown portfolio {dd:.1f}% supera il limite del "
+                f"profilo {p['label']} ({p['max_portfolio_drawdown_pct']:.1f}%). "
+                f"Solo chiusure ammesse, NESSUNA nuova posizione."
+            )
 
     return True, "ok"
 

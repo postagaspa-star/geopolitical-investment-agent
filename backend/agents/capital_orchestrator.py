@@ -501,13 +501,18 @@ def _execute_liquidation(action: dict, run_id: str) -> dict:
             return {"success": False, "ticker": ticker,
                     "error": result.get("reason", f"{_op} failed")}
 
-        proceeds = qty * current_price
+        # Una SHORT si chiude con COVER, che SPENDE cash: non è una fonte di
+        # liquidità per la riallocazione. proceeds=0 così il chiamante non
+        # gonfia total_freed (prima sommava qty*price come capitale liberato
+        # mentre il cash DIMINUIVA).
+        proceeds = 0.0 if direction == "SHORT" else qty * current_price
         return {
             "success": True,
             "ticker": ticker,
             "qty_sold": qty,
             "price": current_price,
             "proceeds": round(proceeds, 2),
+            "direction": direction,
         }
     except Exception as e:
         logger.error("[ORCHESTRATOR][%s] Liquidation failed for %s: %s",

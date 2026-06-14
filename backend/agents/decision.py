@@ -2451,8 +2451,17 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                         "at": timestamp,
                     })
                 except Exception as rp_err:
-                    logger.warning("[%s][DECISION] risk validation error (non-fatal): %s",
-                                   run_id, rp_err)
+                    # FAIL-CLOSED come il ramo ImportError sopra: un'eccezione
+                    # runtime nella validazione (stato anomalo, float su valore
+                    # corrotto…) NON deve far passare il trade senza controllo.
+                    logger.error("[%s][DECISION] risk validation error: BLOCCO il trade. %s",
+                                 run_id, rp_err)
+                    return json.dumps({
+                        "executed": False, "rejected": True,
+                        "ticker": ticker, "action": action,
+                        "reason": f"RISK_PROFILE error (blocco per sicurezza): {str(rp_err)[:200]}",
+                        "at": timestamp,
+                    })
 
             # Esegui trade
             geo_part = logic_chain[:500] if logic_chain else ""

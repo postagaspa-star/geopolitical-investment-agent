@@ -1076,6 +1076,11 @@ def get_recent_user_directives(agent_type: str, hours: int = 48, limit: int = 5,
     = piu' recente tra (now - hours) e since_iso.
     """
     agent_type = (agent_type or "standard").lower()
+    if since_iso:
+        # Normalizza a 'YYYY-MM-DD HH:MM:SS' (no 'T'/offset) per confronto TEXT
+        # coerente con created_at/datetime('now'): prima 'T'+offset faceva
+        # sparire dal contesto le direttive emesse in giornata.
+        since_iso = str(since_iso).replace("T", " ")[:19]
     with get_db() as conn:
         conv = conn.execute(
             "SELECT id FROM decision_chat_conversations WHERE agent_type=? "
@@ -1189,7 +1194,11 @@ def add_agent_commitment(
     expires_at_str = None
     if expires_in_hours and expires_in_hours > 0:
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-        expires_at_str = (_dt.now(_tz.utc) + _td(hours=float(expires_in_hours))).isoformat()
+        # Formato 'YYYY-MM-DD HH:MM:SS' (UTC, niente 'T'/offset) per essere
+        # confrontabile come TEXT con datetime('now') nel sweep di scadenza.
+        # Prima .isoformat() salvava 'T'+offset → come testo 'T'(84) > ' '(32),
+        # quindi `expires_at < datetime('now')` era sempre falso (mai scaduto).
+        expires_at_str = (_dt.now(_tz.utc) + _td(hours=float(expires_in_hours))).strftime("%Y-%m-%d %H:%M:%S")
 
     with get_db() as conn:
         cur = conn.execute(

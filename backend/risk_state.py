@@ -880,7 +880,10 @@ def build_risk_state_prompt_block() -> str:
             "    breaker 24h. Vincoli stringenti:",
             f"      - Stop-loss MAX: {DEFAULT_RECOVERY_SL_MAX_PCT:.1f}% (sotto questo soltanto)",
             f"      - Confidence floor: {DEFAULT_RECOVERY_CONFIDENCE_FLOOR:.2f}",
-            f"      - Target uscita: portafoglio >= ${state['recovery_target_balance']:.2f}",
+            ("      - Target uscita: portafoglio >= " + (
+                f"${state['recovery_target_balance']:.2f}"
+                if isinstance(state.get('recovery_target_balance'), (int, float))
+                else "n/d (target non impostato)")),
             "    Riduci drasticamente la frequenza di trade. Solo setup chiari.",
             "",
         ])
