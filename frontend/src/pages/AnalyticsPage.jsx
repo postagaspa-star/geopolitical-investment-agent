@@ -91,6 +91,141 @@ function KpiCard({ label, value, subValue, color, hint }) {
 }
 
 // ============================================================
+// Risk State LIVE — pannello governor (recovery, drawdown, concentrazione)
+// Consuma /api/risk-state, che prima non aveva alcun consumatore frontend.
+// ============================================================
+
+function RiskMetric({ label, value, color, hint }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', minWidth: 108 }}>
+      <div style={{ fontSize: '0.66rem', color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        {label}
+      </div>
+      <div style={{ fontSize: '1.05rem', fontWeight: 700, color: color ?? '#f1f5f9', lineHeight: 1.1 }}>
+        {value}
+      </div>
+      {hint && <div style={{ fontSize: '0.66rem', color: '#64748b' }}>{hint}</div>}
+    </div>
+  );
+}
+
+function RiskStatePanel() {
+  const [rs, setRs] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    fetch(`${API}/api/risk-state`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('http'))))
+      .then((d) => { if (alive && d && !d.error) setRs(d); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  // best-effort: se il dato non c'è, non mostrare nulla (nessuna regressione UI)
+  if (!rs) return null;
+
+  const dd = Number(rs.drawdown_24h_pct ?? 0);
+  const cb = Number(rs.thresholds?.circuit_breaker_24h_pct ?? -10);
+  const wr = rs.win_rate_last_10 != null ? Math.round(Number(rs.win_rate_last_10) * 100) : null;
+  const conc = Number(rs.max_position_concentration_pct ?? 0);
+  const concTrig = !!rs.concentration_trigger_active;
+  const cbOn = !!(rs.flags && rs.flags.circuit_breaker_enabled);
+  const ddColor = dd <= cb ? '#f87171' : dd <= cb / 2 ? '#f59e0b' : '#10b981';
+
+  return (
+    <div style={{
+      background: rs.recovery_mode ? '#3f1d1d' : '#111827',
+      border: `1px solid ${rs.recovery_mode ? '#7f1d1d' : '#1f2937'}`,
+      borderRadius: 10,
+      padding: '0.85rem 1.2rem',
+      marginBottom: '1.25rem',
+      display: 'flex', flexWrap: 'wrap', gap: '1.6rem', alignItems: 'center',
+    }}>
+      <div style={{ fontSize: '0.72rem', color: '#cbd5e1', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        🛡️ Risk State LIVE
+      </div>
+      {rs.recovery_mode && (
+        <RiskMetric label="Recovery Mode" value="ATTIVO" color="#f87171"
+          hint={rs.recovery_target_balance != null ? `target ≥ ${fmtUsd(rs.recovery_target_balance)}` : 'circuit breaker scattato'} />
+      )}
+      <RiskMetric label="Drawdown 24h" value={`${dd.toFixed(1)}%`} color={ddColor}
+        hint={`stop a ${cb.toFixed(0)}%`} />
+      {wr != null && (
+        <RiskMetric label="Win rate (ult. 10)" value={`${wr}%`}
+          hint={`${rs.wr_wins ?? 0}W / ${rs.wr_losses ?? 0}L`} />
+      )}
+      <RiskMetric label="Concentrazione max" value={`${conc.toFixed(1)}%`}
+        color={concTrig ? '#f59e0b' : '#f1f5f9'}
+        hint={rs.max_concentration_ticker ? `${rs.max_concentration_ticker}${concTrig ? ' · trigger!' : ''}` : '—'} />
+      <RiskMetric label="Circuit breaker" value={cbOn ? 'ON' : 'OFF'} color={cbOn ? '#10b981' : '#64748b'} />
+    </div>
+  );
+}
+
+// ============================================================
+// Capital Orchestrator — trasparenza: perché una posizione è stata liquidata
+// Filtra /api/logs (phase CAPITAL_ORCHESTRATOR). Eventi sparsi: si nasconde
+// se non ce ne sono. Il reasoning era già a DB, prima invisibile all'utente.
+// ============================================================
+
+function CapitalOrchestratorPanel() {
+  const [events, setEvents] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    fetch(`${API}/api/logs?limit=80`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('http'))))
+      .then((data) => {
+        if (!alive) return;
+        const logs = Array.isArray(data) ? data : (data && data.logs) || [];
+        const out = [];
+        for (const log of logs) {
+          if ((log.phase || '') !== 'CAPITAL_ORCHESTRATOR') continue;
+          let c;
+          try { c = JSON.parse(log.content || '{}'); } catch { continue; }
+          if (c.event !== 'approved_executed' && c.event !== 'denied') continue;
+          out.push({
+            id: log.id ?? `${log.created_at || log.timestamp || ''}-${out.length}`,
+            approved: c.event === 'approved_executed',
+            requesting_agent: c.requesting_agent,
+            ticker: c.ticker,
+            freed: c.total_freed_usd,
+            reasoning: c.directive_reasoning || c.reasoning || '',
+          });
+        }
+        setEvents(out.slice(0, 6));
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  if (!events.length) return null;   // sparse: si nasconde se non ci sono eventi
+
+  return (
+    <div style={{ background: '#111827', border: '1px solid #1f2937', borderRadius: 10, padding: '1rem 1.2rem', marginBottom: '1.5rem' }}>
+      <div style={{ fontSize: '0.8rem', color: '#cbd5e1', fontWeight: 700, marginBottom: '0.75rem' }}>
+        🔄 Riallocazioni capitale — perché una posizione è stata liquidata
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+        {events.map((e) => (
+          <div key={e.id} style={{
+            display: 'flex', gap: '0.8rem', alignItems: 'flex-start',
+            borderLeft: `3px solid ${e.approved ? '#10b981' : '#f59e0b'}`, paddingLeft: '0.7rem',
+          }}>
+            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: e.approved ? '#10b981' : '#f59e0b', whiteSpace: 'nowrap', minWidth: 90 }}>
+              {e.approved ? `✅ ${fmtUsd(e.freed ?? 0)}` : '⛔ Negato'}
+            </div>
+            <div style={{ fontSize: '0.78rem', color: '#cbd5e1' }}>
+              <span style={{ color: '#94a3b8' }}>
+                {(e.requesting_agent || 'un agente')} chiedeva capitale{e.ticker ? ` per ${e.ticker}` : ''}
+                {e.approved ? ' → liquidata una posizione cross-agent.' : '.'}
+              </span>
+              {e.reasoning && <div style={{ color: '#e2e8f0', marginTop: '0.2rem' }}>{e.reasoning}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // Computation utilities
 // ============================================================
 
@@ -1230,6 +1365,9 @@ export default function AnalyticsPage() {
         </div>
       </div>
 
+      {/* Risk State LIVE — governor (recovery, drawdown 24h, win-rate, concentrazione) */}
+      <RiskStatePanel />
+
       {/* KPI Cards */}
       <div style={{
         display: 'grid',
@@ -1284,6 +1422,9 @@ export default function AnalyticsPage() {
           />
         )}
       </div>
+
+      {/* Riallocazioni capitale — trasparenza Capital Orchestrator (perché ha liquidato) */}
+      <CapitalOrchestratorPanel />
 
       {/* Charts grid */}
       <div className="analytics-grid" style={{
