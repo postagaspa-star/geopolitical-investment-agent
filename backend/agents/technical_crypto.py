@@ -281,6 +281,72 @@ def _filter_to_supported_crypto(tickers: list[str]) -> list[str]:
 
 
 
+async def _analyze_crypto_chunk(run_id: str, chunk_data: dict,
+                                 crypto_docs_blob: str = "") -> dict:
+    """Analizza UN gruppo di ticker con UNA sola chiamata DeepSeek-V3.
+
+    Estratto da run_crypto_technical per il CHUNKING: l'universo crypto
+    completo (~20 ticker) non entra in un solo contesto (32K), quindi i
+    ticker vengono spezzati in gruppi e ogni gruppo è una chiamata
+    indipendente (eseguita in parallelo). Best-effort: un errore DeepSeek
+    NON solleva, ritorna engine='error' così gli altri chunk proseguono.
+
+    Ritorna: {analyses, summary, engine, parse_ok, raw_preview, error?}.
+    """
+    try:
+        from agents.technical import _clean_for_json
+        context_payload = _clean_for_json({
+            "tickers_data": chunk_data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "instruction": (
+                "Per ogni crypto leggi PRIMA signals_summary (bullish/bearish counts), "
+                "POI calibra confidence. NON usare 35% piatto come fallback: rispetta i floor. "
+                "Se signals_summary.data_quality='insufficient', NON inventare una "
+                "direzione: ritorna signal='HOLD' con reasoning='data_insufficient'."
+            ),
+        })
+    except Exception:
+        context_payload = {
+            "tickers_data": chunk_data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "instruction": (
+                "Per ogni crypto leggi PRIMA signals_summary (bullish/bearish counts), "
+                "POI calibra confidence. NON usare 35% piatto come fallback: rispetta i floor."
+            ),
+        }
+    context = json.dumps(context_payload, default=str, ensure_ascii=False)
+    if crypto_docs_blob:
+        context = crypto_docs_blob + "\n\n" + "=" * 60 + "\n\n" + context
+
+    try:
+        response_text, engine = await _call_deepseek(context[:32000])
+    except Exception as exc:
+        logger.error("[%s][TECH-CRYPTO] DeepSeek-V3 chunk fallito (%d ticker): %s",
+                     run_id, len(chunk_data), exc)
+        return {"analyses": [], "summary": "", "engine": "error",
+                "parse_ok": False, "error": str(exc)[:300]}
+
+    parse_ok = False
+    try:
+        json_start = response_text.find("{")
+        json_end = response_text.rfind("}") + 1
+        if json_start >= 0 and json_end > json_start:
+            rep = json.loads(response_text[json_start:json_end])
+            parse_ok = True
+        else:
+            rep = {}
+    except json.JSONDecodeError:
+        rep = {}
+
+    return {
+        "analyses": rep.get("analyses") or [],
+        "summary": rep.get("summary") or "",
+        "engine": engine,
+        "parse_ok": parse_ok,
+        "raw_preview": "" if parse_ok else (response_text[:400] if response_text else ""),
+    }
+
+
 async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
                                 log_phase: str = "TECH_CRYPTO") -> dict:
     """
@@ -288,8 +354,10 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
 
     Args:
         run_id: ID del run multi-agente
-        tickers: lista ticker da analizzare. Se None, usa DEFAULT_CRYPTO_UNIVERSE
-                 ridotto a 6 ticker top liquidità per contenere costi.
+        tickers: lista ticker da analizzare. Se None, usa l'INTERO universo
+                 crypto tradeable (universe.CORE_CRYPTO). I run con molti
+                 ticker vengono spezzati in chunk per evitare il troncamento
+                 del contesto (vedi _analyze_crypto_chunk).
         log_phase: phase con cui loggare gli eventi su agent_logs.
                    Default "TECH_CRYPTO" (chiamata da crypto pipeline).
                    Quando chiamato come side-call dal Decision Standard
@@ -302,10 +370,15 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
     """
     import database
 
-    # Determina universo. Se non specificato, top 6 crypto liquidità.
+    # Determina universo. Se non specificato, l'INTERO universo crypto
+    # tradeable (universe.CORE_CRYPTO): il Technical Crypto copre SEMPRE tutta
+    # la "board" su cui si può operare, non un sottoinsieme (richiesta Andrea).
     if not tickers:
-        tickers = ["BTC-USD", "ETH-USD", "SOL-USD",
-                   "DOGE-USD", "AVAX-USD", "LINK-USD"]
+        try:
+            import universe as _universe
+            tickers = list(_universe.CORE_CRYPTO)
+        except Exception:
+            tickers = list(DEFAULT_CRYPTO_UNIVERSE)
 
     # Pre-validation: rimuove ticker non-crypto (equity, ETF). Qualsiasi
     # crypto (-USD / X:) e' ACCETTATA, no whitelist.
@@ -389,7 +462,9 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
                 fname = d.get("filename", "?")
                 content = (d.get("content") or "")[:1400]
                 snippet = f"--- {fname} ---\n{content}"
-                if chars_so_far + len(snippet) > 12000:
+                # Cap ridotto (era 12K): il blob viene ora PRE-posto ad OGNI
+                # chunk, quindi va tenuto compatto per non rubare budget ai dati.
+                if chars_so_far + len(snippet) > 6000:
                     doc_lines.append("[...restanti documenti omessi per limite context]")
                     break
                 doc_lines.append(snippet)
@@ -412,49 +487,60 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
         logger.debug("[%s][TECH-CRYPTO] enrich failed: %s", run_id, e)
         ticker_data_enriched = ticker_data
 
-    # Scrub NaN/Inf prima della serializzazione: il fix evita che json.dumps
-    # con default=str li converta in stringhe "nan" che il modello scambia
-    # per dato valido. Riusiamo l'helper di technical standard.
-    try:
-        from agents.technical import _clean_for_json
-        context_payload = _clean_for_json({
-            "tickers_data": ticker_data_enriched,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "instruction": (
-                "Per ogni crypto leggi PRIMA signals_summary (bullish/bearish counts), "
-                "POI calibra confidence. NON usare 35% piatto come fallback: rispetta i floor. "
-                "Se signals_summary.data_quality='insufficient', NON inventare una "
-                "direzione: ritorna signal='HOLD' con reasoning='data_insufficient'."
-            ),
-        })
-    except Exception:
-        context_payload = {
-            "tickers_data": ticker_data_enriched,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "instruction": (
-                "Per ogni crypto leggi PRIMA signals_summary (bullish/bearish counts), "
-                "POI calibra confidence. NON usare 35% piatto come fallback: rispetta i floor."
-            ),
-        }
-    context = json.dumps(context_payload, default=str, ensure_ascii=False)
-    if crypto_docs_blob:
-        context = crypto_docs_blob + "\n\n" + "=" * 60 + "\n\n" + context
+    # ─── Analisi in CHUNK ───────────────────────────────────────────────
+    # L'universo crypto tradeable completo (~20 ticker) NON entra in una sola
+    # chiamata: 20×~3-4K char di dati arricchiti + documenti sforano il budget
+    # di contesto (32K) → troncamento e ticker persi. Spezziamo in gruppi
+    # piccoli, UNA chiamata DeepSeek-V3 per gruppo IN PARALLELO (bounded), poi
+    # uniamo le analisi. Con pochi ticker (chat / side-call) resta un solo
+    # chunk = comportamento invariato.
+    _CHUNK_SIZE = 5
+    _items = list(ticker_data_enriched.items())
+    _chunks = [dict(_items[i:i + _CHUNK_SIZE])
+               for i in range(0, len(_items), _CHUNK_SIZE)]
 
-    try:
-        # Limite alzato a 32K perche' i dati advanced (candle/fib/MTF/deriv)
-        # aggiungono ~2K char per ticker. DeepSeek-V3 ha window 64K input quindi
-        # 32K ci sta abbondantemente.
-        response_text, engine = await _call_deepseek(context[:32000])
-    except Exception as exc:
-        logger.error("[%s][TECH-CRYPTO] DeepSeek-V3 fallito: %s", run_id, exc)
+    _AN_CONC = 3
+    _an_sem = asyncio.Semaphore(_AN_CONC)
+
+    async def _bounded_analyze(_ch):
+        async with _an_sem:
+            return await _analyze_crypto_chunk(run_id, _ch, crypto_docs_blob)
+
+    chunk_reports = await asyncio.gather(*[_bounded_analyze(c) for c in _chunks])
+
+    all_analyses: list = []
+    summaries: list = []
+    engines: list = []
+    raw_previews: list = []
+    chunk_errors: list = []
+    parse_ok = True
+    for cr in chunk_reports:
+        all_analyses.extend(cr.get("analyses") or [])
+        if cr.get("summary"):
+            summaries.append(cr["summary"])
+        if cr.get("engine") and cr["engine"] != "error":
+            engines.append(cr["engine"])
+        if cr.get("raw_preview"):
+            raw_previews.append(cr["raw_preview"])
+        if cr.get("error"):
+            chunk_errors.append(cr["error"])
+        if not cr.get("parse_ok"):
+            parse_ok = False
+
+    # Nessuna analisi prodotta E almeno un chunk in errore → report d'errore
+    # con gli indicatori grezzi (stesso contratto del vecchio path single-call,
+    # così il Decision degrada a do_nothing).
+    if not all_analyses and chunk_errors:
+        logger.error("[%s][TECH-CRYPTO] tutti i %d chunk falliti: %s",
+                     run_id, len(_chunks), chunk_errors[:3])
         try:
             database.insert_agent_log(run_id, log_phase, json.dumps({
                 "event": "tech_crypto_error",
-                "error": str(exc)[:300],
+                "errors": chunk_errors[:5],
+                "chunks": len(_chunks),
             }))
         except Exception:
             pass
-        # Scrub anche raw_indicators del fallback
         try:
             from agents.technical import _clean_for_json
             cleaned_raw = _clean_for_json(ticker_data)
@@ -464,7 +550,7 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
             "analyses": [],
             "raw_indicators": cleaned_raw,
             "engine": "error",
-            "summary": f"DeepSeek error: {exc}",
+            "summary": f"DeepSeek error su tutti i chunk: {chunk_errors[0]}",
             "filtered_count": filtered_count,
             "data_warning": (
                 "TECHNICAL CRYPTO ANALYSIS FAILED. raw_indicators contiene SOLO "
@@ -474,26 +560,19 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
             ),
         }
 
-    # 3. Parse JSON
-    parse_ok = False
-    try:
-        json_start = response_text.find("{")
-        json_end = response_text.rfind("}") + 1
-        if json_start >= 0 and json_end > json_start:
-            report = json.loads(response_text[json_start:json_end])
-            parse_ok = True
-        else:
-            report = {"analyses": [], "raw_analysis": response_text}
-    except json.JSONDecodeError:
-        report = {"analyses": [], "raw_analysis": response_text}
+    report = {
+        "analyses": all_analyses,
+        "engine": engines[0] if engines else "no_data",
+        "summary": " | ".join(summaries)[:3000],
+        "filtered_count": filtered_count,
+        "tickers_analyzed": list(ticker_data.keys()),
+    }
 
-    report["engine"] = engine
-    report["filtered_count"] = filtered_count
-    report["tickers_analyzed"] = list(ticker_data.keys())
-
-    # Log con visibilità degli output del modello (signal/trend/confidence)
+    # Log con visibilità degli output del modello (signal/trend/confidence).
+    # Cap alzato a 25 (era 6): ora i ticker analizzati sono l'intero universo
+    # e la Tech card del frontend deve poterli mostrare tutti.
     analyses_summary = []
-    for a in (report.get("analyses") or [])[:6]:
+    for a in (report.get("analyses") or [])[:25]:
         analyses_summary.append({
             "ticker": a.get("ticker"),
             "signal": a.get("signal"),
@@ -503,18 +582,19 @@ async def run_crypto_technical(run_id: str, tickers: list[str] | None = None,
     try:
         database.insert_agent_log(run_id, log_phase, json.dumps({
             "event": "tech_crypto_complete",
-            "engine": engine,
+            "engine": report["engine"],
+            "chunks": len(_chunks),
             "tickers_analyzed": len(ticker_data),
             "tickers_with_data": list(ticker_data.keys()),
             "tickers_requested": original_count,
             "filtered_out": filtered_count,
+            "chunk_errors": chunk_errors[:5],
             "json_parsed": parse_ok,
             "analyses_summary": analyses_summary,
             # Cap 300 → 2500: i summary tecnici crypto (BTC.D, funding,
-            # leader/laggard altcoin) raramente entrano in 300 char,
-            # e la Tech card del frontend mostrava sintesi troncate.
+            # leader/laggard altcoin) raramente entrano in 300 char.
             "summary_text": (report.get("summary") or "")[:2500],
-            "raw_preview": "" if parse_ok else (response_text[:400] if response_text else ""),
+            "raw_preview": (raw_previews[0] if raw_previews else ""),
         }, default=str))
     except Exception:
         pass

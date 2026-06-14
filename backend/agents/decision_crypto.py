@@ -156,9 +156,11 @@ FASE 1 — Pre-analisi (commit_initial_assessment):
            technical_questions). situation_overview >= 200 caratteri.
 
 FASE 2 — Richiesta dati tecnici (request_crypto_technical_analysis):
-  Chiama il Technical Crypto Agent con i ticker e le domande di FASE 1.
-  MAX 2 chiamate per run. Se non servono dati tecnici (es. solo SL update),
-  passa technical_questions=[] in FASE 1 e salta a FASE 3.
+  Chiama il Technical Crypto Agent. Ricevi SEMPRE l'analisi tecnica
+  dell'INTERO universo crypto tradeable (tutte le ~20 crypto operabili),
+  non solo dei ticker che nomini: usa 'focus_question' per dire cosa ti
+  interessa di più. BASTA UNA chiamata. Se non servono dati tecnici (es.
+  solo SL update), passa technical_questions=[] in FASE 1 e salta a FASE 3.
 
 FASE 3 — Tesi finale (commit_final_thesis):
   Integra pre-analisi + dati tecnici in tesi causale ('se X allora Y perché').
@@ -473,11 +475,14 @@ CRYPTO_DECISION_TOOLS = [
         "function": {
             "name": "request_crypto_technical_analysis",
             "description": (
-                "Chiama il Technical Crypto Agent (DeepSeek-V3) IN TEMPO REALE per "
-                "ottenere analisi fresh su una lista di crypto (max 5). Risponde "
-                "con 'analyses' per i ticker analizzati e 'errors_per_ticker' per "
-                "quelli falliti. Se i dati che ti servivano sono in errors_per_ticker, "
-                "NON inventare: cambia ticker o usa do_nothing motivando."
+                "Chiama il Technical Crypto Agent (DeepSeek-V3) IN TEMPO REALE. "
+                "Analizza SEMPRE l'INTERO universo crypto tradeable (tutte le "
+                "~20 crypto su cui si può operare), a prescindere dai ticker che "
+                "passi: 'tickers' e 'focus_question' indicano solo cosa ti "
+                "interessa di più, NON restringono l'analisi. Risponde con "
+                "'analyses' (una per ticker) e 'errors_per_ticker' per i ticker "
+                "senza dati. Se un dato che ti serviva è in errors_per_ticker, "
+                "NON inventare: usa do_nothing motivando. BASTA UNA chiamata."
             ),
             "parameters": {
                 "type": "object",
@@ -485,15 +490,15 @@ CRYPTO_DECISION_TOOLS = [
                     "tickers": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "minItems": 1, "maxItems": 5,
-                        "description": "Crypto in formato yfinance (BTC-USD, ETH-USD, ...)",
+                        "description": "Crypto di interesse PRIORITARIO (solo guida: "
+                                       "l'analisi copre comunque TUTTO l'universo tradeable).",
                     },
                     "focus_question": {
                         "type": "string",
                         "description": "Cosa vuoi sapere (es. 'breakout 100k BTC?', 'RSI ETH 4H')",
                     },
                 },
-                "required": ["tickers", "focus_question"],
+                "required": ["focus_question"],
             },
         },
     },
@@ -1165,14 +1170,23 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             return json.dumps({"action": "no_trade", "reasoning": reasoning})
 
         elif tool_name == "request_crypto_technical_analysis":
-            tickers = tool_input.get("tickers") or []
             focus = tool_input.get("focus_question", "")
-            if not isinstance(tickers, list) or not tickers:
-                return json.dumps({"error": "tickers deve essere una lista non vuota"})
-            tickers = [str(t).upper().strip() for t in tickers if t][:5]
+            # CAMBIO (richiesta Andrea): il Technical Crypto analizza SEMPRE
+            # l'INTERO universo tradeable (universe.CORE_CRYPTO), non più il
+            # sottoinsieme ≤5 che il modello nominava. Così ogni decisione vede
+            # tutta la "board" crypto su cui si può operare, non solo i ticker
+            # che R1 si ricorda di chiedere. tickers/focus del modello restano
+            # solo come guida al SUO ragionamento, non limitano l'analisi.
+            try:
+                import universe as _universe
+                tickers = list(_universe.CORE_CRYPTO)
+            except Exception:
+                tickers = [str(t).upper().strip()
+                           for t in (tool_input.get("tickers") or []) if t]
 
-            logger.info("[%s][DEC-CRYPTO] request_crypto_technical_analysis: %s — focus: %s",
-                        run_id, tickers, focus[:80])
+            logger.info("[%s][DEC-CRYPTO] request_crypto_technical_analysis: "
+                        "UNIVERSO COMPLETO (%d ticker) — focus: %s",
+                        run_id, len(tickers), focus[:80])
             try:
                 from agents.technical_crypto import run_crypto_technical
                 report = await run_crypto_technical(run_id, tickers)
