@@ -755,15 +755,6 @@ async def run_4d_report(run_id: str) -> dict:
     )
 
 
-async def run_3w_report(run_id: str) -> dict:
-    """
-    DEPRECATO — il tier 3W è stato rimosso dopo evidenza di valore marginale
-    (sintesi della sintesi della sintesi → diminishing returns).
-    Lasciato per backward-compat. Ritorna immediatamente.
-    """
-    return {"skipped": True, "reason": "3w_tier_deprecated"}
-
-
 # ============================================================
 # Weekend Intelligence Report (ripristino)
 # ============================================================
@@ -957,21 +948,6 @@ async def run_weekend_report(run_id: str, *, force: bool = False) -> dict:
     logger.info("[%s][SCOUT] Weekend report OK: %d eventi, %d asset prioritari, model=%s",
                 run_id, n_events, n_assets, used_model)
     return report_obj
-
-
-# ============================================================
-# Backward-compat aliases (i vecchi nomi rimangono importabili
-# ma puntano alle nuove funzioni a cascata)
-# ============================================================
-
-async def run_daily_recap(run_id: str) -> dict:
-    """Alias deprecato: ora corrisponde a run_8h_report."""
-    return await run_8h_report(run_id)
-
-
-async def run_weekly_matrix(run_id: str) -> dict:
-    """Alias deprecato: ora corrisponde a run_4d_report."""
-    return await run_4d_report(run_id)
 
 
 # ============================================================
@@ -1308,50 +1284,6 @@ def _build_macro_context_for_scout(database) -> str:
     if not parts:
         return ""
     return "\n\n".join(parts)
-
-
-# ============================================================
-# Backward-compat: vecchi getter ora puntano ai tier aggregati
-# ============================================================
-
-def get_latest_weekly_matrix(database) -> dict | None:
-    """
-    DEPRECATO: ora ritorna l'ultimo report 3W in formato compatibile col vecchio
-    schema weekly_matrix. Il Decision Agent vecchio continua a funzionare.
-    """
-    rep = get_latest_aggregated_reports(database, TIER_3W, n=1)
-    if not rep:
-        # fallback: ultimo 4D se non c'è ancora un 3W
-        rep = get_latest_aggregated_reports(database, TIER_4D, n=1)
-        if not rep:
-            return None
-    r = rep[0]["report"]
-    return {
-        "week_id": rep[0]["timestamp"],
-        "synthesis": r.get("synthesis") or r.get("summary_text", ""),
-        "long_term_risks": ", ".join(r.get("structural_risks", []) or r.get("accumulating_risks", [])),
-        "sector_rotation_signals": r.get("sector_rotation", {}),
-        "macro_strategy": r.get("macro_strategy") or r.get("next_4d_strategy", ""),
-    }
-
-
-def get_latest_daily_snapshots(database, n: int = 3) -> list[dict]:
-    """
-    DEPRECATO: ora ritorna gli ultimi N report 8H in formato compatibile col
-    vecchio schema daily_snapshots.
-    """
-    rep = get_latest_aggregated_reports(database, TIER_8H, n=n)
-    out = []
-    for r in rep:
-        rr = r["report"]
-        out.append({
-            "date": r["timestamp"],
-            "summary_text": rr.get("summary_text", ""),
-            "key_events": rr.get("key_events", []),
-            "macro_bias": rr.get("macro_bias", "NEUTRAL"),
-            "hot_tickers": rr.get("hot_tickers", []),
-        })
-    return out
 
 
 def get_recent_buffer(database, minutes: int = 40) -> list[dict]:

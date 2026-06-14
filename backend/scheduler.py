@@ -492,29 +492,6 @@ async def _scout_hourly_job():
         logger.error("Errore nel job Scout: %s", e, exc_info=True)
 
 
-async def _scheduled_agent_job():
-    """
-    Job legacy — mantenuto per compatibilità ma NON più usato dallo scheduler principale.
-    Sostituito da _watchdog_job (ogni 5 min) + _scout_hourly_job (ogni ora).
-    """
-    global current_mode
-
-    try:
-        mode = get_current_mode()
-        current_mode = mode
-
-        logger.info("Scheduler job legacy avviato - Modalita': %s", mode.upper())
-
-        from agent import run_agent
-        database.cleanup_old_processed_articles(days=7)
-        await run_agent(mode=mode)
-
-        logger.info("Scheduler job legacy completato - Modalita': %s", mode.upper())
-
-    except Exception as e:
-        logger.error("Errore nel job schedulato: %s", e, exc_info=True)
-
-
 async def _keep_alive_ping():
     """
     Pinga il proprio health endpoint per evitare che Render free tier
