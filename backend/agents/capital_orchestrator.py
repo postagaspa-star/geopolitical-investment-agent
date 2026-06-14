@@ -407,7 +407,6 @@ def _validate_directive(directive: dict, snapshot: dict,
         ticker = a.get("ticker", "")
         from_agent = a.get("from_agent", "")
         qty = float(a.get("quantity_to_sell", 0) or 0)
-        proceeds = float(a.get("estimated_proceeds_usd", 0) or 0)
 
         if not ticker:
             return False, "ticker vuoto in action"
@@ -423,6 +422,14 @@ def _validate_directive(directive: dict, snapshot: dict,
         pos = next((p for p in snapshot["positions"] if p["ticker"] == ticker), None)
         if pos is None:
             return False, f"posizione {ticker} non esiste nel portafoglio"
+        # Proprietario REALE (deterministico dallo snapshot), non il from_agent
+        # asserito dal modello: non si può "liberare" capitale liquidando una
+        # propria posizione spacciandola per riallocazione cross-agent.
+        if str(pos.get("agent_owner") or "").lower() == str(requesting_agent or "").lower():
+            return False, (
+                f"posizione {ticker} è di proprietà del richiedente "
+                f"'{requesting_agent}': non è una riallocazione cross-agent"
+            )
         if qty > pos["quantity"]:
             return False, (
                 f"quantity_to_sell {qty} > qty disponibile {pos['quantity']} "
@@ -443,7 +450,11 @@ def _validate_directive(directive: dict, snapshot: dict,
                 f"{MAX_LOSS_TOLERATED_PCT}%: realizzare loss non efficiente"
             )
 
-        total_proceeds += proceeds
+        # Cap calcolato sul valore REALE qty*prezzo (non su estimated_proceeds_usd
+        # fornito dal modello, che poteva dichiararlo basso per superare il cap
+        # e vendere molto più del 25% del NAV).
+        real_price = float(pos.get("current_price") or pos.get("avg_buy_price") or 0)
+        total_proceeds += qty * real_price
 
     # Cap massimo trasferimento
     transfer_pct = (total_proceeds / total_nav) * 100 if total_nav > 0 else 0

@@ -142,6 +142,11 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
                 run_id=run_id,
                 focus_tickers=crypto_focus,
                 watchdog_reason=reason,
+                # Alert reattivo event-driven dal watchdog: deve bypassare il
+                # cooldown 50min (pensato solo per evitare doppi run SCHEDULATI).
+                # Prima senza force gli alert non-rebalance venivano scartati per
+                # ~50min/ora, vanificando il watchdog 24/7.
+                force=True,
             )
         except Exception as e:
             logger.error("[%s][ORCHESTRATOR] Crypto pipeline (event-driven) fallita: %s",
