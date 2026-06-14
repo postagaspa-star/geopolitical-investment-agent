@@ -765,6 +765,201 @@ async def run_3w_report(run_id: str) -> dict:
 
 
 # ============================================================
+# Weekend Intelligence Report (ripristino)
+# ============================================================
+# Il vecchio agente monolitico (agent.py, mode="weekend") produceva un recap
+# geopolitico del weekend, lo salvava in weekend_intelligence e lo iniettava nel
+# contesto del lunedì. Col passaggio all'architettura multi-agente quel job è
+# stato dismesso (_scheduled_agent_job non è più registrato) e il report ha
+# smesso di essere generato. Questa funzione lo ricostruisce nel paradigma
+# nuovo: sintetizza i report aggregati (AGG_4D + AGG_8H) e le card del weekend
+# con DeepSeek (fallback Claude) e salva il recap nella tabella esistente.
+# A differenza della cascade 8H/4D è READ-ONLY sul buffer: NON consuma né
+# elimina micro-card.
+
+WEEKEND_REPORT_PROMPT = """Sei lo Scout Agent. I mercati azionari sono CHIUSI (weekend).
+Devi produrre un REPORT INTELLIGENCE DEL WEEKEND che prepari la settimana di trading.
+
+Ricevi: i report aggregati recenti (4D macro + 8H) e le notizie geopolitiche/
+finanziarie raccolte durante il weekend (GDELT, NewsAPI, Congressional, crypto).
+
+REGOLE:
+1. Sintetizza cosa è successo nel weekend e cosa conta per l'apertura di lunedì.
+2. Identifica gli eventi chiave con il loro impatto e i ticker coinvolti.
+3. Stima le implicazioni di mercato CONCRETE per la riapertura.
+4. Indica gli asset prioritari da monitorare lunedì.
+5. Le crypto sono 24/7: includi i movimenti crypto rilevanti del weekend.
+6. RISPONDI SOLO CON JSON, nessun preambolo.
+
+OUTPUT JSON:
+{
+  "full_analysis": "Analisi geopolitica e di mercato del weekend, 6-10 frasi dense",
+  "key_events": [
+    {"event": "Titolo evento", "impact": "Come impatta i mercati", "tickers": ["XOM", "BTC-USD"]}
+  ],
+  "market_implications": "Implicazioni concrete per l'apertura di lunedì (4-6 frasi)",
+  "priority_assets": ["LMT", "XOM", "BTC-USD"]
+}"""
+
+
+def _last_weekend_report_age_hours(database) -> float | None:
+    """
+    Età in ore dell'ultimo weekend_intelligence salvato (None se mai).
+    Usato per l'anti-double-run del weekend report (skip se troppo recente).
+    """
+    try:
+        rec = database.get_latest_weekend_intelligence()
+        if not rec:
+            return None
+        ts_str = rec.get("saved_at") or rec.get("timestamp") or ""
+        if not ts_str:
+            return None
+        last_ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last_ts).total_seconds() / 3600.0
+    except Exception:
+        return None
+
+
+async def run_weekend_report(run_id: str, *, force: bool = False) -> dict:
+    """
+    Genera il report intelligence del weekend e lo salva in weekend_intelligence.
+
+    Anti-double-run: skip se ne esiste già uno < 20h fa (salvo force=True),
+    così su restart frequenti di Render resta al massimo 1 report al giorno.
+    READ-ONLY sul buffer: NON consuma/elimina micro-card.
+    """
+    import database
+
+    if not force:
+        age = _last_weekend_report_age_hours(database)
+        if age is not None and age < 20.0:
+            logger.info("[%s][SCOUT] Weekend report skip: ultimo di %.1fh fa (<20h)",
+                        run_id, age)
+            return {"skipped": True, "reason": "too_recent", "last_age_hours": age}
+
+    # 1. Raccogli il materiale del weekend (report aggregati + card grezze).
+    #    only_unprocessed=False: includiamo anche le card già consumate dalla
+    #    cascade 8H/4D — qui leggiamo, non aggreghiamo.
+    rep_4d = get_latest_aggregated_reports(database, TIER_4D, n=1)
+    rep_8h = get_latest_aggregated_reports(database, TIER_8H, n=4)
+    geo_cards = _read_buffer_by_types(
+        database,
+        source_types=["GDELT", "NEWSAPI", "CONGRESSIONAL", "YFINANCE_NEWS",
+                      "YFINANCE", "CRYPTO_MARKET", "REDDIT", "X"],
+        window_hours=72,
+        only_unprocessed=False,
+        limit=120,
+    )
+
+    if not rep_4d and not rep_8h and not geo_cards:
+        logger.info("[%s][SCOUT] Weekend report skip: nessun materiale", run_id)
+        try:
+            database.insert_agent_log(run_id, "SCOUT_WEEKEND", json.dumps({
+                "event": "weekend_skipped", "reason": "no_material",
+            }))
+        except Exception:
+            pass
+        return {"skipped": True, "reason": "no_material"}
+
+    # 2. Costruisci il contesto per il modello
+    lines: list[str] = []
+    if rep_4d:
+        r = rep_4d[0]["report"]
+        lines.append("=== REPORT MACRO 4 GIORNI ===")
+        lines.append(f"Bias: {r.get('macro_bias', '?')}")
+        lines.append((r.get("summary_text") or r.get("synthesis") or "")[:1200])
+        if r.get("sector_rotation"):
+            lines.append(f"Rotazione settoriale: "
+                         f"{json.dumps(r.get('sector_rotation'), ensure_ascii=False)}")
+    if rep_8h:
+        lines.append("\n=== REPORT 8H RECENTI ===")
+        for r0 in rep_8h:
+            r = r0["report"]
+            lines.append(f"--- {r0['timestamp']} | Bias: {r.get('macro_bias', '?')} ---")
+            lines.append((r.get("summary_text") or "")[:400])
+            if r.get("hot_tickers"):
+                lines.append(f"Hot: {', '.join(r.get('hot_tickers', [])[:10])}")
+    if geo_cards:
+        lines.append("\n=== NOTIZIE / CARD DEL WEEKEND ===")
+        for c in geo_cards[:80]:
+            st = c.get("source_type", "?")
+            ms = c.get("micro_summary") or ""
+            if ms:
+                lines.append(f"[{st}] {ms[:200]}")
+    context = "\n".join(lines)
+
+    # 3. DeepSeek-V3 (fallback Claude Sonnet)
+    used_model = "unknown"
+    try:
+        try:
+            response_text, used_model = await _call_deepseek(
+                WEEKEND_REPORT_PROMPT, context[:20000])
+        except Exception as ds_err:
+            logger.warning("[%s][SCOUT] Weekend DeepSeek fallback (%s)", run_id, ds_err)
+            response_text, used_model = await _call_claude_fallback(
+                WEEKEND_REPORT_PROMPT, context[:20000])
+        report_obj = _parse_json_object(response_text)
+        if not report_obj:
+            raise ValueError("Empty JSON object from model")
+    except Exception as e:
+        logger.error("[%s][SCOUT] Weekend report errore modello: %s", run_id, e)
+        try:
+            database.insert_agent_log(run_id, "SCOUT_WEEKEND", json.dumps({
+                "event": "weekend_error", "error": str(e)[:400], "model": used_model,
+            }))
+        except Exception:
+            pass
+        return {"error": str(e)}
+
+    # 4. Salva nella tabella weekend_intelligence. key_events come stringa JSON,
+    #    coerente col vecchio save_weekend_intelligence (il frontend tollera sia
+    #    stringa sia array). priority_assets non ha colonna dedicata: lo
+    #    appendiamo al testo implicazioni così resta visibile.
+    full_analysis = (report_obj.get("full_analysis")
+                     or report_obj.get("synthesis")
+                     or report_obj.get("summary_text") or "")
+    key_events = report_obj.get("key_events") or []
+    market_implications = report_obj.get("market_implications") or ""
+    priority_assets = report_obj.get("priority_assets") or []
+    if priority_assets:
+        market_implications = (
+            market_implications
+            + f"\n\nAsset prioritari lunedì: {', '.join(map(str, priority_assets))}")
+
+    try:
+        database.insert_weekend_intelligence(
+            run_id=run_id,
+            content=full_analysis,
+            key_events=json.dumps(key_events, ensure_ascii=False, default=str),
+            market_implications=market_implications,
+        )
+    except Exception as e:
+        logger.error("[%s][SCOUT] Weekend report write fallito: %s", run_id, e)
+        return {"error": f"write_failed: {e}"}
+
+    # 5. Log visibile nel frontend
+    n_events = len(key_events) if isinstance(key_events, list) else 0
+    n_assets = len(priority_assets) if isinstance(priority_assets, list) else 0
+    try:
+        database.insert_agent_log(run_id, "SCOUT_WEEKEND", json.dumps({
+            "event": "weekend_complete",
+            "key_events": n_events,
+            "priority_assets": n_assets,
+            "model": used_model,
+            "input_4d": len(rep_4d), "input_8h": len(rep_8h),
+            "input_cards": len(geo_cards),
+        }, default=str))
+    except Exception:
+        pass
+
+    logger.info("[%s][SCOUT] Weekend report OK: %d eventi, %d asset prioritari, model=%s",
+                run_id, n_events, n_assets, used_model)
+    return report_obj
+
+
+# ============================================================
 # Backward-compat aliases (i vecchi nomi rimangono importabili
 # ma puntano alle nuove funzioni a cascata)
 # ============================================================

@@ -5833,6 +5833,30 @@ async def force_4d_report(background_tasks: BackgroundTasks):
     return {"status": "started", "run_id": run_id, "tier": "4D"}
 
 
+@app.post("/api/scout/force-weekend-report")
+async def force_weekend_report(background_tasks: BackgroundTasks):
+    """
+    Forza adesso la generazione del Weekend Intelligence Report: sintetizza
+    i report aggregati (4D + 8H) e le notizie del weekend in un recap salvato
+    in weekend_intelligence (tab "Weekend Intelligence" del frontend).
+    Usa force=True per bypassare l'anti-double-run (< 20h).
+    """
+    import uuid as _uuid
+    run_id = str(_uuid.uuid4())
+
+    async def _do():
+        try:
+            from agents.scout import run_weekend_report
+            result = await run_weekend_report(run_id, force=True)
+            logger.info("Manual weekend report %s: skipped=%s, error=%s",
+                        run_id, result.get("skipped"), result.get("error"))
+        except Exception as e:
+            logger.error("Manual weekend report failed: %s", e, exc_info=True)
+
+    background_tasks.add_task(_do)
+    return {"status": "started", "run_id": run_id, "report": "weekend"}
+
+
 @app.post("/api/crypto-monitor/run")
 async def trigger_crypto_monitor(background_tasks: BackgroundTasks):
     """
