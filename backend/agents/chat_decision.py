@@ -55,6 +55,16 @@ DEEPSEEK_R1_MODEL = "deepseek-reasoner"
 MAX_HISTORY_MESSAGES = 30   # ultimi N msg passati al modello (per contenere context)
 MAX_OHLCV_TICKERS = 8       # quanti ticker live OHLCV iniettare (top P&L positions)
 
+# Separatore iniettato tra la cronologia storica e il messaggio CORRENTE, per
+# evitare che il modello (R1/Claude) confonda le proprie proposte passate con
+# la richiesta attuale e le ri-emetta (bug ri-proposizione azioni vecchie).
+_CURRENT_TURN_BOUNDARY = (
+    "--- FINE CRONOLOGIA STORICA. Il testo qui sotto è l'UNICA richiesta "
+    "CORRENTE dell'utente a cui devi rispondere. Le azioni proposte nei turni "
+    "precedenti NON vanno ri-emesse se non vengono richiamate esplicitamente "
+    "qui sotto. ---"
+)
+
 
 # ─── System prompts ─────────────────────────────────────────────────────────
 
@@ -63,6 +73,20 @@ MAX_OHLCV_TICKERS = 8       # quanti ticker live OHLCV iniettare (top P&L positi
 # in chat. L'AI risponde con `proposed_actions[]` e l'utente conferma ogni
 # singola azione cliccando il bottone nella card.
 ACTIONS_BLOCK = """═══════════════════════════════════════════════════════════════════════
+SCOPE — RISPONDI SOLO ALLA RICHIESTA CORRENTE
+═══════════════════════════════════════════════════════════════════════
+Rispondi ESCLUSIVAMENTE a ciò che l'utente chiede nel SUO ULTIMO messaggio.
+La cronologia della conversazione e i blocchi di contesto servono SOLO a
+capire il filo del discorso: NON sono una lista di azioni da rilanciare.
+- Se l'utente chiede di un asset (es. "analisi su XRP"), proponi azioni
+  SOLO su quell'asset.
+- NON ri-proporre, ri-sollevare né "riconfermare" trade / stop-loss /
+  take-profit / direttive di turni precedenti o di run autonome, a meno che
+  l'utente non li richiami ESPLICITAMENTE in questo messaggio.
+- Non attribuire MAI all'utente richieste che non ha scritto nel messaggio
+  corrente.
+
+═══════════════════════════════════════════════════════════════════════
 AZIONI CHE PUOI PROPORRE — array proposed_actions[]
 ═══════════════════════════════════════════════════════════════════════
 
@@ -120,11 +144,15 @@ un'azione che descrivi soltanto a parole nel "text". Quindi:
 - Se descrivi un trade/stop/take-profit/direttiva nel testo, DEVI metterlo
   ANCHE in proposed_actions[] nello stesso messaggio. Testo senza l'oggetto
   strutturato = per l'utente non succede NULLA.
-- Vale ANCHE quando RI-proponi o confermi qualcosa gia' detto prima (es.
-  "ti ripropongo lo short su ETH"): ri-emetti SEMPRE l'azione completa in
-  proposed_actions[]. Non dire mai "come proposto sopra" lasciando l'array
-  vuoto — l'utente non avrebbe nessuna card da confermare.
-- Se invece NON vuoi proporre azioni, lascia proposed_actions: [] e basta.
+- Quando proponi un'azione IN RISPOSTA AL MESSAGGIO CORRENTE (o quando
+  l'utente ti chiede ESPLICITAMENTE ora di confermare/riproporre una certa
+  azione), mettila SEMPRE completa in proposed_actions[] — mai "come proposto
+  sopra" con l'array vuoto, o l'utente non avrebbe nessuna card.
+  Questo NON ti autorizza a ripescare proposte di turni precedenti che
+  l'utente non ha richiamato adesso: quelle restano nella cronologia, non si
+  ri-emettono.
+- Se NON stai proponendo nulla in risposta a questo messaggio, lascia
+  proposed_actions: [] e basta.
 """
 
 
@@ -528,13 +556,15 @@ def _build_context_block(agent_type: str, live_ohlcv: dict) -> str:
             auto_runs = _build_recent_decisions_block(agent_type="crypto", limit=4)
             if auto_runs:
                 parts.append(
-                    "─── LE TUE ULTIME DECISIONI AUTONOME CRYPTO ───\n"
-                    "Queste sono le valutazioni che TU STESSO hai prodotto in "
-                    "modalita' autonoma (non sollecitata dall'utente, quindi "
-                    "piu' obiettiva). Se l'utente ti chiede di un asset che "
-                    "qui risulta valutato SELL/NO_TRADE, la tua posizione di "
-                    "DEFAULT resta questa: cambiala solo con dati nuovi o "
-                    "argomenti che invalidano la tesi, citandola esplicitamente.\n\n"
+                    "─── LE TUE ULTIME DECISIONI AUTONOME CRYPTO (solo background) ───\n"
+                    "ATTENZIONE: questo blocco NON è una richiesta dell'utente e "
+                    "NON è una lista di azioni da rilanciare. Sono valutazioni che "
+                    "hai prodotto in autonomia, utili SOLO come sfondo per "
+                    "coerenza. Se — e SOLO SE — l'utente nel messaggio CORRENTE ti "
+                    "chiede di un asset che qui risulta valutato in un certo modo, "
+                    "puoi citare quella valutazione per coerenza (spiegando cosa è "
+                    "eventualmente cambiato). NON ri-proporre e NON eseguire queste "
+                    "azioni se l'utente non te lo chiede adesso.\n\n"
                     + auto_runs
                 )
         except Exception as e:
@@ -557,6 +587,15 @@ def _build_context_block(agent_type: str, live_ohlcv: dict) -> str:
 
 
 # ─── Engine calls ───────────────────────────────────────────────────────────
+
+def _extract_text_blocks(response) -> str:
+    """Concatena il testo dai blocchi `.text` di una response Anthropic."""
+    out = ""
+    for block in getattr(response, "content", None) or []:
+        if hasattr(block, "text"):
+            out += block.text
+    return out
+
 
 async def _call_claude(system_prompt: str, history: list, user_message: str,
                        context_block: str) -> str:
@@ -598,7 +637,9 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
         content = h.get("content", "")
         if role in ("user", "assistant") and content:
             messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": user_message})
+    had_history = len(messages) > 0
+    cur = (_CURRENT_TURN_BOUNDARY + "\n\n" + user_message) if had_history else user_message
+    messages.append({"role": "user", "content": cur})
 
     # Beta header: senza questo, il "ttl: 1h" viene ignorato dal backend
     # Anthropic e si applica il default 5 minuti.
@@ -614,10 +655,26 @@ async def _call_claude(system_prompt: str, history: list, user_message: str,
         )
 
     response = await asyncio.to_thread(_sync)
-    text = ""
-    for block in response.content:
-        if hasattr(block, "text"):
-            text += block.text
+    text = _extract_text_blocks(response)
+    # Robustezza: se Claude torna senza blocchi di testo (es. stop_reason
+    # anomalo), ritenta UNA volta col modello di fallback prima di propagare ""
+    # a valle (era una causa di "(nessuna risposta)"; CLAUDE_MODEL_FALLBACK
+    # prima era definito ma mai usato).
+    if not text.strip():
+        sr = getattr(response, "stop_reason", None)
+        logger.warning("[CHAT-DEC] _call_claude testo vuoto (stop_reason=%s, model=%s) "
+                       "→ retry con %s", sr, CLAUDE_MODEL, CLAUDE_MODEL_FALLBACK)
+        try:
+            def _sync_fb():
+                return client.messages.create(
+                    model=CLAUDE_MODEL_FALLBACK, max_tokens=4000,
+                    system=system_blocks, messages=messages,
+                    extra_headers=_BETA_HEADERS,
+                )
+            response = await asyncio.to_thread(_sync_fb)
+            text = _extract_text_blocks(response)
+        except Exception as e:
+            logger.warning("[CHAT-DEC] _call_claude retry fallback fallito: %s", e)
     # Log cache stats (best-effort)
     try:
         usage = getattr(response, "usage", None)
@@ -660,12 +717,15 @@ async def _call_deepseek_r1(system_prompt: str, history: list, user_message: str
     full_system = system_prompt + "\n\n═══════════════ CONTESTO LIVE ═══════════════\n\n" + context_block
 
     messages = [{"role": "system", "content": full_system}]
+    had_history = False
     for h in history:
         role = h.get("role")
         content = h.get("content", "")
         if role in ("user", "assistant") and content:
             messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": user_message})
+            had_history = True
+    cur = (_CURRENT_TURN_BOUNDARY + "\n\n" + user_message) if had_history else user_message
+    messages.append({"role": "user", "content": cur})
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
@@ -777,6 +837,43 @@ def _validate_action(a: dict) -> dict | None:
     return None
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Estrae il primo oggetto JSON BILANCIATO da `text`, robusto a:
+      - graffe dentro le stringhe JSON (es. {"text": "usa {\\"stop\\": -5}"})
+      - prosa o blocco ```json prima/dopo il JSON
+    Prima si usava find('{')/rfind('}') greedy: una graffa nel campo text
+    rompeva il parsing → testo perso → "(nessuna risposta)". None se assente."""
+    if not text:
+        return None
+    fence = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
+    target = fence.group(1) if fence else text
+    start = target.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(target)):
+        c = target[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return target[start:i + 1]
+    return None
+
+
 def _parse_response(raw_text: str) -> dict:
     """
     Estrae {text, proposed_trade, proposed_actions} dal raw del modello.
@@ -798,17 +895,9 @@ def _parse_response(raw_text: str) -> dict:
         return {"text": "", "proposed_trade": None, "proposed_actions": []}
 
     text = raw_text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-
-    json_start = text.find("{")
-    json_end = text.rfind("}")
-
-    if json_start < 0 or json_end <= json_start:
+    candidate = _extract_json_object(text)
+    if candidate is None:
         return {"text": text, "proposed_trade": None, "proposed_actions": []}
-
-    candidate = text[json_start:json_end + 1]
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError:
@@ -897,6 +986,53 @@ def _parse_response(raw_text: str) -> dict:
 
 # ─── Public API ─────────────────────────────────────────────────────────────
 
+def _build_history(raw_history: list, exclude_id=None) -> list:
+    """Costruisce la history per il modello MARCANDO i turni assistant che
+    contenevano azioni proposte/eseguite. Così il modello non confonde le
+    proprie proposte passate con la richiesta corrente e non le ri-emette
+    (bug ri-proposizione azioni vecchie)."""
+    out = []
+    for m in raw_history or []:
+        if exclude_id is not None and m.get("id") == exclude_id:
+            continue
+        role = m.get("role")
+        content = m.get("content", "") or ""
+        if role not in ("user", "assistant"):
+            continue
+        if role == "assistant":
+            if m.get("executed_action_results"):
+                content = ("[AZIONE/E DI UN TURNO PRECEDENTE — GIÀ ESEGUITA/E in "
+                           "passato. Non ri-eseguirla e non ri-proporla.]\n" + content)
+            elif m.get("proposed_actions"):
+                content = ("[PROPOSTA DI UN TURNO PRECEDENTE — già mostrata "
+                           "all'utente. NON ri-emetterla se non te la richiede ORA "
+                           "esplicitamente.]\n" + content)
+        if content:
+            out.append({"role": role, "content": content})
+    return out[-MAX_HISTORY_MESSAGES:]
+
+
+async def _final_plaintext_answer(agent_type: str, history: list,
+                                  user_message: str, context_block: str) -> str:
+    """Ultimo tentativo anti "(nessuna risposta)": chiede una risposta in TESTO
+    SEMPLICE (niente JSON, niente azioni), così l'utente non resta mai senza
+    risposta reale. Best-effort: ritorna "" se anche questo fallisce."""
+    sys_plain = (
+        "Sei l'assistente di trading di GeoInvest. Rispondi all'ULTIMO messaggio "
+        "dell'utente in testo semplice italiano: NIENTE JSON, NIENTE azioni "
+        "proposte, solo una risposta utile e concisa usando il contesto fornito. "
+        "Se non hai dati tecnici freschi, dillo e rispondi con quello che sai "
+        "(macro, regime, posizioni aperte). Rispondi SOLO alla richiesta corrente."
+    )
+    try:
+        if agent_type == "crypto":
+            return await _call_deepseek_r1(sys_plain, history, user_message, context_block)
+        return await _call_claude(sys_plain, history, user_message, context_block)
+    except Exception as e:
+        logger.warning("[CHAT-DEC] fallback testo-semplice fallito: %s", e)
+        return ""
+
+
 async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
     """
     Entry point principale. Carica history dal DB, costruisce contesto,
@@ -928,12 +1064,7 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
 
     # 3. Carica history per contesto modello (escluso il msg appena inserito)
     raw_history = database.get_decision_chat_messages(conv_id, limit=MAX_HISTORY_MESSAGES + 5)
-    history = []
-    for m in raw_history:
-        if m.get("id") == user_msg_id:
-            continue
-        history.append({"role": m.get("role"), "content": m.get("content", "")})
-    history = history[-MAX_HISTORY_MESSAGES:]
+    history = _build_history(raw_history, exclude_id=user_msg_id)
 
     # 4. Costruisci contesto live (portfolio + positions + market + OHLCV)
     try:
@@ -1095,7 +1226,13 @@ async def chat_with_decision_agent(agent_type: str, user_message: str) -> dict:
     if not text or not text.strip():
         logger.warning("[CHAT-DEC] %s: testo finale vuoto (model=%s). raw[:600]=%s",
                        agent_type, model_used, (raw_response or "")[:600])
-        if proposed_actions:
+        # Ultimo tentativo: risposta in TESTO SEMPLICE (no JSON) così l'utente
+        # non resta MAI senza risposta reale (causa principale di "nessuna
+        # risposta": testo vuoto/non parsato che cadeva su un messaggio generico).
+        fb = await _final_plaintext_answer(agent_type, history, user_message, context_block)
+        if fb and fb.strip():
+            text = fb.strip()
+        elif proposed_actions:
             text = ("Ho preparato delle azioni proposte qui sotto da confermare "
                     "(non ho aggiunto un commento testuale).")
         else:
