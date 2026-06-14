@@ -618,6 +618,25 @@ async def get_settings():
             settings = database.get_config_settings()
         else:
             settings = database.get_all_settings()
+        # SICUREZZA: maschera i SEGRETI (API key/token/secret) prima di
+        # restituirli — un GET non autenticato non deve esporli in chiaro
+        # (prima un solo GET restituiva tutte le chiavi LLM/dati in plaintext).
+        # La UI Settings NON mostra i valori delle chiavi (solo i prompt),
+        # quindi nessuna regressione; resta visibile se la chiave è configurata
+        # e la sua lunghezza.
+        if isinstance(settings, dict):
+            _secret_markers = ("api_key", "apikey", "api-key", "secret",
+                               "token", "password", "bearer")
+
+            def _is_secret(name: str) -> bool:
+                n = str(name).lower()
+                return any(m in n for m in _secret_markers) or n.endswith("_key")
+
+            settings = {
+                k: ("•" * 8 + f" (configurata, {len(v)} char)"
+                    if isinstance(v, str) and v and _is_secret(k) else v)
+                for k, v in settings.items()
+            }
         return {"settings": settings}
     except Exception as e:
         logger.error(f"Errore nel recupero delle impostazioni: {e}", exc_info=True)

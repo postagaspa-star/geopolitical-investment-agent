@@ -353,7 +353,7 @@ def _validate_indicators(ticker_data: dict) -> tuple[dict, list]:
     return ticker_data, warnings
 
 
-async def _fetch_ticker_indicators(ticker: str, period_days: int = 90) -> dict:
+async def _fetch_ticker_indicators(ticker: str, period_days: int = 365) -> dict:
     """
     Recupera dati OHLCV e calcola indicatori tecnici per un ticker.
     Usa yfinance (via data_fetchers).

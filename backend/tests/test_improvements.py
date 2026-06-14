@@ -19,6 +19,26 @@ def test_live_context_includes_risk_state(monkeypatch):
     assert "RISK_STATE_MARKER_XYZ" in ctx
 
 
+def test_settings_get_redacts_secrets(monkeypatch):
+    # #2 sicurezza: GET /api/settings non deve esporre i segreti in chiaro,
+    # ma deve lasciare intatti prompt/flag (la UI carica i prompt da qui).
+    import asyncio
+    import database
+    import main
+    monkeypatch.setattr(database, "get_config_settings",
+                        lambda: {"anthropic_api_key": "sk-secret-123456",
+                                 "deepseek_key": "dk-xyz",
+                                 "prompt_scout": "ciao mondo",
+                                 "commission_bps": "10"}, raising=False)
+    res = asyncio.run(main.get_settings())
+    s = res["settings"]
+    assert "sk-secret-123456" not in str(s["anthropic_api_key"])
+    assert "configurata" in s["anthropic_api_key"]
+    assert "dk-xyz" not in str(s["deepseek_key"])     # *_key mascherato
+    assert s["prompt_scout"] == "ciao mondo"          # prompt NON mascherato
+    assert s["commission_bps"] == "10"                # flag NON mascherato
+
+
 def test_live_context_survives_risk_state_failure(monkeypatch):
     # se il blocco risk_state esplode, il contesto NON deve rompersi (best-effort)
     import risk_state
