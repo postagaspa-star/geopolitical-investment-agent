@@ -271,6 +271,21 @@ def validate_trade(
                 f"supera il cap del profilo {p['label']} ({cap:.1f}%). Riduci o salta."
             )
 
+    # 2b. Cap di esposizione SATELLITE aggregata (solo universo esteso).
+    if (tier == "satellite" and satellite_exposure_pct is not None
+            and allocation_pct is not None):
+        try:
+            cap = float(p.get("max_satellite_exposure_pct", 100.0))
+            projected = float(satellite_exposure_pct) + float(allocation_pct)
+            if projected > cap + 1e-6:
+                return False, (
+                    f"Esposizione satellite {projected:.1f}% (attuale "
+                    f"{float(satellite_exposure_pct):.1f}% + nuovo {float(allocation_pct):.1f}%) "
+                    f"supera il cap del profilo {p['label']} ({cap:.1f}%). Riduci o salta."
+                )
+        except (TypeError, ValueError):
+            pass
+
     # 3. Max open positions: per crypto usiamo il cap specifico (piu' stretto),
     # per equity il generale. NB: open_positions_count deve essere il count
     # specifico per la asset_class (vedi orchestrator).

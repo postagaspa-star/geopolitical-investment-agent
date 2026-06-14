@@ -16,6 +16,7 @@ const PHASE_COLORS = {
   SCOUT: "#10b981",
   SCOUT_DAILY: "#059669",
   SCOUT_WEEKLY: "#047857",
+  SCOUT_WEEKEND: "#0d9488",
   SCOUT_BUFFER_GDELT: "#10b981",
   SCOUT_BUFFER_NEWSAPI: "#10b981",
   SCOUT_BUFFER_CONGRESSIONAL: "#10b981",
@@ -58,6 +59,7 @@ const PHASE_LABELS = {
   SCOUT_4D: "Scout Report 4D",
   SCOUT_DAILY: "Daily Recap (legacy)",
   SCOUT_WEEKLY: "Weekly Matrix (legacy)",
+  SCOUT_WEEKEND: "Scout Weekend Report",
   SCOUT_BUFFER_GDELT: "Scout GDELT",
   SCOUT_BUFFER_NEWSAPI: "Scout NewsAPI",
   SCOUT_BUFFER_CONGRESSIONAL: "Scout Congressional",
@@ -678,7 +680,7 @@ function IntelligencePage() {
       {activeSection === "intelligence" && (
         <div>
           {(!Array.isArray(intelligence) || intelligence.length === 0) ? (
-            <div className="empty-state">Nessuna intelligence weekend disponibile. La Daily/Weekly Recap dello Scout viene generata alle 23:59 CET ogni giorno (e domenica per la Weekly).</div>
+            <div className="empty-state">Nessuna intelligence weekend disponibile. Lo Scout genera il recap geopolitico del weekend il sabato e la domenica (~20:30 CET), sintetizzando i report aggregati e le notizie del fine settimana.</div>
           ) : intelligence.map((item) => {
             const events = parseJson(item.key_events);
             const isExp = expandedId === `i-${item.id}`;

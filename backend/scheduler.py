@@ -492,29 +492,6 @@ async def _scout_hourly_job():
         logger.error("Errore nel job Scout: %s", e, exc_info=True)
 
 
-async def _scheduled_agent_job():
-    """
-    Job legacy — mantenuto per compatibilità ma NON più usato dallo scheduler principale.
-    Sostituito da _watchdog_job (ogni 5 min) + _scout_hourly_job (ogni ora).
-    """
-    global current_mode
-
-    try:
-        mode = get_current_mode()
-        current_mode = mode
-
-        logger.info("Scheduler job legacy avviato - Modalita': %s", mode.upper())
-
-        from agent import run_agent
-        database.cleanup_old_processed_articles(days=7)
-        await run_agent(mode=mode)
-
-        logger.info("Scheduler job legacy completato - Modalita': %s", mode.upper())
-
-    except Exception as e:
-        logger.error("Errore nel job schedulato: %s", e, exc_info=True)
-
-
 async def _keep_alive_ping():
     """
     Pinga il proprio health endpoint per evitare che Render free tier
@@ -568,6 +545,40 @@ async def _scout_4d_report_job():
                         result.get("macro_bias", "?"), result.get("consumed_records", 0))
     except Exception as e:
         logger.error("Errore Scout 4D: %s", e, exc_info=True)
+
+
+async def _scout_weekend_report_job():
+    """
+    Weekend Intelligence Report — sabato e domenica.
+
+    Sintetizza i report aggregati (4D + 8H) e le notizie del weekend in un
+    recap geopolitico salvato in weekend_intelligence (mostrato nella tab
+    "Weekend Intelligence" del frontend e disponibile come contesto per il
+    lunedì). Ricostruisce ciò che il vecchio agente monolitico produceva in
+    mode="weekend" e che si era perso nel passaggio al multi-agente.
+
+    Il job stesso fa skip se non è weekend o se esiste già un report < 20h fa.
+    """
+    from uuid import uuid4
+    run_id = str(uuid4())
+    try:
+        # Guardia weekend: il cron è già sab/dom, ma il backfill-al-boot può
+        # scattare appena passata la mezzanotte di domenica (= lunedì UTC).
+        if not is_weekend():
+            logger.debug("Weekend report: non è weekend, skip")
+            return
+        from agents.scout import run_weekend_report
+        result = await run_weekend_report(run_id)
+        if result.get("skipped"):
+            logger.info("Weekend report skipped: %s", result.get("reason"))
+        elif result.get("error"):
+            logger.warning("Weekend report error: %s", result.get("error"))
+        else:
+            ke = result.get("key_events", [])
+            logger.info("Weekend report OK: %d eventi chiave",
+                        len(ke) if isinstance(ke, list) else 0)
+    except Exception as e:
+        logger.error("Errore Weekend report job: %s", e, exc_info=True)
 
 
 async def _crypto_pipeline_job():
@@ -1308,6 +1319,38 @@ def start_scheduler() -> AsyncIOScheduler:
         next_run_time=scout_4d_first_run,
     )
 
+    # ── Weekend Intelligence Report: sab + dom 18:30 UTC (~20:30 CET) ──
+    # Ricostruisce il recap geopolitico del weekend che il vecchio agente
+    # monolitico produceva (mode="weekend") e che si era perso nel passaggio
+    # al multi-agente. Lo salva in weekend_intelligence (tab dedicata nel
+    # frontend). Due run (sabato + domenica) coprono il weekend e preparano
+    # l'apertura di lunedì.
+    # BACKFILL: se è weekend adesso e non c'è un report < 20h, gira al boot
+    # così l'utente lo vede subito dopo il deploy senza attendere le 18:30.
+    weekend_first_run = None
+    try:
+        if is_weekend():
+            from agents.scout import _last_weekend_report_age_hours
+            wk_age = _last_weekend_report_age_hours(database)
+            if wk_age is None or wk_age > 20:
+                weekend_first_run = now_utc + timedelta(minutes=6)
+                logger.info("Weekend report backfill: ultimo %s, forzo first_run a +6min",
+                            f"{wk_age:.1f}h fa" if wk_age else "mai eseguito")
+    except Exception as exc:
+        logger.debug("Weekend report backfill check fallito: %s", exc)
+
+    weekend_kwargs = dict(
+        trigger=CronTrigger(day_of_week="sat,sun", hour=18, minute=30),
+        id="scout_weekend_report",
+        name="Weekend Intelligence Report (sab+dom 18:30 UTC)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    if weekend_first_run is not None:
+        weekend_kwargs["next_run_time"] = weekend_first_run
+    _scheduler.add_job(_scout_weekend_report_job, **weekend_kwargs)
+
 
     # ── Crypto pipeline: CRON ogni ora a :00, 24/7 ──
     # Schedule cron-fisso (non interval). Se watchdog triggera crypto a 14:35,
@@ -1560,6 +1603,7 @@ def get_scheduler_info() -> dict:
     scout_next = None
     scout_8h_next = None
     scout_4d_next = None
+    scout_weekend_next = None
     crypto_pipeline_next = None
     standard_pipeline_next = None
     if _scheduler and running:
@@ -1575,6 +1619,9 @@ def get_scheduler_info() -> dict:
         s4 = _scheduler.get_job("scout_4d_report")
         if s4 and s4.next_run_time:
             scout_4d_next = s4.next_run_time.isoformat()
+        sw = _scheduler.get_job("scout_weekend_report")
+        if sw and sw.next_run_time:
+            scout_weekend_next = sw.next_run_time.isoformat()
         cj = _scheduler.get_job("crypto_pipeline_job")
         if cj and cj.next_run_time:
             crypto_pipeline_next = cj.next_run_time.isoformat()
@@ -1634,6 +1681,12 @@ def get_scheduler_info() -> dict:
             "schedule": "ogni 4 giorni (aggrega report 8H — top tier macro)",
             "next_run": scout_4d_next,
             "last_run": scout_4d_last,
+            "active": running,
+        },
+        "scout_weekend": {
+            "schedule": "sab+dom 18:30 UTC (recap geopolitico weekend)",
+            "next_run": scout_weekend_next,
+            "last_run": _last_log_for_phases(["SCOUT_WEEKEND"]),
             "active": running,
         },
         "technical": {
