@@ -230,7 +230,7 @@ function LiveApp() {
             <Route path="analytics" element={<AnalyticsPage />} />
             <Route path="edge-tracker" element={<EdgeTrackerPage />} />
             <Route path="coach-cards" element={<CoachCardsPage />} />
-            <Route path="chat" element={<ChatDecisionPage />} />
+            <Route path="chat" element={<ChatDecisionPage onDataRefresh={fetchAll} />} />
             <Route path="settings" element={<Settings onDataRefresh={fetchAll} />} />
           </Routes>
         </ErrorBoundary>

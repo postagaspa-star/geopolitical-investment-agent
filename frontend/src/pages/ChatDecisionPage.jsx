@@ -650,7 +650,7 @@ function CommitmentsPanel({ agentType, accentColor }) {
 }
 
 
-export default function ChatDecisionPage() {
+export default function ChatDecisionPage({ onDataRefresh }) {
   const [agentType, setAgentType] = useState("standard");
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -799,6 +799,9 @@ export default function ChatDecisionPage() {
         if (m.id !== messageId) return m;
         return { ...m, executed_trade_id: data.trade_id };
       }));
+      // Rinfresca SUBITO i dati globali: il trade e' reale, dashboard/posizioni/
+      // trade devono mostrarlo all'istante invece di aspettare il polling da 15s.
+      if (typeof onDataRefresh === "function") onDataRefresh();
     } catch (e) {
       setError(`Esecuzione fallita: ${e.message || e}`);
     } finally {
@@ -844,6 +847,12 @@ export default function ChatDecisionPage() {
       }));
       if (data.result && data.result.ok === false) {
         setError(`Azione fallita: ${data.result.error || "errore sconosciuto"}`);
+      } else if (typeof onDataRefresh === "function") {
+        // Azione riuscita (trade/SL/TP): rinfresca SUBITO i dati globali cosi'
+        // dashboard, posizioni e grafico riflettono l'operazione all'istante,
+        // invece di aspettare il polling da 15s (era il motivo per cui i trade
+        // da chat "non sembravano reali").
+        onDataRefresh();
       }
     } catch (e) {
       setError(`Esecuzione fallita: ${e.message || e}`);
