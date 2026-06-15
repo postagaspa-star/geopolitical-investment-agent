@@ -85,7 +85,9 @@ def run_swing_backtest(bars: list[dict], params: SwingParams | None = None,
         if pos_side == LONG:
             return cash + pos_units * price
         if pos_side == SHORT:
-            return cash + pos_units * (2 * pos_entry - price)
+            # cash-neutral (#11): coerente col close (pos_units*(pos_entry-price));
+            # 2*pos_entry-price gonfiava NAV e sottostimava il DD degli short.
+            return cash + pos_units * (pos_entry - price)
         return cash
 
     def close_pos(price, reason):

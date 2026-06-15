@@ -55,7 +55,10 @@ def run_regime_backtest(bars, params=None, slippage_bps=5.0,
         if side == LONG:
             return cash + units * price
         if side == SHORT:
-            return cash + units * (2 * entry - price)
+            # cash-neutral (#11): cash + P&L non realizzato, coerente col close
+            # (units*(entry-price)). Lo short NON ha accreditato proventi al cash:
+            # 2*entry-price aggiungeva un units*entry spurio → NAV/DD short gonfiati.
+            return cash + units * (entry - price)
         return cash
 
     def close(price):

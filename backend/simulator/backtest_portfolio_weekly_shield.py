@@ -65,7 +65,9 @@ def _run_one_asset(bars, shield, funding_wk=0.21):
         if side == LONG:
             return cash + units * price
         if side == SHORT:
-            return cash + units * (2 * entry - price)
+            # cash-neutral (#11): coerente col close (units*(entry-price));
+            # 2*entry-price gonfiava NAV e sottostimava il DD degli short.
+            return cash + units * (entry - price)
         return cash
 
     def close(price):
