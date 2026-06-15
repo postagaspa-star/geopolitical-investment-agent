@@ -1290,6 +1290,23 @@ def _exec_action_set_stop_loss(action: dict) -> dict:
     if sl_price <= 0:
         return {"ok": False, "error": "stop_loss_price calcolato non valido"}
 
+    # PARZIALE (ladder): se l'azione specifica una quantita', crea un ordine di
+    # uscita parziale (chiude SOLO quella qty al trigger) invece del singolo SL
+    # whole-position. Piu' livelli impilabili sulla stessa posizione.
+    if action.get("quantity") is not None:
+        try:
+            import portfolio as _pf
+            res = _pf.add_partial_exit(ticker, "SL", sl_price,
+                                       float(action["quantity"]),
+                                       run_id="chat_decision_user")
+        except Exception as e:
+            return {"ok": False, "error": f"SL parziale fallito: {e}"}
+        if not res.get("success"):
+            return {"ok": False, "error": res.get("reason", "SL parziale rifiutato")}
+        return {"ok": True, "ticker": ticker, "stop_loss_price": sl_price,
+                "quantity": res.get("quantity"), "partial": True,
+                "order_id": res.get("order_id")}
+
     try:
         database.update_position_auto_exit(
             ticker, stop_loss_price=sl_price, set_by="chat_decision_user",
@@ -1332,6 +1349,23 @@ def _exec_action_set_take_profit(action: dict) -> dict:
 
     if tp_price <= 0:
         return {"ok": False, "error": "take_profit_price calcolato non valido"}
+
+    # PARZIALE (ladder): se l'azione specifica una quantita', crea un ordine di
+    # uscita parziale (chiude SOLO quella qty al trigger) invece del singolo TP
+    # whole-position. Piu' livelli impilabili (es. 2 BTC: TP 1@60k + TP 1@70k).
+    if action.get("quantity") is not None:
+        try:
+            import portfolio as _pf
+            res = _pf.add_partial_exit(ticker, "TP", tp_price,
+                                       float(action["quantity"]),
+                                       run_id="chat_decision_user")
+        except Exception as e:
+            return {"ok": False, "error": f"TP parziale fallito: {e}"}
+        if not res.get("success"):
+            return {"ok": False, "error": res.get("reason", "TP parziale rifiutato")}
+        return {"ok": True, "ticker": ticker, "take_profit_price": tp_price,
+                "quantity": res.get("quantity"), "partial": True,
+                "order_id": res.get("order_id")}
 
     try:
         database.update_position_auto_exit(

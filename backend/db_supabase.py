@@ -135,6 +135,24 @@ def _ensure_schema_migrations():
         ALTER TABLE positions ADD COLUMN IF NOT EXISTS auto_exit_set_at TIMESTAMPTZ;
         ALTER TABLE positions ADD COLUMN IF NOT EXISTS auto_exit_set_by TEXT;
 
+        -- v15: ladder di uscite PARZIALI (piu' SL/TP per posizione, ognuno con la
+        -- propria quantita'). Eseguono la chiusura parziale al trigger.
+        CREATE TABLE IF NOT EXISTS position_exit_orders (
+            id BIGSERIAL PRIMARY KEY,
+            ticker TEXT NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'LONG',
+            kind TEXT NOT NULL,
+            trigger_price DOUBLE PRECISION NOT NULL,
+            quantity NUMERIC(20,8) NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            set_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            filled_at TIMESTAMPTZ,
+            fill_price DOUBLE PRECISION,
+            filled_qty NUMERIC(20,8)
+        );
+        CREATE INDEX IF NOT EXISTS idx_exit_orders_active ON position_exit_orders (ticker, status);
+
         -- v11: quantity NUMERIC invece di INTEGER.
         -- Bug: 50% di 199 NVDA shares = 99.5 → INTEGER rifiuta con
         -- "invalid input syntax for type integer". Inoltre crypto frazionali
@@ -479,6 +497,81 @@ def get_positions_with_auto_exits():
     except Exception as e:
         logger.warning("get_positions_with_auto_exits fallita: %s", e)
         return []
+
+
+# ── Ladder di uscite parziali (position_exit_orders) ───────────────────────
+def add_exit_order(ticker, kind, trigger_price, quantity, direction="LONG", set_by=""):
+    kind = str(kind or "").upper()
+    if kind not in ("SL", "TP"):
+        return None
+    try:
+        tp = float(trigger_price)
+        q = float(quantity)
+    except (TypeError, ValueError):
+        return None
+    if tp <= 0 or q <= 0:
+        return None
+    client = _get_client()
+    try:
+        res = client.table("position_exit_orders").insert({
+            "ticker": ticker, "direction": str(direction or "LONG").upper(),
+            "kind": kind, "trigger_price": tp, "quantity": q,
+            "status": "active", "set_by": set_by or "",
+        }).execute()
+        return res.data[0]["id"] if res.data else None
+    except Exception as e:
+        logger.warning("add_exit_order fallita: %s", e)
+        return None
+
+
+def get_active_exit_orders(ticker=None):
+    client = _get_client()
+    try:
+        q = client.table("position_exit_orders").select("*").eq("status", "active")
+        if ticker:
+            q = q.eq("ticker", ticker)
+        return q.order("id").execute().data or []
+    except Exception as e:
+        logger.warning("get_active_exit_orders fallita: %s", e)
+        return []
+
+
+def cancel_exit_order(order_id):
+    client = _get_client()
+    try:
+        client.table("position_exit_orders").update({"status": "cancelled"}).eq(
+            "id", order_id).eq("status", "active").execute()
+        return True
+    except Exception as e:
+        logger.warning("cancel_exit_order fallita: %s", e)
+        return False
+
+
+def cancel_exit_orders_for_ticker(ticker, kind=None):
+    client = _get_client()
+    try:
+        q = client.table("position_exit_orders").update({"status": "cancelled"}).eq(
+            "ticker", ticker).eq("status", "active")
+        if kind:
+            q = q.eq("kind", str(kind).upper())
+        q.execute()
+        return True
+    except Exception as e:
+        logger.warning("cancel_exit_orders_for_ticker fallita: %s", e)
+        return False
+
+
+def mark_exit_order_filled(order_id, fill_price, filled_qty):
+    client = _get_client()
+    try:
+        client.table("position_exit_orders").update({
+            "status": "filled", "filled_at": _now_iso(),
+            "fill_price": float(fill_price), "filled_qty": float(filled_qty),
+        }).eq("id", order_id).execute()
+        return True
+    except Exception as e:
+        logger.warning("mark_exit_order_filled fallita: %s", e)
+        return False
 
 
 def count_positions():
@@ -923,6 +1016,10 @@ def reset_portfolio_data(new_balance):
     client.table("trades").delete().neq("id", 0).execute()
     client.table("portfolio_snapshots").delete().neq("id", 0).execute()
     client.table("agent_logs").delete().neq("id", 0).execute()
+    try:
+        client.table("position_exit_orders").delete().neq("id", 0).execute()
+    except Exception:
+        pass
     # Aggiorna il portafoglio
     row = client.table("portfolio").select("id").order("id", desc=True).limit(1).execute()
     if row.data:

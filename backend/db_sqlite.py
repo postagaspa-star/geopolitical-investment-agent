@@ -196,6 +196,27 @@ def init_db():
                 ON agent_commitments (agent_type, status, expires_at);
             CREATE INDEX IF NOT EXISTS idx_agent_commit_recent
                 ON agent_commitments (agent_type, created_at DESC);
+            -- v15: ladder di uscite PARZIALI — piu' SL/TP per posizione, ognuno
+            -- con la propria quantita'. Eseguono la chiusura parziale al trigger
+            -- (a differenza delle colonne singole positions.stop_loss_price/
+            -- take_profit_price, che restano per il vecchio auto-exit single-level).
+            CREATE TABLE IF NOT EXISTS position_exit_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                direction TEXT NOT NULL DEFAULT 'LONG',
+                kind TEXT NOT NULL CHECK(kind IN ('SL','TP')),
+                trigger_price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active','filled','cancelled')),
+                set_by TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                filled_at TEXT,
+                fill_price REAL,
+                filled_qty REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_exit_orders_active
+                ON position_exit_orders (ticker, status);
         """)
         # Migrazione: la vecchia agent_logs aveva CHECK(phase IN (...)) che
         # scartava SILENZIOSAMENTE tutte le fasi custom (NAV_DRIFT_ALERT,
@@ -423,6 +444,76 @@ def get_positions_with_auto_exits():
             "WHERE COALESCE(stop_loss_price, 0) > 0 OR COALESCE(take_profit_price, 0) > 0"
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Ladder di uscite parziali (position_exit_orders) ───────────────────────
+def add_exit_order(ticker, kind, trigger_price, quantity, direction="LONG", set_by=""):
+    """Crea un ordine di uscita PARZIALE: kind 'SL'/'TP', a trigger_price, per
+    `quantity` unita'. Ritorna l'id dell'ordine creato, o None se input invalido."""
+    kind = str(kind or "").upper()
+    if kind not in ("SL", "TP"):
+        return None
+    try:
+        tp = float(trigger_price)
+        q = float(quantity)
+    except (TypeError, ValueError):
+        return None
+    if tp <= 0 or q <= 0:
+        return None
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO position_exit_orders "
+            "(ticker, direction, kind, trigger_price, quantity, set_by) "
+            "VALUES (?,?,?,?,?,?)",
+            (ticker, str(direction or "LONG").upper(), kind, tp, q, set_by or ""))
+        return cur.lastrowid
+
+
+def get_active_exit_orders(ticker=None):
+    """Ordini di uscita parziale ATTIVI (tutti, o per un ticker)."""
+    with get_db() as conn:
+        if ticker:
+            rows = conn.execute(
+                "SELECT * FROM position_exit_orders "
+                "WHERE status='active' AND ticker=? ORDER BY id", (ticker,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM position_exit_orders "
+                "WHERE status='active' ORDER BY ticker, id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def cancel_exit_order(order_id):
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE position_exit_orders SET status='cancelled' "
+            "WHERE id=? AND status='active'", (order_id,))
+        return True
+
+
+def cancel_exit_orders_for_ticker(ticker, kind=None):
+    """Cancella gli ordini attivi di un ticker (opz. solo SL o solo TP)."""
+    with get_db() as conn:
+        if kind:
+            conn.execute(
+                "UPDATE position_exit_orders SET status='cancelled' "
+                "WHERE ticker=? AND status='active' AND kind=?",
+                (ticker, str(kind).upper()))
+        else:
+            conn.execute(
+                "UPDATE position_exit_orders SET status='cancelled' "
+                "WHERE ticker=? AND status='active'", (ticker,))
+        return True
+
+
+def mark_exit_order_filled(order_id, fill_price, filled_qty):
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE position_exit_orders SET status='filled', "
+            "filled_at=datetime('now'), fill_price=?, filled_qty=? WHERE id=?",
+            (float(fill_price), float(filled_qty), order_id))
+        return True
+
 
 def delete_position(ticker):
     with get_db() as conn:
@@ -684,6 +775,7 @@ def reset_portfolio_data(new_balance):
         conn.execute("DELETE FROM trades")
         conn.execute("DELETE FROM portfolio_snapshots")
         conn.execute("DELETE FROM agent_logs")
+        conn.execute("DELETE FROM position_exit_orders")
         conn.execute("UPDATE portfolio SET cash_balance=?, total_value=?, updated_at=datetime('now') WHERE id=(SELECT MAX(id) FROM portfolio)",
                      (new_balance, new_balance))
     # Aggiorna anche la impostazione initial_balance

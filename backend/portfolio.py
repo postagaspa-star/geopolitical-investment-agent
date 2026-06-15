@@ -1086,6 +1086,209 @@ def set_take_profit(ticker: str, target_price: float, run_id: str = "") -> dict:
     }
 
 
+def add_partial_exit(ticker: str, kind: str, trigger_price: float,
+                     quantity: float, run_id: str = "") -> dict:
+    """Aggiunge un livello di uscita PARZIALE (ladder) a una posizione esistente.
+
+    kind: 'SL' o 'TP'. trigger_price: prezzo di trigger. quantity: unita' da
+    chiudere a quel livello. Si possono impilare piu' livelli (anche dello stesso
+    kind, es. due TP a prezzi diversi) finche' la somma per-kind non supera la
+    quantita' posseduta. Livello validato direction-aware (sanity +-50% dal
+    corrente, riusa _validate_sltp_level). L'ordine auto-esegue la chiusura
+    parziale quando il prezzo lo tocca (check_and_execute_partial_exits)."""
+    import database
+    kind = str(kind or "").upper()
+    if kind not in ("SL", "TP"):
+        return {"success": False, "reason": "kind deve essere 'SL' o 'TP'"}
+    pos = get_position(ticker)
+    if pos is None:
+        return {"success": False, "reason": f"Nessuna posizione su {ticker}"}
+    try:
+        q = float(quantity or 0)
+        tp = float(trigger_price or 0)
+    except (TypeError, ValueError):
+        return {"success": False, "reason": "quantity/trigger_price non validi"}
+    if q <= 0:
+        return {"success": False, "reason": "quantity deve essere > 0"}
+    if tp <= 0:
+        return {"success": False, "reason": "trigger_price deve essere > 0"}
+
+    pos_qty = float(pos.get("quantity") or 0)
+    if q > pos_qty + 1e-9:
+        return {"success": False, "reason": (
+            f"quantity {q} supera la posizione ({pos_qty} {ticker})")}
+
+    # Somma per-kind degli ordini attivi: non impegnare piu' della posizione.
+    try:
+        active = database.get_active_exit_orders(ticker)
+    except Exception:
+        active = []
+    committed = sum(float(o.get("quantity") or 0) for o in active
+                    if str(o.get("kind") or "").upper() == kind)
+    if committed + q > pos_qty + 1e-9:
+        return {"success": False, "reason": (
+            f"Totale {kind} parziali ({committed + q}) supera la posizione "
+            f"({pos_qty} {ticker}); gia' impegnati {committed}.")}
+
+    # Sanity del livello (direction-aware, +-50% dal corrente) come set_stop_loss/TP.
+    direction = str(pos.get("direction") or "LONG").upper()
+    is_long = direction != "SHORT"
+    pos_cur = pos.get("current_price") or pos.get("avg_buy_price") or 0
+    cur = _refresh_current_price(ticker, pos_cur)
+    ok, reason = _validate_sltp_level(tp, float(cur), kind=kind,
+                                      is_long=is_long, ticker=ticker)
+    if not ok:
+        return {"success": False, "reason": reason}
+
+    oid = database.add_exit_order(ticker, kind, tp, q, direction=direction,
+                                  set_by=run_id)
+    if not oid:
+        return {"success": False, "reason": "Creazione ordine fallita"}
+    try:
+        import database as _db
+        _db.insert_agent_log(run_id or "", "PARTIAL_EXIT_SET", json.dumps({
+            "order_id": oid, "ticker": ticker, "kind": kind,
+            "trigger_price": tp, "quantity": q, "direction": direction,
+        }, default=str))
+    except Exception:
+        pass
+    return {
+        "success": True, "ticker": ticker, "kind": kind, "order_id": oid,
+        "trigger_price": tp, "quantity": q, "direction": direction,
+        "note": (f"{kind} parziale su {q} {ticker} @ {tp}: eseguito "
+                 "automaticamente al raggiungimento."),
+    }
+
+
+def check_and_execute_partial_exits(prices: dict | None = None) -> list:
+    """Esegue gli ordini di uscita PARZIALE a ladder (position_exit_orders).
+
+    A differenza del vecchio auto-exit whole-position (off di default), questi
+    sono ordini ESPLICITI e dimensionati impostati dall'AI: quando il prezzo
+    tocca il trigger (con margine anti-noise) chiudono ESATTAMENTE la quantita'
+    dell'ordine. Kill-switch dedicato: setting 'partial_exits_enabled' (default
+    ON — il senso di un TP/SL e' che esegua). Ritorna i fill eseguiti."""
+    import database
+    executed: list = []
+    try:
+        raw = (database.get_setting("partial_exits_enabled", "true") or "").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            return executed
+    except Exception:
+        pass
+    try:
+        orders = database.get_active_exit_orders()
+    except Exception:
+        orders = []
+    if not orders:
+        return executed
+
+    # Margine anti-noise: riusa la config dell'auto-exit esistente.
+    try:
+        margin = _get_auto_exits_config()["margin_pct"] / 100.0
+    except Exception:
+        margin = 0.01
+
+    for o in orders:
+        ticker = o.get("ticker")
+        kind = str(o.get("kind") or "").upper()
+        if not ticker or kind not in ("SL", "TP"):
+            continue
+        try:
+            trigger_price = float(o.get("trigger_price") or 0)
+            order_qty = float(o.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if trigger_price <= 0 or order_qty <= 0:
+            continue
+
+        # Posizione fresca (riletta a ogni ordine: un fill precedente nello
+        # stesso ciclo riduce la qty residua).
+        pos = get_position(ticker)
+        if pos is None:
+            try:
+                database.cancel_exit_order(o.get("id"))   # ordine orfano
+            except Exception:
+                pass
+            continue
+        pos_qty = float(pos.get("quantity") or 0)
+        if pos_qty <= 0:
+            try:
+                database.cancel_exit_order(o.get("id"))
+            except Exception:
+                pass
+            continue
+
+        cur_price = None
+        if prices and ticker in prices:
+            try:
+                cur_price = float(prices[ticker])
+            except Exception:
+                cur_price = None
+        if cur_price is None or cur_price <= 0:
+            cur_price = float(pos.get("current_price") or 0)
+        if not cur_price or cur_price <= 0:
+            continue
+
+        is_short = str(o.get("direction") or pos.get("direction") or "LONG").upper() == "SHORT"
+        triggered = False
+        if is_short:
+            # SHORT: TP sotto (profit se scende), SL sopra (loss se sale).
+            if kind == "TP" and cur_price <= trigger_price * (1.0 - margin):
+                triggered = True
+            elif kind == "SL" and cur_price >= trigger_price * (1.0 + margin):
+                triggered = True
+        else:
+            # LONG: TP sopra, SL sotto.
+            if kind == "TP" and cur_price >= trigger_price * (1.0 + margin):
+                triggered = True
+            elif kind == "SL" and cur_price <= trigger_price * (1.0 - margin):
+                triggered = True
+        if not triggered:
+            continue
+
+        close_qty = round(min(order_qty, pos_qty), 8)
+        if close_qty <= 0:
+            continue
+        reason = (f"PARTIAL {kind}: prezzo {cur_price:.6f} ha toccato il trigger "
+                  f"{trigger_price:.6f}. Chiudo {close_qty} {ticker} (ladder).")
+        try:
+            if is_short:
+                result = execute_cover(ticker, close_qty, cur_price,
+                                       geo_reasoning=f"partial_{kind.lower()}",
+                                       tech_reasoning=reason, confidence=100)
+            else:
+                result = execute_sell(ticker, close_qty, cur_price,
+                                      geo_reasoning=f"partial_{kind.lower()}",
+                                      tech_reasoning=reason, confidence=100)
+        except Exception as e:
+            logger.warning("[PARTIAL-EXIT] execute fallita %s: %s", ticker, e)
+            continue
+
+        if isinstance(result, dict) and result.get("success"):
+            try:
+                database.mark_exit_order_filled(o.get("id"), cur_price, close_qty)
+            except Exception:
+                pass
+            try:
+                from database import insert_agent_log
+                insert_agent_log("auto_exit", "PARTIAL_EXIT_FILLED", json.dumps({
+                    "order_id": o.get("id"), "ticker": ticker, "kind": kind,
+                    "trigger_price": trigger_price, "fill_price": cur_price,
+                    "qty": close_qty,
+                }, default=str))
+            except Exception:
+                pass
+            executed.append({"ticker": ticker, "kind": kind,
+                             "order_id": o.get("id"), "qty": close_qty,
+                             "fill_price": cur_price})
+        else:
+            _why = (result or {}).get("reason") if isinstance(result, dict) else result
+            logger.warning("[PARTIAL-EXIT] execute non riuscita %s: %s", ticker, _why)
+
+    return executed
+
+
 def close_position_market(ticker, quantity, price, geo_reasoning,
                           tech_reasoning, confidence=100):
     """Chiude (a mercato) una posizione instradando per DIREZIONE:

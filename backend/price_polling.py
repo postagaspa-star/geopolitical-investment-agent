@@ -1213,6 +1213,15 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
                                 len(triggered),
                                 ", ".join(f"{e['ticker']}={e['trigger']}"
                                           for e in triggered[:5]))
+            # Ladder di uscite PARZIALI (sistema esplicito e dimensionato): esegue
+            # sempre quando un livello e' toccato, indipendentemente dal flag
+            # legacy auto_exits_enabled (kill-switch dedicato partial_exits_enabled).
+            partial = _portfolio.check_and_execute_partial_exits(validated_prices)
+            if partial:
+                logger.info("[POLLING] PARTIAL-EXIT eseguiti: %d (%s)",
+                            len(partial),
+                            ", ".join(f"{e['ticker']}:{e['kind']}x{e['qty']}"
+                                      for e in partial[:5]))
     except Exception as e:
         logger.warning("[POLLING] check_and_execute_auto_exits failed: %s", e)
 

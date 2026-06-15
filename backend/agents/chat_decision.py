@@ -111,20 +111,28 @@ Puoi proporre piu' azioni nello stesso messaggio (array).
 
 2) set_stop_loss — imposta stop-loss su una posizione esistente
    USA stop_loss_pct (es. -5 per -5% sotto entry) OPPURE stop_loss_price (assoluto).
+   Opzionale "quantity": chiude SOLO quella quantita' al trigger (SL PARZIALE).
+   Puoi impilare piu' livelli sulla stessa posizione (ladder). Senza quantity =
+   classico whole-position.
    {
      "type": "set_stop_loss",
      "ticker": "NVDA",
      "stop_loss_pct": -5,
+     "quantity": 1,
      "reasoning": "Per ridurre il rischio sotto $850"
    }
 
 3) set_take_profit — imposta take-profit su una posizione esistente
    USA take_profit_pct (es. 15 per +15% sopra entry) OPPURE take_profit_price (assoluto).
+   Opzionale "quantity": chiude SOLO quella quantita' al trigger (TP PARZIALE).
+   Piu' livelli ammessi (ladder): es. se hai 2 BTC → TP 1 BTC @ 60k + TP 1 BTC @ 70k.
+   Senza quantity = classico whole-position.
    {
      "type": "set_take_profit",
-     "ticker": "NVDA",
-     "take_profit_pct": 15,
-     "reasoning": "Target sul livello chiave $1000"
+     "ticker": "BTC-USD",
+     "take_profit_price": 60000,
+     "quantity": 1,
+     "reasoning": "Scaling-out: prendo profitto su 1 BTC a 60k"
    }
 
 4) add_directive — aggiungi una direttiva strategica permanente
@@ -798,6 +806,14 @@ def _validate_action(a: dict) -> dict | None:
                 return None
         else:
             return None
+        _q = a.get("quantity")
+        if _q is not None:
+            try:
+                _qf = float(_q)
+                if _qf > 0:
+                    out["quantity"] = _qf   # SL PARZIALE (ladder)
+            except (TypeError, ValueError):
+                pass
         return out
 
     if t == "set_take_profit":
@@ -822,6 +838,14 @@ def _validate_action(a: dict) -> dict | None:
                 return None
         else:
             return None
+        _q = a.get("quantity")
+        if _q is not None:
+            try:
+                _qf = float(_q)
+                if _qf > 0:
+                    out["quantity"] = _qf   # TP PARZIALE (ladder)
+            except (TypeError, ValueError):
+                pass
         return out
 
     if t == "add_directive":
