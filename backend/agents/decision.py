@@ -1710,17 +1710,19 @@ def _get_decision_prompt_with_meta(engine: str | None = None) -> tuple[str, list
     return text, coach_card_ids
 
 
-def _get_decision_prompt_split(engine: str | None = None) -> tuple[str, str, list[str]]:
+def _get_decision_prompt_split(engine: str | None = None) -> tuple[str, str, str, list[str]]:
     """
     Versione 'split' del system prompt per abilitare Anthropic prompt caching.
 
-    Ritorna (static_block, dynamic_block, coach_card_ids) dove:
+    Ritorna (directives_block, static_block, dynamic_block, coach_card_ids):
+      - directives_block: direttive utente + RECOVERY REVIEW. Vanno in TESTA al
+        system (alta priorita'), come gia' fa il path R1. Cambiano di rado →
+        cacheabili a parte (#21). Vuoto se non ci sono direttive.
       - static_block: contenuto che cambia RARAMENTE → cacheable con TTL 1h.
         Include: risk_block, regime_block, coach_section (settimanale),
         base_prompt, shared_principles.
       - dynamic_block: contenuto che cambia OGNI RUN → no cache.
-        Include: directives_block (chat user), risk_state_block (live
-        drawdown/recovery), recent_section (ultime 12 decisioni).
+        Include: risk_state_block (live drawdown/recovery), recent_section.
 
     Cache hit = 10% del prezzo input normale (90% di sconto) → save
     sostanzioso visto che lo static è ~7-8k token su ~10k totali system.
@@ -1810,10 +1812,11 @@ def _get_decision_prompt_split(engine: str | None = None) -> tuple[str, str, lis
         static_block = (risk_block + regime_block + short_block
                         + coach_section + base_prompt)
 
-    dynamic_block = (directives_block + risk_state_block + recent_section
-                     + calib_section)
+    # #21: directives_block NON va piu' in coda al dynamic (dopo ~7-8k token di
+    # static): lo restituiamo a parte cosi' il chiamante lo mette in TESTA.
+    dynamic_block = (risk_state_block + recent_section + calib_section)
 
-    return static_block, dynamic_block, coach_card_ids
+    return directives_block, static_block, dynamic_block, coach_card_ids
 
 
 def _get_client() -> Anthropic:
@@ -3256,7 +3259,7 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     # Dynamic (~2k tk):  directives + risk_state + recent_decisions
     # Tools (~2.7k tk):  cachati via cache_control sull'ultimo tool
     # ═══════════════════════════════════════════════════════════════════
-    static_block, dynamic_block, coach_card_ids_claude = _get_decision_prompt_split("claude")
+    directives_block, static_block, dynamic_block, coach_card_ids_claude = _get_decision_prompt_split("claude")
 
     # Costruisci system come lista di blocchi typed per il cache.
     # NB: l'ordine static→dynamic e' importante per il caching (i blocchi
@@ -3268,13 +3271,23 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     # Conviene quando i run sono distanziati di piu' di 5 min ma meno di 1h
     # (caso tipico del nostro bot: pipeline ogni 20-30 min).
     # Richiede beta header 'extended-cache-ttl-2025-04-11' (vedi _create_message).
-    system_blocks: list[dict] = [
-        {
+    # #21: DIRETTIVE utente + RECOVERY REVIEW in un blocco a SE' in TESTA, PRIMA
+    # dello static. Prima erano in coda al dynamic (dopo ~7-8k token di static):
+    # su Claude (motore di produzione) le istruzioni ad alta priorita' erano
+    # depotenziate, in modo incoerente col path R1 che le mette gia' all'inizio.
+    # Cambiano di rado → restano cacheabili con cache_control proprio.
+    system_blocks: list[dict] = []
+    if directives_block and directives_block.strip():
+        system_blocks.append({
             "type": "text",
-            "text": static_block,
+            "text": directives_block,
             "cache_control": {"type": "ephemeral", "ttl": "1h"},
-        },
-    ]
+        })
+    system_blocks.append({
+        "type": "text",
+        "text": static_block,
+        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+    })
     if dynamic_block and dynamic_block.strip():
         system_blocks.append({"type": "text", "text": dynamic_block})
 
