@@ -2055,13 +2055,16 @@ DECISION_TOOLS = [
             "Imposta o aggiorna lo stop-loss AUTOMATICO su una posizione "
             "esistente. Quando il prezzo corrente raggiunge stop_price, il "
             "sistema CHIUDE la posizione automaticamente al prossimo update prezzi. "
-            "Passa stop_price=0 per rimuovere lo SL. Errore se la posizione non esiste."
+            "Passa stop_price=0 per rimuovere lo SL. Opzionale 'quantity': SL "
+            "PARZIALE (chiude solo quella quantita' al trigger; impilabile a "
+            "ladder, piu' livelli sulla stessa posizione). Errore se la posizione non esiste."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string"},
                 "stop_price": {"type": "number", "description": "Prezzo SL assoluto (>0). 0 = rimuovi."},
+                "quantity": {"type": "number", "description": "Opzionale: quantita' da chiudere a questo livello (SL PARZIALE). Omesso = tutta la posizione."},
                 "reason": {"type": "string", "description": "Motivazione tecnica (livello chiave invalidato, ATR multiplier, ecc.)"},
             },
             "required": ["ticker", "stop_price", "reason"],
@@ -2072,13 +2075,17 @@ DECISION_TOOLS = [
         "description": (
             "Imposta o aggiorna il take-profit AUTOMATICO su una posizione "
             "esistente. Quando il prezzo corrente raggiunge target_price, il "
-            "sistema CHIUDE automaticamente. Passa target_price=0 per rimuovere."
+            "sistema CHIUDE automaticamente. Passa target_price=0 per rimuovere. "
+            "Opzionale 'quantity': TP PARZIALE (chiude solo quella quantita' al "
+            "trigger; impilabile a ladder, es. su 2 BTC un TP da 1 a 60k + un TP "
+            "da 1 a 70k)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string"},
                 "target_price": {"type": "number", "description": "Prezzo TP assoluto (>0). 0 = rimuovi."},
+                "quantity": {"type": "number", "description": "Opzionale: quantita' da chiudere a questo livello (TP PARZIALE). Omesso = tutta la posizione."},
                 "reason": {"type": "string", "description": "Motivazione (resistenza, livello psicologico, ecc.)"},
             },
             "required": ["ticker", "target_price", "reason"],
@@ -2779,7 +2786,14 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
             ticker = (tool_input.get("ticker") or "").upper().strip()
             stop_price = float(tool_input.get("stop_price") or 0)
             reason = tool_input.get("reason", "")
-            result = portfolio.set_stop_loss(ticker, stop_price, run_id=run_id)
+            _qty = tool_input.get("quantity")
+            # PARZIALE (ladder) se quantity specificata e stop_price>0; altrimenti
+            # SL classico whole-position.
+            if _qty is not None and stop_price > 0:
+                result = portfolio.add_partial_exit(ticker, "SL", stop_price,
+                                                    _qty, run_id=run_id)
+            else:
+                result = portfolio.set_stop_loss(ticker, stop_price, run_id=run_id)
             # Log: motivazione AI + vero motivo del fallimento (se c'è).
             # Bug precedente: il log mostrava solo `reason` AI (motivazione)
             # quindi se `success: False` non si capiva PERCHÉ → tutti gli SL
@@ -2797,7 +2811,12 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
             ticker = (tool_input.get("ticker") or "").upper().strip()
             target_price = float(tool_input.get("target_price") or 0)
             reason = tool_input.get("reason", "")
-            result = portfolio.set_take_profit(ticker, target_price, run_id=run_id)
+            _qty = tool_input.get("quantity")
+            if _qty is not None and target_price > 0:
+                result = portfolio.add_partial_exit(ticker, "TP", target_price,
+                                                    _qty, run_id=run_id)
+            else:
+                result = portfolio.set_take_profit(ticker, target_price, run_id=run_id)
             database.insert_agent_log(run_id, "DECISION_SET_TP", json.dumps({
                 "ticker": ticker, "target_price": target_price,
                 "success": result.get("success"),

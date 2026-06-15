@@ -509,13 +509,16 @@ CRYPTO_DECISION_TOOLS = [
             "description": (
                 "Imposta o aggiorna lo stop-loss AUTOMATICO su una crypto in "
                 "portafoglio. Quando il prezzo scende a stop_price, il sistema "
-                "chiude automaticamente. Passa stop_price=0 per rimuovere."
+                "chiude automaticamente. Passa stop_price=0 per rimuovere. "
+                "Opzionale 'quantity': SL PARZIALE (chiude solo quella quantita' "
+                "al trigger; impilabile a ladder, piu' livelli per posizione)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
                     "stop_price": {"type": "number"},
+                    "quantity": {"type": "number", "description": "Opzionale: quantita' da chiudere a questo livello (SL parziale). Omesso = tutta la posizione."},
                     "reason": {"type": "string"},
                 },
                 "required": ["ticker", "stop_price", "reason"],
@@ -528,13 +531,16 @@ CRYPTO_DECISION_TOOLS = [
             "name": "set_take_profit",
             "description": (
                 "Imposta o aggiorna il take-profit AUTOMATICO. Quando il prezzo "
-                "raggiunge target_price, il sistema chiude automaticamente."
+                "raggiunge target_price, il sistema chiude automaticamente. "
+                "Opzionale 'quantity': TP PARZIALE (chiude solo quella quantita' "
+                "al trigger; impilabile a ladder, es. su 2 BTC TP 1@60k + TP 1@70k)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
                     "target_price": {"type": "number"},
+                    "quantity": {"type": "number", "description": "Opzionale: quantita' da chiudere a questo livello (TP parziale). Omesso = tutta la posizione."},
                     "reason": {"type": "string"},
                 },
                 "required": ["ticker", "target_price", "reason"],
@@ -1232,7 +1238,12 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             ticker = (tool_input.get("ticker") or "").upper().strip()
             stop_price = float(tool_input.get("stop_price") or 0)
             reason = tool_input.get("reason", "")
-            result = portfolio.set_stop_loss(ticker, stop_price, run_id=run_id)
+            _qty = tool_input.get("quantity")
+            if _qty is not None and stop_price > 0:
+                result = portfolio.add_partial_exit(ticker, "SL", stop_price,
+                                                    _qty, run_id=run_id)
+            else:
+                result = portfolio.set_stop_loss(ticker, stop_price, run_id=run_id)
             database.insert_agent_log(run_id, "DECISION_CRYPTO_SET_SL", json.dumps({
                 "ticker": ticker, "stop_price": stop_price,
                 "success": result.get("success"),
@@ -1246,7 +1257,12 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             ticker = (tool_input.get("ticker") or "").upper().strip()
             target_price = float(tool_input.get("target_price") or 0)
             reason = tool_input.get("reason", "")
-            result = portfolio.set_take_profit(ticker, target_price, run_id=run_id)
+            _qty = tool_input.get("quantity")
+            if _qty is not None and target_price > 0:
+                result = portfolio.add_partial_exit(ticker, "TP", target_price,
+                                                    _qty, run_id=run_id)
+            else:
+                result = portfolio.set_take_profit(ticker, target_price, run_id=run_id)
             database.insert_agent_log(run_id, "DECISION_CRYPTO_SET_TP", json.dumps({
                 "ticker": ticker, "target_price": target_price,
                 "success": result.get("success"),
