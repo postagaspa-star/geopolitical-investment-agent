@@ -412,6 +412,14 @@ def build_confidence_outcome_scatter(history: list[dict]) -> list[dict]:
                         pnl_dollars = (price - pos["avg"]) * close_qty
                     else:
                         pnl_dollars = (pos["avg"] - price) * close_qty
+                    # #32: P&L NETTO delle commissioni (apertura + chiusura),
+                    # coerente con l'equity netta da cui derivano Sharpe/maxDD.
+                    # Prima era LORDO → profit_factor/expectancy ottimistici e
+                    # incoerenti con gli altri KPI nello stesso dict.
+                    pnl_dollars -= (
+                        commission_amount(pos["avg"] * close_qty, DEFAULT_COMMISSION_BPS)
+                        + commission_amount(price * close_qty, DEFAULT_COMMISSION_BPS)
+                    )
                     pnl_pct = ((price - pos["avg"]) / pos["avg"]
                                 if pos["side"] == "long"
                                 else (pos["avg"] - price) / pos["avg"])
@@ -426,6 +434,18 @@ def build_confidence_outcome_scatter(history: list[dict]) -> list[dict]:
                         "close_step": step_idx,
                         "status": "closed",
                     })
+                    # #33: un FLIP CHIUDE e RIAPRE sul lato opposto. Prima la
+                    # posizione flip-aperta veniva persa (solo pop) → il suo
+                    # trade successivo era scartato / con conviction sbagliata.
+                    # Re-inseriscila con la qty residua (oltre la chiusura).
+                    if status.startswith("executed_flip_"):
+                        residual = qty - close_qty
+                        if residual > 1e-12:
+                            positions[asset] = {
+                                "side": "short" if pos["side"] == "long" else "long",
+                                "qty": residual, "avg": price,
+                                "open_step": step_idx, "conviction": conviction,
+                            }
 
     # Posizioni ancora aperte a fine partita: usa final_valuation se disponibile
     # (verra' iniettato dal caller via posizioni rimanenti)
@@ -452,7 +472,11 @@ def add_open_positions_to_scatter(
         for tr in h.get("applied_trades", []) or []:
             asset = tr.get("asset")
             status = tr.get("status", "")
-            if not asset or not status.startswith("executed_open_"):
+            # #33: anche i FLIP aprono una posizione (lato opposto): includili,
+            # altrimenti una posizione flip-aperta ancora aperta a fine partita
+            # non trova la sua conviction (resta sul default).
+            if not asset or not (status.startswith("executed_open_")
+                                 or status.startswith("executed_flip_")):
                 continue
             asset_conv[asset] = (tr.get("conviction", "MEDIA") or "MEDIA", step_idx)
 
