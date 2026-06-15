@@ -56,23 +56,34 @@ def _terminal_move_pct(scenario: dict) -> float:
     return chg7
 
 
-def _core_decision_for(scenario: dict):
-    """Costruisce indicatori coerenti col regime dello scenario e chiede al
-    core una decisione sull'asset principale. Bull → segnali rialzisti,
-    crash → segnali ribassisti (il core dovrebbe preferire short/flat)."""
+def _core_decision_for(scenario: dict, move: float, signal_mode: str):
+    """Costruisce indicatori per il core. signal_mode controlla la RELAZIONE coi
+    fatti (il movimento reale `move`), cosi' l'harness non testa solo i casi
+    facili concordi (#34):
+      - 'concordant': segnali nella direzione del movimento → il core ci prende;
+      - 'discordant': segnali OPPOSTI al movimento → il core sbaglia, ma lo SL
+        gli limita la perdita (e' la proprieta' che il gate deve dimostrare);
+      - 'neutral'  : segnali misti → il core dovrebbe astenersi (HOLD).
+    """
     md = (scenario.get("market_data") or [{}])[0]
     price = float(md.get("price_t0") or 100.0)
-    is_crash = scenario.get("category") == "crash"
     atr = price * 0.04  # 4% ATR tipico crypto
-    if is_crash:
+    ticker = md.get("ticker", "BTC-USD")
+
+    if signal_mode == "neutral":
         details = {
             "current_price": price, "atr": atr,
-            "signal_count": {"bullish": 0, "bearish": 4},
-            "signal": "SELL", "trend": "TRENDING_DOWN",
-            "rsi_14": 72, "candlestick_setup": "bearish engulfing",
+            "signal_count": {"bullish": 2, "bearish": 2},
+            "signal": "HOLD", "trend": "RANGING",
+            "rsi_14": 50, "candlestick_setup": "doji",
         }
-        btc = [200 - i * 0.5 for i in range(200)]  # regime bear
-    else:
+        return core.decide(ticker=ticker, details=details, nav=INITIAL_NAV,
+                           btc_daily_closes=[100.0 for _ in range(200)])
+
+    # Direzione INDOTTA nel core: concordant = come il movimento; discordant =
+    # opposta (il core sbaglia di proposito, per testare il taglio dello SL).
+    induce_up = (move > 0) if signal_mode == "concordant" else (move <= 0)
+    if induce_up:
         details = {
             "current_price": price, "atr": atr,
             "signal_count": {"bullish": 4, "bearish": 0},
@@ -80,8 +91,16 @@ def _core_decision_for(scenario: dict):
             "rsi_14": 34, "candlestick_setup": "bullish hammer",
         }
         btc = [100 + i for i in range(200)]  # regime bull
-    return core.decide(ticker=md.get("ticker", "BTC-USD"), details=details,
-                       nav=INITIAL_NAV, btc_daily_closes=btc)
+    else:
+        details = {
+            "current_price": price, "atr": atr,
+            "signal_count": {"bullish": 0, "bearish": 4},
+            "signal": "SELL", "trend": "TRENDING_DOWN",
+            "rsi_14": 72, "candlestick_setup": "bearish engulfing",
+        }
+        btc = [200 - i * 0.5 for i in range(200)]  # regime bear
+    return core.decide(ticker=ticker, details=details, nav=INITIAL_NAV,
+                       btc_daily_closes=btc)
 
 
 def build_equity_curves():
@@ -95,16 +114,18 @@ def build_equity_curves():
     hist_legacy: list[dict] = []
     rows = []
 
-    for sc in CRYPTO_SCENARIOS:
+    # Modi a rotazione: il core affronta scenari concordi, DISCORDI e neutri
+    # (prima solo concordi → il core non poteva mai sbagliare = gate vacuo, #34).
+    modes = ["concordant", "discordant", "neutral"]
+    for i, sc in enumerate(CRYPTO_SCENARIOS):
         move = _terminal_move_pct(sc) / 100.0  # frazione (es. -0.26)
-        dec = _core_decision_for(sc)
+        mode = modes[i % len(modes)]
+        dec = _core_decision_for(sc, move, mode)
 
         # ── Motore A: core_bound ──
-        # Il core su un crash o non apre (flat) o apre SHORT (guadagna se scende)
-        # e comunque ha SL → perdita per-trade limitata. Modelliamo l'esito:
-        #  - se flat/blocked: 0
-        #  - se direzione concorde col movimento: +|move| sulla size (cap)
-        #  - se direzione discorde: perdita limitata dallo SL (risk_per_trade)
+        #  - flat/blocked: 0
+        #  - direzione concorde col movimento: +|move| sulla size (cap)
+        #  - direzione discorde: perdita LIMITATA dallo SL (risk_per_trade)
         if dec.blocked or dec.action == "HOLD":
             pnl_core = 0.0
             core_outcome = "flat"
@@ -125,10 +146,15 @@ def build_equity_curves():
                           "confidence": "high"})
 
         # ── Motore B: r1_legacy_naive ──
-        # Bias "OSA / in dubbio AGISCI": apre un LONG ~max_position% NAV anche
-        # nei crash, SENZA stop → subisce l'intero movimento.
-        legacy_notional = params.max_position_pct_nav / 100.0 * nav_legacy
-        pnl_legacy = legacy_notional * move   # long: perde tutto il -move nei crash
+        # CONFRONTO EQUO (#34): STESSA direzione del core, ma size ~max_position%
+        # NAV e SENZA stop → subisce l'INTERO movimento (anche avverso). Prima
+        # era hardcoded sempre LONG: uno strawman che perdeva solo nei crash.
+        if dec.blocked or dec.action == "HOLD":
+            pnl_legacy = 0.0          # senza direzione dal core, niente trade
+        else:
+            legacy_long = dec.action == "BUY"
+            legacy_notional = params.max_position_pct_nav / 100.0 * nav_legacy
+            pnl_legacy = legacy_notional * (move if legacy_long else -move)
         nav_legacy += pnl_legacy
         curve_legacy.append({"value": nav_legacy})
         hist_legacy.append({"action": "CLOSE", "realized_pnl": pnl_legacy,
@@ -136,10 +162,12 @@ def build_equity_curves():
 
         rows.append({
             "scenario": sc["id"], "category": sc.get("category", "?"),
+            "mode": mode,
             "move_pct": round(move * 100, 1),
             "core_action": dec.action, "core_outcome": core_outcome,
             "core_conv": dec.conviction, "core_regime": dec.regime,
-            "core_has_sl": bool(dec.stop_loss) or dec.action == "HOLD",
+            # #34: SOLO le vere aperture (gli HOLD NON contano come SL=PASS).
+            "core_has_sl": bool(dec.stop_loss),
             "pnl_core": round(pnl_core, 0), "pnl_legacy": round(pnl_legacy, 0),
         })
 
@@ -177,11 +205,15 @@ def main():
     print(f"Sharpe         core_bound={str(m_core['sharpe_ratio']):>12}   "
           f"r1_legacy={str(m_legacy['sharpe_ratio']):>12}")
 
-    # Verdetto strutturale (gate del piano: il core deve ridurre il drawdown)
-    all_sl = all(r["core_has_sl"] for r in rows)
+    # Verdetto strutturale (gate del piano: il core deve ridurre il drawdown).
+    # #34: lo SL si verifica SOLO sulle vere aperture (BUY/SHORT); gli HOLD non
+    # contano come PASS, e serve almeno un'apertura (altrimenti il gate e' vacuo).
+    openings = [r for r in rows if r["core_action"] != "HOLD"]
+    all_sl = bool(openings) and all(r["core_has_sl"] for r in openings)
     dd_ok = abs(cc) <= abs(cl)
     print("-" * 74)
-    print(f"[{'PASS' if all_sl else 'FAIL'}] Ogni apertura del core ha uno stop-loss")
+    print(f"[{'PASS' if all_sl else 'FAIL'}] Ogni apertura del core ha uno stop-loss "
+          f"({len(openings)} aperture, {len(rows) - len(openings)} HOLD)")
     print(f"[{'PASS' if dd_ok else 'FAIL'}] Drawdown core <= drawdown legacy "
           f"({abs(cc):.1f}% vs {abs(cl):.1f}%)")
     print("=" * 74)
