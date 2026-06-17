@@ -187,6 +187,35 @@ def _load_crypto_docs(max_chars: int = 6000) -> str:
         return ""
 
 
+def _load_experience_block(max_chars: int = 2500) -> str:
+    """FASE 2 — feedback loop: l'Auditor impara dagli ESITI del sistema, non solo
+    dal playbook astratto. Inietta (a) la BASE RATE (win-rate sulle chiusure reali
+    recenti) e (b) le LEZIONI APPRESE (coach cards). Best-effort: vuoto se mancano.
+    Cosi' i verdetti sono calibrati sul track record reale, non su teoria."""
+    parts = []
+    try:
+        import risk_state as _rs
+        wr = _rs.get_recent_win_rate(limit=10)
+        if wr and wr.get("sample_size"):
+            parts.append(
+                f"BASE RATE (ultime {wr['sample_size']} chiusure reali): win "
+                f"{wr['win_rate'] * 100:.0f}% ({wr['wins']}W/{wr['losses']}L). "
+                "Win-rate basso = il sistema tende a TENERE troppo i perdenti: "
+                "sii piu' severo sugli EXIT e sul giveback del profitto.")
+    except Exception:
+        pass
+    try:
+        from agents import coach_cards as _cc
+        block = (_cc.get_active_cards_block_for_decision() or "").strip()
+        if block:
+            parts.append("LEZIONI APPRESE DAL SISTEMA:\n" + block[:max_chars])
+    except Exception:
+        pass
+    if not parts:
+        return ""
+    return "ESPERIENZA DEL SISTEMA (impara dai TUOI esiti):\n" + "\n\n".join(parts)
+
+
 async def _call_v3(context: str, max_retries: int = 2) -> str:
     api_key = _get_deepseek_key()
     if not api_key:
@@ -273,9 +302,10 @@ async def audit_positions(run_id: str, positions: list | None = None) -> dict:
     except Exception:
         payload = {"positions_to_audit": items}
     context = json.dumps(payload, default=str, ensure_ascii=False)
-    docs = _load_crypto_docs()
-    if docs:
-        context = docs + "\n\n" + "=" * 60 + "\n\n" + context
+    # Fase 2: esperienza (base-rate + lezioni) + Fase 1: documenti tecnici (RAG).
+    prefix = "\n\n".join(b for b in (_load_experience_block(), _load_crypto_docs()) if b)
+    if prefix:
+        context = prefix + "\n\n" + "=" * 60 + "\n\n" + context
 
     try:
         raw = await _call_v3(context[:32000])

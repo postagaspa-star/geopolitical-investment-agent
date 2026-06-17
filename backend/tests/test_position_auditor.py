@@ -73,3 +73,27 @@ def test_teeth_skip_low_conf_or_healthy():
     assert pa.enforce_auditor_verdicts("run-x", {"BTC-USD": {"verdict": "HOLD",
         "classification": "healthy_pullback", "confidence": 90}}, positions=pos) == []
     assert float(portfolio.get_position("BTC-USD")["stop_loss_price"]) == 0.0
+
+
+# ── Fase 2: feedback loop (base-rate + lezioni nel contesto dell'Auditor) ──
+def test_experience_block_has_base_rate_and_lessons(monkeypatch):
+    import risk_state
+    from agents import coach_cards
+    monkeypatch.setattr(risk_state, "get_recent_win_rate",
+                        lambda limit=10: {"win_rate": 0.3, "wins": 3,
+                                          "losses": 7, "sample_size": 10})
+    monkeypatch.setattr(coach_cards, "get_active_cards_block_for_decision",
+                        lambda: "LEZIONE: non tenere i perdenti oltre lo SL")
+    block = pa._load_experience_block()
+    assert "BASE RATE" in block and "30%" in block
+    assert "LEZIONE" in block and "LEZIONI APPRESE" in block
+
+
+def test_experience_block_empty_when_no_data(monkeypatch):
+    import risk_state
+    from agents import coach_cards
+    monkeypatch.setattr(risk_state, "get_recent_win_rate",
+                        lambda limit=10: {"win_rate": 0, "wins": 0,
+                                          "losses": 0, "sample_size": 0})
+    monkeypatch.setattr(coach_cards, "get_active_cards_block_for_decision", lambda: "")
+    assert pa._load_experience_block() == ""
