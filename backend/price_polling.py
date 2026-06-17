@@ -1222,6 +1222,16 @@ def _update_positions_and_snapshot(all_quotes: dict[str, dict]) -> tuple[int, bo
                             len(partial),
                             ", ".join(f"{e['ticker']}:{e['kind']}x{e['qty']}"
                                       for e in partial[:5]))
+            # Governor DETERMINISTICO sull'uscita: hard stop-loss VINCOLANTE +
+            # trailing che protegge il profitto (alza lo SL sotto il prezzo), su
+            # prezzi validati. Rende lo stop reale a prescindere dal "risale" del
+            # modello (kill-switch: stop_enforcement_enabled / trailing_stop_enabled).
+            stopped = _portfolio.enforce_stops(validated_prices)
+            if stopped:
+                logger.info("[POLLING] STOP ENFORCED: %d (%s)",
+                            len(stopped),
+                            ", ".join(f"{e['ticker']}@{e['stop_loss']}"
+                                      for e in stopped[:5]))
     except Exception as e:
         logger.warning("[POLLING] check_and_execute_auto_exits failed: %s", e)
 

@@ -1289,6 +1289,153 @@ def check_and_execute_partial_exits(prices: dict | None = None) -> list:
     return executed
 
 
+def enforce_stops(prices: dict | None = None) -> list:
+    """Governor DETERMINISTICO sull'uscita (richiesta Andrea).
+
+    Rende lo STOP-LOSS davvero vincolante e protegge il profitto col TRAILING,
+    a prescindere dal racconto del modello ("e' solo un rintracciamento, risale").
+    Gira a OGNI ciclo di polling su prezzi VALIDATI (anti-incidente NVDA). Due
+    leve indipendenti, ognuna col suo kill-switch (default ON):
+
+      1. stop_enforcement_enabled — se il prezzo tocca lo stop_loss_price (con
+         margine anti-noise), CHIUDE TUTTA la posizione. Lo SL non e' piu' un
+         numero che il modello puo' ignorare aspettando il rimbalzo.
+      2. trailing_stop_enabled — su posizione in PROFITTO, alza (long) / abbassa
+         (short) lo SL verso prezzo*(1∓trailing_stop_pct%), MAI allentando.
+         Lo SL stesso fa da ratchet (max per il long, min per lo short): niente
+         colonna peak. Cosi' un rintracciamento dopo un guadagno blocca il
+         margine invece di restituirlo.
+
+    Funziona long E short. Convive col ladder dei parziali (storage diverso) e
+    col vecchio auto-exit whole-position (che resta spento). Ritorna gli stop
+    eseguiti."""
+    import database
+    executed: list = []
+
+    def _on(key, default):
+        try:
+            raw = (database.get_setting(key, "true" if default else "false") or "").strip().lower()
+            if raw in ("1", "true", "yes", "on"):
+                return True
+            if raw in ("0", "false", "no", "off"):
+                return False
+        except Exception:
+            pass
+        return default
+
+    enforce = _on("stop_enforcement_enabled", True)
+    trailing = _on("trailing_stop_enabled", True)
+    if not enforce and not trailing:
+        return executed
+
+    try:
+        positions = database.get_positions() or []
+    except Exception:
+        positions = []
+    if not positions:
+        return executed
+
+    try:
+        margin = _get_auto_exits_config()["margin_pct"] / 100.0
+    except Exception:
+        margin = 0.01
+    try:
+        trail_pct = float(database.get_setting("trailing_stop_pct", "") or 4.0)
+    except Exception:
+        trail_pct = 4.0
+    if trail_pct <= 0:
+        trail_pct = 4.0
+
+    for p in positions:
+        ticker = p.get("ticker")
+        if not ticker:
+            continue
+        try:
+            qty = float(p.get("quantity") or 0)
+            avg = float(p.get("avg_buy_price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+        is_short = str(p.get("direction") or "LONG").upper() == "SHORT"
+
+        cur = None
+        if prices and ticker in prices:
+            try:
+                cur = float(prices[ticker])
+            except Exception:
+                cur = None
+        if cur is None or cur <= 0:
+            try:
+                cur = float(p.get("current_price") or 0)
+            except (TypeError, ValueError):
+                cur = 0.0
+        if not cur or cur <= 0:
+            continue
+        try:
+            sl = float(p.get("stop_loss_price") or 0)
+        except (TypeError, ValueError):
+            sl = 0.0
+
+        # 1) TRAILING: su posizione in PROFITTO ratchet dello SL verso il prezzo,
+        #    MAI allentando. Lo SL stesso e' il ratchet (max long / min short),
+        #    quindi non serve memorizzare il picco.
+        if trailing and avg > 0:
+            in_profit = (cur > avg) if not is_short else (cur < avg)
+            if in_profit:
+                trail_sl = (round(cur * (1 - trail_pct / 100.0), 6) if not is_short
+                            else round(cur * (1 + trail_pct / 100.0), 6))
+                tighten = (trail_sl > sl) if not is_short else (sl <= 0 or trail_sl < sl)
+                if tighten and trail_sl > 0:
+                    try:
+                        database.update_position_auto_exit(
+                            ticker, stop_loss_price=trail_sl, set_by="stop_trailing")
+                        sl = trail_sl
+                        from database import insert_agent_log as _ial
+                        _ial("auto_exit", "TRAILING_STOP_RAISED", json.dumps({
+                            "ticker": ticker, "new_sl": trail_sl, "price": cur,
+                            "trail_pct": trail_pct,
+                            "direction": "SHORT" if is_short else "LONG",
+                        }, default=str))
+                    except Exception as _te:
+                        logger.debug("[ENFORCE-STOP] trailing %s: %s", ticker, _te)
+
+        # 2) HARD STOP: se il prezzo tocca lo SL (con margine anti-noise) →
+        #    chiude TUTTA la posizione. Long: prezzo <= SL; Short: prezzo >= SL.
+        if enforce and sl > 0:
+            hit = (cur <= sl * (1 - margin)) if not is_short else (cur >= sl * (1 + margin))
+            if not hit:
+                continue
+            reason = (f"STOP ENFORCED: prezzo {cur:.6f} ha toccato lo SL {sl:.6f} "
+                      f"→ chiudo {qty} {ticker} (governor deterministico).")
+            try:
+                if is_short:
+                    result = execute_cover(ticker, qty, cur, geo_reasoning="stop_enforced",
+                                           tech_reasoning=reason, confidence=100)
+                else:
+                    result = execute_sell(ticker, qty, cur, geo_reasoning="stop_enforced",
+                                          tech_reasoning=reason, confidence=100)
+            except Exception as e:
+                logger.warning("[ENFORCE-STOP] execute fallita %s: %s", ticker, e)
+                continue
+            if isinstance(result, dict) and result.get("success"):
+                try:
+                    from database import insert_agent_log as _ial
+                    _ial("auto_exit", "STOP_ENFORCED", json.dumps({
+                        "ticker": ticker, "stop_loss": sl, "fill_price": cur,
+                        "qty": qty, "direction": "SHORT" if is_short else "LONG",
+                    }, default=str))
+                except Exception:
+                    pass
+                executed.append({"ticker": ticker, "stop_loss": sl,
+                                 "fill_price": cur, "qty": qty})
+            else:
+                _why = (result or {}).get("reason") if isinstance(result, dict) else result
+                logger.warning("[ENFORCE-STOP] close non riuscita %s: %s", ticker, _why)
+
+    return executed
+
+
 def close_position_market(ticker, quantity, price, geo_reasoning,
                           tech_reasoning, confidence=100):
     """Chiude (a mercato) una posizione instradando per DIREZIONE:
