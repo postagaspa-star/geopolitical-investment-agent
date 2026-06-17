@@ -3038,6 +3038,7 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     # DATI per tenere (tecnici > news); teeth misurate (SL stretto) su EXIT
     # alta-conviction + struttura rotta. Best-effort: se fallisce, si prosegue.
     auditor_block = ""
+    auditor_exit_tickers: list = []
     try:
         from agents.position_auditor import (audit_positions, format_auditor_block,
                                              enforce_auditor_verdicts)
@@ -3046,6 +3047,8 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             _verdicts = await audit_positions(run_id, _open_pos)
             auditor_block = format_auditor_block(_verdicts)
             enforce_auditor_verdicts(run_id, _verdicts, _open_pos)
+            auditor_exit_tickers = [t for t, v in _verdicts.items()
+                                    if str(v.get("verdict")).upper() == "EXIT"]
     except Exception as _ae:
         logger.warning("[%s][DECISION] position auditor fallito: %s", run_id, _ae)
 

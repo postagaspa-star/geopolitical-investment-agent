@@ -355,6 +355,11 @@ def format_auditor_block(verdicts: dict) -> str:
         "(il livello/struttura precisa che la salva). 'E' un rintracciamento' NON",
         "basta: serve il dato. I TECNICI pesano piu' delle news, e un'uscita e' un",
         "evento tecnico.",
+        "CONFUTAZIONE VALIDA = SOLO struttura/livelli/pattern (supporto che tiene,",
+        "fib/HVN, higher-low intatto, divergenza confermata). INAMMISSIBILE basarsi",
+        "su P&L, prezzo d'ingresso, 'break-even', 'sono in pari', 'perderei poco':",
+        "e' il BIAS che eliminiamo — se la tua UNICA difesa e' quella, ESCI. E in",
+        "ogni caso metti lo SL al livello tecnico che invalida la tesi.",
     ]
     for t, v in flagged.items():
         c = v.get("confidence")
@@ -407,4 +412,78 @@ def enforce_auditor_verdicts(run_id: str, verdicts: dict, positions: list | None
             acted.append(tk)
         except Exception as e:
             logger.debug("[%s][AUDITOR] teeth %s fail: %s", run_id, tk, e)
+    return acted
+
+
+# Termini che rendono una confutazione INAMMISSIBILE (bias contabile / speranza)
+# e termini TECNICI ammessi. Usati dal validatore leggero post-decisione.
+_BIAS_TERMS = ("break-even", "breakeven", "break even", "in pari", "sono in pari",
+               "quasi in pari", "p&l", "pnl", " p/l", "perderei", "perdo poco",
+               "perdo solo", "poco sotto", "prezzo d'ingresso", "prezzo di ingresso",
+               "entry price", "carico medio", "non perdo molto")
+_TECH_TERMS = ("struttura", "supporto", "resistenza", "fib", "hvn", "lvn", "bos",
+               "choch", "engulfing", "rsi", "macd", "ema", "livello", "volume",
+               "higher-low", "lower-low", "higher high", "lower high", "swing",
+               "divergenza", "trend", "breakout", "ipervenduto", "ipercomprato",
+               "hammer", "doji")
+
+
+def flag_bias_holds(decision_text: str, exit_tickers: list) -> list:
+    """Validatore LEGGERO della confutazione. Per ogni ticker che l'Auditor aveva
+    segnalato EXIT, guarda la finestra di testo attorno alla sua menzione nel
+    ragionamento del Decision: se la difesa si regge su termini di BIAS (P&L,
+    break-even, prezzo d'ingresso) e NON cita struttura/livelli/pattern, e' una
+    confutazione INAMMISSIBILE -> l'EXIT deve prevalere. Ritorna quei ticker."""
+    if not decision_text or not exit_tickers:
+        return []
+    low = str(decision_text).lower()
+    flagged = []
+    for tk in exit_tickers:
+        base = str(tk or "").upper().replace("-USD", "").replace("X:", "").strip()
+        if not base:
+            continue
+        idx = low.find(base.lower())
+        if idx < 0:
+            continue
+        window = low[max(0, idx - 80): idx + 280]
+        has_bias = any(b in window for b in _BIAS_TERMS)
+        has_tech = any(t in window for t in _TECH_TERMS)
+        if has_bias and not has_tech:
+            flagged.append(tk)
+    return flagged
+
+
+def enforce_bias_holds(run_id: str, tickers: list, positions: list | None = None) -> list:
+    """Per i ticker la cui confutazione e' risultata BIAS-based (flag_bias_holds),
+    stringe lo SL appena oltre il prezzo (come le teeth): l'EXIT dell'Auditor
+    prevale di fatto se il prezzo prosegue. Ritorna i ticker su cui ha agito."""
+    import database
+    acted = []
+    if not tickers:
+        return acted
+    try:
+        if positions is None:
+            positions = database.get_positions() or []
+        by_ticker = {p.get("ticker"): p for p in positions if p.get("ticker")}
+    except Exception:
+        by_ticker = {}
+    for tk in tickers:
+        try:
+            p = by_ticker.get(tk)
+            if not p:
+                continue
+            cur = float(p.get("current_price") or 0)
+            if cur <= 0:
+                continue
+            is_short = str(p.get("direction") or "LONG").upper() == "SHORT"
+            new_sl = round(cur * (1.005 if is_short else 0.995), 6)
+            database.update_position_auto_exit(tk, stop_loss_price=new_sl,
+                                               set_by="auditor_bias_reject")
+            database.insert_agent_log(run_id, "POSITION_AUDIT_BIAS_REJECT", json.dumps({
+                "ticker": tk, "tightened_sl": new_sl, "price": cur,
+                "reason": "confutazione bias-based (P&L/entry): EXIT prevale",
+            }, default=str))
+            acted.append(tk)
+        except Exception as e:
+            logger.debug("[%s][AUDITOR] bias-reject %s fail: %s", run_id, tk, e)
     return acted

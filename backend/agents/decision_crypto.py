@@ -1793,6 +1793,7 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
     # tenere (tecnici > news); teeth misurate (SL stretto) su EXIT alta-conviction
     # + struttura rotta. Best-effort: se fallisce, la decisione prosegue.
     auditor_block = ""
+    auditor_exit_tickers: list = []
     try:
         from agents.position_auditor import (audit_positions, format_auditor_block,
                                              enforce_auditor_verdicts)
@@ -1803,6 +1804,8 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
             _verdicts = await audit_positions(run_id, _crypto_pos)
             auditor_block = format_auditor_block(_verdicts)
             enforce_auditor_verdicts(run_id, _verdicts, _crypto_pos)
+            auditor_exit_tickers = [t for t, v in _verdicts.items()
+                                    if str(v.get("verdict")).upper() == "EXIT"]
     except Exception as _ae:
         logger.warning("[%s][DECISION-CRYPTO] position auditor fallito: %s", run_id, _ae)
 
@@ -1848,6 +1851,22 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
             pass
         return {"decision": "ERROR", "trades": [], "error": str(exc),
                 "model": "deepseek-r1-error"}
+
+    # Validatore della CONFUTAZIONE: se il Decision ha TENUTO una posizione che
+    # l'Auditor aveva segnalato EXIT difendendola con BIAS (P&L/entry) invece che
+    # coi tecnici, l'EXIT prevale (SL stretto). final_text = ragionamento Decision.
+    if auditor_exit_tickers:
+        try:
+            from agents.position_auditor import flag_bias_holds, enforce_bias_holds
+            _open_now = {p.get("ticker") for p in (database.get_positions() or [])}
+            _open_exit = [t for t in auditor_exit_tickers if t in _open_now]
+            _bias = flag_bias_holds(final_text, _open_exit)
+            if _bias:
+                enforce_bias_holds(run_id, _bias)
+                logger.info("[%s][DECISION-CRYPTO] confutazione bias-based -> EXIT prevale: %s",
+                            run_id, _bias)
+        except Exception as _ve:
+            logger.warning("[%s][DECISION-CRYPTO] validatore confutazione: %s", run_id, _ve)
 
     duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 

@@ -97,3 +97,29 @@ def test_experience_block_empty_when_no_data(monkeypatch):
                                           "losses": 0, "sample_size": 0})
     monkeypatch.setattr(coach_cards, "get_active_cards_block_for_decision", lambda: "")
     assert pa._load_experience_block() == ""
+
+
+# ── Validatore della confutazione: P&L/entry inammissibili, l'EXIT prevale ──
+def test_flag_bias_holds_detects_pnl_defense():
+    text = "AVAX: CONFUTO - P&L -$10, break-even sostanziale, perderei poco. Tengo."
+    assert pa.flag_bias_holds(text, ["AVAX-USD"]) == ["AVAX-USD"]
+
+
+def test_flag_bias_holds_accepts_technical_defense():
+    text = "LINK: CONFUTO - bullish engulfing a fib 0.236, HVN cluster, supporto tiene."
+    assert pa.flag_bias_holds(text, ["LINK-USD"]) == []
+
+
+def test_flag_bias_holds_mixed_keeps_if_technical_present():
+    # se cita ANCHE un argomento tecnico (oltre al P&L) -> ammissibile, non flaggato
+    text = "AVAX: RSI ipervenduto a supporto, struttura intatta. P&L vicino break-even."
+    assert pa.flag_bias_holds(text, ["AVAX-USD"]) == []
+
+
+def test_enforce_bias_holds_tightens_sl():
+    portfolio.execute_buy("AVAX-USD", 2.0, 1000.0, "g", "t", 80)
+    pos = [{"ticker": "AVAX-USD", "current_price": 950.0, "direction": "LONG"}]
+    acted = pa.enforce_bias_holds("run-x", ["AVAX-USD"], positions=pos)
+    assert acted == ["AVAX-USD"]
+    sl = float(portfolio.get_position("AVAX-USD")["stop_loss_price"])
+    assert abs(sl - 950.0 * 0.995) < 1e-3
