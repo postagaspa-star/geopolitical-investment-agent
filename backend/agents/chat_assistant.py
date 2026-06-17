@@ -30,10 +30,12 @@ logger = logging.getLogger(__name__)
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_R1_MODEL = "deepseek-reasoner"
 
-# Limite di output per evitare risposte fluviali e costi esagerati.
-# R1 generera' un blocco <think> separato che NON viene contato qui.
-# Alzato 2500 → 4000: le risposte dell'analista venivano troncate a meta'.
-MAX_RESPONSE_TOKENS = 4000
+# Limite di output per R1. ATTENZIONE: per deepseek-reasoner il budget di
+# output copre ragionamento + risposta: con contesto lungo (portfolio + fino a
+# 20 decisioni + cronologia) il ragionamento può consumarlo tutto e lasciare
+# 'content' VUOTO → "(nessuna risposta generata)". Alzato 4000 → 8000 (max del
+# reasoner) per lasciare spazio alla risposta dopo il ragionamento.
+MAX_RESPONSE_TOKENS = 8000
 
 # Massimo numero di trade da iniettare nel contesto (scaglione di sicurezza
 # in caso l'utente selezioni troppi trade — R1 ha un context da 64k token).
@@ -644,12 +646,29 @@ async def chat_completion(
 
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message", {}) or {}
+        finish = choice.get("finish_reason")
         # R1 restituisce sia content (risposta finale) che reasoning_content
-        # (chain-of-thought). Esponiamo solo content all'utente.
+        # (chain-of-thought). Normalmente esponiamo solo content.
         raw = msg.get("content") or ""
         reasoning = msg.get("reasoning_content") or ""
         text = _strip_think(raw)
         if not text:
+            # Causa tipica di "(nessuna risposta generata)": con contesto lungo
+            # R1 consuma il budget di output nel ragionamento e lascia 'content'
+            # vuoto (finish_reason='length'). Per un ANALISTA il reasoning È
+            # l'analisi: lo usiamo come risposta invece di un errore.
+            fb = (reasoning or "").strip()
+            if fb:
+                logger.warning(
+                    "DeepSeek chat: content vuoto (finish=%s) → uso reasoning_content "
+                    "(len=%d) come risposta.", finish, len(fb),
+                )
+                text = fb
+        if not text:
+            logger.error(
+                "DeepSeek chat: content E reasoning vuoti. finish=%s, msg_keys=%s",
+                finish, list(msg.keys()),
+            )
             text = "(nessuna risposta generata)"
         return (text, reasoning)
     except aiohttp.ClientError as e:
