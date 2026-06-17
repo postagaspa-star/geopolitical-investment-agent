@@ -250,6 +250,8 @@ def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
 
 DECISION_SYSTEM_PROMPT_DEFAULT = """Sei il Decision Agent di GeoInvest AI — un sistema di trading autonomo ad alto rischio.
 
+GERARCHIA DEI SEGNALI (REGOLA FERREA): i TECNICI pesano SEMPRE piu' delle notizie. News/geopolitica danno la TESI e la DIREZIONE; i TECNICI decidono l'ESECUZIONE (quando entrare/uscire, a che livello). Le USCITE in particolare sono eventi TECNICI: se la struttura si rompe (CHoCH, lower-low, supporto perso) ESCI, anche se le news restano buone — mai tenere un trade tecnicamente rotto sperando nel recupero.
+
 HAI PIENA AUTONOMIA DECISIONALE. Non ci sono restrizioni conservative.
 Il tuo obiettivo è MASSIMIZZARE i rendimenti accettando rischi calcolati.
 
@@ -419,6 +421,8 @@ Mai dire "non ho strumenti per chiudere": ce li hai, usali."""
 # al fatto che durante l'overnight la priorità sono BTC/ETH/SOL/etc.
 DECISION_R1_SYSTEM_PROMPT_DEFAULT = """Sei il Decision Agent di GeoInvest AI in MODALITÀ OVERNIGHT (mercati equity chiusi).
 Engine: DeepSeek-R1 (reasoning model). Subentri a Claude Sonnet 4.5 fuori orario.
+
+GERARCHIA DEI SEGNALI (REGOLA FERREA): i TECNICI pesano SEMPRE piu' delle notizie. News/geopolitica danno la TESI e la DIREZIONE; i TECNICI decidono l'ESECUZIONE (quando entrare/uscire, a che livello). Le USCITE in particolare sono eventi TECNICI: se la struttura si rompe (CHoCH, lower-low, supporto perso) ESCI, anche se le news restano buone — mai tenere un trade tecnicamente rotto sperando nel recupero.
 
 CONTESTO OVERNIGHT:
 NYSE/LSE/XETRA chiuse. Le crypto sono il SOLO universo tradabile in tempo reale.
@@ -3029,6 +3033,22 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     portfolio_state = portfolio.get_portfolio_state()
     context_loaded["portfolio"] = True
 
+    # POSITION AUDITOR: revisione TECNICA e imparziale delle posizioni aperte. I
+    # verdetti EXIT/TRIM diventano una sfida che il Decision deve confutare COI
+    # DATI per tenere (tecnici > news); teeth misurate (SL stretto) su EXIT
+    # alta-conviction + struttura rotta. Best-effort: se fallisce, si prosegue.
+    auditor_block = ""
+    try:
+        from agents.position_auditor import (audit_positions, format_auditor_block,
+                                             enforce_auditor_verdicts)
+        _open_pos = database.get_positions() or []
+        if _open_pos:
+            _verdicts = await audit_positions(run_id, _open_pos)
+            auditor_block = format_auditor_block(_verdicts)
+            enforce_auditor_verdicts(run_id, _verdicts, _open_pos)
+    except Exception as _ae:
+        logger.warning("[%s][DECISION] position auditor fallito: %s", run_id, _ae)
+
     # Technical report
     context_loaded["technical"] = bool(tech_report and tech_report.get("analyses"))
 
@@ -3174,6 +3194,8 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         focus_tickers=focus_tickers, watchdog_reason=watchdog_reason,
         rotation_data=rotation_data,
     )
+    if auditor_block:
+        user_message = auditor_block + "\n\n" + user_message
 
     database.insert_agent_log(run_id, "DECISION_CONTEXT",
         json.dumps({

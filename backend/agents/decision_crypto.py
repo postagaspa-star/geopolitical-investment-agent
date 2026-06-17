@@ -66,6 +66,8 @@ CRYPTO_COOLDOWN_SECONDS = 50 * 60   # 50 min: lascia 10 min di margine vs schedu
 
 CRYPTO_DECISION_PROMPT_DEFAULT = """Sei il Decision Agent CRYPTO di GeoInvest AI — sistema autonomo focalizzato ESCLUSIVAMENTE sui mercati crypto (BTC, ETH, SOL, ecc.).
 
+GERARCHIA DEI SEGNALI (REGOLA FERREA): i TECNICI pesano SEMPRE piu' delle notizie. News/geopolitica danno la TESI e la DIREZIONE; i TECNICI decidono l'ESECUZIONE (quando entrare/uscire, a che livello). Le USCITE in particolare sono eventi TECNICI: se la struttura si rompe (CHoCH, lower-low, supporto perso) ESCI, anche se le news restano buone — mai tenere un trade tecnicamente rotto sperando nel recupero.
+
 UNIVERSO INVESTIBILE — APERTO:
 Qualsiasi crypto liquida in formato yfinance (suffisso -USD) o Polygon
 (prefisso X:). NESSUNA whitelist hardcoded: hai liberta' di scegliere il
@@ -1786,10 +1788,30 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
     portfolio_state = portfolio.get_portfolio_state()
     crypto_docs = _load_crypto_documents(database)
 
+    # POSITION AUDITOR: revisione TECNICA e imparziale delle crypto aperte. I
+    # verdetti EXIT/TRIM diventano una sfida che R1 deve confutare COI DATI per
+    # tenere (tecnici > news); teeth misurate (SL stretto) su EXIT alta-conviction
+    # + struttura rotta. Best-effort: se fallisce, la decisione prosegue.
+    auditor_block = ""
+    try:
+        from agents.position_auditor import (audit_positions, format_auditor_block,
+                                             enforce_auditor_verdicts)
+        _crypto_pos = [p for p in (database.get_positions() or [])
+                       if str(p.get("ticker") or "").upper().endswith("-USD")
+                       or str(p.get("ticker") or "").upper().startswith("X:")]
+        if _crypto_pos:
+            _verdicts = await audit_positions(run_id, _crypto_pos)
+            auditor_block = format_auditor_block(_verdicts)
+            enforce_auditor_verdicts(run_id, _verdicts, _crypto_pos)
+    except Exception as _ae:
+        logger.warning("[%s][DECISION-CRYPTO] position auditor fallito: %s", run_id, _ae)
+
     user_message = _build_context(
         tech_report, recent_buffer, portfolio_state, crypto_docs,
         focus_tickers=focus_tickers, watchdog_reason=watchdog_reason,
     )
+    if auditor_block:
+        user_message = auditor_block + "\n\n" + user_message
 
     database.insert_agent_log(run_id, "DECISION_CRYPTO_CONTEXT", json.dumps({
         "tech_engine": tech_report.get("engine", "deferred_to_decision"),
