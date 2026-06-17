@@ -1339,12 +1339,18 @@ def enforce_stops(prices: dict | None = None) -> list:
         margin = _get_auto_exits_config()["margin_pct"] / 100.0
     except Exception:
         margin = 0.01
-    try:
-        trail_pct = float(database.get_setting("trailing_stop_pct", "") or 4.0)
-    except Exception:
-        trail_pct = 4.0
-    if trail_pct <= 0:
-        trail_pct = 4.0
+
+    # Trailing % SEPARATO per asset class: l'equity si muove poco (4%), la crypto
+    # e' molto piu' volatile (10%) — un trailing al 4% sulla crypto stopperebbe
+    # sul rumore, vendendo i vincenti troppo presto. Entrambi tunabili da settings.
+    def _trail_setting(key, dflt):
+        try:
+            v = float(database.get_setting(key, "") or dflt)
+            return v if v > 0 else dflt
+        except Exception:
+            return dflt
+    trail_equity = _trail_setting("trailing_stop_pct", 4.0)
+    trail_crypto = _trail_setting("trailing_stop_pct_crypto", 10.0)
 
     for p in positions:
         ticker = p.get("ticker")
@@ -1358,6 +1364,9 @@ def enforce_stops(prices: dict | None = None) -> list:
         if qty <= 0:
             continue
         is_short = str(p.get("direction") or "LONG").upper() == "SHORT"
+        _tu = ticker.upper()
+        is_crypto = _tu.endswith("-USD") or _tu.startswith("X:")
+        trail_pct = trail_crypto if is_crypto else trail_equity
 
         cur = None
         if prices and ticker in prices:

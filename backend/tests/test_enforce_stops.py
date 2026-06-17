@@ -19,6 +19,8 @@ def _enforce_setup():
     database.set_setting("stop_enforcement_enabled", "true")
     database.set_setting("trailing_stop_enabled", "true")
     database.set_setting("trailing_stop_pct", "4")
+    # i test usano BTC-USD (crypto): fisso anche il trail crypto a 4% per la math nota
+    database.set_setting("trailing_stop_pct_crypto", "4")
 
 
 def _open_long(ticker="BTC-USD", qty=2.0, price=1000.0):
