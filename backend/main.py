@@ -1307,12 +1307,17 @@ def _exec_action_set_stop_loss(action: dict) -> dict:
                 "quantity": res.get("quantity"), "partial": True,
                 "order_id": res.get("order_id")}
 
+    # Instradato via portfolio.set_stop_loss (non piu' scrittura diretta al DB):
+    # cosi' la chat eredita il cricchetto anti-allargamento E il sanity-check
+    # lato/+-50% che prima le mancava.
     try:
-        database.update_position_auto_exit(
-            ticker, stop_loss_price=sl_price, set_by="chat_decision_user",
-        )
+        import portfolio as _pf
+        res = _pf.set_stop_loss(ticker, sl_price, run_id="chat_decision_user")
     except Exception as e:
         return {"ok": False, "error": f"update DB fallito: {e}"}
+    if not (isinstance(res, dict) and res.get("success")):
+        reason = res.get("reason", "SL rifiutato") if isinstance(res, dict) else "SL rifiutato"
+        return {"ok": False, "error": reason}
 
     return {"ok": True, "ticker": ticker, "stop_loss_price": sl_price}
 

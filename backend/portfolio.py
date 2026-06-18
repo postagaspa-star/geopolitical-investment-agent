@@ -1028,6 +1028,42 @@ def set_stop_loss(ticker: str, stop_price: float, run_id: str = "") -> dict:
                 pass
             return {"success": False, "reason": reason}
 
+    # ── Cricchetto a senso unico (anti-allargamento) ──────────────────────
+    # Su una posizione APERTA lo stop puo' solo STRINGERE, mai allargarsi (ne'
+    # essere rimosso). Allargare lo SL di una posizione in perdita e' il
+    # classico disposition effect: e' il caso NEAR (2.15 -> 1.95 "per dare
+    # respiro pre-FOMC") che l'ha lasciata sanguinare fino a -7.6%. I tightener
+    # interni (trailing, teeth, lock-in) scrivono diretto su
+    # update_position_auto_exit e NON passano di qui: questo guard colpisce solo
+    # i path esterni (decision standard/crypto, chat, scalper).
+    existing_sl = float(pos.get("stop_loss_price") or 0)
+    if existing_sl > 0:
+        is_long = str(pos.get("direction") or "LONG").upper() != "SHORT"
+        new_sl = float(stop_price)
+        widens = (new_sl <= 0) or (new_sl < existing_sl if is_long
+                                   else new_sl > existing_sl)
+        if widens:
+            try:
+                import database as _db
+                _db.insert_agent_log(run_id or "", "STOP_WIDEN_BLOCKED",
+                                     json.dumps({
+                                         "ticker": ticker,
+                                         "existing_sl": existing_sl,
+                                         "proposed_sl": stop_price,
+                                         "direction": "LONG" if is_long else "SHORT",
+                                     }, default=str))
+            except Exception:
+                pass
+            return {
+                "success": False, "ticker": ticker,
+                "reason": (
+                    f"Cricchetto anti-allargamento: lo stop di {ticker} non puo' "
+                    f"allargarsi (attuale {existing_sl}, proposto {stop_price}). Su "
+                    f"una posizione aperta lo SL puo' solo stringere o restare; per "
+                    f"ridurre il rischio stringi lo SL o riduci/chiudi la posizione."
+                ),
+            }
+
     ok = update_position_auto_exit(ticker, stop_loss_price=stop_price, set_by=run_id)
     if not ok:
         return {"success": False, "reason": "Aggiornamento DB fallito"}

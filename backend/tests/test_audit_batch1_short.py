@@ -179,6 +179,14 @@ def _patch_chat_pos(monkeypatch, direction, entry=200.0):
     pos = {"ticker": "TST", "direction": direction, "avg_buy_price": entry, "quantity": 5}
     monkeypatch.setattr(database, "get_positions", lambda: [pos])
     monkeypatch.setattr(database, "update_position_auto_exit", lambda *a, **k: True)
+    # La chat ora scrive lo SL via portfolio.set_stop_loss (cricchetto anti-
+    # allargamento + sanity-check): mock dei suoi accessi cosi' il path reale
+    # gira senza DB. pos non ha stop_loss_price -> cricchetto inattivo (1o set).
+    monkeypatch.setattr(portfolio, "get_position", lambda t: pos)
+    monkeypatch.setattr(portfolio, "_refresh_current_price", lambda t, f: f)
+    monkeypatch.setattr(portfolio, "update_position_auto_exit", lambda *a, **k: True)
+    monkeypatch.setattr(database, "insert_agent_log", lambda *a, **k: None,
+                        raising=False)
 
 
 def test_chat_sl_short_above_entry(monkeypatch):
