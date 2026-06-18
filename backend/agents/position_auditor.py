@@ -59,19 +59,22 @@ COME RAGIONA UN ESPERTO (playbook)
 
    PROFONDITA' e DURATA (il punto che si sbaglia piu' spesso): un pullback e' SANO
    solo se POCO PROFONDO e BREVE. Leggi i campi `pullback` che RICEVI:
-   - drawdown_from_high_pct (LONG) / runup_from_low_pct (SHORT) = QUANTO si e'
-     mosso contro la posizione dal massimo/minimo recente. retracement_of_swing =
-     dove sta nello swing (0 = al top, 1 = al fondo).
-   - retracement_of_swing OLTRE ~0.618 (o un drawdown_from_high marcato — indicativo
-     >25-30% su un'altcoin, meno su BTC/ETH) NON e' piu' un "rintracciamento": e'
-     territorio di INVERSIONE, ANCHE SE l'ultimo higher-low formale non e' ancora
-     rotto. La struttura "intatta" da sola NON basta a giustificare un HOLD.
+   - drawdown_from_high_pct (LONG) / runup_from_low_pct (SHORT) e' il METRO PRIMARIO
+     della profondita': QUANTO si e' mosso CONTRO la posizione dal massimo/minimo
+     recente. Un drawdown marcato (indicativo >25-30% su un'altcoin, meno su BTC/ETH)
+     e' gia' territorio di INVERSIONE, ANCHE SE l'ultimo higher-low formale non e'
+     rotto. La struttura "intatta" da sola NON basta a tenere.
+   - retracement_of_swing (0 = al top, 1 = al fondo) e' SECONDARIO e puo' SOTTOSTIMARE
+     la discesa: e' normalizzato sull'intero range della finestra, che spesso include
+     una vecchia capitolazione molto in basso, percio' fa apparire "sotto 0.618 = sano"
+     un calo in realta' profondo. Un retracement_of_swing basso NON annulla un
+     drawdown_from_high marcato. SE I DUE CONFLIGGONO, VINCE IL DRAWDOWN.
    - bars_since_high = DA QUANTO TEMPO non riconquista il massimo. Un pullback sano
      RIMBALZA presto. Se stagna per molte barre facendo lower-high senza riconquistare,
      NON e' una pausa: e' un bleed / distribuzione lenta -> almeno TRIM.
-   In sintesi: profondo + persistente = declassa (TRIM/EXIT), anche con HL formale
-   ancora intatto. NON aspettare la rottura conclamata per uscire: a quel punto il
-   ritracciamento e' gia' diventato perdita piena.
+   In sintesi: drawdown profondo e/o persistente = declassa (TRIM/EXIT), anche con HL
+   formale intatto e retracement_of_swing apparentemente basso. NON aspettare la
+   rottura conclamata: a quel punto il ritracciamento e' gia' perdita piena.
 
 2. TOPPING / DISTRIBUZIONE (si PRENDE il profitto): mossa quasi PARABOLICA +
    climax di VOLUME (spike enorme) + candele di distribuzione (lunghe ombre
@@ -92,7 +95,7 @@ COME RAGIONA UN ESPERTO (playbook)
 
 REGOLE DI GIUDIZIO:
 - TIENI: struttura intatta + pullback SHALLOW e BREVE che rimbalza (anche se in
-  perdita momentanea). Profondo (oltre 0.618 / drawdown marcato) o persistente -> NO.
+  perdita momentanea). drawdown_from_high marcato o persistente -> NO (declassa).
 - TRIM: profitto in giveback o segnali misti / topping iniziale.
 - EXIT: struttura rotta (CHoCH/lower-low) OPPURE topping confermato OPPURE
   invalidazione tecnica.
@@ -109,11 +112,11 @@ ESEMPI (few-shot)
   rimbalzato dopo 1-2 barre, market_structure=UPTREND, higher-low intatto, volume in
   calo -> {"verdict":"HOLD","classification":"healthy_pullback","technical_reason":
   "pullback shallow su 0.4 fib, HL intatto, rimbalzo rapido, volume calante","confidence":78}
-- LONG, drawdown_from_high ~28% (retracement_of_swing 0.72, OLTRE 0.618), fermo da 8+
-  barre con lower-high ripetuti (bars_since_high alto), volume non in chiaro calo, HL
-  formale ancora non rotto -> {"verdict":"EXIT","classification":"reversal",
-  "technical_reason":"ritracciamento profondo oltre 0.618 e persistente, rimbalzo
-  fallito: non e' un pullback sano ma un'inversione in corso","confidence":80}
+- LONG, drawdown_from_high ~28% (PROFONDO) ma retracement_of_swing 0.47 (pare "sotto
+  0.618" perche' la finestra include una vecchia capitolazione), fermo da 15 barre con
+  lower-high ripetuti, HL formale non ancora rotto -> {"verdict":"TRIM","classification":
+  "giveback","technical_reason":"drawdown 28% dal picco (metro primario) + 15 barre di
+  stagnazione = de-risk; il retracement_of_swing basso sottostima la discesa","confidence":75}
 - LONG, era +20%, ora CHoCH_bearish + lower-low confermato, volume in aumento sul
   ribasso -> {"verdict":"EXIT","classification":"reversal","technical_reason":
   "CHoCH bearish + lower-low, supporto chiave rotto con volume: trend invertito",

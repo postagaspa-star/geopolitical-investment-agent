@@ -161,6 +161,9 @@ def test_playbook_has_depth_duration_rules():
     assert "retracement_of_swing" in pb
     assert "0.618" in pb
     assert "bars_since_high" in pb
+    # drawdown = metro PRIMARIO; in conflitto vince sul retracement (anti flip-flop)
+    assert "VINCE IL DRAWDOWN" in pb
+    assert "METRO PRIMARIO" in pb
 
 
 def test_format_block_binding_only_on_crypto():
