@@ -800,8 +800,27 @@ def _enforce_open_has_stop(action, ticker, quantity, current_price,
     return {"aborted": True, "reason": reason, "close_success": close_ok}
 
 
+def _auditor_blocks_add(auditor_binding: dict | None, ticker: str,
+                        action: str) -> dict | None:
+    """Binding asimmetrico (crypto): se l'Auditor ha emesso EXIT/TRIM su `ticker`,
+    blocca le azioni che AGGIUNGONO esposizione nella direzione della posizione
+    (BUY su una LONG, SHORT su una SHORT). Ritorna il motivo (dict) se va bloccato,
+    None se permesso. De-risk (SELL/COVER) e ticker non vincolati -> None. Mai un
+    override narrativo: una confutazione tecnica giustifica al massimo un HOLD."""
+    ab = (auditor_binding or {}).get(str(ticker or "").upper())
+    if not ab:
+        return None
+    pos_dir = str(ab.get("direction") or "LONG").upper()
+    act = str(action or "").upper()
+    adds = (act == "BUY" and pos_dir != "SHORT") or (act == "SHORT" and pos_dir == "SHORT")
+    if not adds:
+        return None
+    return {"verdict": ab.get("verdict"), "direction": pos_dir,
+            "reason": ab.get("reason")}
+
+
 async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
-                        workflow_state=None) -> str:
+                        workflow_state=None, auditor_binding: dict | None = None) -> str:
     import data_fetchers
     import database
     import portfolio
@@ -844,6 +863,26 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             quantity = float(tool_input["quantity"])
             logic_chain = tool_input["logic_chain"]
             confidence = tool_input["confidence_level"]
+            # ── Binding asimmetrico Auditor: blocca gli ADD su EXIT/TRIM ───────
+            # De-risk (SELL/COVER) sempre permesso; nessun override narrativo.
+            _ab_block = _auditor_blocks_add(auditor_binding, ticker, action)
+            if _ab_block:
+                database.insert_agent_log(run_id, "AUDITOR_BINDING_BLOCK", json.dumps({
+                    "ticker": ticker, "action": action,
+                    "verdict": _ab_block.get("verdict"),
+                    "direction": _ab_block.get("direction"),
+                }, default=str))
+                return json.dumps({
+                    "blocked": True, "ticker": ticker, "action": action,
+                    "reason": (
+                        f"BLOCCATO dall'Auditor: verdetto {_ab_block.get('verdict')} su "
+                        f"{ticker} ({_ab_block.get('reason')}). Mandato VINCOLANTE: su questo "
+                        f"ticker puoi solo RIDURRE/CHIUDERE, NON aggiungere esposizione. Il "
+                        f"de-risk e' sempre permesso (asimmetrico). Nessun override narrativo: "
+                        f"confutare coi tecnici puo' giustificare un HOLD passivo, non sblocca "
+                        f"un BUY/aggiunta — e lo SL resta al livello d'invalidazione."
+                    ),
+                })
             # Stop_loss/take_profit: parse esplicito per evitare il bug
             # `or None` che convertiva 0.0 a None silenziosamente.
             sl_raw = tool_input.get("stop_loss")
@@ -1569,7 +1608,8 @@ def _build_context(tech_report: dict, recent_buffer: list, portfolio_state: dict
 
 # ─── Tool loop ──────────────────────────────────────────────────────────────
 
-async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
+async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str,
+                        auditor_binding: dict | None = None
                         ) -> tuple[list, str, int, dict, dict]:
     api_key = _get_deepseek_key()
     if not api_key:
@@ -1689,6 +1729,7 @@ async def _run_r1_loop(run_id: str, system_prompt: str, user_message: str
                 # Esegui tool — workflow_state per arricchimento logic_chain
                 result = await _handle_tool(
                     tool_name, tool_input, run_id, workflow_state=workflow_state,
+                    auditor_binding=auditor_binding,
                 )
 
                 # Aggiorna state machine
@@ -1783,6 +1824,7 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
     # + struttura rotta. Best-effort: se fallisce, la decisione prosegue.
     auditor_block = ""
     auditor_exit_tickers: list = []
+    auditor_binding: dict = {}
     try:
         from agents.position_auditor import (audit_positions, format_auditor_block,
                                              enforce_auditor_verdicts)
@@ -1795,6 +1837,18 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
             enforce_auditor_verdicts(run_id, _verdicts, _crypto_pos)
             auditor_exit_tickers = [t for t, v in _verdicts.items()
                                     if str(v.get("verdict")).upper() == "EXIT"]
+            # Binding asimmetrico: EXIT/TRIM -> il Decision non puo' AGGIUNGERE su
+            # quel ticker (solo ridurre/chiudere). Mappa col verso della posizione.
+            _dir = {str(p.get("ticker")).upper():
+                    str(p.get("direction") or "LONG").upper()
+                    for p in _crypto_pos if p.get("ticker")}
+            auditor_binding = {
+                t.upper(): {"verdict": str(v.get("verdict")).upper(),
+                            "direction": _dir.get(t.upper(), "LONG"),
+                            "reason": v.get("technical_reason")}
+                for t, v in _verdicts.items()
+                if str(v.get("verdict")).upper() in ("EXIT", "TRIM")
+            }
     except Exception as _ae:
         logger.warning("[%s][DECISION-CRYPTO] position auditor fallito: %s", run_id, _ae)
 
@@ -1816,6 +1870,7 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
     try:
         trades, final_text, iterations, ia, ft = await _run_r1_loop(
             run_id, sys_prompt_crypto, user_message,
+            auditor_binding=auditor_binding,
         )
         used_model = DEEPSEEK_R1_MODEL
         _record_run_timestamp()

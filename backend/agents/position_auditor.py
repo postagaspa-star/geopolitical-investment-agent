@@ -421,6 +421,10 @@ def format_auditor_block(verdicts: dict) -> str:
         "(il livello/struttura precisa che la salva). 'E' un rintracciamento' NON",
         "basta: serve il dato. I TECNICI pesano piu' delle news, e un'uscita e' un",
         "evento tecnico.",
+        "MANDATO VINCOLANTE (crypto): su un ticker segnalato EXIT/TRIM puoi solo",
+        "RIDURRE o CHIUDERE — un BUY / un'aggiunta su quel ticker verra' RIFIUTATA",
+        "dal sistema. Puoi TENERE (HOLD passivo) solo con una confutazione tecnica",
+        "valida; il de-risk resta SEMPRE concesso e lo SL va al livello d'invalidazione.",
         "CONFUTAZIONE VALIDA = SOLO struttura/livelli/pattern (supporto che tiene,",
         "fib/HVN, higher-low intatto, divergenza confermata). INAMMISSIBILE basarsi",
         "su P&L, prezzo d'ingresso, 'break-even', 'sono in pari', 'perderei poco':",
@@ -455,7 +459,7 @@ def enforce_auditor_verdicts(run_id: str, verdicts: dict, positions: list | None
         try:
             if str(v.get("verdict")).upper() != "EXIT":
                 continue
-            if str(v.get("classification")) not in ("reversal", "topping"):
+            if str(v.get("classification")) not in ("reversal", "topping", "giveback"):
                 continue
             conf = float(v.get("confidence") or 0)
             if conf < 75:
