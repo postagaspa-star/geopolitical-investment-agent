@@ -60,21 +60,20 @@ COME RAGIONA UN ESPERTO (playbook)
    PROFONDITA' e DURATA (il punto che si sbaglia piu' spesso): un pullback e' SANO
    solo se POCO PROFONDO e BREVE. Leggi i campi `pullback` che RICEVI:
    - drawdown_from_high_pct (LONG) / runup_from_low_pct (SHORT) e' il METRO PRIMARIO
-     della profondita': QUANTO si e' mosso CONTRO la posizione dal massimo/minimo
-     recente. Un drawdown marcato (indicativo >25-30% su un'altcoin, meno su BTC/ETH)
-     e' gia' territorio di INVERSIONE, ANCHE SE l'ultimo higher-low formale non e'
-     rotto. La struttura "intatta" da sola NON basta a tenere.
-   - retracement_of_swing (0 = al top, 1 = al fondo) e' SECONDARIO e puo' SOTTOSTIMARE
-     la discesa: e' normalizzato sull'intero range della finestra, che spesso include
-     una vecchia capitolazione molto in basso, percio' fa apparire "sotto 0.618 = sano"
-     un calo in realta' profondo. Un retracement_of_swing basso NON annulla un
-     drawdown_from_high marcato. SE I DUE CONFLIGGONO, VINCE IL DRAWDOWN.
-   - bars_since_high = DA QUANTO TEMPO non riconquista il massimo. Un pullback sano
-     RIMBALZA presto. Se stagna per molte barre facendo lower-high senza riconquistare,
-     NON e' una pausa: e' un bleed / distribuzione lenta -> almeno TRIM.
-   In sintesi: drawdown profondo e/o persistente = declassa (TRIM/EXIT), anche con HL
-   formale intatto e retracement_of_swing apparentemente basso. NON aspettare la
-   rottura conclamata: a quel punto il ritracciamento e' gia' perdita piena.
+     della profondita', misurato dal PICCO RECENTE (ultimo swing locale), NON da un
+     vecchio massimo: e' QUANTO si e' mosso CONTRO la posizione di recente. Un
+     drawdown marcato (indicativo >15% su un'altcoin, meno su BTC/ETH) e' gia'
+     deterioration vera -> declassa, ANCHE SE l'higher-low formale non e' rotto.
+   - structural_high / structural_low sono l'estremo della finestra LUNGA, solo
+     CONTESTO. ATTENZIONE: se structural_high e' molto sopra recent_high, quel calo
+     e' VECCHIO (spesso pre-ingresso) e NON e' la deterioration attuale -> non
+     contarlo come tale (e' l'errore "drawdown 28% da un massimo di settimane fa").
+   - bars_since_high = DA QUANTO TEMPO non riconquista il picco recente. Un pullback
+     sano RIMBALZA presto. Se stagna molte barre facendo lower-high, e' un bleed ->
+     almeno TRIM.
+   In sintesi: conta la discesa dal PICCO RECENTE (drawdown_from_high) e la sua
+   persistenza, NON un structural_high lontano. Recente marcato e/o persistente =
+   declassa (TRIM/EXIT). NON aspettare la rottura conclamata: e' gia' perdita piena.
 
 2. TOPPING / DISTRIBUZIONE (si PRENDE il profitto): mossa quasi PARABOLICA +
    climax di VOLUME (spike enorme) + candele di distribuzione (lunghe ombre
@@ -95,7 +94,7 @@ COME RAGIONA UN ESPERTO (playbook)
 
 REGOLE DI GIUDIZIO:
 - TIENI: struttura intatta + pullback SHALLOW e BREVE che rimbalza (anche se in
-  perdita momentanea). drawdown_from_high marcato o persistente -> NO (declassa).
+  perdita momentanea). drawdown_from_high (dal picco recente) marcato o persistente -> NO.
 - TRIM: profitto in giveback o segnali misti / topping iniziale.
 - EXIT: struttura rotta (CHoCH/lower-low) OPPURE topping confermato OPPURE
   invalidazione tecnica.
@@ -108,15 +107,18 @@ rottura di struttura al RIALZO (CHoCH bullish, higher-high).
 ═══════════════════════════════════════════════════════════════════════
 ESEMPI (few-shot)
 ═══════════════════════════════════════════════════════════════════════
-- LONG, pullback POCO PROFONDO (drawdown_from_high ~5%, retracement_of_swing 0.40),
-  rimbalzato dopo 1-2 barre, market_structure=UPTREND, higher-low intatto, volume in
-  calo -> {"verdict":"HOLD","classification":"healthy_pullback","technical_reason":
-  "pullback shallow su 0.4 fib, HL intatto, rimbalzo rapido, volume calante","confidence":78}
-- LONG, drawdown_from_high ~28% (PROFONDO) ma retracement_of_swing 0.47 (pare "sotto
-  0.618" perche' la finestra include una vecchia capitolazione), fermo da 15 barre con
-  lower-high ripetuti, HL formale non ancora rotto -> {"verdict":"TRIM","classification":
-  "giveback","technical_reason":"drawdown 28% dal picco (metro primario) + 15 barre di
-  stagnazione = de-risk; il retracement_of_swing basso sottostima la discesa","confidence":75}
+- LONG, drawdown_from_high ~5% dal PICCO RECENTE, rimbalzato dopo 1-2 barre,
+  market_structure=UPTREND, higher-low intatto, volume in calo -> {"verdict":"HOLD",
+  "classification":"healthy_pullback","technical_reason":"pullback shallow dal picco
+  recente, HL intatto, rimbalzo rapido, volume calante","confidence":78}
+- LONG, drawdown_from_high recente solo ~6% e in consolidamento, MA structural_high
+  ~-28% (vecchio massimo, calo PRE-ingresso) -> {"verdict":"HOLD","classification":
+  "healthy_pullback","technical_reason":"deterioration RECENTE lieve (-6%); il -28% e'
+  un calo vecchio dal massimo di finestra, non attuale","confidence":72}
+- LONG, drawdown_from_high ~20% dal PICCO RECENTE, 12 barre senza riconquistare,
+  lower-high ripetuti, struttura che cede -> {"verdict":"EXIT","classification":
+  "reversal","technical_reason":"discesa recente profonda e persistente, rimbalzo
+  fallito: inversione in corso, non pullback sano","confidence":80}
 - LONG, era +20%, ora CHoCH_bearish + lower-low confermato, volume in aumento sul
   ribasso -> {"verdict":"EXIT","classification":"reversal","technical_reason":
   "CHoCH bearish + lower-low, supporto chiave rotto con volume: trend invertito",
@@ -166,40 +168,61 @@ def _build_df_from_market_data(market_data: dict):
     return df
 
 
+def _recent_pivot(vals: list, kind: str, left: int = 3, right: int = 2):
+    """Pivot locale piu' RECENTE (max per 'high', min per 'low'): la barra il cui
+    valore domina i `left` vicini a sinistra e i `right` a destra. Ritorna
+    (valore, barre_fa) oppure None se non confermato nella finestra."""
+    n = len(vals)
+    for i in range(n - 1 - right, left - 1, -1):
+        seg = vals[i - left:i + right + 1]
+        if not seg:
+            continue
+        if kind == "high" and vals[i] >= max(seg):
+            return vals[i], n - 1 - i
+        if kind == "low" and vals[i] <= min(seg):
+            return vals[i], n - 1 - i
+    return None
+
+
 def _compute_pullback(market_data: dict, current_price: float,
                       lookback: int = 60) -> dict:
-    """Profondita' e persistenza del movimento, in chiave TECNICA: vs swing
-    high/low recenti, NON vs prezzo d'ingresso (niente bias da entry/P&L). E' il
-    'quanto' e 'da quanto tempo' che mancavano all'Auditor nel caso NEAR (sceso
-    -30% dallo swing high e fermo da giorni, ma giudicato 'pullback sano')."""
+    """Profondita' e persistenza del movimento, in chiave TECNICA. Il riferimento
+    e' il picco/minimo SWING RECENTE (ultimo pivot locale), NON l'estremo assoluto
+    della finestra: misurare dal massimo a 60 barre confondeva un calo PRE-ingresso
+    (NEAR: -28% da $3.09 di 15 barre fa, prima dell'entry a $2.34) con la
+    deterioration reale della posizione (-7% dal picco recente). `structural_*`
+    riporta l'estremo della finestra solo come CONTESTO. Nessun riferimento
+    all'entry: niente bias da prezzo d'ingresso."""
     try:
         bars = (market_data or {}).get("data") or []
         if not bars or current_price <= 0:
             return {}
         window = bars[-lookback:]
-        highs = [float(b.get("high")) for b in window if b.get("high")]
-        lows = [float(b.get("low")) for b in window if b.get("low")]
+        highs = [float(b.get("high")) for b in window if b.get("high") is not None]
+        lows = [float(b.get("low")) for b in window if b.get("low") is not None]
         if not highs or not lows:
             return {}
-        recent_high = max(highs)
-        recent_low = min(lows)
-        hi_idx = max(range(len(window)),
-                     key=lambda i: float(window[i].get("high") or 0))
-        lo_idx = min(range(len(window)),
-                     key=lambda i: float(window[i].get("low") or 1e18))
-        span = recent_high - recent_low
+        struct_high, struct_low = max(highs), min(lows)
+        ph = _recent_pivot(highs, "high")
+        pl = _recent_pivot(lows, "low")
+        recent_high, bars_since_high = ph if ph else (
+            struct_high, len(highs) - 1 - highs.index(struct_high))
+        recent_low, bars_since_low = pl if pl else (
+            struct_low, len(lows) - 1 - lows.index(struct_low))
+        # clamp >=0: se il prezzo e' sopra il picco recente (nuovo massimo in corso)
+        # la discesa e' 0; idem in basso per gli short.
+        dd = max(0.0, (recent_high - current_price) / recent_high * 100) if recent_high > 0 else 0.0
+        ru = max(0.0, (current_price - recent_low) / recent_low * 100) if recent_low > 0 else 0.0
         return {
             "lookback_bars": len(window),
             "recent_high": round(recent_high, 6),
             "recent_low": round(recent_low, 6),
-            "drawdown_from_high_pct": round((recent_high - current_price)
-                                            / recent_high * 100, 2) if recent_high > 0 else 0.0,
-            "runup_from_low_pct": round((current_price - recent_low)
-                                        / recent_low * 100, 2) if recent_low > 0 else 0.0,
-            # 0 = al massimo dello swing, 1 = al minimo. >0.618 = oltre la zona sana (LONG).
-            "retracement_of_swing": round((recent_high - current_price) / span, 3) if span > 0 else 0.0,
-            "bars_since_high": len(window) - 1 - hi_idx,
-            "bars_since_low": len(window) - 1 - lo_idx,
+            "structural_high": round(struct_high, 6),
+            "structural_low": round(struct_low, 6),
+            "drawdown_from_high_pct": round(dd, 2),
+            "runup_from_low_pct": round(ru, 2),
+            "bars_since_high": bars_since_high,
+            "bars_since_low": bars_since_low,
         }
     except Exception:
         return {}
@@ -452,11 +475,48 @@ def format_auditor_block(verdicts: dict, binding: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _consecutive_derisk_streak(ticker: str, limit: int = 200) -> int:
+    """Quante AUDIT consecutive (dalla piu' recente all'indietro) hanno dato
+    TRIM o EXIT su `ticker`. Un HOLD interrompe lo streak. Deriva dai POSITION_AUDIT
+    log recenti (il verdetto corrente e' gia' loggato da audit_positions, quindi e'
+    incluso): nessun contatore di stato da mantenere. Le audit che non coprono il
+    ticker vengono ignorate (non interrompono lo streak)."""
+    try:
+        import database
+        rows = database.get_agent_logs(limit=limit)  # piu' recenti prima
+    except Exception:
+        return 0
+    tk = str(ticker or "").upper()
+    streak = 0
+    for r in rows:
+        if (r.get("phase") or "") != "POSITION_AUDIT":
+            continue
+        m = r.get("content")
+        if m is None:
+            m = r.get("message")
+        try:
+            data = m if isinstance(m, dict) else json.loads(m)
+        except Exception:
+            continue
+        v = (data.get("verdicts") or {}).get(tk)
+        if not v:
+            continue  # questa audit non copriva il ticker
+        if str(v.get("verdict") or "").upper() in ("TRIM", "EXIT"):
+            streak += 1
+        else:
+            break  # HOLD (o altro) interrompe
+    return streak
+
+
 def enforce_auditor_verdicts(run_id: str, verdicts: dict, positions: list | None = None) -> list:
-    """Teeth MISURATE: su EXIT ad ALTA conviction con struttura ROTTA
-    (classification reversal/topping), stringe lo SL appena sotto (long) / sopra
-    (short) il prezzo corrente, cosi' enforce_stops chiude in fretta se il calo
-    continua, ma un eventuale recupero (storno sano) sopravvive. NON market-dumpa.
+    """Denti dell'Auditor sullo SL (lo stringe appena sotto/sopra il prezzo, NON
+    market-dumpa: enforce_stops chiude se il calo prosegue, un recupero sano
+    sopravvive). Due trigger:
+      (a) TEETH: EXIT alta-conviction (>=75) con struttura rotta (reversal/topping/
+          giveback) -> de-risk immediato.
+      (b) ESCALATION: de-risk (TRIM/EXIT) PERSISTENTE — >=3 audit consecutivi con
+          conf>=60 sul verdetto corrente -> un "riduci" ripetuto e ignorato smette
+          di essere appellabile.
     Ritorna i ticker su cui ha agito."""
     import database
     acted: list = []
@@ -470,31 +530,49 @@ def enforce_auditor_verdicts(run_id: str, verdicts: dict, positions: list | None
         by_ticker = {}
     for tk, v in verdicts.items():
         try:
-            if str(v.get("verdict")).upper() != "EXIT":
-                continue
-            if str(v.get("classification")) not in ("reversal", "topping", "giveback"):
+            verdict = str(v.get("verdict")).upper()
+            if verdict not in ("EXIT", "TRIM"):
                 continue
             conf = float(v.get("confidence") or 0)
-            if conf < 75:
-                continue
+            classification = str(v.get("classification"))
             p = by_ticker.get(tk)
             if not p:
                 continue
             cur = float(p.get("current_price") or 0)
             if cur <= 0:
                 continue
+
+            # (a) Teeth: EXIT alta-conviction con struttura rotta.
+            teeth = (verdict == "EXIT"
+                     and classification in ("reversal", "topping", "giveback")
+                     and conf >= 75)
+            # (b) Escalation: de-risk persistente (>=3 audit consecutivi) ignorato.
+            #     conf>=60 sul verdetto corrente evita di escalare sul rumore.
+            escalation = False
+            streak = 0
+            if not teeth and conf >= 60:
+                streak = _consecutive_derisk_streak(tk)
+                escalation = streak >= 3
+            if not (teeth or escalation):
+                continue
+
             is_short = str(p.get("direction") or "LONG").upper() == "SHORT"
             # SL stretto appena oltre il prezzo (0.5%): se prosegue, enforce_stops esce.
             new_sl = round(cur * (1.005 if is_short else 0.995), 6)
             database.update_position_auto_exit(tk, stop_loss_price=new_sl,
                                                set_by="position_auditor")
-            database.insert_agent_log(run_id, "POSITION_AUDIT_TEETH", json.dumps({
-                "ticker": tk, "tightened_sl": new_sl, "price": cur,
-                "classification": v.get("classification"), "confidence": conf,
-            }, default=str))
+            payload = {"ticker": tk, "tightened_sl": new_sl, "price": cur,
+                       "verdict": verdict, "classification": classification,
+                       "confidence": conf}
+            if escalation:
+                payload["derisk_streak"] = streak
+            database.insert_agent_log(
+                run_id,
+                "AUDITOR_TRIM_ESCALATION" if escalation else "POSITION_AUDIT_TEETH",
+                json.dumps(payload, default=str))
             acted.append(tk)
         except Exception as e:
-            logger.debug("[%s][AUDITOR] teeth %s fail: %s", run_id, tk, e)
+            logger.debug("[%s][AUDITOR] teeth/escalation %s fail: %s", run_id, tk, e)
     return acted
 
 

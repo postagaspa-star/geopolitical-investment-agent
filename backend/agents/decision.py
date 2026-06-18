@@ -2621,12 +2621,11 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                 return json.dumps({"error": "tickers deve essere una lista non vuota"})
             tickers = [str(t).upper().strip() for t in tickers if t][:5]
 
-            # ── Routing automatico: crypto vs equity ────────────────────────
-            # Se l'agente ha una crypto in portfolio (es. BTC-USD aperto da
-            # un run precedente), DEVE poterne ricevere indicatori anche
-            # tramite il tool standard. Splittiamo la richiesta:
-            #   - Equity/ETF → run_technical_analysis (DeepSeek-V3 standard)
-            #   - Crypto → run_crypto_technical (DeepSeek-V3 crypto-specialized)
+            # ── Split crypto vs equity ──────────────────────────────────────
+            # Le crypto sono FUORI dominio per il Decision Standard: le
+            # identifichiamo per RIFIUTARLE (sotto), l'equity/ETF va al Technical
+            # standard. (Storicamente le crypto venivano instradate al Technical
+            # Crypto; ora non piu': il mercato crypto e' invisibile allo Standard.)
             crypto_tickers = [t for t in tickers
                               if t.endswith("-USD") or t.startswith("X:")]
             equity_tickers = [t for t in tickers if t not in crypto_tickers]
@@ -2668,40 +2667,24 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                     for t in equity_tickers:
                         errors_per_ticker[t] = f"technical equity error: {exc}"
 
-            # Crypto branch (auto-routing al Technical Crypto).
-            # IMPORTANTE: usa log_phase="TECH_CRYPTO_SIDECALL" per distinguere
-            # i log di questa chiamata side dal Technical Crypto vero (quello
-            # invocato dalla crypto pipeline standalone). Senza questa
-            # distinzione, la timeline del run Standard mostrava log
-            # "TECH_CRYPTO" che sembravano della crypto pipeline, creando
-            # confusione (mix apparente tra le due pipeline).
+            # Crypto branch RIMOSSO: per il Decision Standard le crypto NON
+            # esistono (dominio esclusivo del Decision Crypto). Se l'agente chiede
+            # l'analisi di un ticker crypto la RIFIUTIAMO, invece di instradarla al
+            # Technical Crypto: cosi' lo Standard non puo' analizzare il mercato
+            # crypto. (Il trade crypto era gia' bloccato in execute_trade.)
             if crypto_tickers:
+                logger.info("[%s][DECISION] richiesta TA crypto RIFIUTATA (fuori "
+                            "dominio): %s", run_id, crypto_tickers)
+                for t in crypto_tickers:
+                    errors_per_ticker[t] = ("crypto fuori dominio: il Decision Standard "
+                                            "opera SOLO equity/ETF; le crypto le gestisce "
+                                            "il Decision Crypto")
                 try:
-                    from agents.technical_crypto import run_crypto_technical
-                    cr_report = await run_crypto_technical(
-                        run_id, crypto_tickers,
-                        log_phase="TECH_CRYPTO_SIDECALL",
-                    )
-                    analyses_combined += (cr_report.get("analyses") or [])
-                    if cr_report.get("engine"):
-                        engines_used.append(f"crypto={cr_report['engine']}")
-                    if cr_report.get("summary"):
-                        summaries.append(f"[CRYPTO] {cr_report['summary']}")
-                    analyzed_cr = {a.get("ticker") for a in (cr_report.get("analyses") or [])}
-                    pte = cr_report.get("per_ticker_errors") or []
-                    for t in crypto_tickers:
-                        if t not in analyzed_cr:
-                            err = "non analizzato (dati yfinance non disponibili o ticker invalido)"
-                            for ent in pte:
-                                if isinstance(ent, dict) and ent.get("ticker") == t:
-                                    err = ent.get("error", err)
-                                    break
-                            errors_per_ticker[t] = err
-                except Exception as exc:
-                    logger.error("[%s][DECISION] technical crypto failed: %s",
-                                 run_id, exc, exc_info=True)
-                    for t in crypto_tickers:
-                        errors_per_ticker[t] = f"technical crypto error: {exc}"
+                    database.insert_agent_log(run_id, "DECISION_CRYPTO_TA_REJECTED",
+                                              json.dumps({"tickers": crypto_tickers},
+                                                         default=str))
+                except Exception:
+                    pass
 
             report = {
                 "analyses": analyses_combined,

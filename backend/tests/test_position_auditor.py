@@ -126,28 +126,31 @@ def test_enforce_bias_holds_tightens_sl():
 
 
 # ── #2: Auditor consapevole di PROFONDITA' + DURATA del pullback ──────────────
-def test_compute_pullback_deep_and_persistent():
-    # Sale a 100 (barra 0), poi scende per 9 barre fino a 72 (current al minimo):
-    # e' il pattern NEAR (profondo + persistente), che deve risultare evidente.
-    bars = [{"high": 100, "low": 95, "close": 98}]
-    for i in range(9):
-        px = 96 - i * 3   # 96, 93, ..., 72
+def test_compute_pullback_uses_recent_pivot_not_stale_high():
+    # vecchio massimo 100 (barra 0), crollo, RECUPERO a ~86 (pivot recente), poi
+    # pullback a 80. La deterioration RECENTE e' da ~86 (~7%), NON da 100 (~20%):
+    # e' esattamente il caso NEAR (drawdown 28% da un massimo pre-ingresso).
+    bars = [{"high": 100, "low": 98, "close": 99}]
+    for px in (90, 80, 72, 70):
         bars.append({"high": px + 1, "low": px, "close": px})
-    pb = pa._compute_pullback({"data": bars}, current_price=72.0)
-    assert pb["bars_since_high"] == 9           # fermo da 9 barre sotto il massimo
-    assert abs(pb["drawdown_from_high_pct"] - 28.0) < 0.6
-    assert pb["retracement_of_swing"] >= 0.99   # current ~ al minimo dello swing
+    for px in (78, 83, 85):
+        bars.append({"high": px + 1, "low": px - 1, "close": px})
+    for px in (84, 82, 80):
+        bars.append({"high": px + 1, "low": px - 1, "close": px})
+    pb = pa._compute_pullback({"data": bars}, current_price=80.0)
+    assert pb["structural_high"] >= 100        # vecchio massimo: solo CONTESTO
+    assert pb["recent_high"] < 95              # riferimento = picco RECENTE (~86)
+    assert pb["drawdown_from_high_pct"] < 12   # deterioration recente lieve, non ~20%
 
 
-def test_compute_pullback_shallow():
-    # swing 90..100, current 98 = appena sotto il massimo -> ritracciamento basso.
-    bars = [{"high": 92, "low": 90, "close": 91}]
+def test_compute_pullback_shallow_recent():
+    bars = [{"high": 90, "low": 88, "close": 89}]
     for _ in range(4):
-        bars.append({"high": 100, "low": 97, "close": 99})
-    bars.append({"high": 99, "low": 98, "close": 98})
-    pb = pa._compute_pullback({"data": bars}, current_price=98.0)
-    assert abs(pb["drawdown_from_high_pct"] - 2.0) < 0.6
-    assert pb["retracement_of_swing"] < 0.4     # dentro la zona sana
+        bars.append({"high": 100, "low": 98, "close": 99})    # plateau ~100 (pivot)
+    for _ in range(3):
+        bars.append({"high": 97, "low": 95, "close": 96})     # pullback lieve a ~96
+    pb = pa._compute_pullback({"data": bars}, current_price=96.0)
+    assert abs(pb["drawdown_from_high_pct"] - 4.0) < 1.5
 
 
 def test_compute_pullback_empty_safe():
@@ -158,12 +161,10 @@ def test_compute_pullback_empty_safe():
 def test_playbook_has_depth_duration_rules():
     pb = pa.AUDITOR_PLAYBOOK
     assert "PROFONDITA'" in pb
-    assert "retracement_of_swing" in pb
-    assert "0.618" in pb
-    assert "bars_since_high" in pb
-    # drawdown = metro PRIMARIO; in conflitto vince sul retracement (anti flip-flop)
-    assert "VINCE IL DRAWDOWN" in pb
     assert "METRO PRIMARIO" in pb
+    assert "PICCO RECENTE" in pb
+    assert "structural_high" in pb
+    assert "bars_since_high" in pb
 
 
 def test_format_block_binding_only_on_crypto():
@@ -177,3 +178,50 @@ def test_format_block_binding_only_on_crypto():
     assert "VINCOLANTE" not in equity
     assert "CONFUTARLA" in equity.upper()    # la sfida tecnica c'e' sempre
     assert "BTC-USD" in equity
+
+
+# ── Escalation: de-risk (TRIM/EXIT) persistente -> denti (SL stretto) ─────────
+def test_derisk_streak_counts_consecutive():
+    import database
+    tk = "STREAKA-USD"
+    for verdict in ("TRIM", "EXIT", "TRIM"):   # 3 de-risk, nessun HOLD
+        database.insert_agent_log("r", "POSITION_AUDIT", json.dumps(
+            {"verdicts": {tk: {"verdict": verdict, "confidence": 70}}}))
+    assert pa._consecutive_derisk_streak(tk) == 3
+
+
+def test_derisk_streak_breaks_on_hold():
+    import database
+    tk = "STREAKB-USD"
+    for verdict in ("TRIM", "HOLD", "TRIM"):   # un HOLD spezza la serie
+        database.insert_agent_log("r", "POSITION_AUDIT", json.dumps(
+            {"verdicts": {tk: {"verdict": verdict, "confidence": 70}}}))
+    # con un HOLD in mezzo lo streak non puo' raggiungere 3 (a prescindere
+    # dall'ordine dei timestamp a parita' di secondo).
+    assert pa._consecutive_derisk_streak(tk) < 3
+
+
+def test_escalation_tightens_sl_after_3_trim():
+    import database
+    tk = "ESCALA-USD"
+    portfolio.execute_buy(tk, 2.0, 100.0, "g", "t", 70)
+    for _ in range(3):                         # 3 TRIM consecutivi ignorati
+        database.insert_agent_log("r", "POSITION_AUDIT", json.dumps(
+            {"verdicts": {tk: {"verdict": "TRIM", "confidence": 65}}}))
+    pos = [{"ticker": tk, "current_price": 95.0, "direction": "LONG"}]
+    verdicts = {tk: {"verdict": "TRIM", "classification": "giveback", "confidence": 65}}
+    acted = pa.enforce_auditor_verdicts("r", verdicts, positions=pos)
+    assert acted == [tk]
+    sl = float(portfolio.get_position(tk)["stop_loss_price"])
+    assert abs(sl - 95.0 * 0.995) < 1e-3       # SL stretto a ridosso del prezzo
+
+
+def test_no_escalation_with_short_streak():
+    import database
+    tk = "ESCALB-USD"
+    portfolio.execute_buy(tk, 2.0, 100.0, "g", "t", 70)
+    database.insert_agent_log("r", "POSITION_AUDIT", json.dumps(
+        {"verdicts": {tk: {"verdict": "TRIM", "confidence": 65}}}))   # solo 1
+    pos = [{"ticker": tk, "current_price": 95.0, "direction": "LONG"}]
+    verdicts = {tk: {"verdict": "TRIM", "classification": "giveback", "confidence": 65}}
+    assert pa.enforce_auditor_verdicts("r", verdicts, positions=pos) == []
