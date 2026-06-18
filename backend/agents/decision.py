@@ -252,6 +252,7 @@ DECISION_SYSTEM_PROMPT_DEFAULT = """Sei il Decision Agent di GeoInvest AI — un
 
 GERARCHIA DEI SEGNALI (REGOLA FERREA): i TECNICI pesano SEMPRE piu' delle notizie. News/geopolitica danno la TESI e la DIREZIONE; i TECNICI decidono l'ESECUZIONE (quando entrare/uscire, a che livello). Le USCITE in particolare sono eventi TECNICI: se la struttura si rompe (CHoCH, lower-low, supporto perso) ESCI, anche se le news restano buone — mai tenere un trade tecnicamente rotto sperando nel recupero.
 REGOLA STOP (CRICCHETTO): su una posizione aperta lo stop-loss puo' solo STRINGERSI o restare, MAI allargarsi/allontanarsi dal prezzo — nemmeno "per dare respiro" prima di un evento (FOMC, CPI, halving...). Se la tesi peggiora: stringi lo SL oppure riduci/chiudi. Allargare lo stop e' VIETATO e verra' rifiutato dal sistema.
+DOMINIO — LE CRYPTO NON ESISTONO PER TE: il mercato crypto e le posizioni crypto (ticker con suffisso -USD o prefisso X:) sono dominio ESCLUSIVO del Decision Crypto. Non compaiono nel tuo portafoglio, non analizzarle, non nominarle, non operarci; ignora del tutto la narrativa crypto (altseason, BTC dominance, ecc.): per te non esistono.
 
 HAI PIENA AUTONOMIA DECISIONALE. Non ci sono restrizioni conservative.
 Il tuo obiettivo è MASSIMIZZARE i rendimenti accettando rischi calcolati.
@@ -425,6 +426,7 @@ Engine: DeepSeek-R1 (reasoning model). Subentri a Claude Sonnet 4.5 fuori orario
 
 GERARCHIA DEI SEGNALI (REGOLA FERREA): i TECNICI pesano SEMPRE piu' delle notizie. News/geopolitica danno la TESI e la DIREZIONE; i TECNICI decidono l'ESECUZIONE (quando entrare/uscire, a che livello). Le USCITE in particolare sono eventi TECNICI: se la struttura si rompe (CHoCH, lower-low, supporto perso) ESCI, anche se le news restano buone — mai tenere un trade tecnicamente rotto sperando nel recupero.
 REGOLA STOP (CRICCHETTO): su una posizione aperta lo stop-loss puo' solo STRINGERSI o restare, MAI allargarsi/allontanarsi dal prezzo — nemmeno "per dare respiro" prima di un evento (FOMC, CPI, halving...). Se la tesi peggiora: stringi lo SL oppure riduci/chiudi. Allargare lo stop e' VIETATO e verra' rifiutato dal sistema.
+DOMINIO — LE CRYPTO NON ESISTONO PER TE: il mercato crypto e le posizioni crypto (ticker con suffisso -USD o prefisso X:) sono dominio ESCLUSIVO del Decision Crypto. Non compaiono nel tuo portafoglio, non analizzarle, non nominarle, non operarci; ignora del tutto la narrativa crypto (altseason, BTC dominance, ecc.): per te non esistono.
 
 CONTESTO OVERNIGHT:
 NYSE/LSE/XETRA chiuse. Le crypto sono il SOLO universo tradabile in tempo reale.
@@ -2836,7 +2838,7 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
             return json.dumps(result, default=str)
 
         elif tool_name == "get_portfolio_state":
-            state = portfolio.get_portfolio_state()
+            state = _hide_crypto_positions(portfolio.get_portfolio_state())
             return json.dumps({"portfolio": state, "at": timestamp}, default=str)
 
         elif tool_name == "set_commitment":
@@ -3032,7 +3034,7 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     context_loaded["intelligence_buffer"] = len(recent_buffer)
 
     # Stato portafoglio
-    portfolio_state = portfolio.get_portfolio_state()
+    portfolio_state = _hide_crypto_positions(portfolio.get_portfolio_state())
     context_loaded["portfolio"] = True
 
     # POSITION AUDITOR: revisione TECNICA e imparziale delle posizioni aperte. I
@@ -3045,10 +3047,18 @@ async def run_decision_agent(run_id: str, tech_report: dict,
         from agents.position_auditor import (audit_positions, format_auditor_block,
                                              enforce_auditor_verdicts)
         _open_pos = database.get_positions() or []
-        if _open_pos:
-            _verdicts = await audit_positions(run_id, _open_pos)
-            auditor_block = format_auditor_block(_verdicts)
-            enforce_auditor_verdicts(run_id, _verdicts, _open_pos)
+        # L'Auditor dello Standard copre SOLO le posizioni EQUITY: le crypto sono
+        # dominio esclusivo del Decision Crypto (che ha il proprio Auditor +
+        # binding). Senza questo filtro l'agente equity auditava e ragionava su
+        # posizioni crypto (es. NEAR), sprecando il run e rischiando un trade
+        # fuori giurisdizione. binding=False: qui l'Auditor e' SFIDANTE, non vincola.
+        _equity_pos = [p for p in _open_pos
+                       if not (str(p.get("ticker") or "").upper().endswith("-USD")
+                               or str(p.get("ticker") or "").upper().startswith("X:"))]
+        if _equity_pos:
+            _verdicts = await audit_positions(run_id, _equity_pos)
+            auditor_block = format_auditor_block(_verdicts, binding=False)
+            enforce_auditor_verdicts(run_id, _verdicts, _equity_pos)
             auditor_exit_tickers = [t for t, v in _verdicts.items()
                                     if str(v.get("verdict")).upper() == "EXIT"]
     except Exception as _ae:
@@ -3764,6 +3774,26 @@ async def _run_deepseek_decision_loop(
 # ============================================================
 # Context Builder
 # ============================================================
+
+def _hide_crypto_positions(state: dict) -> dict:
+    """Le crypto NON esistono per il Decision Standard: rimuove le posizioni
+    crypto (-USD / X:) dalla vista portafoglio che riceve e aggiorna il conteggio.
+    cash e total_value (NAV di conto) restano invariati DI PROPOSITO: il sizing
+    equity gira sul NAV reale e non va alterato. E' una rimozione di VISIBILITA',
+    non di contabilita' (le crypto le gestisce il Decision Crypto)."""
+    if not isinstance(state, dict):
+        return state
+    positions = state.get("positions") or []
+    equity = [p for p in positions
+              if not (str(p.get("ticker") or "").upper().endswith("-USD")
+                      or str(p.get("ticker") or "").upper().startswith("X:"))]
+    if len(equity) == len(positions):
+        return state
+    s = dict(state)
+    s["positions"] = equity
+    s["open_positions_count"] = len(equity)
+    return s
+
 
 def _build_context_message(rep_4d, rep_8h, buffer, tech_report, portfolio_state, docs,
                            focus_tickers: list[str] | None = None,

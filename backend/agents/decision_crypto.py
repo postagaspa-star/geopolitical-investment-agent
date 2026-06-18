@@ -1833,7 +1833,7 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
                        or str(p.get("ticker") or "").upper().startswith("X:")]
         if _crypto_pos:
             _verdicts = await audit_positions(run_id, _crypto_pos)
-            auditor_block = format_auditor_block(_verdicts)
+            auditor_block = format_auditor_block(_verdicts, binding=True)
             enforce_auditor_verdicts(run_id, _verdicts, _crypto_pos)
             auditor_exit_tickers = [t for t, v in _verdicts.items()
                                     if str(v.get("verdict")).upper() == "EXIT"]

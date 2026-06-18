@@ -161,3 +161,16 @@ def test_playbook_has_depth_duration_rules():
     assert "retracement_of_swing" in pb
     assert "0.618" in pb
     assert "bars_since_high" in pb
+
+
+def test_format_block_binding_only_on_crypto():
+    # Il MANDATO VINCOLANTE compare solo con binding=True (crypto); sullo Standard
+    # (equity, binding=False) l'Auditor resta SFIDANTE, senza promessa di enforcement.
+    flagged = {"BTC-USD": {"verdict": "EXIT", "classification": "reversal",
+                           "technical_reason": "CHoCH", "confidence": 85}}
+    crypto = pa.format_auditor_block(flagged, binding=True)
+    equity = pa.format_auditor_block(flagged, binding=False)
+    assert "VINCOLANTE" in crypto and "RIFIUTATA" in crypto
+    assert "VINCOLANTE" not in equity
+    assert "CONFUTARLA" in equity.upper()    # la sfida tecnica c'e' sempre
+    assert "BTC-USD" in equity

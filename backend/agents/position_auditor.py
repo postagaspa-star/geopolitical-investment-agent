@@ -404,9 +404,14 @@ async def audit_positions(run_id: str, positions: list | None = None) -> dict:
     return verdicts
 
 
-def format_auditor_block(verdicts: dict) -> str:
+def format_auditor_block(verdicts: dict, binding: bool = False) -> str:
     """Blocco testo da iniettare nel contesto del Decision: sfida tecnica
-    obbligatoria. Vuoto se nessun verdetto rilevante."""
+    obbligatoria. Vuoto se nessun verdetto rilevante.
+
+    binding=True (solo Decision Crypto): aggiunge il MANDATO VINCOLANTE — gli ADD
+    su un ticker EXIT/TRIM saranno rifiutati dal sistema. Sullo Standard (equity)
+    binding=False: l'Auditor resta uno SFIDANTE non vincolante (niente promessa di
+    enforcement che lato equity non esiste)."""
     if not verdicts:
         return ""
     flagged = {t: v for t, v in verdicts.items()
@@ -421,10 +426,15 @@ def format_auditor_block(verdicts: dict) -> str:
         "(il livello/struttura precisa che la salva). 'E' un rintracciamento' NON",
         "basta: serve il dato. I TECNICI pesano piu' delle news, e un'uscita e' un",
         "evento tecnico.",
-        "MANDATO VINCOLANTE (crypto): su un ticker segnalato EXIT/TRIM puoi solo",
-        "RIDURRE o CHIUDERE — un BUY / un'aggiunta su quel ticker verra' RIFIUTATA",
-        "dal sistema. Puoi TENERE (HOLD passivo) solo con una confutazione tecnica",
-        "valida; il de-risk resta SEMPRE concesso e lo SL va al livello d'invalidazione.",
+    ]
+    if binding:
+        lines += [
+            "MANDATO VINCOLANTE (crypto): su un ticker segnalato EXIT/TRIM puoi solo",
+            "RIDURRE o CHIUDERE — un BUY / un'aggiunta su quel ticker verra' RIFIUTATA",
+            "dal sistema. Puoi TENERE (HOLD passivo) solo con una confutazione tecnica",
+            "valida; il de-risk resta SEMPRE concesso e lo SL va al livello d'invalidazione.",
+        ]
+    lines += [
         "CONFUTAZIONE VALIDA = SOLO struttura/livelli/pattern (supporto che tiene,",
         "fib/HVN, higher-low intatto, divergenza confermata). INAMMISSIBILE basarsi",
         "su P&L, prezzo d'ingresso, 'break-even', 'sono in pari', 'perderei poco':",
