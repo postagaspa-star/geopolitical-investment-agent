@@ -1,7 +1,7 @@
 """
 Decision Crypto Agent — DeepSeek-R1 reasoning, focus ESCLUSIVO crypto 24/7.
 
-Riceve l'output di technical_crypto.py + buffer intelligence + report aggregati
+Riceve l'output di technical_crypto.py + report aggregati (SOLO tecnico: lo Scout/news NON e' usato dal Decision Crypto)
 + documenti specifici crypto. Decide se eseguire trade su crypto.
 
 Differenze rispetto a decision.py:
@@ -66,7 +66,7 @@ CRYPTO_COOLDOWN_SECONDS = 50 * 60   # 50 min: lascia 10 min di margine vs schedu
 
 CRYPTO_DECISION_PROMPT_DEFAULT = """Sei il Decision Agent CRYPTO di GeoInvest AI — sistema autonomo focalizzato ESCLUSIVAMENTE sui mercati crypto (BTC, ETH, SOL, ecc.).
 
-GERARCHIA DEI SEGNALI (REGOLA FERREA): i TECNICI pesano SEMPRE piu' delle notizie. News/geopolitica danno la TESI e la DIREZIONE; i TECNICI decidono l'ESECUZIONE (quando entrare/uscire, a che livello). Le USCITE in particolare sono eventi TECNICI: se la struttura si rompe (CHoCH, lower-low, supporto perso) ESCI, anche se le news restano buone — mai tenere un trade tecnicamente rotto sperando nel recupero.
+GERARCHIA DEI SEGNALI (REGOLA FERREA, CRYPTO): per il crypto decidi ESCLUSIVAMENTE sui DATI TECNICI. NON ricevi piu' news/sentiment (lo Scout e' stato TAGLIATO dal crypto): il "perche'" narrativo di un movimento e' irrilevante — conta solo cosa dicono i grafici (struttura di mercato, S/R, ATR, RSI, volumi, funding/OI se presenti nel report). Le USCITE sono eventi TECNICI: se la struttura si rompe (CHoCH, lower-low, supporto perso) ESCI, mai tenere un trade tecnicamente rotto sperando nel recupero.
 REGOLA STOP (CRICCHETTO): su una posizione aperta lo stop-loss puo' solo STRINGERSI o restare, MAI allargarsi/allontanarsi dal prezzo — nemmeno "per dare respiro" prima di un evento (FOMC, CPI, halving...). Se la tesi peggiora: stringi lo SL oppure riduci/chiudi. Allargare lo stop e' VIETATO e verra' rifiutato dal sistema.
 
 UNIVERSO INVESTIBILE — APERTO:
@@ -89,13 +89,11 @@ REGOLE per la scelta del ticker:
 
 NON tradare equity (azioni/ETF) — quelli sono dominio del Decision normale.
 
-CONTESTO CHE RICEVI:
+CONTESTO CHE RICEVI (SOLO TECNICO — niente news/sentiment per il crypto):
 1. Report tecnico crypto-specifico (tech_report) da Technical Crypto Agent
 2. Documenti tecnici dedicati al crypto (analisi on-chain, framework di
    rischio, strategie di entry/exit)
-3. Buffer intelligence ultime 60 min (sentiment retail Reddit/X, news
-   regolamentari, hack, depeg, whale alerts)
-4. Stato portafoglio corrente (cash + posizioni crypto già aperte)
+3. Stato portafoglio corrente (cash + posizioni crypto già aperte)
 
 REGOLE OPERATIVE (i VINCOLI NUMERICI autorevoli sono nel blocco RISK PROFILE
 piu' in alto: quelli prevalgono SEMPRE su qualunque numero citato altrove):
@@ -109,10 +107,10 @@ piu' in alto: quelli prevalgono SEMPRE su qualunque numero citato altrove):
   base ATR/profilo — ma e' meglio sceglierlo TU su livelli tecnici (S/R, ATR).
   Niente posizioni naked.
 - GESTIONE POSIZIONI: entro i vincoli del profilo, i livelli SL/TP li scegli TU
-  su base tecnica (S/R, ATR, regime di mercato, narrazione corrente).
+  su base tecnica (S/R, ATR, regime di mercato dedotto dai tecnici).
 
-FILOSOFIA: OSA, non aspettare la convinzione perfetta. Se sentiment +
-tecnico concordano (anche solo a livello MEDIO), opera. do_nothing va
+FILOSOFIA: OSA, non aspettare la convinzione perfetta. Se il quadro
+tecnico e' favorevole (anche solo a livello MEDIO), opera. do_nothing va
 usato solo se i dati sono palesemente contraddittori o sei al cap di 15
 posizioni totali. La concentrazione mirata e' una scelta legittima,
 non un errore da evitare.
@@ -123,11 +121,11 @@ prendi una posizione piccola con conviction MEDIA invece di lasciare
 il run a vuoto.
 
 TICKER CORRELATI ("nascosti"): non focalizzarti solo sui crypto che si
-SONO GIA' MOSSI nel buffer/news. Spesso il movimento si propaga ai peers
+SONO GIA' MOSSI (visibili nei tecnici). Spesso il movimento si propaga ai peers
 in pochi minuti. Esempi:
 - BTC rally → considera ETH (lag 5-15 min tipico), poi LTC/BCH (PoW peers)
 - ETH breakout → SOL/AVAX (smart contract competitor), MATIC (L2)
-- DeFi sentiment → LINK (oracle), UNI (DEX leader)
+- Forza settoriale DeFi → LINK (oracle), UNI (DEX leader)
 - Crash su uno major → cerca i "safe" relativi (BTC tende a tenere meglio
   in flight-to-quality crypto-to-crypto)
 In FASE 1 (commit_initial_assessment), includi 2-3 ticker correlati
@@ -137,12 +135,12 @@ e' il trade migliore.
 RISCHI CRYPTO-SPECIFIC da valutare prima di operare:
 - Liquidità: per altcoin minori (DOT, ATOM, NEAR) il book può svuotarsi
 - Regolamentazione: SEC/MiCA possono cambiare regime di un singolo asset
-- Sentiment regime: bull market → bias BUY su breakouts, bear → bias SELL su rallies
-- Funding rate squeezes: se rilevati nel buffer, attesa fino a stabilizzazione
+- Regime di mercato (dedotto dai tecnici): bull → bias BUY su breakouts, bear → bias SELL su rallies
+- Funding rate squeezes: se presenti nei dati tecnici, attesa fino a stabilizzazione
 
 DISCIPLINA DEI DATI (ANTI-ALLUCINAZIONE) — REGOLA FERREA:
 Puoi citare e usare come evidenza SOLO numeri effettivamente presenti nel
-report tecnico crypto o nell'intelligence buffer che ricevi. NON inventare
+report tecnico crypto che ricevi. NON inventare
 valori di funding rate, open interest, dominance BTC.D, metriche on-chain,
 RSI, prezzi o livelli che non sono nei dati ricevuti. Se un fattore non e'
 nei dati, e' SCONOSCIUTO: non puo' contare ne' a favore ne' contro un trade.
@@ -152,8 +150,8 @@ oppure dichiara esplicitamente "non disponibile" e procedi senza.
 WORKFLOW OBBLIGATORIO A 4 FASI (state machine enforced):
 
 FASE 1 — Pre-analisi (commit_initial_assessment):
-  Analizza la SOLA situazione corrente: portfolio crypto, buffer sentiment
-  retail, news regulatorie/macro overnight, catalisti potenziali. Identifica
+  Analizza la SOLA situazione corrente: portfolio crypto e setup tecnico
+  (struttura, livelli chiave, regime BTC dai grafici). Identifica
   i ticker crypto da indagare e le domande tecniche specifiche.
   → tool: commit_initial_assessment(situation_overview, asset_candidates,
            technical_questions). situation_overview >= 200 caratteri.
@@ -284,20 +282,12 @@ def _get_crypto_decision_prompt_with_meta() -> tuple[str, list[str]]:
         logger.debug("[DEC-CRYPTO] coach cards block fallito: %s", e)
     coach_section = (coach_block + "\n\n" + "═" * 60 + "\n") if coach_block else ""
 
-    # 5. LETTURA DEL REGIME DAL DECISION STANDARD (peso alto).
-    #    Il Decision Standard gira su Sonnet 4.5 (modello superiore a R1)
-    #    e comprende il regime macro/geo molto meglio. Il Crypto rilegge
-    #    le sue ultime run e si allinea FORTEMENTE alla sua lettura del
-    #    regime. Posizionato SUBITO DOPO regime_block per massima
-    #    prominenza nel system prompt.
+    # 5. REGIME: il canale narrativo (lettura macro/geo ereditata dal Decision
+    #    Standard) e' stato TAGLIATO dal crypto. Il regime di mercato il Decision
+    #    Crypto lo deduce dai TECNICI (struttura BTC + indicatori per-coin nel
+    #    tech_report, framework nel regime_block qui sopra). In crypto i tecnici
+    #    modellano ~il 90% delle dinamiche: niente piu' eredita' di narrazione.
     std_regime_section = ""
-    try:
-        from agents.decision import build_standard_regime_read_for_crypto
-        srr = build_standard_regime_read_for_crypto(limit=5)
-        if srr:
-            std_regime_section = srr + "\n" + "═" * 60 + "\n"
-    except Exception as exc:
-        logger.debug("[DEC-CRYPTO] standard regime read failed: %s", exc)
 
     # 6. Memoria operativa: ultime N decisioni crypto del Live (feedback loop).
     #    Iniettata anche qui per evitare che R1 ripeta tesi gia' applicate
@@ -401,8 +391,8 @@ def _wrap_anthropic_tool_for_openai(t: dict) -> dict:
 _CRYPTO_INITIAL_TOOL = copy.deepcopy(COMMIT_INITIAL_ASSESSMENT_TOOL)
 _CRYPTO_INITIAL_TOOL["description"] = (
     "FASE 1 OBBLIGATORIA (crypto). Commit dell'analisi iniziale della situazione "
-    "corrente: portfolio crypto, sentiment buffer (Reddit/X), news regolatorie / "
-    "hack / depeg, catalisti overnight. situation_overview >= 200 char. Se non ti "
+    "corrente: portfolio crypto e setup tecnico (struttura, livelli chiave, "
+    "regime BTC). situation_overview >= 200 char. Se non ti "
     "servono dati tecnici, passa technical_questions=[]: salti la FASE 2 e vai "
     "direttamente a commit_final_thesis."
 )
@@ -410,7 +400,7 @@ _cti_props = _CRYPTO_INITIAL_TOOL["input_schema"]["properties"]
 _cti_props.pop("rotation_summary", None)
 _cti_props["situation_overview"]["description"] = (
     "Analisi della situazione crypto corrente senza dati tecnici (>= 200 char): "
-    "cosa dice il portafoglio crypto, quale tema emerge dal buffer sentiment/news, "
+    "cosa dice il portafoglio crypto, quale setup tecnico emerge (struttura/livelli/regime), "
     "cosa motiva la scelta dei ticker."
 )
 _cti_props["asset_candidates"]["description"] = (
@@ -454,7 +444,7 @@ CRYPTO_DECISION_TOOLS = [
                     "quantity": {"type": "number", "exclusiveMinimum": 0},
                     "stop_loss": {"type": "number"},
                     "take_profit": {"type": "number"},
-                    "logic_chain": {"type": "string", "description": "Reasoning tecnico+sentiment"},
+                    "logic_chain": {"type": "string", "description": "Reasoning tecnico"},
                     "confidence_level": {"type": "number", "minimum": 0, "maximum": 100},
                 },
                 "required": ["ticker", "action", "quantity", "logic_chain", "confidence_level"],
@@ -1564,12 +1554,8 @@ def _build_context(tech_report: dict, recent_buffer: list, portfolio_state: dict
     parts.append(f"PORTAFOGLIO CORRENTE:")
     parts.append(json.dumps(portfolio_state, default=str, ensure_ascii=False)[:3000])
     parts.append("=" * 60)
-    parts.append(f"INTELLIGENCE BUFFER (ultimi 60 min, {len(recent_buffer)} card):")
-    for c in recent_buffer[:20]:
-        s = c.get("micro_summary", "")[:200]
-        st = c.get("source_type", "?")
-        parts.append(f"  [{st}] {s}")
-    parts.append("=" * 60)
+    # INTELLIGENCE BUFFER rimosso: lo Scout e' stato TAGLIATO dal Decision
+    # Crypto (decide SOLO sui tecnici). recent_buffer arriva sempre vuoto.
     if crypto_docs:
         parts.append(f"DOCUMENTI CRYPTO ({len(crypto_docs)} caricati):")
         for d in crypto_docs[:5]:
@@ -1764,7 +1750,6 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
                          Decision riceve istruzioni di SELL parziale).
     """
     import database
-    from agents.scout import get_recent_buffer
     import portfolio
 
     logger.info("[%s][DECISION-CRYPTO] === Avvio ===", run_id)
@@ -1784,8 +1769,11 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
         logger.warning("[%s][DECISION-CRYPTO] ensure_fresh_prices fallita: %s",
                        run_id, _pp_exc)
 
-    # Carica contesto specifico crypto
-    recent_buffer = get_recent_buffer(database, minutes=60)
+    # Carica contesto specifico crypto.
+    # SCOUT TAGLIATO dal crypto: il Decision Crypto decide ESCLUSIVAMENTE sui
+    # tecnici (niente news/sentiment). Lo Scout resta attivo sul Decision
+    # Standard (equity). recent_buffer resta vuoto per back-compat di _build_context.
+    recent_buffer: list = []
     portfolio_state = portfolio.get_portfolio_state()
     crypto_docs = _load_crypto_documents(database)
 
