@@ -123,3 +123,41 @@ def test_enforce_bias_holds_tightens_sl():
     assert acted == ["AVAX-USD"]
     sl = float(portfolio.get_position("AVAX-USD")["stop_loss_price"])
     assert abs(sl - 950.0 * 0.995) < 1e-3
+
+
+# ── #2: Auditor consapevole di PROFONDITA' + DURATA del pullback ──────────────
+def test_compute_pullback_deep_and_persistent():
+    # Sale a 100 (barra 0), poi scende per 9 barre fino a 72 (current al minimo):
+    # e' il pattern NEAR (profondo + persistente), che deve risultare evidente.
+    bars = [{"high": 100, "low": 95, "close": 98}]
+    for i in range(9):
+        px = 96 - i * 3   # 96, 93, ..., 72
+        bars.append({"high": px + 1, "low": px, "close": px})
+    pb = pa._compute_pullback({"data": bars}, current_price=72.0)
+    assert pb["bars_since_high"] == 9           # fermo da 9 barre sotto il massimo
+    assert abs(pb["drawdown_from_high_pct"] - 28.0) < 0.6
+    assert pb["retracement_of_swing"] >= 0.99   # current ~ al minimo dello swing
+
+
+def test_compute_pullback_shallow():
+    # swing 90..100, current 98 = appena sotto il massimo -> ritracciamento basso.
+    bars = [{"high": 92, "low": 90, "close": 91}]
+    for _ in range(4):
+        bars.append({"high": 100, "low": 97, "close": 99})
+    bars.append({"high": 99, "low": 98, "close": 98})
+    pb = pa._compute_pullback({"data": bars}, current_price=98.0)
+    assert abs(pb["drawdown_from_high_pct"] - 2.0) < 0.6
+    assert pb["retracement_of_swing"] < 0.4     # dentro la zona sana
+
+
+def test_compute_pullback_empty_safe():
+    assert pa._compute_pullback({}, 0) == {}
+    assert pa._compute_pullback({"data": []}, 50) == {}
+
+
+def test_playbook_has_depth_duration_rules():
+    pb = pa.AUDITOR_PLAYBOOK
+    assert "PROFONDITA'" in pb
+    assert "retracement_of_swing" in pb
+    assert "0.618" in pb
+    assert "bars_since_high" in pb
