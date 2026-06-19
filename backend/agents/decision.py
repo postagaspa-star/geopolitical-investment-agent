@@ -598,6 +598,19 @@ def _build_short_selling_block() -> str:
         "SHORT. Non limitarti a 'evitare' l'asset: lo si shorta.\n"
         "  3. Se il ribasso e' probabilmente finito -> NON shortare "
         "(shortare un minimo e' speculare quanto comprare un massimo).\n\n"
+        "DOWNTREND CONFERMATO = SHORT, NON ATTESA:\n"
+        "Un downtrend STRUTTURALE confermato (BoS ribassista, lower-low, confluence "
+        "multi-timeframe bearish) e' GIA' il setup short: si entra sulla "
+        "CONTINUAZIONE o sul ritracciamento verso una resistenza, NON si aspetta che "
+        "'rompa il prossimo supporto' — la conferma E' la struttura gia' rotta, "
+        "aspettare = entrare a movimento fatto. Il default NO_TRADE/'aspetta' dei "
+        "regimi [MACRO]/[LATERAL] vale per la direzione INCERTA: quando i tecnici "
+        "indicano chiaramente GIU' quell'incertezza non c'e', e lo short e' il trade, "
+        "non l'attesa.\n"
+        "ECCEZIONE eventi binari: nelle ~2-3 ORE prima di un evento binario imminente "
+        "(decisione FOMC/CPI, ecc.) sospendi i NUOVI short e aspetta la reazione "
+        "post-evento (rischio squeeze su sorpresa). Fuori da quella finestra: si "
+        "shorta il downtrend, non si aspetta.\n\n"
         "RISCHIO SHORT (rigoroso — la perdita di uno short e' teoricamente "
         "ILLIMITATA se il prezzo sale):\n"
         "  - Stop-loss OBBLIGATORIO su ogni SHORT, posizionato SOPRA il "
@@ -1120,7 +1133,9 @@ def _build_regime_protocol_block(asset_class: str = "equity") -> str:
         "                Conviction MIN = " + boosted_conf_str + " (resta alta:",
         "                il macro e' il regime piu' difficile). Default =",
         "                NO_TRADE. Deroga SOLO se TUTTI e 3 i pilastri sotto",
-        "                sono soddisfatti e ALLINEATI:",
+        "                sono soddisfatti e ALLINEATI (NB: lo SHORT su un downtrend",
+        "                GIA' confermato e' una REAZIONE, non un pre-positioning:",
+        "                vedi eccezione in PILASTRO 2, non e' bloccato dal default):",
         "",
         "                PILASTRO 1 — DOLLAR & YIELDS ANCHOR (obbligatorio).",
         "                Prima di QUALSIASI trade leggi nel ROTATION SCAN:",
@@ -1145,6 +1160,13 @@ def _build_regime_protocol_block(asset_class: str = "equity") -> str:
         "                completa post-evento + conferma volume direzionale).",
         "                Se il dato non e' ancora uscito o e' uscito da poco",
         "                senza reazione chiara → NO_TRADE, aspetta.",
+        "                ECCEZIONE — reazione a struttura GIA' rotta: un downtrend",
+        "                tecnico GIA' confermato (BoS ribassista, lower-low,",
+        "                confluence MTF bearish) NON e' una previsione del dato ma",
+        "                una REAZIONE a un fatto avvenuto: lo SHORT su quel trend e'",
+        "                AMMESSO (e' il trade), non cade sotto questo divieto. Resta",
+        "                vietato solo nelle ~2-3h PRIMA dell'evento binario (rischio",
+        "                squeeze): li' aspetta la reazione post-dato.",
         "",
         "                PILASTRO 3 — SECTOR ROTATION COERENTE (vedi STEP 2.5).",
         "                Il trade deve essere allineato con la fase del ciclo",
