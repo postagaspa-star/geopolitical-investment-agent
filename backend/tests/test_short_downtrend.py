@@ -30,3 +30,12 @@ def test_crypto_prompt_ignores_macro_event_timing():
     p = dc.CRYPTO_DECISION_PROMPT_DEFAULT
     assert "EVENTI MACRO" in p
     assert "24/7" in p
+
+
+def test_trend_down_regime_makes_short_primary():
+    # il regime [TREND-DOWN] deve inquadrare lo SHORT come trade PRIMARIO, non
+    # come pura difesa: era questo a produrre 14 run di NO_TRADE su un down pulito.
+    p = dec._build_regime_protocol_block(asset_class="crypto")
+    assert "SHORT e' il trade PRIMARIO" in p
+    assert "trade MANCATO" in p                 # cash in un down pulito != disciplina
+    assert "rischio squeeze" in p               # cautela: non shortare dentro il supporto
