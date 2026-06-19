@@ -607,10 +607,15 @@ def _build_short_selling_block() -> str:
         "regimi [MACRO]/[LATERAL] vale per la direzione INCERTA: quando i tecnici "
         "indicano chiaramente GIU' quell'incertezza non c'e', e lo short e' il trade, "
         "non l'attesa.\n"
-        "ECCEZIONE eventi binari: nelle ~2-3 ORE prima di un evento binario imminente "
-        "(decisione FOMC/CPI, ecc.) sospendi i NUOVI short e aspetta la reazione "
-        "post-evento (rischio squeeze su sorpresa). Fuori da quella finestra: si "
-        "shorta il downtrend, non si aspetta.\n\n"
+        "ECCEZIONE eventi binari (equity): SOLO nelle ultime ~2-3 ORE prima di un "
+        "evento binario di cui conosci l'orario CONFERMATO e IMMINENTE (decisione "
+        "FOMC/CPI) sospendi i NUOVI short. Un evento a GIORNI di distanza, o di cui "
+        "stai INDOVINANDO l'orario, NON e' 'imminente': sei FUORI dalla finestra, "
+        "shorti normalmente. NON trattare 'evento in arrivo questa settimana' come "
+        "'ora' (la data degli eventi qui non e' un dato affidabile: nel dubbio, "
+        "NON sei nella finestra). Sul crypto (24/7, decide sui tecnici) questa "
+        "eccezione non si applica: shorta il downtrend a prescindere dagli eventi "
+        "macro equity.\n\n"
         "RISCHIO SHORT (rigoroso — la perdita di uno short e' teoricamente "
         "ILLIMITATA se il prezzo sale):\n"
         "  - Stop-loss OBBLIGATORIO su ogni SHORT, posizionato SOPRA il "
@@ -1165,8 +1170,11 @@ def _build_regime_protocol_block(asset_class: str = "equity") -> str:
         "                confluence MTF bearish) NON e' una previsione del dato ma",
         "                una REAZIONE a un fatto avvenuto: lo SHORT su quel trend e'",
         "                AMMESSO (e' il trade), non cade sotto questo divieto. Resta",
-        "                vietato solo nelle ~2-3h PRIMA dell'evento binario (rischio",
-        "                squeeze): li' aspetta la reazione post-dato.",
+        "                vietato solo nelle ultime ~2-3h prima di un evento binario",
+        "                di cui conosci l'orario CONFERMATO e IMMINENTE (rischio",
+        "                squeeze). Un evento a GIORNI di distanza, o con orario solo",
+        "                INDOVINATO, NON e' 'imminente': NON congelare, shorta il",
+        "                downtrend. 'Evento in arrivo' != 'evento ora'.",
         "",
         "                PILASTRO 3 — SECTOR ROTATION COERENTE (vedi STEP 2.5).",
         "                Il trade deve essere allineato con la fase del ciclo",
