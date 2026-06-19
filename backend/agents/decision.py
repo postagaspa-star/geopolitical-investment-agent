@@ -611,9 +611,10 @@ def _build_short_selling_block() -> str:
         "evento binario di cui conosci l'orario CONFERMATO e IMMINENTE (decisione "
         "FOMC/CPI) sospendi i NUOVI short. Un evento a GIORNI di distanza, o di cui "
         "stai INDOVINANDO l'orario, NON e' 'imminente': sei FUORI dalla finestra, "
-        "shorti normalmente. NON trattare 'evento in arrivo questa settimana' come "
-        "'ora' (la data degli eventi qui non e' un dato affidabile: nel dubbio, "
-        "NON sei nella finestra). Sul crypto (24/7, decide sui tecnici) questa "
+        "shorti normalmente. Le ore REALI al prossimo evento sono nel blocco "
+        "PROSSIMO EVENTO MACRO (calendario vero): sei in finestra SOLO se indica "
+        "< ~3h. NON trattare 'evento in arrivo questa settimana' come 'ora'. Sul "
+        "crypto (24/7, decide sui tecnici) questa "
         "eccezione non si applica: shorta il downtrend a prescindere dagli eventi "
         "macro equity.\n\n"
         "RISCHIO SHORT (rigoroso — la perdita di uno short e' teoricamente "
@@ -3224,6 +3225,15 @@ async def run_decision_agent(run_id: str, tech_report: dict,
     )
     if auditor_block:
         user_message = auditor_block + "\n\n" + user_message
+
+    # Calendario macro REALE (FOMC/CPI): ore VERE al prossimo evento binario, cosi'
+    # l'agente non le indovina (bug: 'FOMC oggi' quando era il giorno prima / a
+    # settimane -> freeze per giorni). Solo Standard: il crypto e' esente per scelta.
+    try:
+        import macro_calendar
+        user_message = macro_calendar.format_macro_event_block() + "\n\n" + user_message
+    except Exception as _mc:
+        logger.debug("[%s][DECISION] macro calendar block failed: %s", run_id, _mc)
 
     database.insert_agent_log(run_id, "DECISION_CONTEXT",
         json.dumps({
