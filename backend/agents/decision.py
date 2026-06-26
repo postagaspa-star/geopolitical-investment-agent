@@ -399,7 +399,8 @@ REGOLE OPERATIVE Fase ESECUZIONE:
 
 REGOLE:
 - Preferisci l'azione all'inazione quando i segnali convergono
-- Confidence threshold per operare: >= 50%
+- Soglia per operare: superi il PAVIMENTO di confidence del profilo di rischio attivo (il numero "min_confidence baseline" indicato nel blocco rischio qui sotto). NON usare 50% come soglia: e' il codice a decidere e usa quel pavimento.
+  In ALTERNATIVA, una tesi SOTTO il pavimento e' ammessa SOLO quando il payoff e' asimmetrico: confidence x R/R atteso deve comunque raggiungere il pavimento, e la confidence non puo' MAI scendere sotto 45%. Sotto 45%, oppure con R/R atteso assente o < 1, NON si opera. Una conviction piu' bassa va PAGATA con un reward:risk piu' alto, non scartata: e' valore atteso.
 - Ogni decisione deve avere un logic_chain dettagliato che integra geo+tech
 - In modalita' Pure Macro (senza dati tecnici): puoi operare con sola analisi geopolitica se confidence >= 70%
 - Per le crypto, il sentiment retail (Reddit r/CryptoCurrency, r/Bitcoin) e' un input fondamentale
@@ -457,7 +458,7 @@ REGOLE OPERATIVE:
 - Allocazione max 30% del portafoglio per singola posizione crypto (vs 50% di giorno:
   liquidità minore di notte = slippage maggiore).
 - Stop-loss CONSIGLIATO sulle crypto overnight (volatilità elevata).
-- Confidence threshold ≥ 55% (lievemente più alta del giorno per filtrare il rumore).
+- Soglia per operare overnight: il PAVIMENTO di confidence del profilo attivo (di notte sii più severo del giorno per filtrare il rumore). Vale la stessa ammissione ALTERNATIVA del giorno — confidence x R/R atteso >= pavimento, mai sotto 45% — ma alza l'asticella: overnight pretendi un payoff atteso più netto.
 - Se geo + tech concordano forte (entrambi BUY), confidence boost +15%.
 - Max 15 posizioni aperte totali (compreso ciò che è già aperto da Sonnet).
   Nessun vincolo di diversificazione: concentra dove la tesi e' piu' forte.
@@ -2476,6 +2477,12 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                         portfolio_drawdown_pct=dd_pct,
                         tier=_tier,
                         satellite_exposure_pct=_sat_exp,
+                        # Lever 2: una tesi sotto il pavimento di confidence ma
+                        # con payoff asimmetrico (R/R atteso alto) ha valore
+                        # atteso positivo -> il gate EV in risk_profile la ammette
+                        # entro limiti duri. Chiude la dead-band prompt(>=50%) vs
+                        # codice(0.65) che teneva fermo lo Standard.
+                        expected_reward_risk=expected_rr,
                     )
                     if not ok:
                         logger.warning("[%s][DECISION] RISK_PROFILE rejected: %s",

@@ -759,6 +759,193 @@ async def _compute_core_guardrails(run_id: str, ticker: str, side: str,
     return rec
 
 
+async def _core_short_candidates(run_id: str, flat_tickers: list[str],
+                                 nav: float) -> list[dict]:
+    """Proposer SHORT deterministico — SAFETY-NET all'astensione di R1.
+
+    Riusa ESATTAMENTE la pipeline di input gia' fidata da
+    _compute_core_guardrails (indicatori puri -> core_inputs -> regime BTC ->
+    decide), ma usa crypto_signal_core.decide() come PROPONENTE invece che come
+    veto. Ritorna i ticker FLAT su cui il core conferma in autonomia uno SHORT
+    pulito: azione SHORT, non bloccato (ha gia' superato i gate interni del core
+    — conviction>=pavimento profilo, filtro contro-trend, SL/size calcolabili),
+    con dati sufficienti (completeness>=0.5). NON esegue: PROPONE soltanto.
+
+    Ogni candidato verra' instradato nello STESSO _handle_tool('execute_trade')
+    e quindi negli stessi governatori (binding Auditor -> risk_profile -> SL
+    obbligatorio -> fail-closed naked-abort). Il core qui propone; a DECIDERE
+    restano i governatori esistenti. Direzione vincolata (solo SHORT) e ticker
+    vincolato (solo FLAT): non aggiunge ne' ribalta posizioni che l'Auditor sta
+    proteggendo.
+    """
+    import data_fetchers
+    from agents import crypto_signal_core as _core
+    out: list[dict] = []
+    if not flat_tickers or not nav or nav <= 0:
+        return out
+
+    # 1. Regime BTC una sola volta (identico a _compute_core_guardrails)
+    btc_closes = None
+    try:
+        md = await asyncio.get_running_loop().run_in_executor(
+            None, data_fetchers.fetch_market_data, "BTC-USD", 250)
+        if md and md.get("data"):
+            btc_closes = [b.get("close") for b in md["data"] if b.get("close")]
+    except Exception:
+        pass
+    try:
+        regime, _ = _core.classify_btc_regime(btc_closes)
+    except Exception:
+        regime = "unknown"
+
+    # 2. Parametri dal profilo attivo (identici al path guardrails: il core
+    #    pretende conviction >= min_confidence del profilo -> bar conservativa)
+    try:
+        import risk_profile as _rp
+        pr = _rp.get_active_profile()
+        params = _core.CoreParams(
+            sl_min_pct=float(pr.get("sl_min_pct_crypto", 12.0)),
+            sl_max_pct=float(pr.get("sl_max_pct_crypto", 25.0)),
+            max_position_pct_nav=float(pr.get("max_position_pct_crypto", 12.0)),
+            min_conviction=float(pr.get("min_confidence", 0.55)),
+        )
+    except Exception:
+        params = _core.CoreParams()
+
+    try:
+        from agents.technical_crypto import _fetch_crypto_indicators
+    except Exception as e:
+        logger.warning("[%s][DEC-CRYPTO] safety-net: import indicatori fallito: %s",
+                       run_id, e)
+        return out
+
+    # 3. Sonda ogni ticker FLAT
+    for tk in flat_tickers:
+        try:
+            ind = await _fetch_crypto_indicators(tk)
+            if not ind or ind.get("error"):
+                continue
+            details, raw, mkt = _core.core_inputs_from_analysis(ind)
+            dec = _core.decide(ticker=tk, details=details, nav=nav, raw=raw,
+                               market_ctx=mkt, regime=regime, params=params)
+            if (getattr(dec, "action", "") == "SHORT"
+                    and not getattr(dec, "blocked", False)
+                    and dec.entry and dec.stop_loss
+                    and dec.size_units and dec.size_units > 0
+                    and float(getattr(dec, "data_completeness", 0.0) or 0.0) >= 0.5):
+                out.append({
+                    "ticker": tk,
+                    "entry": float(dec.entry),
+                    "stop_loss": float(dec.stop_loss),
+                    "size_units": float(dec.size_units),
+                    "conviction": float(dec.conviction),
+                    "regime": str(dec.regime),
+                    "completeness": float(dec.data_completeness),
+                    "reward_risk": float(getattr(dec, "reward_risk", 0.0) or 0.0),
+                })
+        except Exception as e:
+            logger.warning("[%s][DEC-CRYPTO] safety-net probe %s fallita: %s",
+                           run_id, tk, e)
+    # Ordina per conviction decrescente: il candidato migliore per primo
+    out.sort(key=lambda c: c["conviction"], reverse=True)
+    return out
+
+
+async def _run_short_safety_net(run_id: str, trades: list, final_text: str,
+                                focus_tickers, portfolio_state: dict,
+                                auditor_binding: dict | None) -> None:
+    """Semina al piu' UNO SHORT deterministico quando R1 ha rinunciato.
+
+    Estratto in helper per essere testabile in isolamento. Mutazione IN-PLACE
+    di `trades`: se un candidato del core viene eseguito, vi appende un record
+    con source='core_safety_net'. Non e' un bypass — il seed passa per
+    _handle_tool('execute_trade'), quindi per binding Auditor -> risk_profile ->
+    SL obbligatorio -> fail-closed: a decidere restano i governatori esistenti.
+    Killabile live col setting crypto_short_safety_net=off.
+    """
+    import database
+    try:
+        _net_on = (database.get_setting("crypto_short_safety_net", "on")
+                   or "on").strip().lower() == "on"
+    except Exception:
+        _net_on = True
+    try:
+        _open_tk = {str(p.get("ticker") or "").upper()
+                    for p in (database.get_positions() or [])}
+    except Exception:
+        _open_tk = set()
+    _probe = focus_tickers or ["BTC-USD", "ETH-USD", "SOL-USD",
+                               "DOGE-USD", "AVAX-USD", "LINK-USD"]
+    _flat = [t for t in _probe if str(t).upper() not in _open_tk]
+    try:
+        _nav = float((portfolio_state or {}).get("total_value")
+                     or (portfolio_state or {}).get("cash") or 0)
+    except Exception:
+        _nav = 0.0
+
+    _cands: list = []
+    if _net_on and _flat and _nav > 0:
+        try:
+            _cands = await _core_short_candidates(run_id, _flat, _nav)
+        except Exception as _sn_exc:
+            logger.warning("[%s][DECISION-CRYPTO] safety-net error: %s",
+                           run_id, _sn_exc)
+
+    # Abstention-gap come metrica di PRIMA CLASSE (mai silenziosa): rende
+    # misurabile la divergenza R1-vs-core prima di fidarsi della rete.
+    try:
+        database.insert_agent_log(run_id, "DECISION_CRYPTO_ABSTENTION_GAP",
+            json.dumps({
+                "r1_emitted_trade": False,
+                "safety_net_enabled": _net_on,
+                "flat_probed": _flat,
+                "core_short_candidates": [c["ticker"] for c in _cands],
+                "final_text_tail": (final_text or "")[-400:],
+            }, default=str))
+    except Exception:
+        pass
+
+    # Al piu' UNO short seminato per run (conservativo). Stesso handler =
+    # stessi governatori (binding Auditor -> risk_profile -> SL -> fail-closed).
+    for c in _cands[:1]:
+        seed = {
+            "ticker": c["ticker"], "action": "SHORT",
+            "quantity": c["size_units"], "stop_loss": c["stop_loss"],
+            "confidence_level": round(c["conviction"] * 100),
+            "logic_chain": (
+                f"[CORE SAFETY-NET] R1 ha rinunciato a operare; il core "
+                f"deterministico conferma in autonomia uno SHORT su "
+                f"{c['ticker']} (regime {c['regime']}, conviction "
+                f"{c['conviction']:.2f}, completeness {c['completeness']:.2f}, "
+                f"R/R {c['reward_risk']:.2f}, SL {c['stop_loss']}). Proposta "
+                f"deterministica: validata dai governatori standard prima "
+                f"dell'esecuzione."),
+        }
+        try:
+            _res = await _handle_tool("execute_trade", seed, run_id,
+                                      workflow_state=None,
+                                      auditor_binding=auditor_binding)
+            _parsed = json.loads(_res)
+            if _parsed.get("executed"):
+                trades.append({
+                    "ticker": c["ticker"], "action": "SHORT",
+                    "quantity": c["size_units"],
+                    "confidence": round(c["conviction"] * 100),
+                    "source": "core_safety_net",
+                })
+                logger.info("[%s][DECISION-CRYPTO] SAFETY-NET: SHORT %s seminato "
+                            "(core conv %.2f) — R1 era fermo.",
+                            run_id, c["ticker"], c["conviction"])
+            else:
+                logger.info("[%s][DECISION-CRYPTO] SAFETY-NET: SHORT %s proposto "
+                            "ma RESPINTO dai governatori (%s) — resta flat.",
+                            run_id, c["ticker"],
+                            _parsed.get("reason") or _parsed.get("blocked"))
+        except Exception as _seed_exc:
+            logger.warning("[%s][DECISION-CRYPTO] safety-net seed %s fallito: %s",
+                           run_id, c["ticker"], _seed_exc)
+
+
 # ─── Tool handler ───────────────────────────────────────────────────────────
 
 def _enforce_open_has_stop(action, ticker, quantity, current_price,
@@ -801,13 +988,43 @@ def _enforce_open_has_stop(action, ticker, quantity, current_price,
     return {"aborted": True, "reason": reason, "close_success": close_ok}
 
 
+# Struttura "rotta" secondo l'Auditor: gli stessi casi su cui
+# enforce_auditor_verdicts mette i denti (SL stretto). Vedi position_auditor.
+_AUDITOR_BROKEN_STRUCT = ("reversal", "topping", "giveback")
+
+
 def _auditor_blocks_add(auditor_binding: dict | None, ticker: str,
                         action: str) -> dict | None:
-    """Binding asimmetrico (crypto): se l'Auditor ha emesso EXIT/TRIM su `ticker`,
-    blocca le azioni che AGGIUNGONO esposizione nella direzione della posizione
-    (BUY su una LONG, SHORT su una SHORT). Ritorna il motivo (dict) se va bloccato,
-    None se permesso. De-risk (SELL/COVER) e ticker non vincolati -> None. Mai un
-    override narrativo: una confutazione tecnica giustifica al massimo un HOLD."""
+    """Binding asimmetrico (crypto), VERDICT-GRANULARE.
+
+    Se l'Auditor ha emesso EXIT/TRIM su `ticker`, valuta le azioni che
+    AGGIUNGONO esposizione nella direzione della posizione (BUY su una LONG,
+    SHORT su una SHORT). De-risk (SELL/COVER), ticker non vincolati e azioni
+    che non aggiungono -> None. Mai un override narrativo: confutare coi
+    tecnici giustifica al piu' un HOLD, non sblocca un'aggiunta.
+
+    Ritorna:
+      - None                          -> nessun vincolo.
+      - {"mode": "block", ...}        -> blocco DURO. Solo su EXIT + struttura
+        rotta (reversal/topping/giveback) + confidence >= 75 — LO STESSO
+        predicato con cui enforce_auditor_verdicts mette i denti. E' la vera
+        anti-piramidazione in una posizione che un revisore imparziale dice in
+        inversione: la disciplina che i commit hanno aggiunto resta intatta.
+        Fail-closed: anche quando la size della posizione non e' nota (qty<=0)
+        si blocca, per non lasciar passare un add non limitabile.
+      - {"mode": "cap", "cap_qty": q} -> vincolo MORBIDO. TRIM, oppure EXIT a
+        bassa conviction / struttura non rotta: l'aggiunta e' permessa ma la
+        size viene clampata a `q` (la size attuale), cosi' l'esposizione totale
+        nella stessa direzione NON cresce (no piramidazione, refresh dello stop
+        consentito). E' il "NON e' un blocco meccanico" del modulo Auditor.
+
+    Prima questa funzione collassava EXIT e TRIM in UN UNICO blocco cieco:
+    un semplice TRIM ("riduci, struttura intatta") fermava l'aggiunta di
+    conviction su un downtrend confermato esattamente come un EXIT da struttura
+    rotta -> il sistema individuava il trend ma si rifiutava di spingere il
+    vincitore. La granularita' qui ripristina "premi lo short confermato" senza
+    toccare alcuna soglia.
+    """
     ab = (auditor_binding or {}).get(str(ticker or "").upper())
     if not ab:
         return None
@@ -816,8 +1033,21 @@ def _auditor_blocks_add(auditor_binding: dict | None, ticker: str,
     adds = (act == "BUY" and pos_dir != "SHORT") or (act == "SHORT" and pos_dir == "SHORT")
     if not adds:
         return None
-    return {"verdict": ab.get("verdict"), "direction": pos_dir,
-            "reason": ab.get("reason")}
+    verdict = str(ab.get("verdict") or "").upper()
+    classification = str(ab.get("classification") or "unclear").lower()
+    try:
+        conf = float(ab.get("confidence") or 0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    try:
+        cap_qty = float(ab.get("qty") or 0)
+    except (TypeError, ValueError):
+        cap_qty = 0.0
+    hard = (verdict == "EXIT" and classification in _AUDITOR_BROKEN_STRUCT and conf >= 75)
+    # Fail-closed: senza una size nota non possiamo limitare l'aggiunta -> blocca.
+    mode = "block" if (hard or cap_qty <= 0) else "cap"
+    return {"mode": mode, "cap_qty": cap_qty, "verdict": verdict,
+            "direction": pos_dir, "reason": ab.get("reason")}
 
 
 async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
@@ -866,24 +1096,40 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             confidence = tool_input["confidence_level"]
             # ── Binding asimmetrico Auditor: blocca gli ADD su EXIT/TRIM ───────
             # De-risk (SELL/COVER) sempre permesso; nessun override narrativo.
-            _ab_block = _auditor_blocks_add(auditor_binding, ticker, action)
-            if _ab_block:
+            _ab = _auditor_blocks_add(auditor_binding, ticker, action)
+            if _ab and _ab.get("mode") == "block":
                 database.insert_agent_log(run_id, "AUDITOR_BINDING_BLOCK", json.dumps({
                     "ticker": ticker, "action": action,
-                    "verdict": _ab_block.get("verdict"),
-                    "direction": _ab_block.get("direction"),
+                    "verdict": _ab.get("verdict"),
+                    "direction": _ab.get("direction"),
                 }, default=str))
                 return json.dumps({
                     "blocked": True, "ticker": ticker, "action": action,
                     "reason": (
-                        f"BLOCCATO dall'Auditor: verdetto {_ab_block.get('verdict')} su "
-                        f"{ticker} ({_ab_block.get('reason')}). Mandato VINCOLANTE: su questo "
-                        f"ticker puoi solo RIDURRE/CHIUDERE, NON aggiungere esposizione. Il "
-                        f"de-risk e' sempre permesso (asimmetrico). Nessun override narrativo: "
-                        f"confutare coi tecnici puo' giustificare un HOLD passivo, non sblocca "
-                        f"un BUY/aggiunta — e lo SL resta al livello d'invalidazione."
+                        f"BLOCCATO dall'Auditor: verdetto {_ab.get('verdict')} su "
+                        f"{ticker} ({_ab.get('reason')}) — struttura rotta ad alta conviction. "
+                        f"Mandato VINCOLANTE: su questo ticker puoi solo RIDURRE/CHIUDERE, NON "
+                        f"aggiungere esposizione. Il de-risk e' sempre permesso (asimmetrico). "
+                        f"Nessun override narrativo: confutare coi tecnici puo' giustificare un "
+                        f"HOLD passivo, non sblocca un BUY/aggiunta — e lo SL resta al livello "
+                        f"d'invalidazione."
                     ),
                 })
+            if _ab and _ab.get("mode") == "cap":
+                # Vincolo morbido (TRIM / EXIT non da struttura rotta): l'aggiunta
+                # passa ma l'esposizione totale nella stessa direzione non puo'
+                # CRESCERE oltre la size attuale. Refresh/reshuffle ok, no piramide.
+                _cap = float(_ab.get("cap_qty") or 0)
+                if _cap > 0 and quantity > _cap:
+                    database.insert_agent_log(run_id, "AUDITOR_BINDING_CAP", json.dumps({
+                        "ticker": ticker, "action": action,
+                        "requested_qty": quantity, "capped_qty": _cap,
+                        "verdict": _ab.get("verdict"),
+                    }, default=str))
+                    logger.info("[%s][DEC-CRYPTO] Auditor CAP %s %s: qty %s -> %s "
+                                "(verdetto %s, no piramidazione)", run_id, action,
+                                ticker, quantity, _cap, _ab.get("verdict"))
+                    quantity = _cap
             # Stop_loss/take_profit: parse esplicito per evitare il bug
             # `or None` che convertiva 0.0 a None silenziosamente.
             sl_raw = tool_input.get("stop_loss")
@@ -1843,9 +2089,25 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
             _dir = {str(p.get("ticker")).upper():
                     str(p.get("direction") or "LONG").upper()
                     for p in _crypto_pos if p.get("ticker")}
+            # Size attuale per ticker: serve al binding per CAP-pare gli add
+            # morbidi (TRIM) alla size in essere invece di bloccarli del tutto.
+            _qty = {}
+            for p in _crypto_pos:
+                _t = str(p.get("ticker") or "").upper()
+                if _t:
+                    try:
+                        _qty[_t] = abs(float(p.get("quantity") or 0))
+                    except (TypeError, ValueError):
+                        _qty[_t] = 0.0
+            # Binding VERDICT-GRANULARE: si conservano classification + confidence
+            # (prima scartate) cosi' il gate distingue un EXIT da struttura rotta
+            # (blocco duro) da un TRIM (cap morbido). Vedi _auditor_blocks_add.
             auditor_binding = {
                 t.upper(): {"verdict": str(v.get("verdict")).upper(),
                             "direction": _dir.get(t.upper(), "LONG"),
+                            "classification": str(v.get("classification") or "unclear").lower(),
+                            "confidence": float(v.get("confidence") or 0),
+                            "qty": _qty.get(t.upper(), 0.0),
                             "reason": v.get("technical_reason")}
                 for t, v in _verdicts.items()
                 if str(v.get("verdict")).upper() in ("EXIT", "TRIM")
@@ -1912,6 +2174,18 @@ async def run_crypto_decision(run_id: str, tech_report: dict | None,
                             run_id, _bias)
         except Exception as _ve:
             logger.warning("[%s][DECISION-CRYPTO] validatore confutazione: %s", run_id, _ve)
+
+    # ── SAFETY-NET SHORT: R1 ha rinunciato ma il core conferma un ribasso ──────
+    # Causa radice del "individua il downtrend ma resta fermo": l'astensione di
+    # R1 e' il DEFAULT SILENZIOSO (nessun gate di codice blocca uno SHORT su un
+    # ticker flat — semplicemente R1 non emette execute_trade sotto data-
+    # starvation). La rete ribalta l'astensione in evento ESPLICITO e, se il core
+    # conferma uno SHORT pulito, lo propone nello STESSO handler -> stessi
+    # governatori decidono. Mutazione in-place di `trades`.
+    if not trades:
+        await _run_short_safety_net(
+            run_id, trades, final_text, focus_tickers,
+            portfolio_state, auditor_binding)
 
     duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 

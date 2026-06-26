@@ -240,6 +240,7 @@ def validate_trade(
     tier: str = "core",
     satellite_exposure_pct: float | None = None,
     recovery: bool | None = None,
+    expected_reward_risk: float | None = None,
 ) -> tuple[bool, str]:
     """
     Validazione hard del trade contro il profilo attivo.
@@ -288,11 +289,40 @@ def validate_trade(
         if math.isnan(cf) or math.isinf(cf):
             return False, "Confidence non finita (NaN/Inf) — blocco per sicurezza."
         if cf < min_conf - 1e-6:
-            _rec = " (RECOVERY)" if in_recovery else ""
-            return False, (
-                f"Confidence {cf:.2f} sotto il minimo del profilo "
-                f"{p['label']}{_rec} ({min_conf:.2f}). NO TRADE."
-            )
+            # ── Gate Expected-Value (metodo ALTERNATIVO all'astensione cieca) ──
+            # La confidence narrativa non e' l'unico metro: una tesi a conviction
+            # medio-bassa ma con payoff ASIMMETRICO (reward:risk alto) ha valore
+            # atteso positivo (confidence = probabilita' × payoff, cfr. il prompt
+            # del Decision). Ammettiamo l'apertura SOTTO il pavimento SOLO se
+            #     confidence × min(reward_risk, 5)  raggiunge comunque il pavimento,
+            # con un pavimento DURO di confidence a 0.45 e MAI in recovery. Cosi'
+            # si chiude la "dead band" tra prompt (>=50%) e codice (es. moderate
+            # 0.65) senza abbassare min_confidence ne' allargare il rischio sui
+            # trade a basso payoff (rr<1 o rr assente -> resta NO TRADE).
+            ev_ok = False
+            if (not in_recovery) and expected_reward_risk is not None and cf >= 0.45:
+                try:
+                    rr = float(expected_reward_risk)
+                except (TypeError, ValueError):
+                    rr = 0.0
+                if math.isfinite(rr) and rr >= 1.0:
+                    ev_score = cf * min(rr, 5.0)
+                    ev_ok = ev_score >= min_conf - 1e-6
+            if not ev_ok:
+                _rec = " (RECOVERY)" if in_recovery else ""
+                return False, (
+                    f"Confidence {cf:.2f} sotto il minimo del profilo "
+                    f"{p['label']}{_rec} ({min_conf:.2f}) e valore atteso "
+                    f"insufficiente a compensare (R/R atteso assente o troppo "
+                    f"basso). NO TRADE."
+                )
+            # EV positivo: l'apertura prosegue ai cap successivi (allocation,
+            # satellite, n. posizioni, drawdown) che restano INVARIATI e possono
+            # comunque rifiutare. Solo il pavimento di confidence e' superato.
+            logger.info(
+                "EV-gate: confidence %.2f < floor %.2f ma R/R %.2f -> EV %.2f "
+                ">= floor: apertura ammessa (cap successivi ancora attivi).",
+                cf, min_conf, float(expected_reward_risk), cf * min(float(expected_reward_risk), 5.0))
 
     # 2. Allocation
     if allocation_pct is not None:
