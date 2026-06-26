@@ -167,7 +167,7 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
             except Exception as _e:
                 logger.debug("rebalance cooldown record fallito: %s", _e)
 
-        return {
+        _crypto_ret = {
             "run_id": run_id,
             "triggered": True,
             "urgency": urgency,
@@ -177,6 +177,35 @@ async def run_watchdog_pipeline(run_id: str | None = None) -> dict:
             "trades": crypto_result.get("trades", []),
             "duration_seconds": round(time.time() - start, 2),
         }
+        # ── Step 8b: dispatch-BOTH (gated, default OFF) ──────────────────────
+        # Storicamente un trigger misto crypto+equity andava SOLO al crypto e
+        # l'equity veniva SCARTATO (equity_focus_ignored) -> lo Standard perdeva
+        # setup event-driven. Con route_dispatch_both='on', se il trigger include
+        # anche equity e il mercato USA e' aperto, dispacciamo ANCHE la pipeline
+        # standard nello stesso ciclo (i due Decision sono separati per dominio,
+        # lo Standard e' vietato sulle crypto). Default OFF = comportamento storico.
+        try:
+            _both = (database.get_setting("route_dispatch_both", "off")
+                     or "off").strip().lower() == "on"
+        except Exception:
+            _both = False
+        if _both and equity_focus and standard_active and us_market_open:
+            try:
+                from agents.decision import run_decision_agent
+                _eq = await run_decision_agent(
+                    run_id, None, focus_tickers=equity_focus, watchdog_reason=reason)
+                _crypto_ret["route"] = "crypto+equity"
+                _crypto_ret["equity_route"] = {
+                    "decision": _eq.get("decision", "UNKNOWN"),
+                    "trades": _eq.get("trades", []),
+                }
+                logger.info("[%s][ORCHESTRATOR] dispatch-both: equity %s dispacciato "
+                            "(%s)", run_id, equity_focus, _eq.get("decision"))
+            except Exception as _ee:
+                logger.error("[%s][ORCHESTRATOR] dispatch-both equity fallito: %s",
+                             run_id, _ee, exc_info=True)
+                _crypto_ret["equity_route"] = {"decision": "ERROR", "trades": []}
+        return _crypto_ret
 
     # ─── ROUTE 2: equity ticker — richiede AGENTE STANDARD ATTIVO + MERCATO APERTO ───
     # Il Decision Standard puo' partire SOLO se:

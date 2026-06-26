@@ -945,6 +945,50 @@ def build_standard_regime_read_for_crypto(limit: int = 5) -> str:
     return "\n".join(head_lines) + "\n".join(entries) + "\n"
 
 
+def _build_regime_context_block(asset_class: str = "equity") -> str:
+    """Variante 'context' del Regime Protocol (Step 7 della pulizia).
+
+    Il regime diventa CONTESTO di conviction e tattica, NON un veto: niente
+    default NO_TRADE e niente boost del pavimento di confidence DENTRO il prompt.
+    L'ammissione la decide UNA sola volta il gate rischio a valle (pavimento di
+    confidence + eccezione valore-atteso, in risk_profile). Cosi' il modello non
+    si astiene 'a monte' su LATERAL/MACRO prima ancora di arrivare al gate —
+    radice del 'Standard non fa mai un trade'. Tutti i vincoli hard del Risk
+    Profile restano intatti (cap, SL obbligatorio, drawdown)."""
+    asset_word = "crypto" if asset_class == "crypto" else "equity"
+    lines = [
+        "█" * 60,
+        "🧭  REGIME DI MERCATO — CONTESTO (non un veto)",
+        "█" * 60,
+        "",
+        "All'inizio del ragionamento classifica il regime (es. \"Regime:",
+        "[LATERAL]\"): TREND-UP, TREND-DOWN, LATERAL, MACRO, CRASH-RALLY,",
+        "GEOPOLITICAL. Serve a CALIBRARE conviction e tattica, NON a decidere",
+        "da solo un NO_TRADE.",
+        "",
+        "Come usare il regime (solo come contesto):",
+        "  [TREND-UP/DOWN] direzione chiara: opera CON il trend; un downtrend",
+        f"                  confermato si SHORTA (vale anche per le {asset_word}).",
+        "  [LATERAL]       range-bound: preferisci mean-reversion ai bordi del",
+        "                  range; al centro del range la conviction e' bassa.",
+        "  [MACRO]         finestra evento (FOMC/CPI): REAGISCI al dato, non",
+        "                  pre-posizionarti; dollaro/tassi/rotazione sono input",
+        "                  di DIREZIONE, non tre cancelli da superare.",
+        "  [CRASH-RALLY]   alta volatilita': size ridotta, SL coerente.",
+        "",
+        "REGOLA D'ORO: il regime NON impone un NO_TRADE di default e NON alza il",
+        "pavimento di confidence. Se il setup non convince, la conviction sara'",
+        "bassa e sara' il GATE RISCHIO a valle (pavimento + valore atteso) a",
+        "decidere se si opera, in UN solo posto. Non astenerti 'a priori' solo",
+        "perche' il regime e' LATERAL o MACRO: porta la lettura fino al gate.",
+        "",
+        "Restano validi TUTTI i vincoli del Risk Profile (cap allocazione, SL",
+        "obbligatorio, stop drawdown): il regime puo' solo restringere size/",
+        "tattica, MAI rilassare i vincoli.",
+    ]
+    return "\n".join(lines)
+
+
 def _build_regime_protocol_block(asset_class: str = "equity") -> str:
     """
     Regime Protocol: framework decisionale OBBLIGATORIO che precede ogni
@@ -968,6 +1012,20 @@ def _build_regime_protocol_block(asset_class: str = "equity") -> str:
 
     Posizione nel prompt: subito sotto il risk_block, sopra coach_section.
     """
+    # ── Modalita' di ammissione del regime (Step 7) ──────────────────────────
+    # 'legacy_veto' (DEFAULT) = prosa storica: LATERAL/MACRO defaultano a
+    # NO_TRADE e alzano il pavimento NEL PROMPT, sopra il gate di codice.
+    # 'context' = il regime e' solo contesto di conviction; l'ammissione la
+    # decide UNA volta il gate rischio a valle. Gated per confrontare le rese.
+    try:
+        import database as _db
+        _mode = (_db.get_setting("regime_admission_mode", "legacy_veto")
+                 or "legacy_veto").strip().lower()
+    except Exception:
+        _mode = "legacy_veto"
+    if _mode == "context":
+        return _build_regime_context_block(asset_class)
+
     # Leggi il floor min_confidence del profilo attivo per riferirlo
     # esplicitamente (cosi' il modificatore "+0.10" e' aggancia al valore reale).
     try:
@@ -4169,6 +4227,20 @@ def _save_checkpoint(run_id: str, agent_name: str, status: str, data: dict):
 # Signature = hash(open_positions, cash, last_8h_ts, last_4d_ts, last_buf_ts,
 # buf_count). MD5 e' ok qui (non e' uso crittografico).
 
+def _coarse_price(x) -> float:
+    """Prezzo arrotondato a ~3 cifre significative (~1% granularita'),
+    scala-indipendente (BTC 100k o DOGE 0.1): un movimento >~1% cambia la
+    signature. Cosi' l'early-skip CEDE a un movimento reale invece di restare
+    cieco tra un report e l'altro (Step 8a)."""
+    try:
+        v = float(x or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if v <= 0:
+        return 0.0
+    return float(f"{v:.3g}")
+
+
 def _compute_context_signature(portfolio_state: dict,
                                rep_8h: list,
                                rep_4d: list,
@@ -4177,9 +4249,11 @@ def _compute_context_signature(portfolio_state: dict,
     import hashlib
     try:
         positions = portfolio_state.get("positions") or []
-        # Tickers ordinati + quantita' per detect chiusura/apertura/SL update
+        # Tickers ordinati + quantita' + prezzo COARSE (~1%): detect chiusura/
+        # apertura/SL update E movimento di prezzo significativo sulle posizioni.
         pos_summary = sorted([
             f"{p.get('ticker','?')}:{round(float(p.get('quantity', 0) or 0), 4)}"
+            f":{_coarse_price(p.get('current_price'))}"
             for p in positions
         ])
         rep_8h_ts = max([str(r.get("timestamp") or "") for r in rep_8h], default="")
@@ -4215,12 +4289,23 @@ def _should_skip_decision_run(
     condizioni di stabilita' sono soddisfatte.
 
     NON skippa MAI se:
+      - early-skip disattivato (setting decision_early_skip_enabled='off')
       - Watchdog trigger attivo
       - Focus tickers (movimenti anomali rilevati)
       - Commitment attivo che scade entro 6h
       - Nessuna signature precedente (primo run)
       - Signature precedente diversa (qualcosa e' cambiato)
     """
+    # Step 8a: kill-switch per confronto. Con decision_early_skip_enabled='off'
+    # l'early-skip e' spento -> il Decision gira sempre (piu' costo, piu'
+    # occasioni di trade). Default 'on' = comportamento storico.
+    try:
+        import database as _db
+        if (_db.get_setting("decision_early_skip_enabled", "on")
+                or "on").strip().lower() == "off":
+            return False, "early-skip disattivato (decision_early_skip_enabled=off)"
+    except Exception:
+        pass
     # 1. Trigger esterni forzano sempre run
     if watchdog_reason and watchdog_reason.strip():
         return False, f"watchdog: {watchdog_reason[:60]}"

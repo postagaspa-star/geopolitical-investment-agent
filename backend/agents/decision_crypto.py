@@ -658,6 +658,22 @@ CRYPTO_DECISION_TOOLS = [
 
 # ─── Core deterministico (guardrail, flag-gated) ─────────────────────────────
 
+def _btc_regime_band_pct() -> float:
+    """Banda morta del regime BTC per il gate contro-trend. Default ±1%
+    (storico). Setting btc_regime_strict_trend='on' -> ±3%: "bull"/"bear"
+    richiedono un trend GENUINO, cosi' uno SHORT su un alt in downtrend
+    confermato non viene bloccato contro-trend solo perche' BTC e' appena 1%
+    sopra l'EMA200 (piatto-leggermente-su). Default OFF = comportamento
+    invariato; Andrea lo attiva per il confronto."""
+    try:
+        import database
+        on = (database.get_setting("btc_regime_strict_trend", "off")
+              or "off").strip().lower() == "on"
+        return 0.03 if on else 0.01
+    except Exception:
+        return 0.01
+
+
 async def _compute_core_guardrails(run_id: str, ticker: str, side: str,
                                     entry_price: float, llm_units: float,
                                     llm_sl) -> dict | None:
@@ -723,7 +739,7 @@ async def _compute_core_guardrails(run_id: str, ticker: str, side: str,
 
     # Risolvi il regime PRIMA, cosi' lo congeliamo nello snapshot forense
     # (replay esatto senza riconservare l'intera serie BTC).
-    regime, _regime_detail = _core.classify_btc_regime(btc_closes)
+    regime, _regime_detail = _core.classify_btc_regime(btc_closes, _btc_regime_band_pct())
     decision = _core.decide(ticker=ticker, details=details, nav=nav, raw=raw,
                             market_ctx=mkt, regime=regime, params=params)
     snapshot = _core.snapshot_for_replay(
@@ -794,7 +810,7 @@ async def _core_short_candidates(run_id: str, flat_tickers: list[str],
     except Exception:
         pass
     try:
-        regime, _ = _core.classify_btc_regime(btc_closes)
+        regime, _ = _core.classify_btc_regime(btc_closes, _btc_regime_band_pct())
     except Exception:
         regime = "unknown"
 

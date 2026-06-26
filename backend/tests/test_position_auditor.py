@@ -125,6 +125,26 @@ def test_enforce_bias_holds_tightens_sl():
     assert abs(sl - 950.0 * 0.995) < 1e-3
 
 
+def test_tight_stop_helper_is_single_writer(monkeypatch):
+    # Step 6: teeth/escalation e bias-reject passano TUTTE per _apply_tight_stop
+    # (prima era logica copia-incollata in due punti). Un solo writer, un log
+    # per via, prezzo preso dalla lista positions del chiamante.
+    calls = []
+
+    def fake_helper(run_id, ticker, cur, is_short, *, set_by, log_type, payload=None):
+        calls.append((ticker, set_by, log_type, cur))
+        return True
+
+    monkeypatch.setattr(pa, "_apply_tight_stop", fake_helper)
+    pos = [{"ticker": "BTC-USD", "current_price": 900.0, "direction": "LONG"}]
+    pa.enforce_auditor_verdicts("run-z", {"BTC-USD": {"verdict": "EXIT",
+        "classification": "reversal", "confidence": 85}}, positions=pos)
+    pa.enforce_bias_holds("run-z", ["BTC-USD"], positions=pos)
+    assert ("BTC-USD", "position_auditor", "POSITION_AUDIT_TEETH", 900.0) in calls
+    assert ("BTC-USD", "auditor_bias_reject", "POSITION_AUDIT_BIAS_REJECT", 900.0) in calls
+    assert len(calls) == 2  # un solo writer, invocato una volta per ciascuna via
+
+
 # ── #2: Auditor consapevole di PROFONDITA' + DURATA del pullback ──────────────
 def test_compute_pullback_uses_recent_pivot_not_stale_high():
     # vecchio massimo 100 (barra 0), crollo, RECUPERO a ~86 (pivot recente), poi

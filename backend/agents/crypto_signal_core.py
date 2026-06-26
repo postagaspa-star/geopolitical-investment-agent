@@ -131,13 +131,22 @@ def ema(values: list[float], period: int) -> Optional[float]:
     return e
 
 
-def classify_btc_regime(btc_daily_closes: Optional[list[float]]) -> tuple[str, str]:
+def classify_btc_regime(btc_daily_closes: Optional[list[float]],
+                        neutral_band_pct: float = 0.01) -> tuple[str, str]:
     """Regime di mercato da BTC vs EMA200 (daily).
 
     Ritorna (regime, detail). regime ∈ {bull, bear, neutral, unknown}.
     NB: il 4h non e' disponibile nel feed (solo daily) → usiamo l'EMA200 daily
     come proxy del trend di fondo. Se <200 chiusure, ripieghiamo su EMA piu'
     corta marcando bassa confidenza, senza inventare.
+
+    neutral_band_pct: semi-ampiezza della banda morta attorno all'EMA. Default
+    0.01 (±1%, comportamento storico). Con una banda piu' ampia (es. 0.03)
+    "bull"/"bear" richiedono un trend GENUINO, non BTC appena 1% sopra l'EMA:
+    cosi' uno SHORT su un alt in downtrend confermato non viene penalizzato come
+    contro-trend solo perche' BTC e' piatto-leggermente-su. Funzione PURA: la
+    banda e' un parametro (il valore "strict" lo decidono i call-site live), il
+    replay da snapshot resta deterministico.
     """
     closes = [v for v in (_f(x) for x in (btc_daily_closes or [])) if v is not None]
     if len(closes) < 50:
@@ -153,12 +162,19 @@ def classify_btc_regime(btc_daily_closes: Optional[list[float]]) -> tuple[str, s
         low_conf = " (bassa confidenza: <200 closes)"
     if ref is None:
         return "unknown", "EMA non calcolabile"
-    band = ref * 0.01  # banda morta ±1% → neutral
+    try:
+        bpct = float(neutral_band_pct)
+    except (TypeError, ValueError):
+        bpct = 0.01
+    if bpct < 0:
+        bpct = 0.01
+    band = ref * bpct  # banda morta attorno all'EMA → neutral
+    band_lbl = f"±{bpct * 100:.0f}%"
     if price > ref + band:
         return "bull", f"BTC {price:.0f} > {label} {ref:.0f}{low_conf}"
     if price < ref - band:
         return "bear", f"BTC {price:.0f} < {label} {ref:.0f}{low_conf}"
-    return "neutral", f"BTC ~{label} (entro ±1%){low_conf}"
+    return "neutral", f"BTC ~{label} (entro {band_lbl}){low_conf}"
 
 
 # ─── Confluence: conta SOLO i segnali realmente presenti ─────────────────────

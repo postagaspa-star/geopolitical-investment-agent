@@ -508,6 +508,37 @@ def _consecutive_derisk_streak(ticker: str, limit: int = 200) -> int:
     return streak
 
 
+def _apply_tight_stop(run_id: str, ticker: str, current_price, is_short: bool,
+                      *, set_by: str, log_type: str, payload: dict | None = None) -> bool:
+    """UNICO writer dei 'denti' dell'Auditor: stringe lo SL a 0.5% appena oltre il
+    prezzo (cur*1.005 per SHORT, cur*0.995 per LONG) via update_position_auto_exit.
+
+    Prima questa logica era COPIA-INCOLLATA in tre trigger (teeth, escalation,
+    bias-reject): stesso calcolo, stessa scrittura, log diversi. Qui sta una volta
+    sola. Riceve prezzo+direzione GIA' risolti dal chiamante (dalla lista
+    positions), NON rilegge dal DB -> preserva il contratto delle tre vie. NON
+    passa da set_stop_loss: i tightener interni sono esenti dal cricchetto per
+    design (cfr portfolio.py). Ritorna True se ha scritto, False altrimenti."""
+    import database
+    try:
+        cur = float(current_price or 0)
+    except (TypeError, ValueError):
+        return False
+    if not ticker or cur <= 0:
+        return False
+    try:
+        new_sl = round(cur * (1.005 if is_short else 0.995), 6)
+        database.update_position_auto_exit(ticker, stop_loss_price=new_sl, set_by=set_by)
+        full = {"ticker": ticker, "tightened_sl": new_sl, "price": cur}
+        if payload:
+            full.update(payload)
+        database.insert_agent_log(run_id, log_type, json.dumps(full, default=str))
+        return True
+    except Exception as e:
+        logger.debug("[%s][AUDITOR] tight-stop %s (%s) fail: %s", run_id, ticker, set_by, e)
+        return False
+
+
 def enforce_auditor_verdicts(run_id: str, verdicts: dict, positions: list | None = None) -> list:
     """Denti dell'Auditor sullo SL (lo stringe appena sotto/sopra il prezzo, NON
     market-dumpa: enforce_stops chiude se il calo prosegue, un recupero sano
@@ -558,19 +589,17 @@ def enforce_auditor_verdicts(run_id: str, verdicts: dict, positions: list | None
 
             is_short = str(p.get("direction") or "LONG").upper() == "SHORT"
             # SL stretto appena oltre il prezzo (0.5%): se prosegue, enforce_stops esce.
-            new_sl = round(cur * (1.005 if is_short else 0.995), 6)
-            database.update_position_auto_exit(tk, stop_loss_price=new_sl,
-                                               set_by="position_auditor")
-            payload = {"ticker": tk, "tightened_sl": new_sl, "price": cur,
-                       "verdict": verdict, "classification": classification,
-                       "confidence": conf}
+            _payload = {"verdict": verdict, "classification": classification,
+                        "confidence": conf}
             if escalation:
-                payload["derisk_streak"] = streak
-            database.insert_agent_log(
-                run_id,
-                "AUDITOR_TRIM_ESCALATION" if escalation else "POSITION_AUDIT_TEETH",
-                json.dumps(payload, default=str))
-            acted.append(tk)
+                _payload["derisk_streak"] = streak
+            if _apply_tight_stop(
+                    run_id, tk, cur, is_short,
+                    set_by="position_auditor",
+                    log_type=("AUDITOR_TRIM_ESCALATION" if escalation
+                              else "POSITION_AUDIT_TEETH"),
+                    payload=_payload):
+                acted.append(tk)
         except Exception as e:
             logger.debug("[%s][AUDITOR] teeth/escalation %s fail: %s", run_id, tk, e)
     return acted
@@ -637,14 +666,12 @@ def enforce_bias_holds(run_id: str, tickers: list, positions: list | None = None
             if cur <= 0:
                 continue
             is_short = str(p.get("direction") or "LONG").upper() == "SHORT"
-            new_sl = round(cur * (1.005 if is_short else 0.995), 6)
-            database.update_position_auto_exit(tk, stop_loss_price=new_sl,
-                                               set_by="auditor_bias_reject")
-            database.insert_agent_log(run_id, "POSITION_AUDIT_BIAS_REJECT", json.dumps({
-                "ticker": tk, "tightened_sl": new_sl, "price": cur,
-                "reason": "confutazione bias-based (P&L/entry): EXIT prevale",
-            }, default=str))
-            acted.append(tk)
+            if _apply_tight_stop(
+                    run_id, tk, cur, is_short,
+                    set_by="auditor_bias_reject",
+                    log_type="POSITION_AUDIT_BIAS_REJECT",
+                    payload={"reason": "confutazione bias-based (P&L/entry): EXIT prevale"}):
+                acted.append(tk)
         except Exception as e:
             logger.debug("[%s][AUDITOR] bias-reject %s fail: %s", run_id, tk, e)
     return acted
