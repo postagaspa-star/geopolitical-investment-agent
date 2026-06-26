@@ -73,10 +73,22 @@ def test_ev_gate_does_not_bypass_allocation_cap():
 
 
 def test_crypto_path_inert_without_rr():
-    # il Decision Crypto chiama validate_trade SENZA expected_reward_risk:
-    # default None -> path EV inerte, comportamento crypto invariato.
+    # senza expected_reward_risk il gate resta inerte: una conviction 0.50 sotto
+    # il floor 0.65 e' rifiutata (comportamento storico).
     assert not rp.validate_trade(asset_class="crypto", confidence=0.50,
                                  allocation_pct=5, open_positions_count=0)[0]
+
+
+def test_crypto_with_rr_admitted_parity_with_equity():
+    # Step 2 della pulizia: ora il path crypto PUO' passare expected_reward_risk
+    # e il gate EV vale identico all'equity. 0.58 × min(2.5,5)=1.45 >= 0.65 -> ok.
+    assert rp.validate_trade(asset_class="crypto", confidence=0.58,
+                             allocation_pct=5, open_positions_count=0,
+                             expected_reward_risk=2.5)[0]
+    # ma un R/R debole resta NO TRADE anche su crypto
+    assert not rp.validate_trade(asset_class="crypto", confidence=0.58,
+                                 allocation_pct=5, open_positions_count=0,
+                                 expected_reward_risk=1.0)[0]
 
 
 def test_nan_confidence_still_blocked_with_rr():

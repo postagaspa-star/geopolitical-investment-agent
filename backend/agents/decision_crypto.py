@@ -798,8 +798,11 @@ async def _core_short_candidates(run_id: str, flat_tickers: list[str],
     except Exception:
         regime = "unknown"
 
-    # 2. Parametri dal profilo attivo (identici al path guardrails: il core
-    #    pretende conviction >= min_confidence del profilo -> bar conservativa)
+    # 2. Parametri dal profilo attivo SOLO per sizing/SL. min_conviction NON si
+    #    sovrascrive: resta il default NATIVO del core (0.55) come bar di
+    #    PROPOSTA. Il pavimento di profilo (es. 0.65) e' autorita' UNICA di
+    #    risk_profile.validate_trade a valle: cosi' lo stesso numero non viene
+    #    controllato due volte con due valori diversi (era una tripla soglia).
     try:
         import risk_profile as _rp
         pr = _rp.get_active_profile()
@@ -807,7 +810,6 @@ async def _core_short_candidates(run_id: str, flat_tickers: list[str],
             sl_min_pct=float(pr.get("sl_min_pct_crypto", 12.0)),
             sl_max_pct=float(pr.get("sl_max_pct_crypto", 25.0)),
             max_position_pct_nav=float(pr.get("max_position_pct_crypto", 12.0)),
-            min_conviction=float(pr.get("min_confidence", 0.55)),
         )
     except Exception:
         params = _core.CoreParams()
@@ -837,6 +839,7 @@ async def _core_short_candidates(run_id: str, flat_tickers: list[str],
                     "ticker": tk,
                     "entry": float(dec.entry),
                     "stop_loss": float(dec.stop_loss),
+                    "take_profit": float(getattr(dec, "take_profit", 0.0) or 0.0),
                     "size_units": float(dec.size_units),
                     "conviction": float(dec.conviction),
                     "regime": str(dec.regime),
@@ -911,6 +914,11 @@ async def _run_short_safety_net(run_id: str, trades: list, final_text: str,
         seed = {
             "ticker": c["ticker"], "action": "SHORT",
             "quantity": c["size_units"], "stop_loss": c["stop_loss"],
+            "take_profit": (c.get("take_profit") or None),
+            # R/R del core: lo passiamo esplicito cosi' il gate EV a valle
+            # ammette anche uno short con conviction 0.55-0.64 ma payoff
+            # asimmetrico (il core e' a 0.55 nativo, il floor profilo e' 0.65).
+            "expected_reward_risk": (c.get("reward_risk") or None),
             "confidence_level": round(c["conviction"] * 100),
             "logic_chain": (
                 f"[CORE SAFETY-NET] R1 ha rinunciato a operare; il core "
@@ -1241,12 +1249,29 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                     except Exception:
                         pass
 
+                    # R/R atteso per il gate Expected-Value: PARITA' con l'equity
+                    # (decision.py passa expected_reward_risk). Prima il crypto NON
+                    # lo passava -> il gate EV era MORTO sul crypto e uno short
+                    # sotto-pavimento ma con payoff asimmetrico veniva respinto.
+                    # Esplicito dal tool se presente, altrimenti calcolato da
+                    # entry/SL/TP. Senza TP resta None -> gate inerte (come prima).
+                    expected_rr = tool_input.get("expected_reward_risk")
+                    try:
+                        expected_rr = float(expected_rr) if expected_rr is not None else None
+                    except (TypeError, ValueError):
+                        expected_rr = None
+                    if expected_rr is None and stop_loss and take_profit and current_price:
+                        _risk = abs(float(current_price) - float(stop_loss))
+                        _reward = abs(float(take_profit) - float(current_price))
+                        expected_rr = round(_reward / _risk, 2) if _risk > 0 else None
+
                     ok, reason = _rp.validate_trade(
                         asset_class="crypto",
                         confidence=conf_norm,
                         allocation_pct=alloc_pct,
                         open_positions_count=open_count,
                         portfolio_drawdown_pct=dd_pct,
+                        expected_reward_risk=expected_rr,
                     )
                     if not ok:
                         logger.warning("[%s][DEC-CRYPTO] RISK_PROFILE rejected: %s",

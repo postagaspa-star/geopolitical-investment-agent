@@ -176,11 +176,15 @@ def build_risk_block(asset_class: str = "equity") -> str:
         f"  • Stop portfolio: drawdown max {p['max_portfolio_drawdown_pct']:.1f}% dall'high",
         f"  • Freshness news per usarle come catalyst: max {p['news_freshness_min_hours']}h fa",
         "",
-        "Se la conviction è SOTTO la soglia minima → NO TRADE, anche se",
-        "il setup tecnico sembra interessante. Aspetta più segnali.",
+        "Se la conviction è SOTTO la soglia minima → di norma NO TRADE.",
+        "ECCEZIONE valore atteso: puoi operare SOTTO la soglia SOLO se il payoff",
+        "è asimmetrico — confidence × R/R atteso raggiunge comunque la soglia — e",
+        "MAI con confidence sotto 0.45. Una conviction più bassa va PAGATA con un",
+        "reward:risk più alto (fornisci SEMPRE expected_reward_risk / un take",
+        "profit), non scartata. In recovery l'eccezione è disattivata.",
         "",
         "Se l'allocazione richiesta SUPERA il cap → riduci la size, non saltare",
-        "il trade (a meno che non scenda sotto la min_confidence).",
+        "il trade (a meno che non scenda sotto la min_confidence senza R/R che compensi).",
         "",
         f"IMPORTANTE per crypto: il sub-cap di {cap_crypto} posizioni e' uno",
         "stretto, non un suggerimento. Anche se il cap globale e' piu' alto,",
@@ -353,21 +357,6 @@ def validate_trade(
                 f"{float(satellite_exposure_pct):.1f}% + nuovo {float(allocation_pct):.1f}%) "
                 f"supera il cap del profilo {p['label']} ({cap:.1f}%). Riduci o salta."
             )
-
-    # 2b. Cap di esposizione SATELLITE aggregata (solo universo esteso).
-    if (tier == "satellite" and satellite_exposure_pct is not None
-            and allocation_pct is not None):
-        try:
-            cap = float(p.get("max_satellite_exposure_pct", 100.0))
-            projected = float(satellite_exposure_pct) + float(allocation_pct)
-            if projected > cap + 1e-6:
-                return False, (
-                    f"Esposizione satellite {projected:.1f}% (attuale "
-                    f"{float(satellite_exposure_pct):.1f}% + nuovo {float(allocation_pct):.1f}%) "
-                    f"supera il cap del profilo {p['label']} ({cap:.1f}%). Riduci o salta."
-                )
-        except (TypeError, ValueError):
-            pass
 
     # 3. Max open positions: per crypto usiamo il cap specifico (piu' stretto),
     # per equity il generale. NB: open_positions_count deve essere il count
