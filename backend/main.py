@@ -1633,6 +1633,24 @@ async def cancel_commitment(commitment_id: int, payload: CommitmentCancelPayload
 # SIMULATOR — endpoint
 # ═══════════════════════════════════════════════════════════════════════
 
+# TUTTE le categorie del Simulator: 4 equity + 4 crypto. Prima le dashboard
+# (win_by_category, metrics_by_category) iteravano solo sulle 4 equity →
+# i run crypto (bull_cycle/crash/regulatory_event/sideways), che sono META'
+# dei run in auto-mode, sparivano dal "Win rate per categoria". Ordine:
+# equity poi crypto (rispecchia i due engine).
+_SIM_EQUITY_CATEGORIES = ["normale", "geopolitico", "macro", "crash_rally"]
+_SIM_CRYPTO_CATEGORIES = ["bull_cycle", "crash", "regulatory_event", "sideways"]
+_SIM_ALL_CATEGORIES = _SIM_EQUITY_CATEGORIES + _SIM_CRYPTO_CATEGORIES
+
+
+def _sim_categories_present(runs: list) -> list:
+    """Le 8 canoniche + eventuali categorie extra realmente presenti nei
+    run (robusto a nuove categorie), preservando l'ordine canonico."""
+    seen = {r.get("category") for r in runs if r.get("category")}
+    extra = [c for c in sorted(seen) if c not in _SIM_ALL_CATEGORIES]
+    return _SIM_ALL_CATEGORIES + extra
+
+
 @app.get("/api/simulator/scenarios")
 async def sim_scenarios(category: str = Query(...)):
     """Lista scenari disponibili per categoria (senza reveal)."""
@@ -1667,7 +1685,7 @@ async def sim_kpi():
     multi = total - single
     avg_delta = sum((r.get("delta_sp") or 0) for r in runs) / total
     win_by_cat = {}
-    for cat in ["normale", "geopolitico", "macro", "crash_rally"]:
+    for cat in _sim_categories_present(runs):
         cr = [r for r in runs if r.get("category") == cat]
         n = len(cr)
         win_by_cat[cat] = (sum(1 for r in cr if r.get("outcome") == "green") / n) if n else 0
@@ -1711,11 +1729,13 @@ async def sim_kpi():
 
     global_metrics = _trade_metrics(runs)
 
-    # Stesse metriche divise per categoria (richiesta utente)
+    # Stesse metriche divise per categoria (richiesta utente) — tutte le 8
+    # categorie (equity + crypto), solo quelle con almeno 1 run.
     metrics_by_category = {}
-    for cat in ["normale", "geopolitico", "macro", "crash_rally"]:
+    for cat in _sim_categories_present(runs):
         cr = [r for r in runs if r.get("category") == cat]
-        metrics_by_category[cat] = _trade_metrics(cr)
+        if cr:
+            metrics_by_category[cat] = _trade_metrics(cr)
 
     result = {
         "score": round(wins / total * 100, 1),
@@ -1775,9 +1795,54 @@ async def sim_get_result(run_id: str):
                     ),
                 },
             )
-        # Espandi full_data per UI
+        # Espandi full_data per UI. I run V2 (tutti quelli attuali) NON
+        # salvano né steps_data né price_chart: gli step stanno in
+        # full.history e i prezzi per-step in history[].prices. Prima la
+        # tabella "Decisioni step-by-step" e il grafico prezzo NON
+        # comparivano mai per i run V2. Li ricostruiamo qui (backend), così
+        # il frontend resta invariato e riceve i dati nella forma attesa.
         full = run.get("full_data") or {}
         if isinstance(full, dict):
+            hist = full.get("history") or []
+
+            # steps_data ← history (una entry per turno; decisions = i trade)
+            if not full.get("steps_data") and hist:
+                steps = []
+                for h in hist:
+                    prices = h.get("prices") or {}
+                    decisions = [{
+                        "action": t.get("action"),
+                        "asset": t.get("asset"),
+                        "conviction": t.get("conviction"),
+                        "horizon": None,   # V2 non ha orizzonte per-trade
+                        "price": prices.get(t.get("asset")),
+                        # V2 usa exit_plan testuale, non SL/TP numerici:
+                        "stop_loss_target": None,
+                        "take_profit_target": None,
+                        "exit_plan": t.get("exit_plan"),
+                    } for t in (h.get("ai_trades") or [])]
+                    first = decisions[0] if decisions else {}
+                    steps.append({
+                        "action": first.get("action"),
+                        "asset": first.get("asset"),
+                        "conviction": first.get("conviction"),
+                        "price": first.get("price"),
+                        "decisions": decisions,
+                    })
+                full["steps_data"] = steps
+
+            # price_chart ← prezzo dell'asset principale per-step (da history)
+            if not full.get("price_chart") and hist and run.get("asset_chosen"):
+                main = run["asset_chosen"]
+                chart = []
+                for h in hist:
+                    px = (h.get("prices") or {}).get(main)
+                    if px is not None:
+                        chart.append({"date": h.get("step_date"), "price": px})
+                if chart:
+                    full["price_chart"] = chart
+
+            run["full_data"] = full
             run["price_chart"] = full.get("price_chart", [])
             run["steps_data"] = full.get("steps_data", [])
         return run
@@ -2344,12 +2409,13 @@ async def sim_analytics():
     from simulator import db as sim_db
     runs = sim_db.list_runs(limit=500)
     win_by_cat = {}
-    for cat in ["normale", "geopolitico", "macro", "crash_rally"]:
+    for cat in _sim_categories_present(runs):
         cr = [r for r in runs if r.get("category") == cat]
+        # Solo categorie con almeno 1 run: evita barre a 0 fittizie per
+        # categorie mai giocate (era il caso di TUTTE le crypto prima).
         if cr:
             win_by_cat[cat] = sum(1 for r in cr if r.get("outcome") == "green") / len(cr)
-        else:
-            win_by_cat[cat] = 0
+            win_by_cat[cat + "_total"] = len(cr)
     perf_by_horizon = {
         "h_1w": sum((r.get("perf_1w") or 0) for r in runs) / max(1, len(runs)),
         "h_1m": sum((r.get("perf_1m") or 0) for r in runs) / max(1, len(runs)),

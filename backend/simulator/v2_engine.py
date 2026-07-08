@@ -1898,7 +1898,10 @@ def _auto_save_thesis_advice(scenario: dict, final_result: dict,
         category_key = scenario.get("category", "unknown")
         base_tags = {"category": category_key}
 
-    base_tags = {**(base_tags or {}), "auto": True, "run_mode": run_mode}
+    # BUG FIX: "auto" era hardcoded True anche sui run MANUALI, rendendo
+    # inutile il filtro Auto/Manual della UI. Deve riflettere run_mode.
+    base_tags = {**(base_tags or {}), "auto": run_mode == "auto",
+                 "run_mode": run_mode}
 
     pnl_pct = (final_result.get("final_valuation") or {}).get("total_pnl_pct", 0)
     bench_pct = final_result.get("benchmark_spy_pnl_pct")
@@ -2137,6 +2140,27 @@ Stile delle risposte:
         return f"Errore advisor: {str(e)[:200]}"
 
 
+def _pnl_after_first_step(final_result: dict) -> float:
+    """
+    Frazione di P&L dopo il PRIMO step, dai portfolio_value_series.
+    Usato per popolare perf_1w: prima era sempre assente (solo il V1 legacy
+    lo scriveva) → la barra "Performance per orizzonte / 1 settimana" e la
+    colonna 1S risultavano SEMPRE a 0. Ora mostra un datapoint reale
+    "precoce" del run. Ritorna 0.0 se non calcolabile.
+    """
+    pvs = final_result.get("portfolio_value_series") or []
+    if len(pvs) < 2:
+        return 0.0
+    try:
+        initial = float(pvs[0].get("value") or 0)
+        first = float(pvs[1].get("value") or 0)
+        if initial:
+            return round((first / initial) - 1.0, 6)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _persist_run(scenario: dict, history: list[dict], final_result: dict,
                   run_mode: str = "manual") -> str:
     """
@@ -2170,9 +2194,15 @@ def _persist_run(scenario: dict, history: list[dict], final_result: dict,
     pnl_pct = final_result["final_valuation"].get("total_pnl_pct", 0) / 100.0
     bench_pct = (final_result.get("benchmark_spy_pnl_pct") or 0) / 100.0
 
+    _now_iso = datetime.now(timezone.utc).isoformat()
     run_data = {
         "id": run_id,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        # created_at ESPLICITO (non affidarsi al DEFAULT NOW() del DB): è il
+        # campo su cui runs_today() filtra per il cap giornaliero. Un insert
+        # senza created_at su un path che non applica il default renderebbe
+        # la riga non contata → cap che non ferma.
+        "created_at": _now_iso,
+        "completed_at": _now_iso,
         # mode='auto' nei run avviati dallo scheduler (per il cap giornaliero);
         # 'simulator_v2' (default) per i run manuali. Tracciato da runs_today.
         "mode": "auto" if run_mode == "auto" else "simulator_v2",
@@ -2187,6 +2217,11 @@ def _persist_run(scenario: dict, history: list[dict], final_result: dict,
         "action_chosen": action_chosen,
         "conviction": "MEDIA",   # aggregata, no singolo trade
         "horizon": "1settimana",
+        # perf_1w = P&L dopo il 1° step (datapoint precoce reale, non più 0);
+        # perf_1m = P&L finale del run. perf_3m resta = perf_1m: un run V2
+        # dura settimane, non 3 mesi → non esiste un orizzonte a 3 mesi
+        # distinto (il valore è comunque il rendimento reale del run).
+        "perf_1w": _pnl_after_first_step(final_result),
         "perf_1m": pnl_pct,
         "perf_3m": pnl_pct,
         "perf_sp_1m": bench_pct,

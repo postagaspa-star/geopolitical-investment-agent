@@ -430,7 +430,7 @@ function PlayingView({ scenario, portfolio, history, currentStepIdx, t0Prices,
           <strong>Pronto per il turno {currentStepIdx + 1}?</strong>
           <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 4 }}>
             L'AI leggerà le headline del {currentDate} e deciderà come allocare il
-            portafoglio per i prossimi 7 giorni.
+            portafoglio per il prossimo turno ({stepUnit}).
           </div>
         </div>
         <button style={S.btnPrimary} onClick={onNextStep} disabled={busy}>

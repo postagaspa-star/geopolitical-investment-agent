@@ -887,17 +887,34 @@ def runs_today(mode: str = "auto") -> int:
     """
     cutoff = (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()
     client = _get_client()
+    table_count = None
     if client:
         try:
             r = client.table("sim_runs").select("id", count="exact")\
                 .eq("mode", mode).gte("created_at", cutoff).execute()
-            return r.count or 0
+            table_count = r.count or 0
         except Exception as exc:
             logger.debug("[SIM] runs_today via sim_runs fallita (%s), "
                          "uso contatore fallback", str(exc)[:120])
+
+    # Per mode='auto' (l'unico con un cap giornaliero) usiamo il MASSIMO tra
+    # il conteggio della tabella e il contatore in sim_settings.
+    # RAGIONE (belt-and-suspenders contro il "cap che non ferma"): il
+    # conteggio via tabella filtra su created_at, che dipende dal DEFAULT
+    # NOW() del DB — se un insert per qualunque motivo non lo popola (path
+    # fallback, drift schema, sqlite senza default applicato) la riga NON
+    # viene contata e il cap non scatta. Il contatore invece è incrementato
+    # esattamente una volta per ogni insert auto (in insert_run), a
+    # prescindere da created_at. Prendendo il max, se UNO dei due
+    # sotto-conta l'altro lo salva; e siccome tracciano gli STESSI insert,
+    # a regime sono uguali (nessun doppio conteggio).
     if mode == "auto":
-        return _auto_daily_counter()
-    return 0
+        counter = _auto_daily_counter()
+        if table_count is None:
+            return counter
+        return max(table_count, counter)
+
+    return table_count if table_count is not None else 0
 
 
 def migrate_fallback_runs_to_table() -> dict:

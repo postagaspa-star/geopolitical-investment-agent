@@ -4,6 +4,19 @@ import { Filter, RefreshCw } from "lucide-react";
 
 const API = window.location.origin;
 
+// Le 8 categorie del Simulator (4 equity + 4 crypto). Prima erano hardcoded
+// solo le equity → i run crypto sparivano da grafico e filtro.
+const SIM_CATEGORIES = [
+  { key: "normale", name: "Normale", group: "Equity" },
+  { key: "geopolitico", name: "Geopolitico", group: "Equity" },
+  { key: "macro", name: "Macro", group: "Equity" },
+  { key: "crash_rally", name: "Crash/Rally", group: "Equity" },
+  { key: "bull_cycle", name: "Bull cycle", group: "Crypto" },
+  { key: "crash", name: "Crash", group: "Crypto" },
+  { key: "regulatory_event", name: "Evento regolatorio", group: "Crypto" },
+  { key: "sideways", name: "Laterale", group: "Crypto" },
+];
+
 /**
  * Storico & Analytics: tabella completa + grafici aggregati + pattern testuali.
  */
@@ -58,12 +71,10 @@ export default function SimHistory() {
         <div style={S.card}>
           <div style={S.cardTitle}>Win rate per categoria</div>
           {analytics?.win_by_category ? (
-            <BarChart data={[
-              { label: "Normale", value: analytics.win_by_category.normale ?? 0 },
-              { label: "Geopolitico", value: analytics.win_by_category.geopolitico ?? 0 },
-              { label: "Macro", value: analytics.win_by_category.macro ?? 0 },
-              { label: "Crash/Rally", value: analytics.win_by_category.crash_rally ?? 0 },
-            ]} />
+            <BarChart data={SIM_CATEGORIES
+              .filter(c => (analytics.win_by_category[c.key + "_total"] ?? 0) > 0)
+              .map(c => ({ label: c.name,
+                           value: analytics.win_by_category[c.key] ?? 0 }))} />
           ) : <Empty />}
         </div>
         <div style={S.card}>
@@ -107,10 +118,9 @@ export default function SimHistory() {
         <Filter size={14} style={{ color: "#94a3b8" }} />
         <select value={filterCat} onChange={e => setFilterCat(e.target.value)} style={S.select}>
           <option value="">Tutte le categorie</option>
-          <option value="normale">Normale</option>
-          <option value="geopolitico">Geopolitico</option>
-          <option value="macro">Macro</option>
-          <option value="crash_rally">Crash/Rally</option>
+          {SIM_CATEGORIES.map(c => (
+            <option key={c.key} value={c.key}>{c.name} ({c.group})</option>
+          ))}
         </select>
         <select value={filterType} onChange={e => setFilterType(e.target.value)} style={S.select}>
           <option value="">Tutti i tipi</option>
@@ -140,7 +150,7 @@ export default function SimHistory() {
               <tr>
                 <th>Data</th><th>Categoria</th><th>Tipo</th>
                 <th>Asset</th><th>1S</th><th>1M</th><th>3M</th>
-                <th>Δ S&P</th><th>Conviction</th><th>Esito</th>
+                <th>Δ bench</th><th>Conviction</th><th>Esito</th>
               </tr>
             </thead>
             <tbody>

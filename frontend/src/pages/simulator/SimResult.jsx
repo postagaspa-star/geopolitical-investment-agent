@@ -200,12 +200,18 @@ function ResultView({ run, runId, nav }) {
           </>
         )}
 
-        {/* Riga 2: Δ vs benchmarks (1M) */}
-        <div style={S.perfSectionTitle}>Alpha vs benchmark (1 mese)</div>
+        {/* Riga 2: Δ vs benchmark. Etichetta corretta per engine: le
+            categorie crypto usano BTC come benchmark, le equity l'S&P 500.
+            settore/random esistono solo nei run V1 legacy → mostrati solo
+            se valorizzati (nei run V2 sono assenti, niente colonne "—"). */}
+        <div style={S.perfSectionTitle}>Alpha vs benchmark</div>
         <div style={S.perfGrid3}>
-          <PerfCol label="Δ vs S&P 500" v={run.delta_sp} />
-          <PerfCol label="Δ vs settore" v={run.delta_sector} />
-          <PerfCol label="Δ vs random" v={run.delta_monkey} />
+          <PerfCol
+            label={["bull_cycle", "crash", "regulatory_event", "sideways"]
+              .includes(run.category) ? "Δ vs BTC" : "Δ vs S&P 500"}
+            v={run.delta_sp} />
+          {run.delta_sector != null && <PerfCol label="Δ vs settore" v={run.delta_sector} />}
+          {run.delta_monkey != null && <PerfCol label="Δ vs random" v={run.delta_monkey} />}
         </div>
       </div>
 

@@ -233,7 +233,7 @@ export default function SimDashboard() {
              sub={`${kpi?.wins ?? 0}/${kpi?.total ?? 0} run`} tone="#10b981" />
         <KPI label="Run completati" value={kpi?.total ?? 0}
              sub={`${kpi?.single_step ?? 0} single · ${kpi?.multi_step ?? 0} multi`} tone="#06b6d4" />
-        <KPI label="Δ vs S&P (medio)" value={kpi ? `${(kpi.avg_delta_sp * 100).toFixed(2)}%` : "—"}
+        <KPI label="Δ vs benchmark (medio)" value={kpi ? `${(kpi.avg_delta_sp * 100).toFixed(2)}%` : "—"}
              sub="Performance media a 1M" tone="#f472b6" />
       </div>
 
@@ -345,7 +345,7 @@ export default function SimDashboard() {
             <thead>
               <tr>
                 <th>Data</th><th>Categoria</th><th>Tipo</th><th>Asset</th>
-                <th>Perf 1M</th><th>Δ S&P</th><th>Esito</th>
+                <th>Perf 1M</th><th>Δ bench</th><th>Esito</th>
               </tr>
             </thead>
             <tbody>
@@ -483,7 +483,7 @@ function FullRunsTable({ runs, kpi }) {
             <th style={{ textAlign: "right", padding: "6px 4px" }}>Perf 1S</th>
             <th style={{ textAlign: "right", padding: "6px 4px" }}>Perf 1M</th>
             <th style={{ textAlign: "right", padding: "6px 4px" }}>Perf 3M</th>
-            <th style={{ textAlign: "right", padding: "6px 4px" }}>Δ S&P</th>
+            <th style={{ textAlign: "right", padding: "6px 4px" }}>Δ bench</th>
             <th style={{ textAlign: "center", padding: "6px 4px" }}>Esito</th>
           </tr>
         </thead>
@@ -580,14 +580,13 @@ function pfColor(m) {
 }
 
 function MetricsByCategoryTable({ data }) {
-  const cats = [
-    { key: "normale", name: "Normale", tone: "#06b6d4" },
-    { key: "geopolitico", name: "Geopolitico", tone: "#f472b6" },
-    { key: "macro", name: "Macro", tone: "#fbbf24" },
-    { key: "crash_rally", name: "Crash/Rally", tone: "#ef4444" },
-  ];
   if (!data) {
     return <div style={S.subText}>Nessun dato disponibile.</div>;
+  }
+  // Tutte le 8 categorie (equity + crypto), solo quelle con trade reali.
+  const cats = SIM_CATEGORY_META.filter(c => (data[c.key]?.trades_total ?? 0) > 0);
+  if (!cats.length) {
+    return <div style={S.subText}>Nessun run ancora.</div>;
   }
   return (
     <div style={{ overflowX: "auto" }}>
@@ -654,13 +653,26 @@ function KPI({ label, value, sub, tone }) {
   );
 }
 
+// Tutte le 8 categorie: 4 equity + 4 crypto. Prima erano hardcoded solo le
+// equity → i run crypto (metà dei run in auto-mode) non comparivano nel
+// "Win rate per categoria". Mostriamo solo quelle con almeno 1 run.
+const SIM_CATEGORY_META = [
+  { key: "normale", name: "Normale", tone: "#06b6d4", group: "Equity" },
+  { key: "geopolitico", name: "Geopolitico", tone: "#f472b6", group: "Equity" },
+  { key: "macro", name: "Macro", tone: "#fbbf24", group: "Equity" },
+  { key: "crash_rally", name: "Crash/Rally", tone: "#ef4444", group: "Equity" },
+  { key: "bull_cycle", name: "Bull cycle", tone: "#10b981", group: "Crypto" },
+  { key: "crash", name: "Crash", tone: "#f97316", group: "Crypto" },
+  { key: "regulatory_event", name: "Evento regolatorio", tone: "#a78bfa", group: "Crypto" },
+  { key: "sideways", name: "Laterale", tone: "#64748b", group: "Crypto" },
+];
+
 function CategoryBars({ data }) {
-  const cats = [
-    { key: "normale", name: "Normale", tone: "#06b6d4" },
-    { key: "geopolitico", name: "Geopolitico", tone: "#f472b6" },
-    { key: "macro", name: "Macro", tone: "#fbbf24" },
-    { key: "crash_rally", name: "Crash/Rally", tone: "#ef4444" },
-  ];
+  // Solo categorie con run reali (total > 0): niente barre a 0 fittizie.
+  const cats = SIM_CATEGORY_META.filter(c => (data?.[c.key + "_total"] ?? 0) > 0);
+  if (!cats.length) {
+    return <div style={{ fontSize: 13, color: "#64748b" }}>Nessun run ancora.</div>;
+  }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {cats.map(c => {
@@ -668,7 +680,10 @@ function CategoryBars({ data }) {
         const total = data?.[c.key + "_total"] ?? 0;
         return (
           <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span style={{ width: 110, fontSize: 13, color: "#cbd5e1" }}>{c.name}</span>
+            <span style={{ width: 130, fontSize: 13, color: "#cbd5e1" }}>
+              {c.name}
+              <span style={{ fontSize: 10, color: "#64748b", marginLeft: 5 }}>{c.group}</span>
+            </span>
             <div style={{ flex: 1, height: 18, background: "#1f2937", borderRadius: 4, overflow: "hidden" }}>
               <div style={{ width: `${pct * 100}%`, height: "100%", background: c.tone,
                             transition: "width 0.4s" }} />

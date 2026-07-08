@@ -34,6 +34,7 @@ from simulator.v2_engine import (
     apply_trades, compute_portfolio_value, fetch_full_price_series,
     extract_prices_at_date, make_initial_portfolio, _parse_response,
     _classify_outcome, DEEPSEEK_API_URL, DEEPSEEK_R1, _get_deepseek_key,
+    _pnl_after_first_step,
 )
 
 logger = logging.getLogger(__name__)
@@ -968,9 +969,13 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
     pnl_pct = final_result["final_valuation"].get("total_pnl_pct", 0) / 100.0
     bench_pct = (final_result.get("benchmark_btc_pnl_pct") or 0) / 100.0
 
+    _now_iso = datetime.now(timezone.utc).isoformat()
     run_data = {
         "id": run_id,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        # created_at ESPLICITO: campo su cui runs_today() filtra per il cap
+        # giornaliero (vedi nota in v2_engine._persist_run).
+        "created_at": _now_iso,
+        "completed_at": _now_iso,
         # mode='auto' nei run avviati dallo scheduler (cap giornaliero),
         # 'simulator_v2_crypto' nei run manuali.
         "mode": "auto" if run_mode == "auto" else "simulator_v2_crypto",
@@ -983,6 +988,8 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
         ),
         "asset_chosen": main_asset, "action_chosen": action_chosen,
         "conviction": "MEDIA", "horizon": "2giorni",
+        # perf_1w = P&L dopo il 1° step (prima sempre 0); vedi v2_engine.
+        "perf_1w": _pnl_after_first_step(final_result),
         "perf_1m": pnl_pct, "perf_3m": pnl_pct,
         "perf_sp_1m": bench_pct,    # benchmark BTC stored qui per coerenza UI
         "delta_sp": pnl_pct - bench_pct,
