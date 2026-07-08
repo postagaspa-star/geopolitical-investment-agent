@@ -50,6 +50,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Simulator schema init fallita (non bloccante): %s", e)
 
+    # Self-healing: se sim_runs è (diventata) disponibile, travasa i run
+    # rimasti nel fallback sim_settings dentro la tabella vera. No-op
+    # rapido se la tabella manca ancora o il fallback è vuoto.
+    try:
+        from simulator import db as sim_db
+        rep = sim_db.migrate_fallback_runs_to_table()
+        if rep.get("migrated"):
+            logger.info("Simulator: %d run migrati dal fallback a sim_runs.",
+                        rep["migrated"])
+    except Exception as e:
+        logger.warning("Simulator migrate fallback fallita (non bloccante): %s", e)
+
     # Schema Chat Assistant (idempotente, fail-safe)
     # Crea le tabelle chat_conversations / chat_messages al volo se mancano.
     # Su Supabase richiede DATABASE_URL o SUPABASE_DB_PASSWORD.

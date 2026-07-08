@@ -80,25 +80,32 @@ jobs:
           echo "Backend target: $GEOINVEST_API_BASE_URL"
           echo "Target scenari/run: $TARGET_SCENARIOS (min guarantee: $MIN_VALID_SCENARIOS)"
 
-      - name: Health check backend
+      - name: Health check backend (aspetta fino a 4 min se in restart)
         id: health
         run: |
-          # Ping endpoint GET pubblico per verificare che il backend sia raggiungibile
-          # PRIMA di buttare $$ in chiamate DeepSeek
-          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-            --max-time 15 \
-            "$GEOINVEST_API_BASE_URL/api/simulator/scenarios/dynamic" || echo "000")
-          echo "Backend health check HTTP: $http_code"
-          if [ "$http_code" = "000" ]; then
-            echo "::error::Backend non raggiungibile (timeout/network)"
-            exit 1
-          elif [ "$http_code" = "404" ]; then
-            echo "::error::Endpoint /api/simulator/scenarios/dynamic non esiste (404)"
-            exit 1
-          elif [ "$http_code" = "503" ]; then
-            echo "::warning::Backend risponde 503 (SCENARIO_UPLOAD_TOKEN non configurato server-side?)"
-          fi
-          echo "✓ Backend raggiungibile"
+          # Il backend puo' essere in restart (post-OOM, redeploy, resume da
+          # sospensione): un 503 istantaneo NON e' un buon motivo per
+          # procedere (storicamente: 24 giorni di upload falliti perche' lo
+          # step accettava il 503 e il POST moriva in ~10s di retry).
+          # Aspettiamo /health=200 fino a 4 minuti; 404 = errore hard.
+          deadline=$(( $(date +%s) + 240 ))
+          while true; do
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 15 "$GEOINVEST_API_BASE_URL/health" || echo "000")
+            echo "Health check HTTP: $http_code ($(date -u +%H:%M:%S))"
+            if [ "$http_code" = "200" ]; then
+              echo "✓ Backend healthy"
+              break
+            elif [ "$http_code" = "404" ]; then
+              echo "::error::Endpoint /health non esiste (404) — deploy rotto?"
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Backend non healthy dopo 4 min (ultimo HTTP: $http_code). Controlla Render (sospensione billing? OOM loop?)."
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Run scenario generator
         id: gen

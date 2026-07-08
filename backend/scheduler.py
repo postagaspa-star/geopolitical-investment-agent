@@ -1028,6 +1028,18 @@ async def _simulator_auto_run_job():
         logger.error("[SIM-AUTO][%s] crash: %s", run_id_for_log, e, exc_info=True)
     finally:
         sim_db.set_setting("auto_run_in_progress", "")
+        # Trim RAM subito dopo ogni run auto: i run V2 (fetch dati + step AI
+        # + metriche) lasciano RSS alto e il container ha 512MB — gli OOM di
+        # fine giugno 2026 arrivavano proprio nelle ore di run auto. Il job
+        # periodico da 30min resta come backstop, ma qui il rilascio è
+        # immediato invece che "entro mezz'ora".
+        try:
+            import memory_utils
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, memory_utils.trim_memory,
+                                       "post_sim_auto_run")
+        except Exception:
+            pass
 
 
 async def _execute_one_auto_run(use_crypto: bool, log_id: str):

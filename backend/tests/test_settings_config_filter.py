@@ -79,14 +79,32 @@ def test_purge_default_only_sim_progress_and_fallback():
 
 
 def test_purge_default_prefixes_spare_chat_and_config():
-    # Verifica il DEFAULT (senza prefixes espliciti): tocca solo sim progress/
-    # fallback, mai chat-fallback ne' config.
+    # Verifica il DEFAULT (senza prefixes espliciti): tocca solo sim progress,
+    # mai chat-fallback ne' config.
     database.set_setting("_chat_fallback::conv::keepme", "{}")
     database.set_setting("user_risk_profile", "moderate")
     database.purge_transient_settings()  # default prefixes
     allk = database.get_all_settings()
     assert "_chat_fallback::conv::keepme" in allk
     assert allk.get("user_risk_profile") == "moderate"
+
+
+def test_purge_default_spares_sim_run_fallback():
+    # REGRESSIONE perdita storico (giugno 2026): senza la tabella sim_runs,
+    # `_sim_run_fallback::*` E' lo storico run del Simulator. Il purge di
+    # DEFAULT non deve toccarlo mai (solo con prefisso esplicito).
+    database.set_setting("_sim_run_fallback::run::keep-run-1", '{"id":"keep-run-1"}')
+    database.set_setting("_sim_run_fallback::list", '["keep-run-1"]')
+    database.set_setting("_sim_run_progress::ephemeral-1", "{}")
+
+    database.purge_transient_settings()  # default prefixes
+
+    allk = database.get_all_settings()
+    assert "_sim_run_fallback::run::keep-run-1" in allk, \
+        "il purge default ha cancellato lo storico run del fallback!"
+    assert "_sim_run_fallback::list" in allk
+    # il progress effimero invece DEVE sparire
+    assert "_sim_run_progress::ephemeral-1" not in allk
 
 
 def test_config_filter_behavior_via_public_api():

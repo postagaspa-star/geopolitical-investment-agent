@@ -674,10 +674,13 @@ def get_config_settings():
         return {r["key"]: r["value"] for r in rows if _is_config_key(r["key"])}
 
 
-def purge_transient_settings(prefixes=("_sim_run_progress::", "_sim_run_fallback::"),
+def purge_transient_settings(prefixes=("_sim_run_progress::",),
                               dry_run: bool = False) -> dict:
-    """Elimina le chiavi transitorie con i prefissi dati (default: solo stato
-    Simulator, rigenerabile). dry_run=True conta soltanto."""
+    """Elimina le chiavi transitorie con i prefissi dati. Default: SOLO il
+    progress effimero. `_sim_run_fallback::*` NON è più nel default: senza
+    la tabella sim_runs quelle chiavi sono lo storico run del Simulator
+    (purgarle di default causò la perdita dello storico, giugno 2026).
+    dry_run=True conta soltanto."""
     report: dict = {}
     with get_db() as conn:
         for pref in prefixes:

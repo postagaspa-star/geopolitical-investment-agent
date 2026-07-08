@@ -856,15 +856,17 @@ def get_config_settings():
     return config
 
 
-def purge_transient_settings(prefixes=("_sim_run_progress::", "_sim_run_fallback::"),
+def purge_transient_settings(prefixes=("_sim_run_progress::",),
                               dry_run: bool = False) -> dict:
     """Elimina dalla tabella settings le chiavi transitorie con i prefissi dati.
 
-    DEFAULT SICURO: tocca solo lo stato del Simulator (progress/fallback run),
-    che e' rigenerabile e ha gia' un TTL logico. NON include `_chat_fallback::*`
-    (storia chat dell'utente quando le tabelle chat mancano) ne' `_sim_scenario::*`
-    (scenari dinamici salvati) — vanno purgati solo con prefisso esplicito e
-    consapevole.
+    DEFAULT SICURO: solo `_sim_run_progress::*` (progress effimero, TTL
+    1-15min, rigenerabile). NON include `_sim_run_fallback::*`: finché la
+    tabella sim_runs non esiste su questo Supabase, quelle chiavi SONO lo
+    storico run del Simulator — purgarle di default è stata la causa della
+    perdita dello storico (giugno 2026). NON include nemmeno
+    `_chat_fallback::*` (storia chat) né `_sim_scenario::*` (scenari
+    dinamici) — vanno purgati solo con prefisso esplicito e consapevole.
 
     dry_run=True → conta soltanto, non cancella. Ritorna {prefix: count}.
     """

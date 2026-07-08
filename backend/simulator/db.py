@@ -91,7 +91,19 @@ _SIM_RUN_FALLBACK_TTL_SEC = 300
 _LAST_SIM_TIER1_ERROR: dict | None = None
 _RUN_FALLBACK_LIST_KEY = "_sim_run_fallback::list"
 _RUN_FALLBACK_RUN_KEY = "_sim_run_fallback::run::{id}"
-_RUN_FALLBACK_MAX_LIST = 300   # cap totale run preservati nel fallback
+# Cap run preservati nel fallback. Era 300 (~6 giorni di auto-mode senza
+# cap funzionante): al superamento i run più vecchi venivano CANCELLATI —
+# è la "soglia oltre cui il database si svuota". Le chiavi vivono in
+# sim_settings (tabella dedicata: niente bloat della `settings` Live né
+# truncation PostgREST delle config), quindi il cap può essere largo:
+# evita solo crescita illimitata finché sim_runs non esiste. Con sim_runs
+# attiva il fallback resta come backup.
+_RUN_FALLBACK_MAX_LIST = 1000
+# Contatore giornaliero run auto in sim_settings: usato da runs_today()
+# quando sim_runs non è interrogabile. Senza, il conteggio tornava 0 e il
+# daily_cap dell'auto-mode non veniva MAI applicato (~48 run/giorno con il
+# tick da 30min invece delle 5 configurate → costi LLM e pressione OOM).
+_AUTO_COUNTER_KEY = "_sim_auto_runs_count::{day}"
 
 
 def _is_table_missing_error(exc: Exception) -> bool:
@@ -191,6 +203,30 @@ def _run_fallback_save_run(run_data: dict) -> bool:
     except Exception as exc:
         logger.warning("[SIM] fallback save run %s fallita: %s", rid, exc)
         return False
+
+
+def _bump_auto_daily_counter() -> None:
+    """
+    Incrementa il contatore giornaliero dei run auto (chiave in sim_settings).
+    Best-effort: una race tra due tick perde al massimo 1 conteggio, e il
+    daily_cap resta comunque rispettato entro ±1 (il lock soft
+    auto_run_in_progress serializza già i run auto).
+    """
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    key = _AUTO_COUNTER_KEY.format(day=day)
+    try:
+        current = int(_settings_get(key, "0") or 0)
+    except Exception:
+        current = 0
+    _settings_set(key, str(current + 1))
+
+
+def _auto_daily_counter() -> int:
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        return int(_settings_get(_AUTO_COUNTER_KEY.format(day=day), "0") or 0)
+    except Exception:
+        return 0
 
 
 def _run_fallback_list_runs(limit: int = 50, category: str | None = None,
@@ -425,6 +461,14 @@ def insert_run(run_data: dict) -> str:
     """
     global _SIM_RUN_FALLBACK_MODE, _SIM_RUN_FALLBACK_TRIPPED_AT
     rid = run_data["id"]
+
+    # Contatore giornaliero auto: PRIMA dei tier di persistenza, così il
+    # daily_cap funziona anche quando sim_runs non è interrogabile.
+    if run_data.get("mode") == "auto":
+        try:
+            _bump_auto_daily_counter()
+        except Exception:
+            pass
 
     # Tier "background": cache file locale — SEMPRE (no-op se non scrivibile)
     try:
@@ -831,7 +875,16 @@ def set_setting(key: str, value: str):
 
 
 def runs_today(mode: str = "auto") -> int:
-    """Conta run eseguiti oggi (UTC) in modalità data."""
+    """
+    Conta run eseguiti oggi (UTC) in modalità data.
+
+    BUG PRECEDENTE: se la query su sim_runs falliva (tabella mai creata su
+    questo Supabase → PGRST205), l'except ritornava 0 e il daily_cap
+    dell'auto-mode non scattava MAI: con il tick da 30 minuti giravano
+    ~48 run/giorno invece delle 5 configurate (costi LLM + pressione OOM
+    sul container da 512MB). Ora per mode='auto' c'è il contatore
+    giornaliero in sim_settings come fallback.
+    """
     cutoff = (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()
     client = _get_client()
     if client:
@@ -839,6 +892,75 @@ def runs_today(mode: str = "auto") -> int:
             r = client.table("sim_runs").select("id", count="exact")\
                 .eq("mode", mode).gte("created_at", cutoff).execute()
             return r.count or 0
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[SIM] runs_today via sim_runs fallita (%s), "
+                         "uso contatore fallback", str(exc)[:120])
+    if mode == "auto":
+        return _auto_daily_counter()
     return 0
+
+
+def migrate_fallback_runs_to_table() -> dict:
+    """
+    Self-healing: quando la tabella sim_runs diventa disponibile (es. dopo
+    aver eseguito migrations/create_sim_runs.sql sul Dashboard Supabase),
+    copia dentro sim_runs tutti i run rimasti nel fallback sim_settings.
+
+    - Idempotente: upsert per id, ri-eseguibile senza duplicati.
+    - Non cancella il fallback (resta come backup; list_runs deduplica
+      per id, quindi nessun doppione visibile).
+    - Chiamata al boot (main.lifespan) dopo ensure_schema: no-op rapido
+      se sim_runs non esiste o il fallback è vuoto.
+
+    Ritorna {migrated, skipped, failed, table_ok}.
+    """
+    report = {"migrated": 0, "skipped": 0, "failed": 0, "table_ok": False}
+    client = _get_client()
+    if client is None:
+        return report
+
+    # Probe tabella: se manca, no-op silenzioso (il fallback resta primario)
+    try:
+        client.table("sim_runs").select("id").limit(1).execute()
+        report["table_ok"] = True
+    except Exception:
+        return report
+
+    ids = _run_fallback_load_list()
+    if not ids:
+        return report
+
+    # Id già presenti in sim_runs (query unica, solo colonna id)
+    existing: set = set()
+    try:
+        r = client.table("sim_runs").select("id").in_("id", ids).execute()
+        existing = {row["id"] for row in (r.data or [])}
+    except Exception as exc:
+        logger.warning("[SIM] migrate_fallback: check esistenti fallito: %s",
+                       str(exc)[:150])
+
+    for rid in ids:
+        if rid in existing:
+            report["skipped"] += 1
+            continue
+        run = _run_fallback_load_run(rid)
+        if not run:
+            report["skipped"] += 1
+            continue
+        payload = dict(run)
+        payload.pop("_source", None)
+        if isinstance(payload.get("full_data"), dict):
+            payload["full_data"] = json.dumps(payload["full_data"], default=str)
+        try:
+            client.table("sim_runs").upsert(payload).execute()
+            report["migrated"] += 1
+        except Exception as exc:
+            report["failed"] += 1
+            logger.warning("[SIM] migrate_fallback run %s fallita: %s",
+                           rid, str(exc)[:150])
+
+    if report["migrated"]:
+        logger.info("[SIM] migrate_fallback: %d run copiati in sim_runs "
+                    "(%d skip, %d falliti)", report["migrated"],
+                    report["skipped"], report["failed"])
+    return report

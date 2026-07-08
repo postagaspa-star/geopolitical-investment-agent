@@ -407,6 +407,48 @@ def normalize_scenario(s: dict, idx: int) -> dict:
 
 # ─── 4. POST batch all'endpoint backend ─────────────────────────────────────
 
+# Attesa max per un backend non healthy (restart post-OOM, redeploy, resume
+# da sospensione). Il caso reale osservato (giu-lug 2026): il servizio Render
+# rispondeva 503 e i 3 retry in ~10s totali morivano prima che tornasse su —
+# 24 giorni di upload falliti nonostante gli scenari fossero già generati.
+BACKEND_WAIT_MAX_SEC = int(os.environ.get("BACKEND_WAIT_MAX_SEC", "240") or "240")
+
+
+async def wait_for_backend_healthy(session: aiohttp.ClientSession,
+                                    base_url: str,
+                                    max_wait_sec: int = BACKEND_WAIT_MAX_SEC,
+                                    poll_every_sec: int = 10) -> bool:
+    """
+    Polla GET /health finché risponde 200 o scade max_wait_sec.
+    Ritorna True se il backend è healthy. Usata in 2 punti:
+      - PRIMA della generazione: evita di bruciare chiamate LLM se il
+        backend è giù per davvero;
+      - tra i retry del POST: dà al backend il tempo di completare un
+        cold start / restart invece di martellarlo a intervalli brevi.
+    """
+    url = f"{base_url.rstrip('/')}/health"
+    deadline = asyncio.get_event_loop().time() + max_wait_sec
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    if attempt > 1:
+                        logger.info("Backend healthy dopo %d tentativi", attempt)
+                    return True
+                logger.warning("Health check HTTP %d (tentativo %d)",
+                                resp.status, attempt)
+        except Exception as e:
+            logger.warning("Health check errore (tentativo %d): %s",
+                            attempt, str(e)[:120])
+        if asyncio.get_event_loop().time() + poll_every_sec > deadline:
+            return False
+        await asyncio.sleep(poll_every_sec)
+
+
 async def post_scenarios(session: aiohttp.ClientSession,
                           base_url: str, token: str,
                           scenarios: list[dict]) -> dict:
@@ -420,9 +462,13 @@ async def post_scenarios(session: aiohttp.ClientSession,
 
     logger.info("POST %s con %d scenari...", url, len(scenarios))
 
-    # Retry: 3 tentativi con backoff su 5xx/network errors
+    # Retry: 5 tentativi. Su 5xx/network il backend è probabilmente in
+    # restart (OOM/redeploy): prima di ritentare aspettiamo che /health
+    # torni 200 (fino a 90s per tentativo) invece del vecchio backoff
+    # 2-4s che moriva sempre dentro la finestra di cold start.
     last_err = None
-    for attempt in range(3):
+    attempts = 5
+    for attempt in range(attempts):
         try:
             async with session.post(
                 url, json=payload, headers=headers,
@@ -435,14 +481,20 @@ async def post_scenarios(session: aiohttp.ClientSession,
                     # Errore client (auth, validazione): no retry
                     raise RuntimeError(f"POST rejected HTTP {resp.status}: {body[:300]}")
                 last_err = f"HTTP {resp.status}: {body[:200]}"
+        except RuntimeError:
+            raise
         except Exception as e:
             last_err = str(e)
-        if attempt < 2:
-            logger.warning("Tentativo %d fallito (%s), retry in %ds...",
-                            attempt + 1, last_err, 2 * (attempt + 1))
-            await asyncio.sleep(2 * (attempt + 1))
+        if attempt < attempts - 1:
+            logger.warning("Tentativo %d/%d fallito (%s) — aspetto che il "
+                            "backend torni healthy...",
+                            attempt + 1, attempts, str(last_err)[:160])
+            healthy = await wait_for_backend_healthy(
+                session, base_url, max_wait_sec=90, poll_every_sec=8)
+            if not healthy:
+                logger.warning("Backend ancora down, ritento comunque il POST")
 
-    raise RuntimeError(f"POST fallito dopo 3 tentativi: {last_err}")
+    raise RuntimeError(f"POST fallito dopo {attempts} tentativi: {last_err}")
 
 
 async def _generate_and_validate(session: aiohttp.ClientSession,
@@ -505,6 +557,7 @@ async def main():
     #   20 = generation error (DeepSeek + retry falliti)
     #   30 = upload error
     #   40 = insufficient valid scenarios (< MIN_VALID_SCENARIOS)
+    #   50 = backend non healthy (giù prima ancora di generare)
     base_url = os.environ.get("GEOINVEST_API_BASE_URL", "").strip().rstrip("/")
     token = os.environ.get("SCENARIO_UPLOAD_TOKEN", "").strip()
 
@@ -526,6 +579,21 @@ async def main():
     logger.info("=" * 60)
 
     async with aiohttp.ClientSession() as session:
+        # ── 0. Backend health gate ───────────────────────────────────────
+        # Aspetta che il backend sia su PRIMA di generare: se è giù (restart
+        # post-OOM, redeploy, resume da sospensione) evitiamo di bruciare
+        # chiamate LLM per scenari che non potremo caricare. Exit 50 =
+        # backend irraggiungibile (diagnosi rapida nei log GitHub).
+        healthy = await wait_for_backend_healthy(session, base_url)
+        if not healthy:
+            logger.error(
+                "Backend non healthy dopo %ds di attesa — abort PRIMA della "
+                "generazione (nessun costo LLM). Controlla lo stato del "
+                "servizio su Render (sospensione billing? OOM loop?).",
+                BACKEND_WAIT_MAX_SEC,
+            )
+            sys.exit(50)
+
         # ── 1. Fetch news (con fallback se GDELT vuoto/down) ─────────────
         articles = await fetch_gdelt_news(session)
         if articles:
