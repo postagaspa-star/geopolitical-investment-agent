@@ -538,8 +538,20 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
 
         else:  # SELL
             if existing and existing.get("side") == "long":
-                # Chiude/riduce long. FIX: se qty supera il long, il residuo
-                # apre uno SHORT netto (prima si scartava il residuo).
+                # Chiude/riduce long. Se qty supera il long, il residuo apre
+                # uno SHORT netto — ma SOLO se l'eccesso è sostanziale
+                # (> 30% della posizione). L'AI esprime il SELL in % del
+                # capitale totale: un close espresso come "11.5%" su una
+                # posizione che vale l'11.4% del NAV produceva residui
+                # micro-short involontari (osservato su run reale: 0.125 SOL
+                # e 0.47 DOT rimasti aperti short con thesis "Exit...to
+                # reduce risk"). Il prompt (regola C4) dice "SELL su
+                # posseduto = chiude": l'eccesso da arrotondamento è intent
+                # di chiusura, non di flip.
+                if (quantity > existing["quantity"]
+                        and quantity - existing["quantity"]
+                        <= 0.30 * existing["quantity"]):
+                    quantity = existing["quantity"]
                 close_qty = min(quantity, existing["quantity"])
                 gross_proceeds = close_qty * price
                 fee_close = commission_amount(gross_proceeds, commission_bps)
@@ -651,9 +663,25 @@ async def _call_r1(system_prompt: str, user_message: str,
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
+                            choice = (data.get("choices") or [{}])[0]
+                            content = (choice.get("message") or {})\
+                                .get("content") or ""
+                            # Output troncato dal cap max_tokens: il JSON
+                            # dei trade arriva a metà e il parse produce un
+                            # hold SILENZIOSO (trade decisi ma mai eseguiti,
+                            # osservato su run reale). Ritenta con budget
+                            # maggiore finché ci sono tentativi.
+                            if (choice.get("finish_reason") == "length"
+                                    and attempt < cfg_retries - 1):
+                                payload["max_tokens"] = 6500
+                                last_error = (f"{provider} output troncato "
+                                              "(finish_reason=length)")
+                                logger.warning("[SIM-V2] %s — retry con "
+                                               "max_tokens=6500", last_error)
+                                continue
                             if provider == "auriko":
                                 record_auriko_success()
-                            return data["choices"][0]["message"]["content"] or ""
+                            return content
                         body = await resp.text()
                         last_error = f"{provider} HTTP {resp.status}: {body[:200]}"
                         if resp.status == 429 or 500 <= resp.status < 600:
@@ -779,12 +807,18 @@ def _parse_response(raw: str) -> dict:
     if isinstance(decision_json, dict):
         hold_summary = (decision_json.get("hold_summary") or "")[:400]
 
+    # Distingue "hold intenzionale" da "JSON dei trade presente ma corrotto/
+    # troncato": nel secondo caso i trade decisi andrebbero persi in
+    # SILENZIO (lo step diventa un finto hold). I caller ritentano/abortono.
+    parse_failed = bool(re.search(r'"trades"', txt)) and not decision_json
+
     return {
         "reading": reading or txt[:600],
         "reasoning": reasoning or "",
         "trades": trades_norm,
         "hold_summary": hold_summary,
         "raw": txt,
+        "parse_failed": parse_failed,
     }
 
 
@@ -1089,6 +1123,16 @@ async def execute_step(
         sys_prompt = advice_block + "\n\n" + ("═" * 60) + "\n" + sys_prompt
     raw = await _call_r1(sys_prompt, user_msg)
     parsed = _parse_response(raw)
+    if parsed.get("parse_failed"):
+        # JSON dei trade presente ma corrotto/troncato: un retry, poi errore
+        # VISIBILE. Mai degradare in hold silenzioso (= trade decisi e persi).
+        logger.warning("[SIM-V2] decisione non parsabile, retry singolo")
+        raw = await _call_r1(sys_prompt, user_msg)
+        parsed = _parse_response(raw)
+        if parsed.get("parse_failed"):
+            raise ValueError(
+                "Decisione AI non parsabile dopo retry (JSON troncato?) — "
+                "step abortito per non perdere trade in silenzio")
 
     # 6. Apply trades — aggiorna lo status del registry
     if tracking_id:

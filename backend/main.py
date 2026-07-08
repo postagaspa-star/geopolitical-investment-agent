@@ -165,11 +165,25 @@ app.add_middleware(
 # (il CORS NON ferma curl/script). Le GET di sola lettura non sono toccate.
 import secrets as _secrets
 
+# Endpoint machine-to-machine con auth PROPRIA, esenti dal guard globale:
+# l'upload scenari valida X-Scenario-Token contro SCENARIO_UPLOAD_TOKEN
+# dentro l'handler. Il guard li bloccava con 401 — è la rottura originale
+# del Scenario Generator (15/06/2026: guard aggiunto → ogni upload da
+# GitHub Actions respinto; poi mascherata dai 503 della sospensione
+# billing). NON è un buco di sicurezza: l'handler resta autenticato, solo
+# col suo token dedicato invece dell'admin token.
+_ADMIN_GUARD_EXEMPT = {
+    ("POST", "/api/simulator/scenarios/dynamic"),
+}
+
 
 @app.middleware("http")
 async def _admin_token_guard(request: Request, call_next):
     token = os.environ.get("ADMIN_API_TOKEN", "").strip()
     if token and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        _path = getattr(getattr(request, "url", None), "path", "")
+        if (request.method, _path) in _ADMIN_GUARD_EXEMPT:
+            return await call_next(request)
         provided = request.headers.get("x-admin-token", "")
         if not provided or not _secrets.compare_digest(str(provided), token):
             return JSONResponse(

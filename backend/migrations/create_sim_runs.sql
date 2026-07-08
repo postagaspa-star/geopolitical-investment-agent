@@ -14,9 +14,11 @@
 --   Con la tabella vera: persistenza illimitata, query per categoria/data,
 --   nessun purge che la tocca.
 --
--- DOPO AVERLA CREATA: al primo riavvio il backend migra da solo i run
---   rimasti nel fallback dentro sim_runs (migrate_fallback_runs_to_table,
---   chiamata nel lifespan di main.py). Non serve fare altro.
+-- DOPO AVERLA CREATA: riavvia il servizio Render (Manual Deploy → "Restart
+--   service" oppure il prossimo deploy). Al boot il backend migra da solo
+--   dentro sim_runs tutti i run trovati nel fallback — scansiona le chiavi
+--   `_sim_run_fallback::run::*` sia in sim_settings sia nella settings Live
+--   (recupera anche eventuali orfani pre-migrazione). Non serve fare altro.
 --
 -- COME ESEGUIRE: Supabase Dashboard → SQL Editor → incolla tutto → Run.
 --   Idempotente: ri-eseguibile senza danni.

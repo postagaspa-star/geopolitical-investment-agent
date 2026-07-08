@@ -39,13 +39,31 @@ def test_apply_cash_delta_deltas_accumulate():
     assert float(p["cash_balance"]) == 98000.0
 
 
-def _fake_req(method, headers=None):
+def _fake_req(method, headers=None, path="/api/qualcosa"):
     class _R:
+        pass
+    class _U:
         pass
     r = _R()
     r.method = method
     r.headers = headers or {}
+    r.url = _U()
+    r.url.path = path
     return r
+
+
+def test_admin_guard_exempts_scenario_upload(monkeypatch):
+    # REGRESSIONE 15/06/2026: il guard globale bloccava il POST del
+    # Scenario Generator (GitHub Actions), che si autentica con
+    # X-Scenario-Token dentro l'handler, NON con l'admin token.
+    # L'endpoint è esente dal guard; l'auth propria resta.
+    import asyncio
+    import main
+    monkeypatch.setenv("ADMIN_API_TOKEN", "sekret-123")
+    out = asyncio.run(main._admin_token_guard(
+        _fake_req("POST", {}, path="/api/simulator/scenarios/dynamic"),
+        _passthrough))
+    assert out == "PASSED"
 
 
 async def _passthrough(_req):

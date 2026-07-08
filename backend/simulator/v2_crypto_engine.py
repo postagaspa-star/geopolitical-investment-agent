@@ -158,7 +158,20 @@ async def _call_crypto_r1(system_prompt: str, user_message: str,
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        return data["choices"][0]["message"]["content"] or ""
+                        choice = (data.get("choices") or [{}])[0]
+                        content = (choice.get("message") or {})\
+                            .get("content") or ""
+                        # Output troncato dal cap max_tokens → il parse
+                        # perderebbe i trade in silenzio: retry con budget
+                        # maggiore (stesso guardrail di v2_engine._call_r1).
+                        if (choice.get("finish_reason") == "length"
+                                and attempt < max_retries - 1):
+                            payload["max_tokens"] = 6500
+                            logger.warning("[SIM-CRYPTO] output troncato "
+                                           "(finish_reason=length) — retry "
+                                           "con max_tokens=6500")
+                            continue
+                        return content
                     body = await resp.text()
                     last_error = f"HTTP {resp.status}: {body[:200]}"
                     if resp.status == 429 or 500 <= resp.status < 600:
@@ -499,6 +512,16 @@ async def execute_crypto_step(
         sys_prompt = advice_block + "\n\n" + ("═" * 60) + "\n" + sys_prompt
     raw = await _call_crypto_r1(sys_prompt, user_msg)
     parsed = _parse_crypto_response(raw)
+    if parsed.get("parse_failed"):
+        # Stesso guardrail dell'engine equity: JSON trade corrotto/troncato
+        # → un retry, poi errore visibile (mai hold silenzioso).
+        logger.warning("[SIM-CRYPTO] decisione non parsabile, retry singolo")
+        raw = await _call_crypto_r1(sys_prompt, user_msg)
+        parsed = _parse_crypto_response(raw)
+        if parsed.get("parse_failed"):
+            raise ValueError(
+                "Decisione AI non parsabile dopo retry (JSON troncato?) — "
+                "step abortito per non perdere trade in silenzio")
 
     if tracking_id:
         try:
