@@ -926,25 +926,60 @@ def migrate_fallback_runs_to_table() -> dict:
     except Exception:
         return report
 
-    ids = _run_fallback_load_list()
-    if not ids:
+    # Raccogli i run dal fallback SCANSIONANDO PER PREFISSO su entrambe le
+    # tabelle key-value (sim_settings E settings), NON solo dall'indice
+    # `::list`: l'indice può essere stato azzerato/troncato mentre le chiavi
+    # `::run::` sopravvivevano (orfani) — es. dopo il purge del giugno 2026
+    # o dopo la creazione di sim_settings quando i run vecchi erano rimasti
+    # nella `settings` Live. Così il boot recupera anche quelli.
+    candidates: dict[str, dict] = {}
+    prefix = "_sim_run_fallback::run::"
+    for table in ("sim_settings", "settings"):
+        page, page_size = 0, 100
+        while True:
+            try:
+                rows = client.table(table).select("key,value")\
+                    .like("key", f"{prefix}%")\
+                    .range(page * page_size, (page + 1) * page_size - 1)\
+                    .execute().data or []
+            except Exception as exc:
+                logger.debug("[SIM] migrate_fallback scan %s fallita: %s",
+                             table, str(exc)[:120])
+                break
+            for row in rows:
+                rid = (row.get("key") or "")[len(prefix):]
+                raw = row.get("value") or ""
+                if not rid or not raw or rid in candidates:
+                    continue
+                try:
+                    run = json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(run, dict) and run.get("id"):
+                        candidates[rid] = run
+                except Exception:
+                    continue
+            if len(rows) < page_size:
+                break
+            page += 1
+            if page > 50:   # hard stop di sicurezza (5k chiavi)
+                break
+
+    if not candidates:
         return report
 
-    # Id già presenti in sim_runs (query unica, solo colonna id)
+    ids = list(candidates.keys())
+    # Id già presenti in sim_runs (query a blocchi, solo colonna id)
     existing: set = set()
     try:
-        r = client.table("sim_runs").select("id").in_("id", ids).execute()
-        existing = {row["id"] for row in (r.data or [])}
+        for i in range(0, len(ids), 100):
+            r = client.table("sim_runs").select("id")\
+                .in_("id", ids[i:i + 100]).execute()
+            existing.update(row["id"] for row in (r.data or []))
     except Exception as exc:
         logger.warning("[SIM] migrate_fallback: check esistenti fallito: %s",
                        str(exc)[:150])
 
-    for rid in ids:
+    for rid, run in candidates.items():
         if rid in existing:
-            report["skipped"] += 1
-            continue
-        run = _run_fallback_load_run(rid)
-        if not run:
             report["skipped"] += 1
             continue
         payload = dict(run)
