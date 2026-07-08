@@ -58,6 +58,12 @@ MAX_RESPONSE_TOKENS = 3000
 ADVICE_KEY_PREFIX = "_sim_advice::"
 ADVICE_INDEX_KEY = "_sim_advice::index"
 ADVISOR_CHAT_KEY_PREFIX = "_sim_advisor_chat::"
+# Archivio dei DEBRIEF di run ("[Auto] scenario → OUTCOME"): sono LOG,
+# non lezioni. Prima venivano salvati nei bucket advice e occupavano gli
+# slot delle 5 lezioni iniettate nei prompt (93 su 400 record erano
+# debrief). Ora vivono qui: consultabili per statistiche, mai iniettati.
+ADVICE_ARCHIVE_PREFIX = "_sim_advice_archive::"
+ARCHIVE_CAP_PER_KEY = 150
 
 
 def _settings_get(key: str, default: str = "") -> str:
@@ -209,16 +215,92 @@ def _save_index(idx: list[str]) -> None:
     _settings_set(ADVICE_INDEX_KEY, json.dumps(sorted(set(idx))))
 
 
-def load_advice_for_key(category_key: str, max_items: int = 5) -> list[dict]:
-    """Ultimi N advice per la category_key, ordinati per recency."""
+def _normalize_title_tokens(title: str) -> set:
+    """Token-set del titolo per il confronto di similarità: via i tag
+    [TIMING]/[Auto]/..., lowercase, solo parole alfanumeriche >2 char."""
+    t = re.sub(r"^\[[^\]]+\]\s*", "", title or "").lower()
+    tokens = set(re.findall(r"[a-z0-9]{3,}", t))
+    # Stopwords minime it/en che gonfiano la similarità senza informazione
+    return tokens - {"the", "con", "per", "del", "della", "sul", "sulla",
+                     "una", "uno", "nel", "nella", "dopo", "che", "non"}
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """Jaccard sui token dei titoli. 0..1."""
+    ta, tb = _normalize_title_tokens(a), _normalize_title_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+# Soglia dedup: 0.6 cattura i cloni osservati ("Sell the news su Merge
+# hype" vs "Sell the news su Ethereum Merge" ≈ 0.6-0.8) senza fondere
+# lezioni distinte della stessa categoria.
+DEDUP_SIMILARITY_THRESHOLD = 0.6
+
+
+def _quality_score(it: dict) -> float:
+    """
+    Punteggio qualità DETERMINISTICO di un advice — usato per scegliere
+    le 5 lezioni iniettate nei prompt. Prima la selezione era per pura
+    recency (il campo quality_score esisteva ma non veniva mai calcolato):
+    l'ultima lezione scritta vinceva sempre, anche se contraddiceva le 10
+    precedenti o era un log di run.
+
+    Criteri (dal design del sistema: le lezioni buone sono CONCRETE,
+    AZIONABILI, GENERALIZZABILI):
+      -5  log di run ([Auto]/debrief) — non è una lezione
+      +3  lezione vera taggata ([TIMING], [SIZE], ...)
+      +2  contiene numeri/soglie (regola concreta, non vaga)
+      +1  ha un rationale
+      +0.5 × dup_count (cap +2): ri-imparata in più run = pattern reale
+      + quality_score utente se presente (rating manuale futuro, additivo)
+      + recency come SPAREGGIO (max +1, decade in ~60 giorni)
+    """
+    score = 0.0
+    title = it.get("title") or ""
+    tags = it.get("scenario_tags") or {}
+    if title.startswith("[Auto]") or tags.get("source") == "debrief":
+        score -= 5.0
+    if tags.get("source") == "lesson" or re.match(r"^\[[A-Z_]+\]", title):
+        score += 3.0
+    if re.search(r"\d", it.get("text") or ""):
+        score += 2.0
+    if (it.get("rationale") or "").strip():
+        score += 1.0
+    score += min(int(it.get("dup_count") or 0), 4) * 0.5
+    if isinstance(it.get("quality_score"), (int, float)):
+        score += float(it["quality_score"])
+    # Recency: spareggio lineare 0..1 su 60 giorni
+    try:
+        created = datetime.fromisoformat(
+            str(it.get("created_at", "")).replace("Z", "+00:00"))
+        age_days = (datetime.now(timezone.utc) - created).total_seconds() / 86400
+        score += max(0.0, 1.0 - age_days / 60.0)
+    except Exception:
+        pass
+    return score
+
+
+def _load_bucket(category_key: str) -> list[dict]:
     raw = _settings_get(f"{ADVICE_KEY_PREFIX}{category_key}", "[]")
     try:
         items = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(items, list):
-            items = []
+        return items if isinstance(items, list) else []
     except Exception:
-        items = []
-    items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return []
+
+
+def load_advice_for_key(category_key: str, max_items: int = 5) -> list[dict]:
+    """
+    Migliori N advice per la category_key, ordinati per QUALITÀ
+    (punteggio deterministico, recency solo come spareggio — vedi
+    _quality_score). I log di run finiscono in fondo e di fatto non
+    vengono mai iniettati.
+    """
+    items = _load_bucket(category_key)
+    items.sort(key=lambda x: (_quality_score(x), x.get("created_at", "")),
+               reverse=True)
     return items[:max_items]
 
 
@@ -245,13 +327,7 @@ def save_advice(advice: dict) -> str:
         "quality_score": advice.get("quality_score"),
     }
 
-    raw = _settings_get(f"{ADVICE_KEY_PREFIX}{key}", "[]")
-    try:
-        items = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(items, list):
-            items = []
-    except Exception:
-        items = []
+    items = _load_bucket(key)
 
     # Update if exists, else prepend
     found = False
@@ -260,7 +336,31 @@ def save_advice(advice: dict) -> str:
             items[i] = payload
             found = True
             break
+
     if not found:
+        # DEDUP: la memoria si riempiva di cloni (8 varianti di "sell the
+        # news sul Merge" dallo stesso scenario rigiocato 11 volte) che
+        # occupavano gli slot delle 5 lezioni iniettate. Se esiste già una
+        # lezione con titolo molto simile, NON creiamo il doppione:
+        # rinfreschiamo quella esistente e contiamo la ri-conferma in
+        # dup_count (che ne ALZA il quality_score: una lezione ri-imparata
+        # in più run è un pattern reale, non rumore).
+        for it in items:
+            if _title_similarity(payload["title"], it.get("title", "")) \
+                    >= DEDUP_SIMILARITY_THRESHOLD:
+                it["dup_count"] = int(it.get("dup_count") or 0) + 1
+                it["created_at"] = payload["created_at"]
+                # Il testo più recente può essere più raffinato: tienilo
+                # se più lungo/concreto di quello esistente.
+                if len(payload["text"]) > len(it.get("text") or ""):
+                    it["text"] = payload["text"]
+                _settings_set(f"{ADVICE_KEY_PREFIX}{key}",
+                              json.dumps(items, default=str))
+                logger.info("[SIM-ADVISOR] dedup: '%s' ricondotta a advice "
+                            "esistente %s (dup_count=%d)",
+                            payload["title"][:60], it.get("id"),
+                            it["dup_count"])
+                return it.get("id") or aid
         items.insert(0, payload)
     items = items[:50]  # cap per categoria
 
@@ -273,6 +373,99 @@ def save_advice(advice: dict) -> str:
         _save_index(idx)
 
     return aid
+
+
+def save_run_log(advice: dict) -> str:
+    """
+    Salva un DEBRIEF di run nell'ARCHIVIO (non nei bucket advice).
+    Stesso shape di save_advice, ma: niente dedup, niente iniezione nei
+    prompt, cap più alto. Serve per statistiche storiche e consultazione,
+    non per l'apprendimento (un riassunto-partita non è una regola).
+    """
+    key = advice.get("scenario_category")
+    if not key:
+        raise ValueError("advice.scenario_category mancante")
+    aid = advice.get("id") or str(uuid.uuid4())
+    payload = {
+        "id": aid,
+        "run_id": advice.get("run_id"),
+        "scenario_category": key,
+        "scenario_tags": advice.get("scenario_tags") or {},
+        "title": (advice.get("title") or "")[:200],
+        "text": (advice.get("text") or "")[:1000],
+        "rationale": (advice.get("rationale") or "")[:600],
+        "created_at": advice.get("created_at") or _now_iso(),
+    }
+    raw = _settings_get(f"{ADVICE_ARCHIVE_PREFIX}{key}", "[]")
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        items = []
+    items.insert(0, payload)
+    items = items[:ARCHIVE_CAP_PER_KEY]
+    _settings_set(f"{ADVICE_ARCHIVE_PREFIX}{key}", json.dumps(items, default=str))
+    return aid
+
+
+def prune_advice_memory() -> dict:
+    """
+    Pulizia ONE-OFF della memoria advice accumulata (giu 2026: 400 record,
+    di cui 93 debrief-log e decine di cloni). Per ogni bucket:
+      1. Sposta i DEBRIEF ([Auto]/source=debrief) nell'archivio — sono
+         log di run, non lezioni: inquinavano la selezione.
+      2. Dedup delle lezioni per similarità di titolo (>= soglia): tiene
+         la più recente, somma apply_count, registra dup_count (che alza
+         il quality_score della lezione superstite).
+
+    Idempotente nei fatti (dopo il primo giro non trova più nulla da
+    spostare/fondere). Il chiamante (main.lifespan) usa un marker per
+    non rieseguirla a ogni boot. Ritorna un report per il log.
+    """
+    report = {"buckets": 0, "archived_logs": 0, "merged_dups": 0, "kept": 0}
+    for key in _load_index():
+        items = _load_bucket(key)
+        if not items:
+            continue
+        report["buckets"] += 1
+
+        lessons: list[dict] = []
+        for it in items:
+            title = it.get("title") or ""
+            tags = it.get("scenario_tags") or {}
+            if title.startswith("[Auto]") or tags.get("source") == "debrief":
+                try:
+                    save_run_log(it)
+                    report["archived_logs"] += 1
+                except Exception as e:
+                    logger.warning("[SIM-ADVISOR] prune: archive fallita "
+                                   "per %s: %s", it.get("id"), e)
+                    lessons.append(it)   # non perderla se l'archive fallisce
+                continue
+            lessons.append(it)
+
+        # Dedup: più recente prima, le successive simili vengono fuse
+        lessons.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        kept: list[dict] = []
+        for it in lessons:
+            merged = False
+            for k in kept:
+                if _title_similarity(it.get("title", ""), k.get("title", "")) \
+                        >= DEDUP_SIMILARITY_THRESHOLD:
+                    k["dup_count"] = int(k.get("dup_count") or 0) + 1
+                    k["apply_count"] = (int(k.get("apply_count") or 0)
+                                        + int(it.get("apply_count") or 0))
+                    report["merged_dups"] += 1
+                    merged = True
+                    break
+            if not merged:
+                kept.append(it)
+
+        report["kept"] += len(kept)
+        _settings_set(f"{ADVICE_KEY_PREFIX}{key}",
+                      json.dumps(kept, default=str))
+    return report
 
 
 def delete_advice(advice_id: str, category_key: str) -> bool:
@@ -334,6 +527,11 @@ def format_advice_for_prompt(items: list[dict], category_key: str) -> str:
         "Sono regole operative emerse dall'analisi di scenari simili.",
         "Considerale come contesto, non come regole assolute — il contesto",
         "attuale potrebbe richiedere deroghe motivate.",
+        "Se due lezioni puntano in direzioni OPPOSTE (succede: nascono da",
+        "scenari diversi), scegli in base alla condizione che distingue lo",
+        "scenario CORRENTE (crash sistemico vs evento singolo già prezzato,",
+        "trend vs range) e DICHIARA nel ragionamento quale lezione segui e",
+        "perché. Non citarle mai come pretesto per ciò che volevi già fare.",
         "═" * 60,
     ]
     for i, it in enumerate(items, 1):

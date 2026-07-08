@@ -757,11 +757,60 @@ def get_scenario_by_id(scenario_id: str) -> dict | None:
     return None
 
 
-def get_random_scenario(category: str) -> dict | None:
-    """Sceglie uno scenario random nella categoria."""
+# ── Anti-ripetizione: contatore giocate per scenario ─────────────────────
+# Prima la scelta era random pura su pool piccoli → lo stesso scenario
+# veniva rigiocato decine di volte ("Ethereum Merge" 11 volte, sempre con
+# lo stesso errore) e la memoria advice si riempiva di lezioni-clone.
+# Ora: scelta random SOLO tra i meno giocati della categoria.
+_PLAYS_KEY = "_sim_scenario_plays"
+_PLAYS_MAP_CAP = 500
+
+
+def _load_play_counts() -> dict:
+    import json
+    try:
+        from simulator import db as sim_db
+        raw = sim_db.get_setting(_PLAYS_KEY, "{}") or "{}"
+        v = json.loads(raw) if isinstance(raw, str) else raw
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
+def bump_scenario_play(scenario_id: str) -> None:
+    """Registra una giocata. Chiamato da start_run/start_crypto_run."""
+    import json
+    if not scenario_id:
+        return
+    try:
+        from simulator import db as sim_db
+        counts = _load_play_counts()
+        counts[scenario_id] = int(counts.get(scenario_id) or 0) + 1
+        # Cap di sicurezza: via le entry più vecchie (insertion order)
+        if len(counts) > _PLAYS_MAP_CAP:
+            for k in list(counts.keys())[:len(counts) - _PLAYS_MAP_CAP]:
+                counts.pop(k, None)
+        sim_db.set_setting(_PLAYS_KEY, json.dumps(counts))
+    except Exception:
+        pass
+
+
+def least_played_choice(candidates: list[dict]) -> dict | None:
+    """Random tra gli scenari MENO giocati del pool (copertura uniforme)."""
     import random
+    if not candidates:
+        return None
+    counts = _load_play_counts()
+    min_plays = min(int(counts.get(s.get("id"), 0) or 0) for s in candidates)
+    eligible = [s for s in candidates
+                if int(counts.get(s.get("id"), 0) or 0) <= min_plays]
+    return random.choice(eligible or candidates)
+
+
+def get_random_scenario(category: str) -> dict | None:
+    """Sceglie uno scenario nella categoria, privilegiando i meno giocati."""
     candidates = [s for s in _all_scenarios() if s.get("category") == category]
-    return random.choice(candidates) if candidates else None
+    return least_played_choice(candidates)
 
 
 def _strip_reveal(s: dict) -> dict:

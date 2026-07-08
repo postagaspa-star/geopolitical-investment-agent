@@ -276,6 +276,38 @@ i conflitti ci sono, e sono questi:
    GitHub le notifiche dei workflow falliti — questa rottura è passata
    inosservata per 24 giorni.
 
+## 6-bis. AGGIORNAMENTO (sera del 08/07): le 6 mosse sono state APPLICATE
+
+Su richiesta di Andrea, tutte e 6 le raccomandazioni del §5 sono state
+implementate (12 test nuovi, suite 379 verdi):
+
+1. **Partecipazione al trend** — nuova sezione 6.D in ENTRAMBI i prompt:
+   in trend confermato esposizione target ≥60%, cash >40% da motivare a
+   ogni turno; esclusa esplicitamente nei crash (comanda 6.A).
+2. **Advice memory ripulita e con qualità** — dedup al salvataggio
+   (similarità titoli ≥0.6 → dup_count invece di clone); debrief "[Auto]"
+   spostati in archivio dedicato (`_sim_advice_archive::`, mai iniettati);
+   selezione delle 5 lezioni per QUALITÀ (punteggio deterministico:
+   lezione taggata +3, numeri concreti +2, rationale +1, ri-imparata
+   +0.5×dup, log -5; recency solo spareggio); pulizia one-off al boot con
+   marker `_sim_advice_pruned_v1`; header del blocco iniettato ora chiede
+   di dichiarare quale lezione si segue quando due si contraddicono.
+3. **Guardrail nel prompt crypto** — nuova sezione 6 con capitulation
+   protocol (adattato: "+4% in 48h dentro un crash è rumore"), fai correre
+   i vincitori/taglia i perdenti, gate R/R ≥1.5, e campo `rr` nello schema
+   (prima mancava del tutto).
+4. **Gerarchia rotazione vs capitulation** — regola 5 equity subordinata
+   esplicitamente alla 6.A nei crash ("non usare la regola 5 per
+   giustificare acquisti dentro un crash senza i segnali della 6.A").
+5. **Piani d'uscita obbligatori** — campo `exit_plan` (stop+target)
+   obbligatorio nello schema di entrambi gli engine, attaccato alla
+   posizione, RIPRESENTATO a ogni turno ("⤷ IL TUO PIANO D'USCITA: ...")
+   con check esplicito in procedura [2]: agire o derogare dichiarandolo.
+   Nessun enforcement meccanico (insegnare, non vietare).
+6. **Anti-ripetizione scenari** — contatore giocate per scenario
+   (`_sim_scenario_plays` in sim_settings), scelta random SOLO tra i meno
+   giocati della categoria, per entrambi i pool (dinamico e crypto statico).
+
 ## 7. Stato deploy
 
 - 3 commit su `main` (auto-deploy Render): `3a6e190`, `c565a4c`, `ce0e3e4`

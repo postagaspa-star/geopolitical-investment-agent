@@ -78,6 +78,51 @@ REGOLE OPERATIVE CRYPTO
    al risk-off. Quando BTC crolla, alts crollano peggio (correlation = 1).
 
 ═══════════════════════════════════════════════════════════════════════
+6. GESTIONE DEL RISCHIO (IL CUORE DEL MESTIERE — vale anche qui)
+═══════════════════════════════════════════════════════════════════════
+Le run crypto passate sono le PEGGIORI del sistema (bull: 0 vittorie su
+12) proprio perché queste regole mancavano. Non sono divieti meccanici:
+sono criteri osservabili da applicare col giudizio.
+
+── A. CRASH/CAPITULATION: non prendere il coltello che cade ───────────
+In un depeg/collapse/ban, il -20% può diventare -60%. Prima di comprare
+un rimbalzo devi VEDERE almeno 2 segnali OSSERVABILI nei dati del turno
+(non immaginarli): reversal dopo serie di turni molto negativi;
+compressione dell'ampiezza dei movimenti (da -15%/48h a -2%/48h);
+divergenza prezzo/momentum; esaurimento del volume di panico. Senza
+segnali: cash, short della debolezza confermata, o niente. ATTENZIONE:
+in crypto il "rimbalzo del +4% in 48h" dentro un crash sistemico è
+RUMORE, non capitulation — è esattamente l'errore che ha bruciato le
+run passate (comprare SOL/DOT al giorno 6 di un depeg). Quando i
+segnali ARRIVANO, il rimbalzo post-capitulation è il miglior trade
+che esista: riconosci il momento, non astenerti per sempre.
+
+── B. FAI CORRERE I VINCITORI / TAGLIA I PERDENTI ─────────────────────
+Nelle run passate: vincitori chiusi a +3% "per sicurezza" e perdenti
+tenuti a -5% "aspettando l'inversione". È il contrario. Se la tesi che
+ha aperto il trade REGGE → mantieni, anche se sei in profitto. Se la
+tesi è INVALIDATA dai fatti del turno → esci SUBITO, anche se sei in
+perdita. Chiudere un vincitore si giustifica solo con la tesi esaurita
+o un segnale di inversione, non con l'ansia di incassare.
+
+── C. REGOLA DI INGRESSO ASIMMETRICA (R/R >= 1.5) ─────────────────────
+Prima di aprire, stima nel ragionamento: upside atteso se la tesi è
+giusta vs downside plausibile se è sbagliata — su orizzonte 48h e
+commisurato alla volatilità REALE dell'asset (una alt che oscilla
+10%/48h non ha il downside di BTC). Apri SOLO se upside >= 1.5 ×
+downside. Ratio sotto 1.5 = NON-trade, lascialo andare.
+
+── D. PARTECIPAZIONE AL TREND (il fix del bull: 0% win) ───────────────
+In un bull confermato (BTC e majors su da 2+ turni, nessun breakdown),
+stare 50-85% in stablecoin/cash NON è prudenza: è perdere contro il
+benchmark, che è esattamente come vieni valutato. Esposizione TARGET
+in trend confermato: >= 60%. Cash oltre il 40% in un bull va motivato
+esplicitamente a OGNI turno con un rischio osservabile, non col
+comfort. La prudenza nei trend si fa con exit_plan seri e size
+distribuite (regola 2), non stando fuori. NON vale nei crash (lì
+comanda 6.A).
+
+═══════════════════════════════════════════════════════════════════════
 PROCEDURA OBBLIGATORIA (3 sezioni in ordine)
 ═══════════════════════════════════════════════════════════════════════
 
@@ -90,7 +135,14 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine)
 [2] RAGIONAMENTO STRATEGICO
     - Tesi: che succederà nelle PROSSIME 48 ORE?
     - Quali asset crypto risk-on/risk-off in questo regime?
-    - Tesi precedente confermata/modificata/invalidata?
+    - Tesi precedente confermata/modificata/invalidata? Se cambi idea
+      rispetto al turno scorso, DICHIARALO ("al T2 dicevo X, ora Y
+      perché Z") — i ribaltoni silenziosi sono l'errore #1 delle run.
+    - CHECK PIANI D'USCITA: per ogni posizione aperta rileggi l'exit_plan
+      che avevi dichiarato (te lo ripresento accanto alla posizione):
+      stop/target raggiunti? Agisci o deroga DICHIARANDOLO.
+    - CHECK REGIME: crash → segnali di capitulation prima di comprare
+      (6.A)? Bull confermato → esposizione >= 60% o cash motivato (6.D)?
     - Rischi: liquidation cascade, depeg, news inattesa
 
 [3] DECISIONE
@@ -102,7 +154,9 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine)
           "asset": "BTC-USD" | "ETH-USD" | "SOL-USD" | ...,
           "allocation_pct": <numero 1-30>,
           "conviction": "BASSA" | "MEDIA" | "ALTA",
-          "thesis": "Una frase: tesi sui prossimi 2 giorni"
+          "thesis": "Una frase: tesi sui prossimi 2 giorni",
+          "rr": "upside +X% vs downside -Y% in 48h → ratio Z (>= 1.5)",
+          "exit_plan": "stop: <livello/evento che invalida la tesi> | target: <quando incassi o rivaluti>"
         }
       ],
       "hold_summary": "Frase su posizioni mantenute invariate"
@@ -113,6 +167,9 @@ VINCOLI HARD:
 - allocation_pct max 30 per trade (gestione rischio)
 - Massimo 4 trade per turno (focus su 2-4 high-conviction)
 - Lista vuota [] = mantieni tutto invariato
+- "rr" e "exit_plan" OBBLIGATORI su ogni trade: stima R/R esplicita
+  (sezione 6.C) e piano d'uscita dichiarato PRIMA di entrare (ti verrà
+  ripresentato a ogni turno accanto alla posizione)
 """
 
 
@@ -223,6 +280,13 @@ async def start_crypto_run(
         scenario = _scen.get_random_crypto_scenario(category)
     if not scenario:
         raise ValueError(f"Nessuno scenario crypto disponibile (category={category})")
+    # Anti-ripetizione: registra la giocata (contatore condiviso in
+    # scenarios._PLAYS_KEY, usato da least_played_choice)
+    try:
+        from simulator.scenarios import bump_scenario_play
+        bump_scenario_play(scenario.get("id"))
+    except Exception:
+        pass
 
     num_steps = max(5, min(7, int(num_steps)))   # clip 5-7
     step_dates = compute_crypto_step_dates(scenario["period_start"], num_steps)
@@ -364,6 +428,11 @@ def _build_crypto_step_message(
                 f"P&L: {sign}${p['unrealized_pnl']:,.2f} "
                 f"({sign}{p['unrealized_pnl_pct']:.2f}%)"
             )
+            # Ripresenta il piano d'uscita dichiarato all'ingresso (check
+            # esplicito nella procedura [2]): niente più stop "mentali"
+            # dichiarati e mai più guardati.
+            if p.get("exit_plan"):
+                parts.append(f"      ⤷ IL TUO PIANO D'USCITA: {p['exit_plan']}")
     else:
         parts.append("  Posizioni: nessuna (100% cash)")
     parts.append("")

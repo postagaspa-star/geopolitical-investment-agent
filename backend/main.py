@@ -62,6 +62,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Simulator migrate fallback fallita (non bloccante): %s", e)
 
+    # Pulizia ONE-OFF memoria advice (marker: gira una volta sola):
+    # sposta i debrief-log nell'archivio e fonde le lezioni duplicate.
+    # Vedi sim_advisor.prune_advice_memory per il razionale completo.
+    try:
+        from simulator import db as sim_db
+        if sim_db.get_setting("_sim_advice_pruned_v1", "") != "done":
+            from agents import sim_advisor as _sa
+            rep = _sa.prune_advice_memory()
+            sim_db.set_setting("_sim_advice_pruned_v1", "done")
+            logger.info("Simulator advice prune: %s", rep)
+    except Exception as e:
+        logger.warning("Simulator advice prune fallita (non bloccante): %s", e)
+
     # Schema Chat Assistant (idempotente, fail-safe)
     # Crea le tabelle chat_conversations / chat_messages al volo se mancano.
     # Su Supabase richiede DATABASE_URL o SUPABASE_DB_PASSWORD.

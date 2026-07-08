@@ -326,10 +326,17 @@ def get_crypto_scenario_by_id(scenario_id: str) -> dict | None:
 
 
 def get_random_crypto_scenario(category: str | None = None) -> dict | None:
-    import random
+    """Scenario crypto privilegiando i MENO giocati (anti-ripetizione:
+    il pool statico è piccolo e 'Ethereum Merge' era stato rigiocato 11
+    volte di fila dall'auto-mode — vedi scenarios.least_played_choice)."""
     pool = (CRYPTO_SCENARIOS if not category
             else [s for s in CRYPTO_SCENARIOS if s["category"] == category])
-    return random.choice(pool) if pool else None
+    try:
+        from simulator.scenarios import least_played_choice
+        return least_played_choice(pool)
+    except Exception:
+        import random
+        return random.choice(pool) if pool else None
 
 
 def list_crypto_scenarios(category: str | None = None) -> list[dict]:

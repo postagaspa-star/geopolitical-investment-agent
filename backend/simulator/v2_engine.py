@@ -79,14 +79,22 @@ REGOLE CHIAVE (LEGGI CON ATTENZIONE)
    posseduto = apre uno short. SELL su asset già posseduto = chiude la
    posizione long.
 
-5. PENSA GLOBALMENTE — ROTAZIONE SETTORIALE OBBLIGATORIA
+5. PENSA GLOBALMENTE — ROTAZIONE SETTORIALE
    Ogni scenario include un CONTESTO GLOBALE con macro indicators e segnali
    cross-settoriali. Leggilo SEMPRE e ragiona sulle implicazioni per TUTTI
    i settori disponibili nell'asset_universe, non solo quello primario.
 
    Se il settore principale è sotto pressione e non vedi asset positivi al
-   suo interno → NON stare in cash: individua il settore BENEFICIARIO e
-   ruota lì. La rotazione settoriale è spesso la mossa più redditizia.
+   suo interno → di norma NON stare in cash: individua il settore
+   BENEFICIARIO e ruota lì. La rotazione settoriale è spesso la mossa più
+   redditizia.
+
+   GERARCHIA (chi comanda quando): questa regola vale nei regimi
+   NORMALE/TREND/MACRO. In un CRASH conclamato comanda la sezione 6.A:
+   se i segnali di capitulation NON ci sono, "stare in cash / shortare /
+   ruotare SOLO su safe-haven" È la mossa giusta e questa regola 5 NON
+   ti obbliga a comprare altro. Non usare la regola 5 per giustificare
+   acquisti dentro un crash senza i segnali della 6.A.
 
    Correlazioni fondamentali da applicare:
    • Conflitto militare  →  Defense ↑, Energy ↑, Gold ↑, Tech ↓, Bond ↑
@@ -181,6 +189,30 @@ rende quanto (o meno di) quanto rischi nel caso peggiore, è un NON-trade:
 lascialo andare. È meglio mancare 10 trade mediocri che farne 1 con
 R/R sfavorevole.
 
+── D. PARTECIPAZIONE AL TREND (il fix di Bull/Normale) ─────────────────
+L'errore #4, speculare al coltello che cade: NON PARTECIPARE ai mercati
+che salgono. I dati storici delle run sono brutali: nei regimi bull il
+win rate è 0% e nei regimi normali 9% — non per trade sbagliati, ma per
+SOTTOESPOSIZIONE CRONICA (50-85% di cash costante). Il tuo risultato è
+misurato CONTRO il mercato: se il mercato fa +3% e tu +0.9% perché eri
+mezzo fermo, HAI PERSO. In un trend che sale, il cash non è prudenza:
+è un trade MANCATO, esattamente come comprare il coltello che cade è
+un trade sbagliato.
+
+Regole operative:
+  • Se il regime è TREND CONFERMATO (la maggioranza degli asset sale da
+    2+ turni, nessun segnale di rottura): l'esposizione TARGET è >= 60%
+    del capitale. Sotto quel livello stai scommettendo CONTRO il trend
+    senza dirlo.
+  • Cash sopra il 40% in un trend confermato = una POSIZIONE ATTIVA che
+    va motivata esplicitamente nel ragionamento a OGNI turno ("resto
+    liquido perché X osservabile"), non un default di comfort.
+  • La prudenza vera nei trend non è stare fuori: è stare DENTRO con
+    stop chiari sulle posizioni (sezione uscite) e size sensate.
+  • Questa regola NON vale nei CRASH (lì comanda 6.A) né quando i
+    segnali sono contraddittori (lì il cash è legittimo e va comunque
+    motivato).
+
 ═══════════════════════════════════════════════════════════════════════
 PROCEDURA OBBLIGATORIA (3 sezioni in ordine, NESSUNA OMISSIONE)
 ═══════════════════════════════════════════════════════════════════════
@@ -200,9 +232,17 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine, NESSUNA OMISSIONE)
       l'ha aperta REGGE ancora? Se sì → mantieni e lascia correre (non
       chiudere un vincitore per ansia). Se è INVALIDATA → chiudi subito,
       non sperare nel ritorno (sezione 6.C).
+    - CHECK PIANI D'USCITA: ogni posizione aperta ha il suo exit_plan
+      DICHIARATO DA TE (te lo ripresento nel portafoglio). Rileggilo:
+      lo stop o il target sono stati raggiunti/violati? Se sì hai DUE
+      sole opzioni oneste: (a) agire di conseguenza, o (b) derogare
+      DICHIARANDOLO ("il mio piano diceva X, non lo eseguo perché Y
+      osservabile"). Ignorare in silenzio il proprio piano è l'errore
+      più costoso rilevato nelle run passate.
     - CHECK REGIME: se CRASH → hai i segnali di capitulation per comprare
       un rimbalzo? (sezione 6.A) Se l'asset è crypto in stress → size
-      dimezzata + solo conviction ALTA? (sezione 6.B)
+      dimezzata + solo conviction ALTA? (sezione 6.B) Se TREND CONFERMATO
+      → esposizione >= 60% o cash motivato esplicitamente? (sezione 6.D)
 
 [3] DECISIONE
     Output JSON STRUTTURATO. Schema esatto (NIENTE testo extra dopo):
@@ -214,7 +254,8 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine, NESSUNA OMISSIONE)
           "allocation_pct": <numero 1-100>,
           "conviction": "BASSA" | "MEDIA" | "ALTA",
           "thesis": "Una frase: perché questo trade per la prossima settimana",
-          "rr": "upside +X% vs downside -Y% → ratio Z (deve essere >= 1.5)"
+          "rr": "upside +X% vs downside -Y% → ratio Z (deve essere >= 1.5)",
+          "exit_plan": "stop: <condizione/livello che invalida la tesi> | target: <quando incassi o rivaluti>"
         }
       ],
       "hold_summary": "Frase breve sulle posizioni che mantieni invariate (se ce ne sono)"
@@ -233,16 +274,27 @@ REGOLE PER trades:
   numero generico). Se ratio < 1.5 il trade NON va aperto — è un
   NON-trade. Questo campo rende verificabile la disciplina R/R della
   sezione 6.C: un trade senza rr coerente è un errore di processo.
+- "exit_plan" OBBLIGATORIO su ogni BUY e ogni SHORT: PRIMA di entrare
+  dichiari a che condizioni esci — uno stop (il livello/evento che
+  invalida la tesi) e un target (quando incassi o rivaluti). Livelli in
+  % o prezzo, commisurati alla volatilità dell'asset. Il piano ti verrà
+  RIPRESENTATO a ogni turno accanto alla posizione: entrare senza piano
+  d'uscita è un errore di processo (le run passate mostrano stop
+  "mentali" dichiarati e mai più guardati).
 
 ESEMPIO DI BUONA DECISIONE:
 {
   "trades": [
     {"action": "BUY", "asset": "XOM", "allocation_pct": 25,
      "conviction": "ALTA",
-     "thesis": "Tensione Medio Oriente persiste, oil supply a rischio nel breve"},
+     "thesis": "Tensione Medio Oriente persiste, oil supply a rischio nel breve",
+     "rr": "upside +5% vs downside -2.5% → ratio 2.0",
+     "exit_plan": "stop: chiusura sotto $102 (supporto) o de-escalation | target: +5-6% o headline risolutiva"},
     {"action": "SELL", "asset": "TLT", "allocation_pct": 15,
      "conviction": "MEDIA",
-     "thesis": "Yields probabili al rialzo se inflazione importata da oil"}
+     "thesis": "Yields probabili al rialzo se inflazione importata da oil",
+     "rr": "upside +3% vs downside -2% → ratio 1.5",
+     "exit_plan": "stop: CPI sotto attese o TLT +2% contro di me | target: +3% sul short"}
   ],
   "hold_summary": "Mantengo GLD long (10%) come hedge, cash al 50% per opportunità"
 }
@@ -497,6 +549,8 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                            + price * quantity) / new_qty
                 existing["quantity"] = round(new_qty, 4)
                 existing["avg_entry_price"] = round(new_avg, 4)
+                if trade.get("exit_plan"):
+                    existing["exit_plan"] = str(trade["exit_plan"])[:250]
                 applied_trades.append(_record(quantity, "executed_add_long", fee=fee))
             elif existing and existing.get("side") == "short":
                 # BUY su SHORT = riacquista (chiude). FIX accounting:
@@ -517,6 +571,7 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                         "avg_entry_price": round(price, 4), "side": "long",
                         "thesis": trade.get("thesis", "")[:300],
                         "conviction": trade.get("conviction", "MEDIA"),
+                        "exit_plan": (trade.get("exit_plan") or "")[:250],
                     })
                     applied_trades.append(_record(quantity, "executed_flip_short_to_long",
                                                    fee=fee,
@@ -533,6 +588,7 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                     "avg_entry_price": price, "side": "long",
                     "thesis": trade.get("thesis", "")[:300],
                     "conviction": trade.get("conviction", "MEDIA"),
+                    "exit_plan": (trade.get("exit_plan") or "")[:250],
                 })
                 applied_trades.append(_record(quantity, "executed_open_long", fee=fee))
 
@@ -573,6 +629,7 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                         "avg_entry_price": round(price, 4), "side": "short",
                         "thesis": trade.get("thesis", "")[:300],
                         "conviction": trade.get("conviction", "MEDIA"),
+                        "exit_plan": (trade.get("exit_plan") or "")[:250],
                     })
                     applied_trades.append(_record(quantity, "executed_flip_long_to_short",
                                                    fee=fee_close + fee_short,
@@ -594,6 +651,8 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                 # Incassa il proceeds NETTO anche sull'aumento short
                 new_portfolio["cash"] += net_proceeds
                 new_portfolio["total_commissions_paid"] += fee
+                if trade.get("exit_plan"):
+                    existing["exit_plan"] = str(trade["exit_plan"])[:250]
                 applied_trades.append(_record(quantity, "executed_add_short", fee=fee))
             else:
                 gross_proceeds = quantity * price
@@ -606,6 +665,7 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                     "avg_entry_price": price, "side": "short",
                     "thesis": trade.get("thesis", "")[:300],
                     "conviction": trade.get("conviction", "MEDIA"),
+                    "exit_plan": (trade.get("exit_plan") or "")[:250],
                 })
                 applied_trades.append(_record(quantity, "executed_open_short",
                                                fee=fee,
@@ -795,6 +855,12 @@ def _parse_response(raw: str) -> dict:
             "allocation_pct": alloc_pct,
             "conviction": (t.get("conviction") or "MEDIA").upper(),
             "thesis": (t.get("thesis") or "")[:400],
+            # exit_plan: piano d'uscita dichiarato PRIMA di entrare
+            # (stop + target). Viene attaccato alla posizione e
+            # RIPRESENTATO all'AI a ogni turno — chiude il loop
+            # "stop mentale dichiarato e mai più guardato". Come rr:
+            # non enforced meccanicamente (insegnare, non vietare).
+            "exit_plan": (t.get("exit_plan") or "")[:250],
             # rr: stima R/R dichiarata dall'AU (sezione 6.C del prompt).
             # NON enforced meccanicamente (insegnare, non vietare): viene
             # preservato per il debrief/memoria advice → l'AI puo' imparare
@@ -932,6 +998,11 @@ async def start_run(
         scenario = _scen.get_random_scenario(category)
     if not scenario:
         raise ValueError(f"Nessuno scenario disponibile (category={category})")
+    # Anti-ripetizione: registra la giocata (anche per scenario_id esplicito)
+    try:
+        _scen.bump_scenario_play(scenario.get("id"))
+    except Exception:
+        pass
 
     num_steps = max(3, min(5, int(num_steps)))   # clip 3-5
     step_dates = compute_step_dates(scenario["period_start"], num_steps)
@@ -1226,6 +1297,11 @@ def _build_step_message(
                 f"valore ${value_now:,.2f} | P&L: {sign}${p['unrealized_pnl']:,.2f} "
                 f"({sign}{p['unrealized_pnl_pct']:.2f}%)"
             )
+            # Ripresenta il piano d'uscita dichiarato all'ingresso: l'AI
+            # deve confrontarlo con lo stato attuale a OGNI turno (check
+            # esplicito nella procedura [2]) invece di dimenticarselo.
+            if p.get("exit_plan"):
+                parts.append(f"      ⤷ IL TUO PIANO D'USCITA: {p['exit_plan']}")
     else:
         parts.append("  Posizioni aperte: nessuna")
     parts.append("")
@@ -1852,12 +1928,15 @@ def _auto_save_thesis_advice(scenario: dict, final_result: dict,
             "rationale": rationale_base,
         }
         try:
-            aid = sim_advisor.save_advice(debrief_advice)
-            logger.info("[SIM-V2] auto-saved DEBRIEF advice: id=%s category=%s",
+            # ARCHIVIO, non bucket advice: il debrief è un log di run, non
+            # una lezione. Salvato nei bucket occupava gli slot delle 5
+            # lezioni iniettate nei prompt (93/400 record erano debrief).
+            aid = sim_advisor.save_run_log(debrief_advice)
+            logger.info("[SIM-V2] auto-saved DEBRIEF (archivio): id=%s category=%s",
                         aid, category_key)
             saved_count += 1
         except Exception as e:
-            logger.warning("[SIM-V2] save_advice debrief fallito: %s", e)
+            logger.warning("[SIM-V2] save_run_log debrief fallito: %s", e)
 
     # ── 2. SAVE LESSONS (lista pre-generata in final_result.lessons) ────
     # Le lessons sono generate in finalize_run via _generate_lessons_learned
