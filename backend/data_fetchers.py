@@ -1081,6 +1081,34 @@ def fetch_market_data(ticker: str, period_days: int = 90,
                          cache_key, cached_result.get("source", "?"))
             return cached_result
 
+    # ── MAGAZZINO OHLCV (Approach 1, dietro flag OHLCV_STORE_ENABLED) ─────────
+    # Legge PRIMA dal magazzino pre-caricato: se il dato è fresco lo usa senza
+    # toccare i provider → durante il run del Decision niente raffica parallela
+    # ai provider = niente rate-limit silenzioso = niente barre corrotte.
+    # bypass_cache=True (es. esecuzione trade reale) salta il magazzino e va
+    # live per il prezzo più fresco. Best-effort: su errore ripiega sul live.
+    if not bypass_cache:
+        try:
+            import ohlcv_store
+            if ohlcv_store.ohlcv_store_enabled():
+                stored = ohlcv_store.get_bars(ticker, period_days)
+                if stored and stored.get("data"):
+                    _yfinance_cache[cache_key] = (now, stored)
+                    logger.debug("OHLCV %s servito dal magazzino (age=%ss)",
+                                 ticker, stored.get("store_age_sec"))
+                    return stored
+        except Exception as exc:
+            logger.debug("OHLCV store read %s fallita: %s", ticker, exc)
+
+    def _warm_store(_res):
+        """Scrive il risultato validato nel magazzino (best-effort, gated)."""
+        try:
+            import ohlcv_store as _os
+            if _os.ohlcv_store_enabled():
+                _os.upsert_bars(ticker, _res["data"], _res.get("source"))
+        except Exception:
+            pass
+
     # ── Cascata provider ordinata per asset class ───────────────────────────
     # Il corruption guard (_is_ohlcv_corrupted) e' applicato a OGNI provider,
     # non solo a yfinance → un clone da qualunque fonte viene scartato e si
@@ -1130,6 +1158,7 @@ def fetch_market_data(ticker: str, period_days: int = 90,
             continue
         logger.debug("OHLCV %s OK da %s (%d bars)", ticker, name, len(result["data"]))
         _yfinance_cache[cache_key] = (now, result)
+        _warm_store(result)   # scalda il magazzino (gated, best-effort)
         return result
 
     # ── Ultima spiaggia: yfinance ────────────────────────────────────────────
@@ -1192,6 +1221,7 @@ def fetch_market_data(ticker: str, period_days: int = 90,
                 }
                 # Salva in cache
                 _yfinance_cache[cache_key] = (now, result)
+                _warm_store(result)   # scalda il magazzino (gated, best-effort)
                 return result
 
     except Exception as exc:

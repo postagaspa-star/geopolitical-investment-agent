@@ -4686,6 +4686,18 @@ async def portfolio_restore_cash(
         return JSONResponse(status_code=500, content={"status": "error", "error": str(e)})
 
 
+@app.get("/api/admin/ohlcv-store")
+async def admin_ohlcv_store():
+    """Diagnostica del magazzino OHLCV (Approach 1): flag, ticker freschi/stantii.
+    Read-only. Verifica che il magazzino si riempia quando OHLCV_STORE_ENABLED
+    è attivo."""
+    try:
+        import ohlcv_store
+        return ohlcv_store.store_stats()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/admin/health")
 async def admin_health(fresh: bool = Query(default=False)):
     """Cruscotto di salute del sistema.

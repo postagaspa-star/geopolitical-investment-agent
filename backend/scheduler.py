@@ -376,6 +376,49 @@ async def _price_polling_job():
         logger.error("Errore Price Polling: %s", e, exc_info=False)
 
 
+async def _ohlcv_warm_job():
+    """
+    Job magazzino OHLCV (Approach 1) — SOLO se OHLCV_STORE_ENABLED.
+
+    Tiene fresco il magazzino ohlcv_daily per l'universo equity scaricando
+    UN TICKER ALLA VOLTA con pause (mai in parallelo): così i provider non
+    vanno in rate-limit e le barre non si corrompono. Il Decision poi legge
+    dal magazzino invece di colpire i provider in parallelo durante il run.
+
+    No-op istantaneo se il flag è OFF (default) → zero impatto quando spento.
+    """
+    try:
+        import ohlcv_store
+    except Exception:
+        return
+    if not ohlcv_store.ohlcv_store_enabled():
+        return
+    try:
+        import data_fetchers
+        tickers = ohlcv_store.warm_universe_tickers()
+        if not tickers:
+            return
+        loop = asyncio.get_running_loop()
+        ok = 0
+        for t in tickers:
+            try:
+                # bypass_cache=True → fetch LIVE (cascade+corruption guard) e
+                # upsert nel magazzino via _warm_store dentro fetch_market_data.
+                res = await loop.run_in_executor(
+                    None, lambda tk=t: data_fetchers.fetch_market_data(
+                        tk, 120, True))
+                if res and res.get("data") and not res.get("error"):
+                    ok += 1
+            except Exception:
+                pass
+            # Pausa tra i ticker: serializzazione anti-rate-limit.
+            await asyncio.sleep(1.2)
+        logger.info("[OHLCV-STORE] warm ciclo completato: %d/%d ticker aggiornati",
+                    ok, len(tickers))
+    except Exception as e:
+        logger.warning("[OHLCV-STORE] warm job errore: %s", e)
+
+
 async def _memory_trim_job():
     """
     Job riduzione memoria — ogni 30 minuti (backstop al trim post-pipeline).
@@ -1234,6 +1277,22 @@ def start_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(pytz.utc) + timedelta(seconds=120),
+    )
+
+    # ── Magazzino OHLCV: ogni 20 min (no-op se OHLCV_STORE_ENABLED off) ──
+    # Tiene fresco ohlcv_daily scaricando l'universo equity un ticker alla
+    # volta (anti rate-limit). Il job stesso fa exit immediato se il flag è
+    # OFF, quindi registrarlo sempre è innocuo.
+    _scheduler.add_job(
+        _ohlcv_warm_job,
+        trigger="interval",
+        minutes=20,
+        id="ohlcv_warm_job",
+        name="OHLCV store warm 20min (opt-in via OHLCV_STORE_ENABLED)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(pytz.utc) + timedelta(seconds=45),
     )
 
     # ── Memory trim: ogni 30 min (fix OOM, backstop al trim post-pipeline) ──
