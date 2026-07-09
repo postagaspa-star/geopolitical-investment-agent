@@ -178,6 +178,10 @@ def apply_tool_transition(state: WorkflowState, tool_name: str,
         state.initial_assessment = {
             "situation_overview": tool_input.get("situation_overview", ""),
             "rotation_summary": tool_input.get("rotation_summary", ""),
+            # Flusso a settori: quali settori/narrative approfondire e quali
+            # scartare (con perché). Loggati e mostrati in dashboard.
+            "sectors_to_investigate": tool_input.get("sectors_to_investigate", []),
+            "sectors_skipped": tool_input.get("sectors_skipped", ""),
             "asset_candidates": tool_input.get("asset_candidates", []),
             "technical_questions": questions,
         }
@@ -257,18 +261,19 @@ def validate_commit_input(tool_name: str, tool_input: dict) -> tuple[bool, str]:
 COMMIT_INITIAL_ASSESSMENT_TOOL = {
     "name": "commit_initial_assessment",
     "description": (
-        "FASE 1 OBBLIGATORIA. Commit dell'analisi iniziale della situazione "
-        "corrente (portfolio, briefing macro, sentiment buffer, ROTATION SCAN) "
-        "PRIMA di richiedere dati tecnici. situation_overview deve essere "
-        ">= 200 char e DEVE riferirsi esplicitamente al rotation scan: "
-        "quali categorie guidano, quali sono in coda, e se la tua watchlist "
-        "abituale è allineata o no. Se non ti servono dati tecnici, passa "
-        "technical_questions=[]: potrai saltare la FASE 2 e andare "
-        "direttamente a commit_final_thesis.\n\n"
-        "Il campo rotation_summary è OBBLIGATORIO: 1-2 frasi su cosa il "
-        "rotation scan ti ha detto su questa giornata di mercato. Senza "
-        "questo campo non posso verificare che tu abbia integrato i dati "
-        "cross-sector nel tuo ragionamento."
+        "FASE 1 OBBLIGATORIA — RAGIONAMENTO A SETTORI. Prima di guardare i "
+        "singoli ticker devi decidere QUALI SETTORI (o narrative, per il "
+        "crypto) conviene approfondire in questa giornata e QUALI NO, in base "
+        "a portfolio, briefing macro, sentiment buffer e ROTATION SCAN. "
+        "Compila:\n"
+        "  • sectors_to_investigate: i settori che approfondirai (ne prenderai "
+        "    i dati di TUTTI i ticker disponibili).\n"
+        "  • sectors_skipped: i settori che NON guardi ORA e perché.\n"
+        "  • asset_candidates: i ticker DEI SETTORI SCELTI su cui indagare.\n"
+        "situation_overview >= 200 char e DEVE riferirsi al rotation scan "
+        "(categorie leader/laggard, SPY benchmark). rotation_summary "
+        "OBBLIGATORIO. Se non ti servono dati tecnici, technical_questions=[] "
+        "per saltare la FASE 2."
     ),
     "input_schema": {
         "type": "object",
@@ -278,6 +283,24 @@ COMMIT_INITIAL_ASSESSMENT_TOOL = {
                 "description": "Analisi della situazione corrente senza dati tecnici "
                                "(>= 200 caratteri). DEVE menzionare cosa hai osservato "
                                "nel rotation scan (categorie leader/laggard, SPY benchmark).",
+            },
+            "sectors_to_investigate": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "I SETTORI/CATEGORIE che approfondirai in questo run, "
+                               "scelti dal rotation scan (equity: defensive, safe_haven, "
+                               "hedge, geopolitical, energy_commodity, sectors, bonds, "
+                               "international, factor). Per il crypto: le NARRATIVE "
+                               "(layer-1, DeFi, AI-tokens, memecoin, ETF-flows, ...). "
+                               "Di questi settori valuterai TUTTI i ticker disponibili, "
+                               "non solo quelli della tua watchlist abituale. Almeno 1.",
+            },
+            "sectors_skipped": {
+                "type": "string",
+                "description": "Quali settori/narrative NON guardi in questo run e "
+                               "PERCHÉ (breve). Es: 'Salto bonds e international: nessun "
+                               "catalyst e RS negativa vs SPY'. Serve a rendere esplicito "
+                               "il ragionamento su cosa vale la pena guardare e cosa no.",
             },
             "rotation_summary": {
                 "type": "string",
@@ -307,6 +330,7 @@ COMMIT_INITIAL_ASSESSMENT_TOOL = {
             },
         },
         "required": ["situation_overview", "rotation_summary",
+                      "sectors_to_investigate", "sectors_skipped",
                       "asset_candidates", "technical_questions"],
     },
 }

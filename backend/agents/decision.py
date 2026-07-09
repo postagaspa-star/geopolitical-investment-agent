@@ -216,6 +216,18 @@ def _build_reasoning_text(ia: dict, ft: dict, final_text: str) -> str:
     rot = (ia.get("rotation_summary") or "").strip()
     if rot:
         sections.append(f"🔄 ROTATION ANALYSIS\n{rot}")
+    # Flusso a settori: quali settori/narrative approfondire e quali scartare.
+    sectors_inv = ia.get("sectors_to_investigate") or []
+    sectors_skip = (ia.get("sectors_skipped") or "").strip()
+    if sectors_inv or sectors_skip:
+        lines = []
+        if sectors_inv:
+            inv_str = ", ".join(str(s) for s in sectors_inv) \
+                if isinstance(sectors_inv, list) else str(sectors_inv)
+            lines.append(f"Approfondisco: {inv_str}")
+        if sectors_skip:
+            lines.append(f"Scarto: {sectors_skip}")
+        sections.append("🧭 SETTORI\n" + "\n".join(lines))
     candidates = ia.get("asset_candidates") or []
     if candidates:
         if isinstance(candidates, list):
@@ -338,20 +350,28 @@ WORKFLOW OBBLIGATORIO A 4 FASI (enforced via tool state machine)
 TU durante FASE 2. Se chiami execute_trade prima di aver completato le
 4 fasi, il sistema TI RIFIUTA il tool con un errore esplicito.
 
-FASE 1 — Pre-analisi (commit_initial_assessment)
+FASE 1 — Pre-analisi A SETTORI (commit_initial_assessment)
   Analizza la SOLA situazione corrente: portfolio, briefing 4D/8H,
-  intelligence buffer recente, sentiment retail. Identifica i ticker
-  che vuoi indagare e formula domande tecniche specifiche da girare al
-  Technical Agent (es. "RSI 14 e livelli S/R su NVDA per posizionare SL").
-  → tool: commit_initial_assessment(situation_overview, asset_candidates,
-           technical_questions)
-     situation_overview deve essere >= 200 caratteri.
+  intelligence buffer recente, sentiment retail, ROTATION SCAN.
+  RAGIONA PRIMA PER SETTORI, non per singoli ticker: decidi QUALI SETTORI
+  conviene approfondire oggi e QUALI NO, motivando.
+    → sectors_to_investigate: i settori/categorie che approfondirai (dal
+      rotation scan: defensive, safe_haven, hedge, geopolitical,
+      energy_commodity, sectors, bonds, international, factor).
+    → sectors_skipped: quali settori NON guardi ora e perché.
+    → asset_candidates: i ticker DEI SETTORI SCELTI da indagare.
+  → tool: commit_initial_assessment(situation_overview, rotation_summary,
+           sectors_to_investigate, sectors_skipped, asset_candidates,
+           technical_questions). situation_overview >= 200 caratteri.
 
-FASE 2 — Richiesta dati tecnici (request_technical_analysis)
-  Chiama il Technical Agent con i ticker e la focus_question definiti
-  in FASE 1. MAX 2 chiamate per run. Se non ti servono dati tecnici
-  (es. solo rebalancing), passa technical_questions=[] in FASE 1 e
-  salta direttamente a FASE 3.
+FASE 2 — Dati dei ticker dei settori scelti
+  Per VEDERE TUTTI i ticker dei settori che hai scelto (non solo la tua
+  watchlist), usa scan_rotation_opportunities(categories=<i tuoi
+  sectors_to_investigate>): ti dà indicatori grezzi (RSI, forza relativa,
+  distanza dalle medie, rotation_score) di TUTTO il settore a costo ~0.
+  Poi, sui FINALISTI più interessanti, chiama request_technical_analysis
+  per l'analisi profonda (MAX 2 chiamate per run). Se non ti servono dati
+  tecnici (es. solo rebalancing), technical_questions=[] e salta a FASE 3.
 
 FASE 3 — Tesi finale (commit_final_thesis)
   Integra l'analisi iniziale con i dati tecnici ricevuti. Formula tesi
@@ -2288,14 +2308,21 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                 # rotation_summary: campo obbligatorio della FASE 1 che riassume
                 # cosa il modello ha visto nel rotation scan iniettato in contesto.
                 "rotation_summary": (tool_input.get("rotation_summary") or "")[:4000],
+                "sectors_to_investigate": tool_input.get("sectors_to_investigate") or [],
+                "sectors_skipped": (tool_input.get("sectors_skipped") or "")[:2000],
                 "asset_candidates": tool_input.get("asset_candidates") or [],
                 "technical_questions": tool_input.get("technical_questions") or [],
             }
             database.insert_agent_log(run_id, "DECISION_PHASE1", json.dumps(payload, default=str))
+            _sect = payload["sectors_to_investigate"]
             return json.dumps({
                 "phase": "INITIAL_DONE",
-                "ack": "Pre-analisi committata. Procedi con request_technical_analysis "
-                       "se hai domande tecniche, altrimenti vai a commit_final_thesis.",
+                "ack": "Pre-analisi committata. Ora prendi i dati dei ticker dei "
+                       "settori scelti (usa scan_rotation_opportunities con le "
+                       "categorie di sectors_to_investigate per vederne TUTTI i "
+                       "ticker, poi request_technical_analysis sui finalisti), "
+                       "altrimenti vai a commit_final_thesis.",
+                "sectors_to_investigate": _sect,
                 "questions_count": len(payload["technical_questions"]),
             })
 
@@ -3571,6 +3598,8 @@ async def run_decision_agent(run_id: str, tech_report: dict,
             "reasoning_text": reasoning_text,   # campo letto dal frontend
             "situation_overview": (ia.get("situation_overview") or "")[:12000],
             "rotation_summary": (ia.get("rotation_summary") or "")[:4000],
+            "sectors_to_investigate": ia.get("sectors_to_investigate") or [],
+            "sectors_skipped": (ia.get("sectors_skipped") or "")[:2000],
             "asset_candidates": ia.get("asset_candidates") or [],
             "technical_questions": ia.get("technical_questions") or [],
             "thesis": (ft.get("thesis") or "")[:12000],

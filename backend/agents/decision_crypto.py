@@ -150,11 +150,17 @@ oppure dichiara esplicitamente "non disponibile" e procedi senza.
 
 WORKFLOW OBBLIGATORIO A 4 FASI (state machine enforced):
 
-FASE 1 — Pre-analisi (commit_initial_assessment):
+FASE 1 — Pre-analisi A NARRATIVE (commit_initial_assessment):
   Analizza la SOLA situazione corrente: portfolio crypto e setup tecnico
-  (struttura, livelli chiave, regime BTC dai grafici). Identifica
-  i ticker crypto da indagare e le domande tecniche specifiche.
-  → tool: commit_initial_assessment(situation_overview, asset_candidates,
+  (struttura, livelli chiave, regime BTC dai grafici). RAGIONA PRIMA PER
+  NARRATIVE, non per singoli ticker: decidi QUALI narrative conviene
+  approfondire oggi e QUALI NO, motivando.
+    → sectors_to_investigate: le narrative scelte (layer-1, DeFi, AI-tokens,
+      memecoin, ETF-flows, RWA, restaking, ...).
+    → sectors_skipped: quali narrative NON guardi ora e perché.
+    → asset_candidates: le crypto DELLE narrative scelte da indagare.
+  → tool: commit_initial_assessment(situation_overview,
+           sectors_to_investigate, sectors_skipped, asset_candidates,
            technical_questions). situation_overview >= 200 caratteri.
 
 FASE 2 — Richiesta dati tecnici (request_crypto_technical_analysis):
@@ -391,11 +397,14 @@ def _wrap_anthropic_tool_for_openai(t: dict) -> dict:
 # intatto e continua a richiederlo.
 _CRYPTO_INITIAL_TOOL = copy.deepcopy(COMMIT_INITIAL_ASSESSMENT_TOOL)
 _CRYPTO_INITIAL_TOOL["description"] = (
-    "FASE 1 OBBLIGATORIA (crypto). Commit dell'analisi iniziale della situazione "
-    "corrente: portfolio crypto e setup tecnico (struttura, livelli chiave, "
-    "regime BTC). situation_overview >= 200 char. Se non ti "
-    "servono dati tecnici, passa technical_questions=[]: salti la FASE 2 e vai "
-    "direttamente a commit_final_thesis."
+    "FASE 1 OBBLIGATORIA (crypto) — RAGIONAMENTO A NARRATIVE. Prima dei "
+    "singoli ticker decidi QUALI NARRATIVE conviene approfondire oggi e QUALI "
+    "NO: layer-1, DeFi, AI-tokens, memecoin, ETF-flows, RWA, staking/restaking, "
+    "ecc. Compila sectors_to_investigate (le narrative scelte), sectors_skipped "
+    "(quali salti e perché) e asset_candidates (le crypto di quelle narrative). "
+    "situation_overview >= 200 char (portfolio crypto + setup tecnico: "
+    "struttura, livelli, regime BTC). Se non ti servono dati tecnici, "
+    "technical_questions=[] per saltare la FASE 2."
 )
 _cti_props = _CRYPTO_INITIAL_TOOL["input_schema"]["properties"]
 _cti_props.pop("rotation_summary", None)
@@ -404,12 +413,22 @@ _cti_props["situation_overview"]["description"] = (
     "cosa dice il portafoglio crypto, quale setup tecnico emerge (struttura/livelli/regime), "
     "cosa motiva la scelta dei ticker."
 )
+_cti_props["sectors_to_investigate"]["description"] = (
+    "Le NARRATIVE crypto che approfondirai in questo run (layer-1, DeFi, "
+    "AI-tokens, memecoin, ETF-flows, RWA, restaking, ...). Ne valuterai le "
+    "crypto disponibili nell'universo, non solo BTC/ETH. Almeno 1."
+)
+_cti_props["sectors_skipped"]["description"] = (
+    "Quali narrative NON guardi in questo run e PERCHÉ (breve). Es: 'Salto "
+    "memecoin: nessun momentum e rischio pump-and-dump alto'."
+)
 _cti_props["asset_candidates"]["description"] = (
     "Crypto su cui vuoi indagare (formato BTC-USD, ETH-USD). Puo' essere lista "
     "vuota se il run e' di puro rebalancing/no-trade."
 )
 _CRYPTO_INITIAL_TOOL["input_schema"]["required"] = [
-    "situation_overview", "asset_candidates", "technical_questions",
+    "situation_overview", "sectors_to_investigate", "sectors_skipped",
+    "asset_candidates", "technical_questions",
 ]
 
 
@@ -833,14 +852,18 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
         if tool_name == "commit_initial_assessment":
             payload = {
                 "situation_overview": (tool_input.get("situation_overview") or "")[:12000],
+                "sectors_to_investigate": tool_input.get("sectors_to_investigate") or [],
+                "sectors_skipped": (tool_input.get("sectors_skipped") or "")[:2000],
                 "asset_candidates": tool_input.get("asset_candidates") or [],
                 "technical_questions": tool_input.get("technical_questions") or [],
             }
             database.insert_agent_log(run_id, "DECISION_CRYPTO_PHASE1", json.dumps(payload, default=str))
             return json.dumps({
                 "phase": "INITIAL_DONE",
-                "ack": "Pre-analisi crypto committata. Procedi con request_crypto_technical_analysis "
-                       "se hai domande tecniche, altrimenti vai a commit_final_thesis.",
+                "ack": "Pre-analisi crypto committata (narrative scelte). Procedi con "
+                       "request_crypto_technical_analysis se hai domande tecniche, "
+                       "altrimenti vai a commit_final_thesis.",
+                "sectors_to_investigate": payload["sectors_to_investigate"],
                 "questions_count": len(payload["technical_questions"]),
             })
 
