@@ -1265,7 +1265,11 @@ export default function AnalyticsPage() {
   const [history, setHistory] = useState([]);
   const [portfolio, setPortfolio] = useState(null);
   const [benchmark, setBenchmark] = useState(null);
-  const [period, setPeriod] = useState("30d");
+  // Default "all" (non "30d"): l'utente vuole vedere TUTTO il periodo da
+  // quando investe, non solo l'ultimo mese. Valeva sia qui sia nel grafico
+  // equity/benchmark che usano ?period=. Con 250+ trade chiusi, 30gg
+  // mostrava una fetta minima e falsava P&L e confronto S&P.
+  const [period, setPeriod] = useState("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [researchOpen, setResearchOpen] = useState(false);
@@ -1277,9 +1281,11 @@ export default function AnalyticsPage() {
       try {
         const [posRes, tradeRes, histRes, portRes, benchRes] = await Promise.all([
           fetch(`${API}/api/positions`),
-          // FIX: limit alto per non troncare le statistiche. Bug precedente:
-          // default 50 → 80+ trade reali → KPI calcolati solo sugli ultimi 50.
-          fetch(`${API}/api/trades?limit=1000`),
+          // FIX: limit alto per non troncare le statistiche. Con 250+ trade
+          // CHIUSI (=500+ gambe) 1000 poteva tagliare le BUY più vecchie →
+          // le SELL non trovavano l'apertura nel FIFO → P&L realizzato e
+          // avg win/loss sballati. 5000 = allineato al backend edge-tracker.
+          fetch(`${API}/api/trades?limit=5000`),
           fetch(`${API}/api/portfolio/history?period=${period}`),
           // Portfolio per estrarre cash_balance e mostrare la Liquidità
           // nel pie chart Esposizione Attuale.

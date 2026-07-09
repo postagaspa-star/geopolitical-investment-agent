@@ -1219,28 +1219,59 @@ def get_cash_audit_log(limit=100, since_iso=None, reason=None):
         return []
 
 
-def get_portfolio_history(days=30):
+def get_portfolio_history(days=30, max_points=1200):
     """
-    Ritorna gli snapshot di portafoglio degli ultimi N giorni.
+    Ritorna gli snapshot di portafoglio degli ultimi N giorni, coprendo
+    l'INTERO periodo (non solo l'ultima settimana).
 
-    Bug precedente: Supabase impone un limite default di 1000 righe per query
-    e l'order era ASC senza limit esplicito, quindi venivano restituite le
-    PRIME 1000 righe del periodo (le più vecchie). I grafici Live Analytics
-    mostravano dati di settimane fa invece dei più recenti.
+    Bug precedente #1: order ASC senza limit → prime 1000 righe (le più
+    vecchie). Bug precedente #2 (questo fix): limit(1000) fisso. Con
+    snapshot ogni ~15 min, 1000 righe = ~10 giorni → per period="all"
+    (days=3650) il grafico equity e il confronto S&P mostravano solo
+    l'ultima settimana invece della vita completa del portafoglio.
 
-    Fix: ordine DESC + limit esplicito → prendiamo le 1000 più recenti, poi
-    invertiamo lato Python per restituirle ASC (compatibile col frontend).
+    Fix: paginazione DESC per prendere TUTTE le righe del periodo (cap di
+    sicurezza), poi DOWNSAMPLING uniforme a max_points punti così l'intera
+    finestra sta nel grafico senza troncare né esplodere l'egress.
+    Restituite ASC (cronologiche) per il frontend.
     """
     client = _get_client()
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    result = (client.table("portfolio_snapshots")
-              .select("total_value, cash_balance, timestamp")
-              .gte("timestamp", since)
-              .order("timestamp", desc=True)
-              .limit(1000)
-              .execute())
-    rows = result.data or []
-    rows.reverse()   # da DESC a ASC per il chart (timeline cronologica)
+
+    # Paginazione DESC: raccogli tutte le righe del periodo, cap ~30k
+    # (safety: ~1 anno a cadenza 15 min) per non sfondare l'egress.
+    PAGE = 1000
+    HARD_CAP = 30000
+    rows: list = []
+    page = 0
+    while True:
+        try:
+            res = (client.table("portfolio_snapshots")
+                   .select("total_value, cash_balance, timestamp")
+                   .gte("timestamp", since)
+                   .order("timestamp", desc=True)
+                   .range(page * PAGE, (page + 1) * PAGE - 1)
+                   .execute())
+        except Exception as exc:
+            logger.warning("get_portfolio_history paginazione fallita a "
+                           "pagina %d: %s", page, exc)
+            break
+        batch = res.data or []
+        rows.extend(batch)
+        if len(batch) < PAGE or len(rows) >= HARD_CAP:
+            break
+        page += 1
+
+    rows.reverse()   # da DESC a ASC (timeline cronologica)
+
+    # Downsampling uniforme: se ho più di max_points snapshot, tengo 1 punto
+    # ogni `step`, MA preservo sempre il PRIMO e l'ULTIMO (ancore del return
+    # e del confronto S&P). Sotto la soglia ritorno tutto.
+    n = len(rows)
+    if n > max_points and max_points >= 2:
+        step = n / max_points
+        idxs = sorted(set(int(i * step) for i in range(max_points)) | {0, n - 1})
+        rows = [rows[i] for i in idxs if 0 <= i < n]
     return rows
 
 
