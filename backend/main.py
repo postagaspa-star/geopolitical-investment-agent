@@ -401,7 +401,7 @@ async def get_price_quotes(tickers: str = Query(default="")):
 
 
 @app.get("/api/trades")
-async def get_trades(limit: int = Query(default=50, ge=1, le=1000)):
+async def get_trades(limit: int = Query(default=50, ge=1, le=5000)):
     """
     Restituisce la cronologia dei trade con il ragionamento associato.
     Accetta il parametro ?limit per limitare il numero di risultati.
