@@ -203,7 +203,7 @@ async def _call_crypto_r1(system_prompt: str, user_message: str,
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
-        "max_tokens": 4500,
+        "max_tokens": 6000,   # era 4500: meno troncamenti (vedi v2_engine)
     }
 
     last_error = ""
@@ -584,14 +584,25 @@ async def execute_crypto_step(
     parsed = _parse_crypto_response(raw)
     if parsed.get("parse_failed"):
         # Stesso guardrail dell'engine equity: JSON trade corrotto/troncato
-        # → un retry, poi errore visibile (mai hold silenzioso).
+        # → un retry.
         logger.warning("[SIM-CRYPTO] decisione non parsabile, retry singolo")
         raw = await _call_crypto_r1(sys_prompt, user_msg)
         parsed = _parse_crypto_response(raw)
         if parsed.get("parse_failed"):
-            raise ValueError(
-                "Decisione AI non parsabile dopo retry (JSON troncato?) — "
-                "step abortito per non perdere trade in silenzio")
+            # NON abortire l'intera run per uno step non parsabile (vedi
+            # v2_engine): degrado a NO-TRADE visibile e proseguo.
+            logger.error("[SIM-CRYPTO] step %d: output non parsabile dopo "
+                         "retry → degrado a NO-TRADE (run NON abortita)",
+                         step_index)
+            parsed = {
+                "reading": parsed.get("reading") or "(output non parsabile)",
+                "reasoning": parsed.get("reasoning") or "",
+                "trades": [],
+                "hold_summary": "⚠ PARSE FAILED: output AI troncato/corrotto, "
+                                "step saltato senza trade (run non abortita).",
+                "raw": parsed.get("raw", ""),
+                "parse_failed": True,
+            }
 
     if tracking_id:
         try:

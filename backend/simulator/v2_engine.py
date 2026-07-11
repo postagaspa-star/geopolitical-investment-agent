@@ -711,7 +711,10 @@ async def _call_r1(system_prompt: str, user_message: str,
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-            "max_tokens": 4500,
+            # 6000 (era 4500): il prompt equity è lungo (regole regime +
+            # settori + exit_plan) → 4500 token di output troncavano spesso
+            # il JSON dei trade → parse_failed. Più margine = meno troncamenti.
+            "max_tokens": 6000,
         }
         cfg_failed = False
         for attempt in range(cfg_retries):
@@ -1195,15 +1198,30 @@ async def execute_step(
     raw = await _call_r1(sys_prompt, user_msg)
     parsed = _parse_response(raw)
     if parsed.get("parse_failed"):
-        # JSON dei trade presente ma corrotto/troncato: un retry, poi errore
-        # VISIBILE. Mai degradare in hold silenzioso (= trade decisi e persi).
+        # JSON dei trade presente ma corrotto/troncato: un retry.
         logger.warning("[SIM-V2] decisione non parsabile, retry singolo")
         raw = await _call_r1(sys_prompt, user_msg)
         parsed = _parse_response(raw)
         if parsed.get("parse_failed"):
-            raise ValueError(
-                "Decisione AI non parsabile dopo retry (JSON troncato?) — "
-                "step abortito per non perdere trade in silenzio")
+            # BUGFIX crash sistematico run EQUITY: prima qui si faceva
+            # raise ValueError → lo scheduler abortiva l'INTERA run
+            # multi-step. Il prompt equity è più lungo del crypto → si
+            # tronca più spesso → le run equity crashavano quasi sempre
+            # (auto-mode salvava ~solo crypto, 4:1). NON crashiamo più la
+            # run: degradiamo questo SINGOLO step a NO-TRADE in modo
+            # VISIBILE (log ERROR + hold_summary esplicito), così la run
+            # prosegue e si completa. Non è un hold silenzioso.
+            logger.error("[SIM-V2] step %d: output non parsabile dopo retry "
+                         "→ degrado a NO-TRADE (run NON abortita)", step_index)
+            parsed = {
+                "reading": parsed.get("reading") or "(output non parsabile)",
+                "reasoning": parsed.get("reasoning") or "",
+                "trades": [],
+                "hold_summary": "⚠ PARSE FAILED: output AI troncato/corrotto, "
+                                "step saltato senza trade (run non abortita).",
+                "raw": parsed.get("raw", ""),
+                "parse_failed": True,
+            }
 
     # 6. Apply trades — aggiorna lo status del registry
     if tracking_id:
