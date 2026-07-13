@@ -34,7 +34,7 @@ from simulator.v2_engine import (
     apply_trades, compute_portfolio_value, fetch_full_price_series,
     extract_prices_at_date, make_initial_portfolio, _parse_response,
     _classify_outcome, DEEPSEEK_API_URL, DEEPSEEK_R1, _get_deepseek_key,
-    _pnl_after_first_step,
+    _pnl_after_first_step, aggregate_run_conviction,
 )
 
 logger = logging.getLogger(__name__)
@@ -998,7 +998,10 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
             f"{scenario.get('period_start', '?')} → {scenario.get('period_end', '?')}"
         ),
         "asset_chosen": main_asset, "action_chosen": action_chosen,
-        "conviction": "MEDIA", "horizon": "2giorni",
+        # Conviction REALE aggregata dai trade dell'agente (era hardcoded
+        # "MEDIA": il 100% delle run risultava MEDIA — analisi 13/07).
+        "conviction": aggregate_run_conviction(history),
+        "horizon": "2giorni",
         # perf_1w = P&L dopo il 1° step (prima sempre 0); vedi v2_engine.
         "perf_1w": _pnl_after_first_step(final_result),
         "perf_1m": pnl_pct, "perf_3m": pnl_pct,

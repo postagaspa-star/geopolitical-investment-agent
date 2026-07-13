@@ -2158,6 +2158,58 @@ Stile delle risposte:
         return f"Errore advisor: {str(e)[:200]}"
 
 
+_VALID_CONVICTIONS = {"ALTA", "MEDIA", "BASSA"}
+
+
+def aggregate_run_conviction(history: list[dict]) -> str | None:
+    """
+    Conviction aggregata della run dai trade REALI dichiarati dall'agente
+    (history[].ai_trades[].conviction).
+
+    Regola: conviction del trade con allocation_pct massima nel PRIMO step
+    che contiene trade (e' la decisione d'ingresso, quella che definisce la
+    tesi della run). Se quel primo step non ha conviction valide, fallback:
+    moda pesata per allocation_pct su tutta la run.
+
+    Nessun trade in tutta la run -> None: l'assenza di trade non e' una
+    conviction, e "MEDIA" come default nascondeva il dato (tutte le run
+    risultavano MEDIA — vedi analisi 13/07).
+    """
+    def _conv(t: dict) -> str | None:
+        c = str(t.get("conviction") or "").strip().upper()
+        return c if c in _VALID_CONVICTIONS else None
+
+    def _alloc(t: dict) -> float:
+        try:
+            return float(t.get("allocation_pct") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # 1) primo step con trade: vince la conviction del trade piu' grosso
+    for step in history or []:
+        trades = [t for t in (step.get("ai_trades") or []) if isinstance(t, dict)]
+        if not trades:
+            continue
+        valid = [t for t in trades if _conv(t)]
+        if valid:
+            return _conv(max(valid, key=_alloc))
+        break  # trade presenti ma senza conviction valida -> fallback globale
+
+    # 2) fallback: moda pesata per allocazione su tutta la run
+    weights: dict[str, float] = {}
+    for step in history or []:
+        for t in (step.get("ai_trades") or []):
+            if not isinstance(t, dict):
+                continue
+            c = _conv(t)
+            if c:
+                # peso minimo 1: un trade senza allocazione conta comunque
+                weights[c] = weights.get(c, 0.0) + max(_alloc(t), 1.0)
+    if weights:
+        return max(weights, key=lambda k: weights[k])
+    return None
+
+
 def _pnl_after_first_step(final_result: dict) -> float:
     """
     Frazione di P&L dopo il PRIMO step, dai portfolio_value_series.
@@ -2233,7 +2285,9 @@ def _persist_run(scenario: dict, history: list[dict], final_result: dict,
         ),
         "asset_chosen": main_asset,
         "action_chosen": action_chosen,
-        "conviction": "MEDIA",   # aggregata, no singolo trade
+        # Conviction REALE aggregata dai trade dell'agente (era hardcoded
+        # "MEDIA": il 100% delle run risultava MEDIA — analisi 13/07).
+        "conviction": aggregate_run_conviction(history),
         "horizon": "1settimana",
         # perf_1w = P&L dopo il 1° step (datapoint precoce reale, non più 0);
         # perf_1m = P&L finale del run. perf_3m resta = perf_1m: un run V2
