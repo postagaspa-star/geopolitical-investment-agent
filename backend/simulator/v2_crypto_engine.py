@@ -33,8 +33,8 @@ import aiohttp
 from simulator.v2_engine import (
     apply_trades, compute_portfolio_value, fetch_full_price_series,
     extract_prices_at_date, make_initial_portfolio, _parse_response,
-    _classify_outcome, DEEPSEEK_API_URL, DEEPSEEK_R1, _get_deepseek_key,
-    _pnl_after_first_step, aggregate_run_conviction,
+    _classify_outcome, classify_outcome_v2, DEEPSEEK_API_URL, DEEPSEEK_R1,
+    _get_deepseek_key, _pnl_after_first_step, aggregate_run_conviction,
 )
 
 logger = logging.getLogger(__name__)
@@ -746,6 +746,11 @@ async def finalize_crypto_run(
         return_exceptions=False,
     )
 
+    # Outcome v2 (confronto a pari esposizione); il legacy resta salvato
+    # per confronto/rollback nella riclassificazione retroattiva.
+    _ov2 = classify_outcome_v2(final_valuation, history,
+                               benchmark_value_series, benchmark_pnl_pct)
+
     result = {
         "scenario_id": scenario.get("id"),
         "engine_mode": "crypto",
@@ -755,7 +760,9 @@ async def finalize_crypto_run(
         "benchmark_btc_pnl_pct": benchmark_pnl_pct,    # NB: BTC, non SPY
         "benchmark_spy_pnl_pct": benchmark_pnl_pct,    # alias per UI generico
         "benchmark_value_series": benchmark_value_series,
-        "outcome": _classify_outcome(final_valuation, benchmark_pnl_pct),
+        "outcome": _ov2["outcome"],
+        "outcome_legacy": _classify_outcome(final_valuation, benchmark_pnl_pct),
+        "outcome_v2_inputs": _ov2,
         "debrief": debrief,
         # Lessons learned: lista [{title, text, type}, ...] generata in parallel
         # al debrief; iniettata in _auto_save_thesis_advice per save automatico.
@@ -1014,6 +1021,8 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
         "full_data": {
             "engine": "simulator_v2_crypto",
             "scenario": scenario, "history": history,
+            "outcome_legacy": final_result.get("outcome_legacy"),
+            "outcome_v2_inputs": final_result.get("outcome_v2_inputs"),
             "final_valuation": final_result.get("final_valuation"),
             "benchmark_btc_pnl_pct": final_result.get("benchmark_btc_pnl_pct"),
             "benchmark_value_series": final_result.get("benchmark_value_series"),

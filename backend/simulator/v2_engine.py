@@ -1555,6 +1555,11 @@ async def finalize_run(
         return_exceptions=False,
     )
 
+    # Outcome v2 (confronto a pari esposizione); il legacy resta salvato
+    # per confronto/rollback nella riclassificazione retroattiva.
+    _ov2 = classify_outcome_v2(final_valuation, history,
+                               benchmark_value_series, benchmark_pnl_pct)
+
     result = {
         "scenario_id": scenario.get("id"),
         "final_date": final_date,
@@ -1562,7 +1567,9 @@ async def finalize_run(
         "final_valuation": final_valuation,
         "benchmark_spy_pnl_pct": benchmark_pnl_pct,
         "benchmark_value_series": benchmark_value_series,   # per chart vs benchmark
-        "outcome": _classify_outcome(final_valuation, benchmark_pnl_pct),
+        "outcome": _ov2["outcome"],
+        "outcome_legacy": _classify_outcome(final_valuation, benchmark_pnl_pct),
+        "outcome_v2_inputs": _ov2,
         "debrief": debrief,
         # Lista [{title, text, type}, ...] iniettata in _auto_save_thesis_advice
         "lessons_learned": lessons_learned or [],
@@ -1732,6 +1739,156 @@ def _classify_outcome(valuation: dict, benchmark_pct: Optional[float]) -> str:
 
     # ── Tutto il resto: giallo ──────────────────────────────────────────
     return "yellow"
+
+
+def _step_exposure(valuation: dict | None) -> float | None:
+    """
+    Esposizione NETTA del portafoglio da una valuation di step:
+    1 - cash/total_value. Con gli short il cash cresce oltre il total
+    → esposizione negativa (beta negativo vs benchmark): corretto per il
+    calcolo dello shadow. Clamp [-1.5, 1.5] contro valuation degeneri.
+    None se la valuation non e' utilizzabile.
+    """
+    if not isinstance(valuation, dict):
+        return None
+    try:
+        total = float(valuation.get("total_value") or 0)
+        cash = float(valuation.get("cash") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return round(max(-1.5, min(1.5, 1.0 - cash / total)), 6)
+
+
+def compute_shadow_return_pct(history: list[dict],
+                              benchmark_value_series: list[dict]) -> float | None:
+    """
+    Rendimento % del "benchmark ombra": cosa avrebbe reso un portafoglio
+    passivo con la STESSA esposizione per-step dell'agente, investita sul
+    benchmark. E' il confronto a pari prudenza — il benchmark 100% investito
+    contro un portafoglio al 12-17% e' la causa n.1 del giallo-tutto
+    (analisi 13/07).
+
+    shadow = 100 * Σ_k exposure(t_k) * (bench[k+1]/bench[k] - 1)
+
+    dove exposure(t_k) e' l'esposizione netta del portafoglio alla data del
+    punto k della serie benchmark (dopo i trade dello step k; 0 al punto T0
+    pre-trade). Somma semplice, non composta: adeguata su run brevi.
+
+    Ritorna None se serie o history non sono utilizzabili (il chiamante
+    fa fallback sui criteri legacy).
+    """
+    series = [p for p in (benchmark_value_series or [])
+              if isinstance(p, dict) and p.get("value")]
+    if len(series) < 2 or not history:
+        return None
+
+    # step_index -> esposizione dopo i trade di quello step
+    exp_map: dict[int, float] = {}
+    for h in history:
+        if not isinstance(h, dict):
+            continue
+        e = _step_exposure(h.get("valuation_after"))
+        if e is not None and h.get("step_index") is not None:
+            exp_map[int(h["step_index"])] = e
+    if not exp_map:
+        return None
+
+    shadow = 0.0
+    last_exp = 0.0
+    for k in range(len(series) - 1):
+        try:
+            v0 = float(series[k]["value"])
+            v1 = float(series[k + 1]["value"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if v0 <= 0:
+            continue
+        idx = series[k].get("step_index")
+        if idx is not None and int(idx) in exp_map:
+            last_exp = exp_map[int(idx)]
+        exp = 0.0 if (idx is not None and int(idx) == -1) else last_exp
+        shadow += exp * (v1 / v0 - 1.0)
+    return round(shadow * 100.0, 4)
+
+
+def classify_outcome_v2(final_valuation: dict, history: list[dict],
+                        benchmark_value_series: list[dict],
+                        benchmark_pnl_pct: Optional[float]) -> dict:
+    """
+    Outcome v2: giudica la DECISIONE a pari esposizione, non il portafoglio
+    contro un benchmark full-invested.
+
+    Sostituisce i criteri legacy (_classify_outcome) che producevano ~60%
+    di run gialle: le difese riuscite in crash (pnl<0 ma molto meglio del
+    mercato) e il cash-drag nei rally (pnl>0 ma molto peggio) non avevano
+    mai un verdetto netto (analisi 13/07).
+
+    REGOLE (in ordine):
+      1. pnl <= -3.0%                              -> red   (override gravita')
+      2. HOLD puro (zero trade eseguiti, |expo|~0):
+           bench <= -1.5% -> green (danno evitato)
+           bench >= +1.5% -> red   (occasione persa)
+           altrimenti     -> yellow
+      3. delta_eq = pnl - shadow (benchmark a pari esposizione):
+           >= +0.4 -> green ; <= -0.4 -> red ; zona morta -> yellow
+      4. Dati insufficienti -> fallback criteri legacy.
+
+    Ritorna un dict con outcome + input di calcolo (salvati in full_data
+    per trasparenza e per la riclassificazione retroattiva).
+    """
+    pnl = float((final_valuation or {}).get("total_pnl_pct", 0) or 0)
+
+    exposures = []
+    for h in history or []:
+        if isinstance(h, dict):
+            e = _step_exposure(h.get("valuation_after"))
+            if e is not None:
+                exposures.append(e)
+    exposure_avg = (round(sum(exposures) / len(exposures), 4)
+                    if exposures else None)
+
+    def _result(outcome, method, shadow=None, delta_eq=None):
+        return {
+            "outcome": outcome, "method": method,
+            "shadow_benchmark_pct": shadow, "delta_eq": delta_eq,
+            "exposure_avg": exposure_avg,
+        }
+
+    # 1) Override gravita': una perdita grossa resta rossa comunque.
+    if pnl <= -3.0:
+        return _result("red", "pnl_override")
+
+    # 2) HOLD puro: giudica la scelta di stare fuori dal mercato.
+    executed = any(
+        str(t.get("status", "")).startswith("executed")
+        for h in (history or []) if isinstance(h, dict)
+        for t in (h.get("applied_trades") or []) if isinstance(t, dict)
+    )
+    abs_expo_avg = (sum(abs(e) for e in exposures) / len(exposures)
+                    if exposures else 0.0)
+    if not executed and abs_expo_avg < 0.02 and benchmark_pnl_pct is not None:
+        b = float(benchmark_pnl_pct)
+        if b <= -1.5:
+            return _result("green", "hold_rule")
+        if b >= 1.5:
+            return _result("red", "hold_rule")
+        return _result("yellow", "hold_rule")
+
+    # 3) Confronto a pari esposizione.
+    shadow = compute_shadow_return_pct(history, benchmark_value_series)
+    if shadow is not None:
+        delta_eq = round(pnl - shadow, 4)
+        if delta_eq >= 0.4:
+            return _result("green", "shadow_v2", shadow, delta_eq)
+        if delta_eq <= -0.4:
+            return _result("red", "shadow_v2", shadow, delta_eq)
+        return _result("yellow", "shadow_v2", shadow, delta_eq)
+
+    # 4) Fallback: dati insufficienti -> criteri legacy.
+    return _result(_classify_outcome(final_valuation, benchmark_pnl_pct),
+                   "legacy_fallback")
 
 
 async def _generate_lessons_learned(
@@ -2306,6 +2463,8 @@ def _persist_run(scenario: dict, history: list[dict], final_result: dict,
             "engine": "simulator_v2",
             "scenario": scenario,
             "history": history,
+            "outcome_legacy": final_result.get("outcome_legacy"),
+            "outcome_v2_inputs": final_result.get("outcome_v2_inputs"),
             "final_valuation": final_result.get("final_valuation"),
             "benchmark_spy_pnl_pct": final_result.get("benchmark_spy_pnl_pct"),
             "benchmark_value_series": final_result.get("benchmark_value_series"),

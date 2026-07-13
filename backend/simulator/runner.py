@@ -1134,6 +1134,9 @@ def _build_run_data(run_id: str, state: dict) -> dict:
     perf_1w = _position_pnl(asset_1w, entry_action)
     perf_1m = _position_pnl(asset_1m, entry_action)
     perf_3m = _position_pnl(asset_3m, entry_action)
+    # LEGACY (motore V1): benchmark COSTANTI finti, non calcolati dai dati.
+    # I motori V2 usano classify_outcome_v2 (shadow benchmark a pari
+    # esposizione, v2_engine.py); il V1 resta com'era — non estenderlo.
     perf_sp_1m = 0.02
     perf_sector_1m = 0.015
     perf_monkey_1m = 0.005
