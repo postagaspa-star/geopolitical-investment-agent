@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -33,7 +34,8 @@ import aiohttp
 from simulator.v2_engine import (
     apply_trades, compute_portfolio_value, fetch_full_price_series,
     extract_prices_at_date, make_initial_portfolio, _parse_response,
-    _classify_outcome, classify_outcome_v2, DEEPSEEK_API_URL, DEEPSEEK_R1,
+    _classify_outcome, classify_outcome_v2, compute_shadow_return_pct,
+    _build_benchmark_value_series, DEEPSEEK_API_URL, DEEPSEEK_R1,
     _get_deepseek_key, _pnl_after_first_step, aggregate_run_conviction,
 )
 
@@ -706,7 +708,6 @@ async def finalize_crypto_run(
 
     # ── Benchmark equity curve BTC buy-and-hold ────────────────────────────
     # Riusa la helper di v2_engine: stessa logica della SPY series.
-    from simulator.v2_engine import _build_benchmark_value_series
     benchmark_value_series = _build_benchmark_value_series(
         price_series, "BTC-USD", step_dates, initial, history, final_date
     )
@@ -960,6 +961,62 @@ Stile risposte:
         return f"Errore advisor: {str(e)[:200]}"
 
 
+def _compute_crypto_benchmarks(scenario: dict, history: list[dict],
+                               run_id: str, main_asset: str | None,
+                               pnl_frac: float) -> tuple[float | None, float | None, dict]:
+    """
+    Benchmark aggiuntivi per le run crypto (analisi 13/07: perf_monkey e
+    delta_monkey erano SEMPRE 0 per crypto — esisteva solo BTC buy&hold).
+
+    - MONKEY: un asset A CASO dall'universo dello scenario, valutato con la
+      STESSA esposizione per-step dell'agente ("una scimmia prudente quanto
+      te, ma senza criterio nella scelta"). Seed = run_id: deterministico e
+      riproducibile dal full_data.
+    - MAIN-ASSET B&H: buy&hold dell'asset piu' tradato dall'agente. Solo in
+      full_data (NON in perf_sector_1m: l'etichetta UI "Settore" mentirebbe).
+
+    Ritorna (perf_monkey_frac, delta_monkey_frac, blocco_full_data).
+    """
+    empty = (None, None, {})
+    step_dates = scenario.get("step_dates") or []
+    price_series = scenario.get("price_series") or {}
+    if len(step_dates) < 2 or not price_series or not history:
+        return empty
+    t0_date, final_date = step_dates[0], step_dates[-1]
+
+    def _bh_pct(asset: str) -> float | None:
+        serie = price_series.get(asset) or {}
+        p0, p1 = serie.get(t0_date), serie.get(final_date)
+        if p0 and p1 and p0 > 0:
+            return round((p1 / p0 - 1.0) * 100.0, 4)
+        return None
+
+    # Monkey: candidati = universo con serie prezzi utilizzabile
+    candidates = sorted(
+        t for t in (scenario.get("asset_universe") or [])
+        if (price_series.get(t) or {}).get(t0_date)
+        and (price_series.get(t) or {}).get(final_date)
+    )
+    monkey_asset, monkey_pct = None, None
+    if candidates:
+        monkey_asset = random.Random(run_id).choice(candidates)
+        # Scala della curva irrilevante: conta solo il rapporto tra punti.
+        curve = _build_benchmark_value_series(
+            price_series, monkey_asset, step_dates, 100000.0,
+            history, final_date)
+        monkey_pct = compute_shadow_return_pct(history, curve)
+
+    monkey_frac = round(monkey_pct / 100.0, 6) if monkey_pct is not None else None
+    delta_frac = (round(pnl_frac - monkey_frac, 6)
+                  if monkey_frac is not None else None)
+    block = {
+        "monkey_asset": monkey_asset,
+        "monkey_shadow_pct": monkey_pct,
+        "main_asset_bh_pct": _bh_pct(main_asset) if main_asset else None,
+    }
+    return monkey_frac, delta_frac, block
+
+
 def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
                           run_mode: str = "manual") -> str:
     """
@@ -986,6 +1043,9 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
 
     pnl_pct = final_result["final_valuation"].get("total_pnl_pct", 0) / 100.0
     bench_pct = (final_result.get("benchmark_btc_pnl_pct") or 0) / 100.0
+
+    monkey_frac, delta_monkey_frac, crypto_benchmarks = _compute_crypto_benchmarks(
+        scenario, history, run_id, main_asset, pnl_pct)
 
     _now_iso = datetime.now(timezone.utc).isoformat()
     run_data = {
@@ -1014,6 +1074,9 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
         "perf_1m": pnl_pct, "perf_3m": pnl_pct,
         "perf_sp_1m": bench_pct,    # benchmark BTC stored qui per coerenza UI
         "delta_sp": pnl_pct - bench_pct,
+        # Monkey a pari esposizione (prima: sempre 0 per crypto)
+        "perf_monkey_1m": monkey_frac,
+        "delta_monkey": delta_monkey_frac,
         "outcome": final_result.get("outcome", "yellow"),
         "original_thesis": (history[0].get("ai_reasoning", "") if history else "")[:1500],
         "what_happened": final_result.get("description_reveal", "")[:1500],
@@ -1023,6 +1086,7 @@ def _persist_crypto_run(scenario: dict, history: list[dict], final_result: dict,
             "scenario": scenario, "history": history,
             "outcome_legacy": final_result.get("outcome_legacy"),
             "outcome_v2_inputs": final_result.get("outcome_v2_inputs"),
+            "crypto_benchmarks": crypto_benchmarks,
             "final_valuation": final_result.get("final_valuation"),
             "benchmark_btc_pnl_pct": final_result.get("benchmark_btc_pnl_pct"),
             "benchmark_value_series": final_result.get("benchmark_value_series"),
