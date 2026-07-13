@@ -648,6 +648,42 @@ def get_run(run_id: str) -> dict | None:
     return None
 
 
+def update_run_outcome(run_id: str, outcome: str, full_data: dict) -> bool:
+    """
+    Aggiorna outcome + full_data di un run GIA' salvato. Usato SOLO dalla
+    riclassificazione retroattiva (tools/reclassify_outcomes.py, Step 4
+    analisi 13/07) — il flusso normale passa da insert_run.
+
+    Scrive sul tier primario: Supabase sim_runs se configurato, altrimenti
+    SQLite. Niente fallback multipli: se il tier primario fallisce ritorna
+    False e il chiamante segnala il run come non aggiornato.
+    """
+    payload_fd = (json.dumps(full_data, default=str)
+                  if isinstance(full_data, (dict, list)) else full_data)
+    client = _get_client()
+    if client:
+        try:
+            client.table("sim_runs").update(
+                {"outcome": outcome, "full_data": payload_fd}
+            ).eq("id", run_id).execute()
+            return True
+        except Exception as exc:
+            logger.error("[SIM] update_run_outcome Supabase fallito per %s: %s",
+                         run_id, str(exc)[:200])
+            return False
+    try:
+        import db_sqlite
+        with db_sqlite.get_db() as conn:
+            cur = conn.execute(
+                "UPDATE sim_runs SET outcome=?, full_data=? WHERE id=?",
+                (outcome, payload_fd, run_id))
+            return cur.rowcount > 0
+    except Exception as exc:
+        logger.error("[SIM] update_run_outcome SQLite fallito per %s: %s",
+                     run_id, str(exc)[:200])
+        return False
+
+
 # Campi scalari di sim_runs (TUTTI tranne full_data). list_runs() li
 # seleziona esplicitamente per NON trascinare la colonna full_data JSONB
 # (steps/price_chart/scatter/reasoning: 50-200 KB per run). Caricare
