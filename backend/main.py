@@ -50,6 +50,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Simulator schema init fallita (non bloccante): %s", e)
 
+    # Colonna trades.execution_type (idempotente, fail-safe): equivalente
+    # automatico di migrations/add_execution_type.sql. Se fallisce (es.
+    # DATABASE_URL assente) insert_trade ha comunque il retry senza colonna.
+    try:
+        _ok, _msg = database.ensure_trades_execution_type()
+        logger.info("ensure_trades_execution_type: %s (%s)", _ok, _msg)
+    except Exception as e:
+        logger.warning("ensure_trades_execution_type fallita (non bloccante): %s", e)
+
     # Self-healing: se sim_runs è (diventata) disponibile, travasa i run
     # rimasti nel fallback sim_settings dentro la tabella vera. No-op
     # rapido se la tabella manca ancora o il fallback è vuoto.
@@ -2401,6 +2410,79 @@ async def sim_set_auto_mode(payload: dict):
     sim_db.set_setting("auto_mode_enabled", "true" if enabled else "false")
     sim_db.set_setting("auto_mode_daily_cap", str(cap))
     return {"enabled": enabled, "daily_cap": cap}
+
+
+# ── Flag del Simulator (Step 5/9b analisi 13/07) ─────────────────────────
+# Whitelist esplicita: questo endpoint NON permette scritture arbitrarie
+# su sim_settings, solo i flag comportamentali documentati.
+_SIM_FLAGS_WHITELIST = {
+    "sim_stop_enforcement_enabled",
+    "sim_trend_participation_enabled",
+}
+
+
+@app.get("/api/simulator/flags")
+async def sim_get_flags():
+    from simulator import db as sim_db
+    return {k: (sim_db.get_setting(k, "false") or "false").strip().lower()
+            in ("1", "true", "yes", "on")
+            for k in sorted(_SIM_FLAGS_WHITELIST)}
+
+
+@app.post("/api/simulator/flags")
+async def sim_set_flags(payload: dict):
+    """Body: {"<flag>": true|false, ...} — solo chiavi in whitelist."""
+    from simulator import db as sim_db
+    unknown = [k for k in payload if k not in _SIM_FLAGS_WHITELIST]
+    if unknown:
+        return JSONResponse(status_code=400, content={
+            "error": f"flag non riconosciuti: {unknown}",
+            "whitelist": sorted(_SIM_FLAGS_WHITELIST)})
+    for k, v in payload.items():
+        sim_db.set_setting(k, "true" if bool(v) else "false")
+    return await sim_get_flags()
+
+
+@app.post("/api/simulator/reclassify-v2")
+async def sim_reclassify_v2(apply: bool = Query(default=False),
+                            limit: int = Query(default=None, ge=1, le=500),
+                            offset: int = Query(default=0, ge=0)):
+    """
+    Riclassificazione retroattiva outcome v2, server-side (le credenziali
+    Supabase stanno gia' qui). Default DRY-RUN: nessuna scrittura senza
+    apply=true. Stesso core dello script tools/reclassify_outcomes.py.
+    """
+    try:
+        from simulator.reclassify import reclassify
+        res = reclassify(apply=apply, limit=limit, offset=offset)
+        from collections import Counter as _C
+        return {
+            "apply": apply,
+            "processed": len(res["rows"]),
+            "applied": res["applied"],
+            "matrix": dict(res["matrix"]),
+            "before": dict(_C(r["old"] for r in res["rows"])),
+            "after": dict(_C(r["new"] for r in res["rows"])),
+            "skipped": [{"run_id": rid, "reason": why}
+                        for rid, why in res["skipped"]],
+            "rows": res["rows"],
+        }
+    except Exception as e:
+        logger.error("sim_reclassify_v2 error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500,
+                            content={"error": str(e), "type": type(e).__name__})
+
+
+@app.post("/api/admin/ensure-execution-type")
+async def admin_ensure_execution_type():
+    """Forza l'auto-migrazione trades.execution_type (idempotente) —
+    pattern di /api/chat/init-tables."""
+    try:
+        ok, msg = database.ensure_trades_execution_type()
+        return {"ok": ok, "message": msg}
+    except Exception as e:
+        return JSONResponse(status_code=500,
+                            content={"ok": False, "error": str(e)})
 
 
 @app.get("/api/simulator/analytics")

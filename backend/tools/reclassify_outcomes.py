@@ -11,6 +11,10 @@ COSA FA
   full_data.outcome_legacy (mai sovrascritto se gia' presente: rollback
   sempre possibile).
 
+  Il core vive in simulator/reclassify.py ed e' esposto anche come
+  endpoint server-side: POST /api/simulator/reclassify-v2?apply=true
+  (utile quando le credenziali Supabase non sono disponibili in locale).
+
 ENV
   SUPABASE_URL / SUPABASE_KEY  -> lavora sul DB di produzione.
   Nessuna env                  -> lavora sul SQLite locale (dev/test).
@@ -35,83 +39,7 @@ _BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-V2_ENGINES = {"simulator_v2", "simulator_v2_crypto"}
-
-
-def _bench_pct(full_data: dict) -> float | None:
-    """Benchmark % totale del run: BTC per crypto, SPY per equity."""
-    for key in ("benchmark_btc_pnl_pct", "benchmark_spy_pnl_pct"):
-        v = full_data.get(key)
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                pass
-    return None
-
-
-def reclassify(apply: bool = False, limit: int | None = None,
-               offset: int = 0) -> dict:
-    """
-    Core riusabile (testato in test_reclassify_outcomes.py).
-    Ritorna {"rows": [...], "matrix": Counter, "skipped": [...], "applied": n}.
-    """
-    from simulator import db as sim_db
-    from simulator.v2_engine import classify_outcome_v2
-
-    supabase_mode = bool(os.environ.get("SUPABASE_URL")
-                         and os.environ.get("SUPABASE_KEY"))
-
-    light = sim_db.list_runs(limit=500) or []
-    ids = [r.get("id") for r in light if r.get("id")]
-    ids = ids[offset: offset + limit if limit else None]
-
-    rows, skipped, applied = [], [], 0
-    matrix: Counter = Counter()
-
-    for rid in ids:
-        run = sim_db.get_run(rid)
-        if not run:
-            skipped.append((rid, "run non trovato"))
-            continue
-        fd = run.get("full_data") or {}
-        if not isinstance(fd, dict):
-            skipped.append((rid, "full_data non parsabile"))
-            continue
-        engine = fd.get("engine")
-        if engine not in V2_ENGINES:
-            skipped.append((rid, f"engine {engine or 'v1'} non v2"))
-            continue
-        # Prudenza: in modalita' Supabase applica solo righe lette dal
-        # tier primario (get_run ha fallback multipli non aggiornabili).
-        if apply and supabase_mode and run.get("_source") != "supabase":
-            skipped.append((rid, f"sorgente {run.get('_source')} non primaria"))
-            continue
-
-        history = fd.get("history") or []
-        series = fd.get("benchmark_value_series") or []
-        valuation = fd.get("final_valuation") or {}
-        if not history or not valuation:
-            skipped.append((rid, "history/final_valuation mancanti"))
-            continue
-
-        old = run.get("outcome") or "?"
-        v2 = classify_outcome_v2(valuation, history, series, _bench_pct(fd))
-        new = v2["outcome"]
-        matrix[f"{old}->{new}"] += 1
-        rows.append({"run_id": rid, "old": old, "new": new,
-                     "delta_eq": v2.get("delta_eq"), "method": v2["method"]})
-
-        if apply:
-            fd.setdefault("outcome_legacy", old)   # mai sovrascritto
-            fd["outcome_v2_inputs"] = v2
-            if sim_db.update_run_outcome(rid, new, fd):
-                applied += 1
-            else:
-                skipped.append((rid, "update fallito"))
-
-    return {"rows": rows, "matrix": matrix, "skipped": skipped,
-            "applied": applied}
+from simulator.reclassify import reclassify  # noqa: E402  (re-export per i test)
 
 
 def main() -> int:

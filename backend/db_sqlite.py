@@ -570,6 +570,12 @@ def count_positions():
     with get_db() as conn:
         return conn.execute("SELECT COUNT(*) as cnt FROM positions").fetchone()["cnt"]
 
+def ensure_trades_execution_type() -> tuple[bool, str]:
+    """Parita' di interfaccia con db_supabase: su SQLite la colonna e il
+    backfill sono gia' gestiti dall'ALTER auto in init_db()."""
+    return True, "SQLite: colonna gestita da init_db()"
+
+
 def _normalize_confidence(confidence):
     """
     Igiene confidence (analisi 13/07: nel DB convivevano 0.72 in scala

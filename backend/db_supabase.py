@@ -584,6 +584,78 @@ def count_positions():
 # Trades
 # ============================================================
 
+def ensure_trades_execution_type() -> tuple[bool, str]:
+    """
+    Auto-migrazione della colonna trades.execution_type (Step 6 analisi
+    13/07) via psycopg2 — stesso canale DDL di ensure_chat_tables e di
+    simulator.ensure_schema (gia' funzionante in prod: sim_runs esiste).
+
+    Idempotente: probe della colonna via REST; se manca, ALTER + backfill
+    dai tag testuali + riparazione confidence frazionarie + indice.
+    Ritorna (ok, messaggio). Chiamata fail-safe al boot (lifespan) e
+    on-demand da POST /api/admin/ensure-execution-type.
+
+    E' l'equivalente automatico di migrations/add_execution_type.sql
+    (che resta la via manuale documentata).
+    """
+    # Probe: la colonna esiste gia'?
+    try:
+        client = _get_client()
+        client.table("trades").select("execution_type").limit(1).execute()
+        return True, "colonna execution_type gia' presente"
+    except Exception as exc:
+        if "execution_type" not in str(exc).lower():
+            return False, f"probe fallita (non per colonna mancante): {exc}"
+
+    # Colonna mancante: DDL via psycopg2 (serve DATABASE_URL o derivata)
+    db_url = os.environ.get("DATABASE_URL", "").strip()
+    if not db_url:
+        sup_url = os.environ.get("SUPABASE_URL", "")
+        db_pass = os.environ.get("SUPABASE_DB_PASSWORD", "").strip()
+        if sup_url and db_pass:
+            try:
+                ref = sup_url.split("//")[1].split(".")[0]
+                db_url = (f"postgresql://postgres.{ref}:{db_pass}"
+                          f"@aws-0-eu-central-1.pooler.supabase.com:6543/postgres")
+            except Exception:
+                pass
+    if not db_url:
+        return False, ("DATABASE_URL non configurato: esegui manualmente "
+                       "migrations/add_execution_type.sql sul Dashboard")
+
+    ddl = """
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS execution_type TEXT;
+UPDATE trades SET execution_type = CASE
+  WHEN geopolitical_reasoning LIKE 'FAIL-CLOSED%'               THEN 'fail_closed'
+  WHEN geopolitical_reasoning = 'stop_enforced'                 THEN 'stop_enforced'
+  WHEN geopolitical_reasoning = 'partial_sl'                    THEN 'partial_sl'
+  WHEN geopolitical_reasoning = 'partial_tp'                    THEN 'partial_tp'
+  WHEN geopolitical_reasoning LIKE 'auto_stop_loss%'
+    OR geopolitical_reasoning LIKE 'auto_take_profit%'          THEN 'auto_exit'
+  WHEN geopolitical_reasoning LIKE 'CIRCUIT_BREAKER_LIQUIDATE%' THEN 'liquidation'
+  WHEN geopolitical_reasoning = '(scalper)'                     THEN 'scalper'
+  WHEN geopolitical_reasoning LIKE '[ORCHESTRATOR]%'            THEN 'orchestrator'
+  WHEN geopolitical_reasoning = '(airbag deterministico)'       THEN 'airbag'
+  ELSE 'ai' END
+WHERE execution_type IS NULL;
+UPDATE trades SET confidence_score = ROUND(confidence_score * 100)
+WHERE confidence_score > 0 AND confidence_score <= 1;
+CREATE INDEX IF NOT EXISTS idx_trades_execution_type ON trades(execution_type);
+"""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(ddl)
+        conn.close()
+        logger.info("ensure_trades_execution_type: migrazione applicata via psycopg2")
+        return True, "migrazione execution_type applicata (colonna + backfill + indice)"
+    except Exception as exc:
+        logger.error("ensure_trades_execution_type: DDL fallita: %s", exc)
+        return False, f"DDL fallita: {exc}"
+
+
 def _normalize_confidence(confidence):
     """
     Igiene confidence (analisi 13/07: nel DB convivevano 0.72 in scala
