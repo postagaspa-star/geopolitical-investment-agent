@@ -431,7 +431,8 @@ def can_buy(ticker, quantity, price):
     return True, "Acquisto consentito"
 
 
-def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confidence):
+def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confidence,
+                execution_type="ai"):
     """
     Esegue un ordine di acquisto verificando solo la disponibilita' di liquidita'.
     L'AI decide autonomamente quando e quanto comprare.
@@ -518,6 +519,7 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
             geo_reasoning,
             (tech_reasoning or "") + fee_note,
             decision_text, confidence,
+            execution_type=execution_type,
         )
     except Exception as ex:
         _alert_trade_not_logged("buy", ticker, quantity, price, ex)
@@ -538,7 +540,8 @@ def execute_buy(ticker, quantity, price, geo_reasoning, tech_reasoning, confiden
     }
 
 
-def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confidence):
+def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confidence,
+                 execution_type="ai"):
     """
     Esegue un ordine di vendita verificando solo che la posizione esista.
     L'AI decide autonomamente quando e quanto vendere.
@@ -642,6 +645,7 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
             geo_reasoning,
             (tech_reasoning or "") + fee_note,
             decision_text, confidence,
+            execution_type=execution_type,
         )
     except Exception as ex:
         _alert_trade_not_logged("sell", ticker, quantity, price, ex)
@@ -668,7 +672,7 @@ def execute_sell(ticker, quantity, price, geo_reasoning, tech_reasoning, confide
 # ═══════════════════════════════════════════════════════════════════════
 
 def execute_short(ticker, quantity, price, geo_reasoning, tech_reasoning,
-                  confidence):
+                  confidence, execution_type="ai"):
     """
     Apre (o incrementa) una posizione SHORT: 'vende' allo scoperto N azioni
     a prezzo P incassandone i proventi. Si guadagna se il prezzo SCENDE.
@@ -763,7 +767,7 @@ def execute_short(ticker, quantity, price, geo_reasoning, tech_reasoning,
         trade_id = insert_trade(
             ticker, "SELL", quantity, price, geo_reasoning,
             (tech_reasoning or "") + fee_note, decision_text, confidence,
-            direction="SHORT",
+            direction="SHORT", execution_type=execution_type,
         )
     except Exception as ex:
         _alert_trade_not_logged("short", ticker, quantity, price, ex)
@@ -786,7 +790,7 @@ def execute_short(ticker, quantity, price, geo_reasoning, tech_reasoning,
 
 
 def execute_cover(ticker, quantity, price, geo_reasoning, tech_reasoning,
-                  confidence):
+                  confidence, execution_type="ai"):
     """
     Chiude (o riduce) una posizione SHORT: 'ricompra' N azioni a prezzo P
     per restituirle. Realized P&L = (prezzo_short - prezzo_cover)*qty - fee
@@ -858,7 +862,7 @@ def execute_cover(ticker, quantity, price, geo_reasoning, tech_reasoning,
         trade_id = insert_trade(
             ticker, "BUY", quantity, price, geo_reasoning,
             (tech_reasoning or "") + fee_note, decision_text, confidence,
-            direction="SHORT",
+            direction="SHORT", execution_type=execution_type,
         )
     except Exception as ex:
         _alert_trade_not_logged("cover", ticker, quantity, price, ex)
@@ -1292,11 +1296,13 @@ def check_and_execute_partial_exits(prices: dict | None = None) -> list:
             if is_short:
                 result = execute_cover(ticker, close_qty, cur_price,
                                        geo_reasoning=f"partial_{kind.lower()}",
-                                       tech_reasoning=reason, confidence=100)
+                                       tech_reasoning=reason, confidence=None,
+                                       execution_type=f"partial_{kind.lower()}")
             else:
                 result = execute_sell(ticker, close_qty, cur_price,
                                       geo_reasoning=f"partial_{kind.lower()}",
-                                      tech_reasoning=reason, confidence=100)
+                                      tech_reasoning=reason, confidence=None,
+                                      execution_type=f"partial_{kind.lower()}")
         except Exception as e:
             logger.warning("[PARTIAL-EXIT] execute fallita %s: %s", ticker, e)
             continue
@@ -1456,10 +1462,12 @@ def enforce_stops(prices: dict | None = None) -> list:
             try:
                 if is_short:
                     result = execute_cover(ticker, qty, cur, geo_reasoning="stop_enforced",
-                                           tech_reasoning=reason, confidence=100)
+                                           tech_reasoning=reason, confidence=None,
+                                           execution_type="stop_enforced")
                 else:
                     result = execute_sell(ticker, qty, cur, geo_reasoning="stop_enforced",
-                                          tech_reasoning=reason, confidence=100)
+                                          tech_reasoning=reason, confidence=None,
+                                          execution_type="stop_enforced")
             except Exception as e:
                 logger.warning("[ENFORCE-STOP] execute fallita %s: %s", ticker, e)
                 continue
@@ -1482,7 +1490,8 @@ def enforce_stops(prices: dict | None = None) -> list:
 
 
 def close_position_market(ticker, quantity, price, geo_reasoning,
-                          tech_reasoning, confidence=100):
+                          tech_reasoning, confidence=100,
+                          execution_type="ai"):
     """Chiude (a mercato) una posizione instradando per DIREZIONE:
     SHORT → execute_cover, LONG → execute_sell. Prima close_position e
     liquidate_all chiamavano sempre execute_sell, che su una SHORT torna
@@ -1493,9 +1502,11 @@ def close_position_market(ticker, quantity, price, geo_reasoning,
         return {"success": False, "reason": f"Nessuna posizione aperta per {ticker}"}
     if str(existing.get("direction") or "LONG").upper() == "SHORT":
         return execute_cover(ticker, quantity, price, geo_reasoning,
-                             tech_reasoning, confidence)
+                             tech_reasoning, confidence,
+                             execution_type=execution_type)
     return execute_sell(ticker, quantity, price, geo_reasoning,
-                        tech_reasoning, confidence)
+                        tech_reasoning, confidence,
+                        execution_type=execution_type)
 
 
 def liquidate_all_positions(reason: str = "circuit_breaker",
@@ -1547,7 +1558,8 @@ def liquidate_all_positions(reason: str = "circuit_breaker",
                 ticker, qty, cur,
                 geo_reasoning=f"CIRCUIT_BREAKER_LIQUIDATE: {reason}",
                 tech_reasoning=f"(forced close, qty={qty}, price={cur:.4f})",
-                confidence=100,
+                confidence=None,
+                execution_type="liquidation",
             )
             executed.append({
                 "ticker": ticker, "qty": qty, "price": cur,
@@ -1751,22 +1763,24 @@ def check_and_execute_auto_exits(prices: dict | None = None) -> list:
             continue
 
         # Esegui la chiusura parziale (o totale se sell_pct=100).
-        # SHORT → COVER (ricompra); LONG → SELL. confidence=100 marca
-        # l'operazione come chiusura non-AI (auto-exit).
+        # SHORT → COVER (ricompra); LONG → SELL. execution_type='auto_exit'
+        # marca l'operazione come chiusura non-AI (confidence non applicabile).
         try:
             if is_short:
                 result = execute_cover(
                     ticker, sell_qty, cur_price,
                     geo_reasoning=f"auto_{trigger}",
                     tech_reasoning=reason,
-                    confidence=100,
+                    confidence=None,
+                    execution_type="auto_exit",
                 )
             else:
                 result = execute_sell(
                     ticker, sell_qty, cur_price,
                     geo_reasoning=f"auto_{trigger}",
                     tech_reasoning=reason,
-                    confidence=100,
+                    confidence=None,
+                    execution_type="auto_exit",
                 )
             executed.append({
                 "ticker": ticker, "trigger": trigger,

@@ -798,12 +798,14 @@ def _enforce_open_has_stop(action, ticker, quantity, current_price,
             close_res = portfolio.execute_cover(
                 ticker, quantity, current_price,
                 geo_reasoning="FAIL-CLOSED: SL obbligatorio non settabile",
-                tech_reasoning=str(reason), confidence=0)
+                tech_reasoning=str(reason), confidence=None,
+                execution_type="fail_closed")
         else:
             close_res = portfolio.execute_sell(
                 ticker, quantity, current_price,
                 geo_reasoning="FAIL-CLOSED: SL obbligatorio non settabile",
-                tech_reasoning=str(reason), confidence=0)
+                tech_reasoning=str(reason), confidence=None,
+                execution_type="fail_closed")
     except Exception as exc:
         close_res = {"success": False, "reason": f"close exception: {exc}"}
     close_ok = bool(isinstance(close_res, dict) and close_res.get("success"))

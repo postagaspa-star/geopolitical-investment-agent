@@ -501,6 +501,7 @@ def _execute_liquidation(action: dict, run_id: str) -> dict:
             geo_reasoning="[ORCHESTRATOR] Cross-agent capital reallocation",
             tech_reasoning=action.get("rationale", "Capital orchestrator directive"),
             confidence=85,
+            execution_type="orchestrator",
         )
         if direction == "SHORT":
             result = _pf.execute_cover(**common)

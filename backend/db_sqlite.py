@@ -58,6 +58,7 @@ def init_db():
                 geopolitical_reasoning TEXT, technical_reasoning TEXT,
                 final_decision TEXT, confidence_score REAL,
                 direction TEXT NOT NULL DEFAULT 'LONG',
+                execution_type TEXT DEFAULT 'ai',
                 timestamp TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS agent_logs (
@@ -290,6 +291,35 @@ def init_db():
                     f"NOT NULL DEFAULT 'LONG'")
             except Exception:
                 pass
+
+        # ── execution_type: distingue trade AI da esecuzioni meccaniche ──
+        # (auto stop loss, trailing, fail-closed, ...). Prima erano
+        # distinguibili solo dai tag testuali in geopolitical_reasoning e
+        # inquinavano le analisi confidence (analisi 13/07). Backfill con
+        # la stessa euristica di migrations/add_execution_type.sql.
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN execution_type TEXT DEFAULT 'ai'")
+            conn.execute("""
+                UPDATE trades SET execution_type = CASE
+                  WHEN geopolitical_reasoning LIKE 'FAIL-CLOSED%'               THEN 'fail_closed'
+                  WHEN geopolitical_reasoning = 'stop_enforced'                 THEN 'stop_enforced'
+                  WHEN geopolitical_reasoning = 'partial_sl'                    THEN 'partial_sl'
+                  WHEN geopolitical_reasoning = 'partial_tp'                    THEN 'partial_tp'
+                  WHEN geopolitical_reasoning LIKE 'auto_stop_loss%'
+                    OR geopolitical_reasoning LIKE 'auto_take_profit%'          THEN 'auto_exit'
+                  WHEN geopolitical_reasoning LIKE 'CIRCUIT_BREAKER_LIQUIDATE%' THEN 'liquidation'
+                  WHEN geopolitical_reasoning = '(scalper)'                     THEN 'scalper'
+                  WHEN geopolitical_reasoning LIKE '[ORCHESTRATOR]%'            THEN 'orchestrator'
+                  WHEN geopolitical_reasoning = '(airbag deterministico)'       THEN 'airbag'
+                  ELSE 'ai' END
+                WHERE execution_type IS NULL OR execution_type = 'ai'
+            """)
+            conn.execute("""
+                UPDATE trades SET confidence_score = ROUND(confidence_score*100)
+                WHERE confidence_score > 0 AND confidence_score <= 1
+            """)
+        except Exception:
+            pass
 
         # ── Migrazione documenti: aggiunta colonna category ──
         # Permette di separare documenti generici (per Decision normale)
@@ -540,8 +570,28 @@ def count_positions():
     with get_db() as conn:
         return conn.execute("SELECT COUNT(*) as cnt FROM positions").fetchone()["cnt"]
 
+def _normalize_confidence(confidence):
+    """
+    Igiene confidence (analisi 13/07: nel DB convivevano 0.72 in scala
+    frazionaria, 0/100 dei trade meccanici e 58-85 dell'AI):
+      - None resta None (trade meccanici: la confidence non si applica)
+      - 0 < c <= 1 -> frazione salvata per errore: riscalata a 0-100
+      - clamp [0, 100]
+    """
+    if confidence is None:
+        return None
+    try:
+        c = float(confidence)
+    except (TypeError, ValueError):
+        return None
+    if 0 < c <= 1:
+        c = c * 100
+    return max(0, min(100, round(c)))
+
+
 def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
-                 final_decision, confidence, direction="LONG"):
+                 final_decision, confidence, direction="LONG",
+                 execution_type="ai"):
     """
     Inserisce un trade e ritorna l'ID della riga creata.
 
@@ -549,18 +599,45 @@ def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
     book long da quelle sul book short. action resta 'BUY'/'SELL' (il
     verbo di mercato): aprire uno short e' un SELL+SHORT, coprirlo e'
     un BUY+SHORT.
+
+    execution_type = chi ha originato il trade: 'ai' (decisione LLM),
+    'scalper', 'orchestrator', 'airbag', 'partial_sl', 'partial_tp',
+    'stop_enforced', 'auto_exit', 'fail_closed', 'liquidation'.
+    I trade meccanici passano confidence=None.
     """
     direction = "SHORT" if str(direction).upper() == "SHORT" else "LONG"
+    execution_type = (str(execution_type or "ai").strip().lower())[:32]
+    confidence = _normalize_confidence(confidence)
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO trades (ticker,action,quantity,price,total_value,geopolitical_reasoning,technical_reasoning,final_decision,confidence_score,direction) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (ticker, action, quantity, price, price*quantity, geo_reasoning, tech_reasoning, final_decision, confidence, direction),
+            "INSERT INTO trades (ticker,action,quantity,price,total_value,geopolitical_reasoning,technical_reasoning,final_decision,confidence_score,direction,execution_type) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (ticker, action, quantity, price, price*quantity, geo_reasoning, tech_reasoning, final_decision, confidence, direction, execution_type),
         )
         return cur.lastrowid
 
 def get_trades(limit=50):
     with get_db() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?", (limit,)).fetchall()]
+
+
+def get_recent_trades_by_ticker(ticker, hours, execution_types=None):
+    """
+    Trade recenti su un ticker (finestra in ore), dal piu' recente.
+    Il filtro execution_type e' fatto in Python: resiliente a righe
+    pre-migrazione senza la colonna (trattate come 'ai').
+    """
+    minutes = max(1, int(float(hours) * 60))
+    with get_db() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM trades WHERE ticker=? AND timestamp >= "
+            "datetime('now', ?) ORDER BY timestamp DESC",
+            (ticker, f"-{minutes} minutes"),
+        ).fetchall()]
+    if execution_types:
+        allowed = {str(e).strip().lower() for e in execution_types}
+        rows = [r for r in rows
+                if str(r.get("execution_type") or "ai").strip().lower() in allowed]
+    return rows
 
 
 def update_trade_mirror_status(trade_id, status, reason=None, increment_attempts=True):

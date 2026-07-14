@@ -805,18 +805,22 @@ async def _execute_scalper_action(portfolio, database, run_id, ticker, act) -> b
     note = f"[SCALPER] {act.reason}"
 
     def _buy():
-        return portfolio.execute_buy(ticker, units, price, "(scalper)", note, 70)
+        return portfolio.execute_buy(ticker, units, price, "(scalper)", note, 70,
+                                     execution_type="scalper")
 
     def _sell_all():
         pos = _current_qty(database, ticker)
-        return portfolio.execute_sell(ticker, pos, price, "(scalper)", note, 70) if pos > 0 else None
+        return portfolio.execute_sell(ticker, pos, price, "(scalper)", note, 70,
+                                      execution_type="scalper") if pos > 0 else None
 
     def _short():
-        return portfolio.execute_short(ticker, units, price, "(scalper)", note, 70)
+        return portfolio.execute_short(ticker, units, price, "(scalper)", note, 70,
+                                       execution_type="scalper")
 
     def _cover_all():
         pos = _current_qty(database, ticker)
-        return portfolio.execute_cover(ticker, abs(pos), price, "(scalper)", note, 70) if pos else None
+        return portfolio.execute_cover(ticker, abs(pos), price, "(scalper)", note, 70,
+                                       execution_type="scalper") if pos else None
 
     loop = asyncio.get_running_loop()
     try:

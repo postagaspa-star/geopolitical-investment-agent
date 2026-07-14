@@ -168,7 +168,8 @@ def run_airbag(run_id: str | None = None) -> dict:
                 geo_reasoning="(airbag deterministico)",
                 tech_reasoning=f"AIRBAG: mercato in DOWNTREND macro confermato "
                                f"(BTC settimanale) → metto in cash per protezione.",
-                confidence=100,
+                confidence=None,
+                execution_type="airbag",
             )
             ok = isinstance(res, dict) and res.get("success")
             sold.append({"ticker": ticker, "qty": qty, "price": price, "ok": bool(ok)})

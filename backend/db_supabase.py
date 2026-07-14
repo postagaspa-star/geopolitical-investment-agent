@@ -584,17 +584,43 @@ def count_positions():
 # Trades
 # ============================================================
 
+def _normalize_confidence(confidence):
+    """
+    Igiene confidence (analisi 13/07: nel DB convivevano 0.72 in scala
+    frazionaria, 0/100 dei trade meccanici e 58-85 dell'AI):
+      - None resta None (trade meccanici: la confidence non si applica)
+      - 0 < c <= 1 -> frazione salvata per errore: riscalata a 0-100
+      - clamp [0, 100]
+    """
+    if confidence is None:
+        return None
+    try:
+        c = float(confidence)
+    except (TypeError, ValueError):
+        return None
+    if 0 < c <= 1:
+        c = c * 100
+    return max(0, min(100, round(c)))
+
+
 def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
-                 final_decision, confidence, direction="LONG"):
+                 final_decision, confidence, direction="LONG",
+                 execution_type="ai"):
     """
     Inserisce un trade e ritorna l'ID della riga creata.
 
     direction = 'LONG' | 'SHORT' — tag che distingue le operazioni sul
     book long da quelle short (aprire short = SELL+SHORT, coprire =
     BUY+SHORT). action resta il verbo di mercato 'BUY'/'SELL'.
+
+    execution_type = chi ha originato il trade: 'ai' (decisione LLM),
+    'scalper', 'orchestrator', 'airbag', 'partial_sl', 'partial_tp',
+    'stop_enforced', 'auto_exit', 'fail_closed', 'liquidation'.
+    I trade meccanici passano confidence=None.
     """
     client = _get_client()
     direction = "SHORT" if str(direction).upper() == "SHORT" else "LONG"
+    execution_type = (str(execution_type or "ai").strip().lower())[:32]
     payload = {
         "ticker": ticker,
         "action": action,
@@ -604,21 +630,28 @@ def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
         "geopolitical_reasoning": geo_reasoning,
         "technical_reasoning": tech_reasoning,
         "final_decision": final_decision,
-        "confidence_score": confidence,
+        "confidence_score": _normalize_confidence(confidence),
     }
-    try:
-        result = client.table("trades").insert({**payload, "direction": direction}).execute()
-    except Exception as exc:
-        # Resilienza finestra di deploy: colonna 'direction' non ancora
-        # presente → inserisci senza tag invece di perdere il trade.
-        if "direction" in str(exc).lower():
-            logger.warning("insert_trade: colonna 'direction' assente su "
-                           "Supabase — inserisco senza tag (applica la "
-                           "migration add_short_direction.sql)")
-            result = client.table("trades").insert(payload).execute()
-        else:
-            raise
-    if result.data and len(result.data) > 0:
+    # Colonne aggiunte da migration: se una manca (finestra di deploy),
+    # riprova senza quella colonna invece di perdere il trade — stesso
+    # pattern del fallback 'direction' (add_short_direction.sql).
+    extras = {"direction": direction, "execution_type": execution_type}
+    result = None
+    for _attempt in range(len(extras) + 1):
+        try:
+            result = client.table("trades").insert({**payload, **extras}).execute()
+            break
+        except Exception as exc:
+            missing = [k for k in list(extras) if k in str(exc).lower()]
+            if not missing:
+                raise
+            for k in missing:
+                extras.pop(k, None)
+            logger.warning("insert_trade: colonne %s assenti su Supabase — "
+                           "inserisco senza (applica le migration "
+                           "add_short_direction.sql / add_execution_type.sql)",
+                           missing)
+    if result is not None and result.data and len(result.data) > 0:
         return result.data[0].get("id")
     return None
 
@@ -627,6 +660,25 @@ def get_trades(limit=50):
     client = _get_client()
     result = client.table("trades").select("*").order("timestamp", desc=True).limit(limit).execute()
     return result.data or []
+
+
+def get_recent_trades_by_ticker(ticker, hours, execution_types=None):
+    """
+    Trade recenti su un ticker (finestra in ore), dal piu' recente.
+    Il filtro execution_type e' fatto in Python: resiliente a righe
+    pre-migrazione senza la colonna (trattate come 'ai').
+    """
+    client = _get_client()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=float(hours))).isoformat()
+    result = (client.table("trades").select("*")
+              .eq("ticker", ticker).gte("timestamp", cutoff)
+              .order("timestamp", desc=True).execute())
+    rows = result.data or []
+    if execution_types:
+        allowed = {str(e).strip().lower() for e in execution_types}
+        rows = [r for r in rows
+                if str(r.get("execution_type") or "ai").strip().lower() in allowed]
+    return rows
 
 
 def update_trade_mirror_status(trade_id, status, reason=None, increment_attempts=True):

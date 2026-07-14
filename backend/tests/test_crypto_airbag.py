@@ -66,8 +66,10 @@ def _install_fakes(enabled=True, regime="UPTREND", positions=None, state="armed"
     # fake portfolio
     fake_pf = types.SimpleNamespace()
 
-    def execute_sell(ticker, qty, price, geo_reasoning, tech_reasoning, confidence):
-        calls["sold"].append({"ticker": ticker, "qty": qty, "price": price})
+    def execute_sell(ticker, qty, price, geo_reasoning, tech_reasoning,
+                     confidence, execution_type="ai"):
+        calls["sold"].append({"ticker": ticker, "qty": qty, "price": price,
+                              "execution_type": execution_type})
         return {"success": True}
     fake_pf.execute_sell = execute_sell
     sys.modules["portfolio"] = fake_pf
