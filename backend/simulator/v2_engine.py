@@ -1176,6 +1176,11 @@ async def start_run(
                 pass
             logger.info("[SIM-V2] iniettati %d advice per categoria %s",
                         len(ids), cat_key)
+        # Calibrazione conviction (Step 9a analisi 13/07): auto-skip
+        # finche' non ci sono abbastanza run con conviction reale.
+        calib = sim_advisor.build_conviction_calibration_block(is_crypto=False)
+        if calib:
+            advice_block_text = (advice_block_text + "\n\n" + calib).strip()
     except Exception as e:
         logger.debug("[SIM-V2] advice injection skipped: %s", e)
 
@@ -1656,21 +1661,22 @@ async def finalize_run(
         periods_per_year=_metrics.ANNUALIZATION_EQUITY,
     )
 
+    # Outcome v2 (confronto a pari esposizione); il legacy resta salvato
+    # per confronto/rollback nella riclassificazione retroattiva.
+    # Calcolato PRIMA del debrief cosi' la narrativa e' allineata al colore.
+    _ov2 = classify_outcome_v2(final_valuation, history,
+                               benchmark_value_series, benchmark_pnl_pct)
+
     # Debrief AI (narrativa) + Lessons learned (insights azionabili).
     # Eseguiti in parallelo per minimizzare la latenza del finalize_run:
     # entrambi sono chiamate AI separate ma indipendenti.
     debrief, lessons_learned = await asyncio.gather(
         _generate_debrief(scenario, history, final_valuation,
-                          benchmark_pnl_pct, reveal),
+                          benchmark_pnl_pct, reveal, outcome_v2=_ov2),
         _generate_lessons_learned(scenario, history, final_valuation,
                                    benchmark_pnl_pct, reveal),
         return_exceptions=False,
     )
-
-    # Outcome v2 (confronto a pari esposizione); il legacy resta salvato
-    # per confronto/rollback nella riclassificazione retroattiva.
-    _ov2 = classify_outcome_v2(final_valuation, history,
-                               benchmark_value_series, benchmark_pnl_pct)
 
     result = {
         "scenario_id": scenario.get("id"),
@@ -2266,9 +2272,32 @@ def _auto_save_thesis_advice(scenario: dict, final_result: dict,
                     "(category %s)", saved_count, persisted_run_id, category_key)
 
 
+def _outcome_v2_debrief_lines(outcome_v2: dict | None) -> str:
+    """Righe per il prompt del debrief con gli input dell'outcome v2:
+    la narrativa DEVE essere coerente col colore assegnato (Step 9c)."""
+    if not isinstance(outcome_v2, dict) or not outcome_v2.get("outcome"):
+        return ""
+    shadow = outcome_v2.get("shadow_benchmark_pct")
+    delta = outcome_v2.get("delta_eq")
+    expo = outcome_v2.get("exposure_avg")
+    parts = [f"Verdetto assegnato: {str(outcome_v2['outcome']).upper()} "
+             f"(metodo {outcome_v2.get('method')})"]
+    if shadow is not None:
+        parts.append(f"Benchmark ombra a pari esposizione: {shadow:+.2f}%")
+    if delta is not None:
+        parts.append(f"Delta vs ombra: {delta:+.2f} punti")
+    if expo is not None:
+        parts.append(f"Esposizione media: {expo * 100:.0f}%")
+    return ("\n".join(parts) +
+            "\nIl tuo verdetto narrativo DEVE essere coerente con questi "
+            "numeri (giudica la decisione a pari esposizione, non il P&L "
+            "assoluto).\n")
+
+
 async def _generate_debrief(
     scenario: dict, history: list[dict], final_valuation: dict,
-    benchmark_pct: Optional[float], reveal: str
+    benchmark_pct: Optional[float], reveal: str,
+    outcome_v2: dict | None = None
 ) -> str:
     """Genera un debrief sintetico (1 chiamata R1 leggera)."""
     debrief_prompt = """Sei un coach di trading. Riassumi in 4-6 frasi (formato narrativo,
@@ -2297,6 +2326,7 @@ Non superare 600 caratteri totali."""
         f"Storia delle decisioni: {' | '.join(history_summary)}\n"
         f"P&L finale portafoglio: {pnl:+.2f}%\n"
         f"P&L benchmark SPY: {bench_str}\n"
+        + _outcome_v2_debrief_lines(outcome_v2) +
         f"Cosa è successo davvero: {reveal[:600]}\n\n"
         f"Riassumi la partita in 4-6 frasi."
     )

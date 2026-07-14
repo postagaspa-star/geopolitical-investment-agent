@@ -911,6 +911,57 @@ async def chat_with_advisor(
 
 # ─── Helper esposto al runner per iniettare advice ──────────────────────────
 
+def build_conviction_calibration_block(is_crypto: bool, min_n: int = 10) -> str:
+    """
+    Tabella calibrazione conviction -> esito dalle run REALI (Step 9a
+    analisi 13/07: la conviction ALTA rendeva PEGGIO della MEDIA — P&L
+    medio -0.84% vs -0.29% — ma l'agente non poteva saperlo perche' il
+    campo salvato era hardcoded MEDIA).
+
+    Conviction a livello di RUN (trade dominante, v. v2_engine.
+    aggregate_run_conviction). Classi con meno di min_n run omesse;
+    stringa vuota se nessuna classe qualifica (auto-skip: il blocco
+    diventa informativo solo quando si accumulano run col fix attivo).
+    """
+    try:
+        from simulator import db as sim_db
+        runs = sim_db.list_runs(limit=500) or []
+    except Exception as e:
+        logger.debug("calibrazione conviction: list_runs fallita: %s", e)
+        return ""
+    # horizon discrimina il motore sui record light: crypto=2giorni
+    want_horizon = "2giorni" if is_crypto else "1settimana"
+    per_class: dict[str, dict] = {}
+    for r in runs:
+        if r.get("horizon") != want_horizon:
+            continue
+        conv = str(r.get("conviction") or "").upper()
+        if conv not in ("ALTA", "MEDIA", "BASSA"):
+            continue
+        d = per_class.setdefault(conv, {"n": 0, "green": 0, "pnl": 0.0})
+        d["n"] += 1
+        d["green"] += 1 if r.get("outcome") == "green" else 0
+        try:
+            d["pnl"] += float(r.get("perf_1m") or 0)
+        except (TypeError, ValueError):
+            pass
+    lines = []
+    for conv in ("ALTA", "MEDIA", "BASSA"):
+        d = per_class.get(conv)
+        if not d or d["n"] < min_n:
+            continue
+        lines.append(f"  • {conv}: {d['n']} run, verdi "
+                     f"{d['green'] / d['n'] * 100:.0f}%, P&L medio "
+                     f"{d['pnl'] / d['n'] * 100:+.2f}%")
+    if not lines:
+        return ""
+    return ("CALIBRAZIONE CONVICTION (dalle tue run passate; conviction "
+            "a livello di RUN = trade dominante):\n" + "\n".join(lines) +
+            "\n  → Se la tua ALTA non rende più della tua MEDIA, la "
+            "conviction dichiarata è mal calibrata: alza l'asticella "
+            "per dichiarare ALTA.")
+
+
 def get_advice_block_for_runner(scenario: dict, max_items: int = 5) -> tuple[str, str, list[str]]:
     """
     Chiamato da runner.py all'inizio di un run. Ritorna:

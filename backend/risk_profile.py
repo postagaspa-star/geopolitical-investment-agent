@@ -138,6 +138,49 @@ def list_profiles() -> dict:
     }
 
 
+# ─── Trend participation (Step 9b analisi 13/07, flag OFF default) ─────────
+# Il Live operava ~80% cash anche in trend confermato: prudenza fissa che
+# in bull diventa la prima causa di sottoperformance. Con flag ON e regime
+# BTC UPTREND (macchina a stati settimanale dell'airbag, deterministica),
+# il cap per-posizione crypto sale di x1.5 (mai oltre il 30% del NAV).
+# UNICA fonte per prompt (build_risk_block) e governor (validate_trade):
+# cosi' non possono divergere (prompt che promette 18% e governor che
+# blocca a 12% = trade rifiutati a raffica).
+
+SETTING_LIVE_TREND_PARTICIPATION = "live_trend_participation_enabled"
+TREND_PARTICIPATION_MULT = 1.5
+TREND_PARTICIPATION_ABS_CAP = 30.0   # % NAV: tetto assoluto
+
+
+def trend_participation_active(asset_class: str = "crypto") -> bool:
+    """True solo se: flag ON + asset_class crypto + regime BTC UPTREND.
+    Fail-safe: qualsiasi errore (settings, fetch regime) -> False."""
+    if asset_class != "crypto":
+        return False
+    try:
+        import database as _db
+        on = (_db.get_setting(SETTING_LIVE_TREND_PARTICIPATION, "false")
+              or "false").strip().lower() in ("1", "true", "yes", "on")
+        if not on:
+            return False
+        from agents import crypto_airbag as _ab
+        return _ab.detect_market_regime() == "UPTREND"
+    except Exception as e:
+        logger.debug("trend_participation_active: fail-safe OFF (%s)", e)
+        return False
+
+
+def _apply_trend_participation(max_pos: float, asset_class: str,
+                               active: bool | None = None) -> tuple[float, bool]:
+    """(cap_effettivo, attiva). active passabile per test/riuso."""
+    if active is None:
+        active = trend_participation_active(asset_class)
+    if not active:
+        return max_pos, False
+    return min(max_pos * TREND_PARTICIPATION_MULT,
+               TREND_PARTICIPATION_ABS_CAP), True
+
+
 # ─── Prompt block ──────────────────────────────────────────────────────────
 
 def build_risk_block(asset_class: str = "equity") -> str:
@@ -153,6 +196,9 @@ def build_risk_block(asset_class: str = "equity") -> str:
     primary_pos = p["max_position_pct_crypto"] if is_crypto else p["max_position_pct_equity"]
     primary_sl_min = p["sl_min_pct_crypto"] if is_crypto else p["sl_min_pct_equity"]
     primary_sl_max = p["sl_max_pct_crypto"] if is_crypto else p["sl_max_pct_equity"]
+
+    # Trend participation (Step 9b): stesso calcolo del governor, mai divergente
+    primary_pos, _tp_active = _apply_trend_participation(primary_pos, asset_class)
 
     # Cap posizioni per asset class
     cap_crypto = p.get("max_open_positions_crypto", p["max_open_positions"])
@@ -185,6 +231,16 @@ def build_risk_block(asset_class: str = "equity") -> str:
         f"IMPORTANTE per crypto: il sub-cap di {cap_crypto} posizioni e' uno",
         "stretto, non un suggerimento. Anche se il cap globale e' piu' alto,",
         "le crypto hanno volatilita' tale da giustificare un limite separato.",
+    ]
+    if _tp_active:
+        lines += [
+            "",
+            "🚀 TREND PARTICIPATION ATTIVA (regime BTC UPTREND confermato):",
+            f"   il cap per posizione e' ALZATO a {primary_pos:.1f}%. In un bull",
+            "   confermato la sottoesposizione e' il costo principale: con tesi",
+            "   confermata usa il cap, senza allentare stop e disciplina.",
+        ]
+    lines += [
         "█" * 60,
         "",
     ]
@@ -259,6 +315,10 @@ def validate_trade(
     p = get_active_profile()
     is_crypto = asset_class == "crypto"
     max_pos = p["max_position_pct_crypto"] if is_crypto else p["max_position_pct_equity"]
+
+    # Trend participation (Step 9b): stesso calcolo di build_risk_block —
+    # il cap promesso nel prompt e quello applicato qui non possono divergere.
+    max_pos, _ = _apply_trend_participation(max_pos, asset_class)
 
     # Cintura SATELLITE (universo esteso): sizing ridotto. tier='core' (default)
     # = comportamento INVARIATO. Non tocca il crypto.

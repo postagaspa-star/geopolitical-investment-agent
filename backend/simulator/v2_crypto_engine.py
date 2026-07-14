@@ -356,8 +356,38 @@ async def start_crypto_run(
                 pass
             logger.info("[SIM-CRYPTO] iniettati %d advice per categoria %s",
                         len(ids), cat_key)
+        # Calibrazione conviction (Step 9a analisi 13/07): auto-skip
+        # finche' non ci sono abbastanza run con conviction reale.
+        calib = sim_advisor.build_conviction_calibration_block(is_crypto=True)
+        if calib:
+            advice_block_text = (advice_block_text + "\n\n" + calib).strip()
     except Exception as e:
         logger.debug("[SIM-CRYPTO] advice injection skipped: %s", e)
+
+    # ── Trend participation (Step 9b analisi 13/07, flag OFF default) ────
+    # Negli scenari bull il portafoglio restava investito al 12-17% e ogni
+    # run finiva sotto il benchmark. Con flag ON e scenario bull_cycle:
+    # cap per-trade 50% (nel PARSER, il gate reale) + guida esplicita.
+    max_alloc_pct = 30.0
+    try:
+        from simulator import db as sim_db
+        _tp_on = (sim_db.get_setting("sim_trend_participation_enabled", "false")
+                  or "false").strip().lower() in ("1", "true", "yes", "on")
+        if _tp_on and scenario.get("category") == "bull_cycle":
+            max_alloc_pct = 50.0
+            tp_block = (
+                "TREND PARTICIPATION ATTIVA (scenario bull):\n"
+                "  • Cap per posizione ALZATO a 50% (default 30%).\n"
+                "  • Con tesi confermata dal turno precedente (posizione in "
+                "profitto), l'esposizione target è >= 50% del capitale: in "
+                "un bull confermato il cash oltre il 50% è la prima causa "
+                "di sottoperformance vs benchmark.\n"
+                "  • Le regole di uscita NON cambiano: stop dichiarati e "
+                "rispettati.")
+            advice_block_text = (advice_block_text + "\n\n" + tp_block).strip()
+            logger.info("[SIM-CRYPTO] trend participation ON: max_alloc 50%%")
+    except Exception as e:
+        logger.debug("[SIM-CRYPTO] trend participation skip: %s", e)
 
     return {
         "scenario": {
@@ -378,6 +408,9 @@ async def start_crypto_run(
             "commission_bps": bps,
             "advice_block": advice_block_text,
             "advice_meta": advice_meta,
+            # Cap allocazione per-trade: 30 default, 50 con trend
+            # participation attiva (letto da execute_crypto_step → parser).
+            "max_alloc_pct": max_alloc_pct,
             "tracking_id": tracking_id,
             "run_mode": run_mode,
         },
@@ -523,8 +556,10 @@ def _build_crypto_step_message(
     return "\n".join(parts)
 
 
-def _parse_crypto_response(raw: str) -> dict:
-    """Parse + validazione: ogni asset deve essere crypto, allocation max 30%."""
+def _parse_crypto_response(raw: str, max_alloc: float = 30.0) -> dict:
+    """Parse + validazione: ogni asset deve essere crypto, allocation
+    cap a max_alloc (30 default; 50 con trend participation attiva —
+    il clamp del parser e' il gate REALE, il prompt da solo e' testo)."""
     parsed = _parse_response(raw)
     valid_trades = []
     for t in parsed.get("trades", []):
@@ -533,8 +568,7 @@ def _parse_crypto_response(raw: str) -> dict:
         if not (asset.endswith("-USD") and len(asset) > 4):
             logger.warning("[SIM-CRYPTO] trade scartato (non crypto): %s", t)
             continue
-        # Cap allocation_pct a 30
-        alloc = min(float(t.get("allocation_pct", 0) or 0), 30.0)
+        alloc = min(float(t.get("allocation_pct", 0) or 0), float(max_alloc))
         if alloc <= 0:
             continue
         valid_trades.append({**t, "allocation_pct": alloc})
@@ -598,14 +632,17 @@ async def execute_crypto_step(
     advice_block = (scenario.get("advice_block") or "").strip()
     if advice_block:
         sys_prompt = advice_block + "\n\n" + ("═" * 60) + "\n" + sys_prompt
+    # Cap allocazione: 30 default, 50 con trend participation (Step 9b)
+    _max_alloc = float(scenario.get("max_alloc_pct") or 30.0)
+
     raw = await _call_crypto_r1(sys_prompt, user_msg)
-    parsed = _parse_crypto_response(raw)
+    parsed = _parse_crypto_response(raw, max_alloc=_max_alloc)
     if parsed.get("parse_failed"):
         # Stesso guardrail dell'engine equity: JSON trade corrotto/troncato
         # → un retry.
         logger.warning("[SIM-CRYPTO] decisione non parsabile, retry singolo")
         raw = await _call_crypto_r1(sys_prompt, user_msg)
-        parsed = _parse_crypto_response(raw)
+        parsed = _parse_crypto_response(raw, max_alloc=_max_alloc)
         if parsed.get("parse_failed"):
             # NON abortire l'intera run per uno step non parsabile (vedi
             # v2_engine): degrado a NO-TRADE visibile e proseguo.
@@ -752,22 +789,23 @@ async def finalize_crypto_run(
         periods_per_year=_metrics.ANNUALIZATION_CRYPTO,
     )
 
+    # Outcome v2 (confronto a pari esposizione); il legacy resta salvato
+    # per confronto/rollback nella riclassificazione retroattiva.
+    # Calcolato PRIMA del debrief cosi' la narrativa e' allineata al colore.
+    _ov2 = classify_outcome_v2(final_valuation, history,
+                               benchmark_value_series, benchmark_pnl_pct)
+
     # Debrief AI (narrativa) + Lessons learned crypto-tailored, in parallelo.
     # _generate_lessons_learned è in v2_engine ed è generico (funziona anche
     # per crypto perché il prompt accetta qualsiasi tipo di scenario).
     from simulator.v2_engine import _generate_lessons_learned as _gen_lessons
     debrief, lessons_learned = await asyncio.gather(
         _generate_crypto_debrief(scenario, history, final_valuation,
-                                  benchmark_pnl_pct, reveal),
+                                  benchmark_pnl_pct, reveal, outcome_v2=_ov2),
         _gen_lessons(scenario, history, final_valuation,
                      benchmark_pnl_pct, reveal),
         return_exceptions=False,
     )
-
-    # Outcome v2 (confronto a pari esposizione); il legacy resta salvato
-    # per confronto/rollback nella riclassificazione retroattiva.
-    _ov2 = classify_outcome_v2(final_valuation, history,
-                               benchmark_value_series, benchmark_pnl_pct)
 
     result = {
         "scenario_id": scenario.get("id"),
@@ -840,7 +878,8 @@ async def finalize_crypto_run(
 
 async def _generate_crypto_debrief(
     scenario: dict, history: list[dict], final_valuation: dict,
-    benchmark_pct: Optional[float], reveal: str
+    benchmark_pct: Optional[float], reveal: str,
+    outcome_v2: dict | None = None
 ) -> str:
     """Debrief crypto-tailored."""
     debrief_prompt = """Sei un coach di trading crypto. Riassumi in 4-6 frasi
@@ -863,11 +902,13 @@ late entry, missed rotation BTC→alt o viceversa. Massimo 600 caratteri."""
 
     pnl = final_valuation.get("total_pnl_pct", 0)
     bench_str = f"{benchmark_pct:.2f}%" if benchmark_pct is not None else "n/d"
+    from simulator.v2_engine import _outcome_v2_debrief_lines
     user_msg = (
         f"Scenario crypto: {scenario.get('title')}\n"
         f"Decisioni: {' | '.join(history_summary)}\n"
         f"P&L portafoglio: {pnl:+.2f}%\n"
         f"Benchmark BTC buy&hold: {bench_str}\n"
+        + _outcome_v2_debrief_lines(outcome_v2) +
         f"Cosa è successo davvero: {reveal[:600]}\n\n"
         f"Riassumi la partita in 4-6 frasi crypto-savvy."
     )
