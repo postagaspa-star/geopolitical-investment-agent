@@ -255,7 +255,8 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine, NESSUNA OMISSIONE)
           "conviction": "BASSA" | "MEDIA" | "ALTA",
           "thesis": "Una frase: perché questo trade per la prossima settimana",
           "rr": "upside +X% vs downside -Y% → ratio Z (deve essere >= 1.5)",
-          "exit_plan": "stop: <condizione/livello che invalida la tesi> | target: <quando incassi o rivaluti>"
+          "exit_plan": "stop: <condizione/livello che invalida la tesi> | target: <quando incassi o rivaluti>",
+          "stop_loss_target": null | <PREZZO ASSOLUTO (es. 150.50), NON percentuale>
         }
       ],
       "hold_summary": "Frase breve sulle posizioni che mantieni invariate (se ce ne sono)"
@@ -274,6 +275,9 @@ REGOLE PER trades:
   numero generico). Se ratio < 1.5 il trade NON va aperto — è un
   NON-trade. Questo campo rende verificabile la disciplina R/R della
   sezione 6.C: un trade senza rr coerente è un errore di processo.
+- "stop_loss_target" FACOLTATIVO ma, se popolato, VINCOLANTE: prezzo
+  assoluto a cui la posizione viene chiusa AUTOMATICAMENTE dal motore
+  prima del tuo turno successivo (long: prezzo <= stop; short: >= stop)
 - "exit_plan" OBBLIGATORIO su ogni BUY e ogni SHORT: PRIMA di entrare
   dichiari a che condizioni esci — uno stop (il livello/evento che
   invalida la tesi) e un target (quando incassi o rivaluti). Livelli in
@@ -481,7 +485,11 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
         action = (trade.get("action") or "").upper()
         asset = trade.get("asset", "").upper()
         alloc_pct = float(trade.get("allocation_pct", 0))
-        if not asset or alloc_pct <= 0 or action not in ("BUY", "SELL"):
+        # _force_close (chiave privata, usata da enforce_sim_stops): chiude
+        # la posizione INTERA a qty esatta, senza matematica allocation_pct.
+        force_close = bool(trade.get("_force_close"))
+        if not asset or (alloc_pct <= 0 and not force_close) \
+                or action not in ("BUY", "SELL"):
             continue
         price = prices.get(asset)
         if not price or price <= 0:
@@ -498,14 +506,22 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
         # Calcola dollar amount = % del valore totale corrente
         dollar_amount = total_value_now * (alloc_pct / 100.0)
         quantity = round(dollar_amount / price, 4)
-        if quantity <= 0:
-            applied_trades.append({**trade, "status": "skipped",
-                                   "reason": "quantity rounds to 0"})
-            continue
 
         # Trova posizione esistente per questo asset
         existing = next((p for p in new_portfolio["positions"]
                          if p["asset"] == asset), None)
+
+        if force_close:
+            if not existing:
+                applied_trades.append({**trade, "status": "skipped",
+                                       "reason": "no position to force-close"})
+                continue
+            quantity = existing["quantity"]
+
+        if quantity <= 0:
+            applied_trades.append({**trade, "status": "skipped",
+                                   "reason": "quantity rounds to 0"})
+            continue
 
         # Trade-record builder che riflette gli effettivi valori eseguiti
         # (FIX: prima si scriveva l'allocation_pct ORIGINALE anche dopo
@@ -551,6 +567,8 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                 existing["avg_entry_price"] = round(new_avg, 4)
                 if trade.get("exit_plan"):
                     existing["exit_plan"] = str(trade["exit_plan"])[:250]
+                if _stop_target_of(trade) is not None:
+                    existing["stop_loss_target"] = _stop_target_of(trade)
                 applied_trades.append(_record(quantity, "executed_add_long", fee=fee))
             elif existing and existing.get("side") == "short":
                 # BUY su SHORT = riacquista (chiude). FIX accounting:
@@ -572,6 +590,7 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                         "thesis": trade.get("thesis", "")[:300],
                         "conviction": trade.get("conviction", "MEDIA"),
                         "exit_plan": (trade.get("exit_plan") or "")[:250],
+                        "stop_loss_target": _stop_target_of(trade),
                     })
                     applied_trades.append(_record(quantity, "executed_flip_short_to_long",
                                                    fee=fee,
@@ -589,6 +608,7 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                     "thesis": trade.get("thesis", "")[:300],
                     "conviction": trade.get("conviction", "MEDIA"),
                     "exit_plan": (trade.get("exit_plan") or "")[:250],
+                    "stop_loss_target": _stop_target_of(trade),
                 })
                 applied_trades.append(_record(quantity, "executed_open_long", fee=fee))
 
@@ -630,6 +650,7 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                         "thesis": trade.get("thesis", "")[:300],
                         "conviction": trade.get("conviction", "MEDIA"),
                         "exit_plan": (trade.get("exit_plan") or "")[:250],
+                        "stop_loss_target": _stop_target_of(trade),
                     })
                     applied_trades.append(_record(quantity, "executed_flip_long_to_short",
                                                    fee=fee_close + fee_short,
@@ -653,6 +674,8 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                 new_portfolio["total_commissions_paid"] += fee
                 if trade.get("exit_plan"):
                     existing["exit_plan"] = str(trade["exit_plan"])[:250]
+                if _stop_target_of(trade) is not None:
+                    existing["stop_loss_target"] = _stop_target_of(trade)
                 applied_trades.append(_record(quantity, "executed_add_short", fee=fee))
             else:
                 gross_proceeds = quantity * price
@@ -666,6 +689,7 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
                     "thesis": trade.get("thesis", "")[:300],
                     "conviction": trade.get("conviction", "MEDIA"),
                     "exit_plan": (trade.get("exit_plan") or "")[:250],
+                    "stop_loss_target": _stop_target_of(trade),
                 })
                 applied_trades.append(_record(quantity, "executed_open_short",
                                                fee=fee,
@@ -676,6 +700,84 @@ def apply_trades(portfolio: dict, trades: list[dict], prices: dict[str, float],
         new_portfolio["total_commissions_paid"], 2
     )
     return {"portfolio": new_portfolio, "applied_trades": applied_trades}
+
+
+def _stop_target_of(trade: dict) -> float | None:
+    """stop_loss_target del trade come float positivo, o None."""
+    try:
+        f = float(trade.get("stop_loss_target"))
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+# ── Stop enforcement sim (Step 5 analisi 13/07, flag OFF di default) ─────
+# Il Live esegue gli stop meccanicamente (watchdog/enforce_stops); il
+# Simulator prima NO: gli exit plan erano solo testo e ~meta' degli stop
+# dichiarati toccati non produceva chiusure. Divergenza Sim/Live che
+# invalidava il transfer dei risultati.
+
+SETTING_SIM_STOP_ENFORCEMENT = "sim_stop_enforcement_enabled"
+
+
+def _sim_stop_enforcement_enabled() -> bool:
+    try:
+        from simulator import db as sim_db
+        val = sim_db.get_setting(SETTING_SIM_STOP_ENFORCEMENT, "false")
+    except Exception:
+        return False
+    return (val or "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def enforce_sim_stops(portfolio: dict, prices: dict[str, float],
+                      commission_bps: float | None = None
+                      ) -> tuple[dict, list[dict]]:
+    """
+    Esegue gli stop_loss_target dichiarati dall'agente PRIMA del turno LLM
+    (long: price <= stop; short: price >= stop), chiudendo la POSIZIONE
+    INTERA con la contabilita' di apply_trades (fee incluse).
+
+    Ritorna (portfolio, forced_trades). Con flag OFF o nessuno stop
+    crossato: input invariato e lista vuota.
+    """
+    if not _sim_stop_enforcement_enabled():
+        return portfolio, []
+    forced = []
+    for p in portfolio.get("positions") or []:
+        stop = _stop_target_of(p)
+        if stop is None:
+            continue
+        px = prices.get(p.get("asset"))
+        if not px or px <= 0:
+            continue
+        side = p.get("side")
+        if (side == "long" and px <= stop) or (side == "short" and px >= stop):
+            forced.append({
+                "action": "SELL" if side == "long" else "BUY",
+                "asset": p["asset"], "allocation_pct": 0,
+                "_force_close": True, "forced_by": "stop_loss_sim",
+                "thesis": (f"STOP LOSS automatico: {side} su {p['asset']} "
+                           f"chiuso a {px} (stop dichiarato {stop})"),
+            })
+    if not forced:
+        return portfolio, []
+    result = apply_trades(portfolio, forced, prices, commission_bps)
+    for r in result["applied_trades"]:
+        if str(r.get("status", "")).startswith("executed"):
+            r["status"] = "executed_stop_loss_sim"
+    return result["portfolio"], result["applied_trades"]
+
+
+def _sim_stop_notice(forced_trades: list[dict]) -> str:
+    """Blocco per il messaggio step: informa l'LLM degli stop eseguiti."""
+    lines = ["⚠ STOP LOSS ESEGUITI AUTOMATICAMENTE PRIMA DEL TUO TURNO:"]
+    for t in forced_trades:
+        if str(t.get("status", "")).startswith("executed"):
+            lines.append(f"  • {t.get('action')} {t.get('asset')} "
+                         f"qty {t.get('executed_qty')} @ {t.get('executed_price')}"
+                         f" — {t.get('thesis', '')}")
+    lines.append("Le posizioni chiuse dallo stop NON sono piu' in portafoglio.")
+    return "\n".join(lines)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -870,6 +972,9 @@ def _parse_response(raw: str) -> dict:
             # confrontando il R/R che aveva stimato col risultato reale
             # (es. "stimavi downside -1% ma hai perso -4%: tara il rischio").
             "rr": (t.get("rr") or "")[:200],
+            # stop_loss_target: prezzo assoluto, VINCOLANTE se il flag
+            # sim_stop_enforcement_enabled e' attivo (enforce_sim_stops).
+            "stop_loss_target": _stop_target_of(t),
         })
 
     hold_summary = ""
@@ -1169,6 +1274,10 @@ async def execute_step(
     if step_index > 0:
         prev_prices = extract_prices_at_date(price_series, step_dates[step_index - 1])
 
+    # 1b. Stop enforcement sim (flag OFF default): esegue gli stop dichiarati
+    #     PRIMA del turno LLM, come il watchdog nel Live.
+    portfolio, forced_stop_trades = enforce_sim_stops(portfolio, prices)
+
     # 2. Valuta portfolio prima dei trade
     valuation_before = compute_portfolio_value(portfolio, prices)
 
@@ -1182,6 +1291,8 @@ async def execute_step(
         scenario, portfolio, valuation_before, prices, prev_prices, t0_prices,
         headlines, history, step_index, num_steps, target_date
     )
+    if forced_stop_trades:
+        user_msg = _sim_stop_notice(forced_stop_trades) + "\n\n" + user_msg
 
     # 5. Call AI — inietta direttive utente + advice memory in cima al system prompt
     try:
@@ -1232,7 +1343,8 @@ async def execute_step(
             pass
     apply_result = apply_trades(portfolio, parsed["trades"], prices)
     new_portfolio = apply_result["portfolio"]
-    applied_trades = apply_result["applied_trades"]
+    # Gli stop forzati appaiono in testa: sono avvenuti PRIMA dei trade LLM
+    applied_trades = forced_stop_trades + apply_result["applied_trades"]
 
     # 7. Valuta dopo i trade (con stessi prezzi, cambia solo composizione)
     valuation_after = compute_portfolio_value(new_portfolio, prices)

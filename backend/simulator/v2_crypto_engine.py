@@ -37,6 +37,7 @@ from simulator.v2_engine import (
     _classify_outcome, classify_outcome_v2, compute_shadow_return_pct,
     _build_benchmark_value_series, DEEPSEEK_API_URL, DEEPSEEK_R1,
     _get_deepseek_key, _pnl_after_first_step, aggregate_run_conviction,
+    enforce_sim_stops, _sim_stop_notice,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,8 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine)
           "conviction": "BASSA" | "MEDIA" | "ALTA",
           "thesis": "Una frase: tesi sui prossimi 2 giorni",
           "rr": "upside +X% vs downside -Y% in 48h → ratio Z (>= 1.5)",
-          "exit_plan": "stop: <livello/evento che invalida la tesi> | target: <quando incassi o rivaluti>"
+          "exit_plan": "stop: <livello/evento che invalida la tesi> | target: <quando incassi o rivaluti>",
+          "stop_loss_target": null | <PREZZO ASSOLUTO (es. 61500.0), NON percentuale>
         }
       ],
       "hold_summary": "Frase su posizioni mantenute invariate"
@@ -173,6 +175,9 @@ VINCOLI HARD:
 - "rr" e "exit_plan" OBBLIGATORI su ogni trade: stima R/R esplicita
   (sezione 6.C) e piano d'uscita dichiarato PRIMA di entrare (ti verrà
   ripresentato a ogni turno accanto alla posizione)
+- "stop_loss_target" FACOLTATIVO ma, se popolato, VINCOLANTE: prezzo
+  assoluto a cui il motore chiude la posizione AUTOMATICAMENTE prima
+  del tuo turno successivo (long: prezzo <= stop; short: >= stop)
 """
 
 
@@ -563,6 +568,10 @@ async def execute_crypto_step(
     prev_prices = (extract_prices_at_date(price_series, step_dates[step_index - 1])
                    if step_index > 0 else {})
 
+    # Stop enforcement sim (flag OFF default): esegue gli stop dichiarati
+    # PRIMA del turno LLM, come il watchdog nel Live.
+    portfolio, forced_stop_trades = enforce_sim_stops(portfolio, prices)
+
     valuation_before = compute_portfolio_value(portfolio, prices)
     headlines = _split_headlines_for_step(
         scenario.get("headlines_master", []), step_index, num_steps
@@ -572,6 +581,8 @@ async def execute_crypto_step(
         scenario, portfolio, valuation_before, prices, prev_prices, t0_prices,
         headlines, history, step_index, num_steps, target_date
     )
+    if forced_stop_trades:
+        user_msg = _sim_stop_notice(forced_stop_trades) + "\n\n" + user_msg
 
     # Inietta direttive utente + advice memory in cima al system prompt
     try:
@@ -614,7 +625,8 @@ async def execute_crypto_step(
             pass
     apply_result = apply_trades(portfolio, parsed["trades"], prices)
     new_portfolio = apply_result["portfolio"]
-    applied_trades = apply_result["applied_trades"]
+    # Gli stop forzati appaiono in testa: sono avvenuti PRIMA dei trade LLM
+    applied_trades = forced_stop_trades + apply_result["applied_trades"]
 
     valuation_after = compute_portfolio_value(new_portfolio, prices)
 
