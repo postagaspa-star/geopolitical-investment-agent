@@ -2592,6 +2592,28 @@ async def _handle_decision_tool(tool_name: str, tool_input: dict, run_id: str,
                             "at": timestamp,
                         })
 
+            # ── Guard pre-esecuzione (Step 7-8 analisi 13/07) ──
+            # Cooldown ri-entrata post-chiusura meccanica (attivo default) +
+            # isteresi anti-inversione (flag OFF). Solo aperture BUY/SHORT.
+            if action in ("BUY", "SHORT"):
+                import trade_guards
+                _gok, _gwhy = trade_guards.check_reentry_cooldown(ticker, action)
+                if _gok:
+                    _gok, _gwhy = trade_guards.check_anti_inversion(
+                        ticker, action, confidence,
+                        tool_input.get("thesis_invalidation"))
+                if not _gok:
+                    database.insert_agent_log(
+                        run_id, "DECISION_GUARD_BLOCKED", json.dumps({
+                            "ticker": ticker, "action": action,
+                            "reason": _gwhy[:400],
+                        }, default=str))
+                    return json.dumps({
+                        "executed": False, "rejected": True,
+                        "ticker": ticker, "action": action,
+                        "reason": _gwhy, "at": timestamp,
+                    }, default=str)
+
             # Esegui trade
             geo_part = logic_chain[:500] if logic_chain else ""
             tech_part = logic_chain[500:] if len(logic_chain) > 500 else ""

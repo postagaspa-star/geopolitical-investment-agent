@@ -785,14 +785,51 @@ def _enforce_open_has_stop(action, ticker, quantity, current_price,
     """Fail-closed su apertura con SL OBBLIGATORIO non settato.
 
     Se l'apertura (BUY/SHORT) richiedeva uno stop-loss (stop_loss>0) ma
-    set_stop_loss NON è andato a buon fine, la posizione resta NAKED (rischio
-    illimitato sulle SHORT): la chiude SUBITO (SHORT→cover, LONG→sell).
-    Ritorna None se ok, altrimenti dict {aborted, reason, close_success}."""
+    set_stop_loss NON è andato a buon fine:
+
+      - Se la posizione ha GIA' uno stop valido (caso tipico: ADD su
+        posizione esistente, il cricchetto anti-allargamento rifiuta lo
+        stop nuovo piu' largo ma quello vecchio RESTA attivo) → NON
+        chiudere: tieni lo stop esistente e logga. Prima qui si chiudeva
+        comunque, innescando il loop BUY→fail-closed→re-BUY (SOL 29/06:
+        4 trade in 34s — analisi 13/07).
+        Ritorna {aborted: False, kept_existing_stop: True, existing_sl}.
+
+      - Se la posizione e' davvero NAKED (nessuno stop valido, rischio
+        illimitato sulle SHORT): la chiude SUBITO (SHORT→cover, LONG→sell).
+        Ritorna {aborted: True, reason, close_success}.
+
+    Ritorna None se lo SL non era richiesto o e' stato settato."""
     needs_sl = bool(stop_loss and float(stop_loss) > 0)
     sl_ok = bool(isinstance(sl_result, dict) and sl_result.get("success"))
     if not needs_sl or sl_ok:
         return None
     reason = (sl_result or {}).get("reason", "sconosciuto") if isinstance(sl_result, dict) else str(sl_result)
+
+    # La posizione ha gia' uno stop valido? Allora NON e' naked: lo stop
+    # esistente protegge anche la quantita' appena aggiunta.
+    existing_sl = 0.0
+    try:
+        pos = portfolio.get_position(ticker)
+        existing_sl = float((pos or {}).get("stop_loss_price") or 0)
+    except Exception:
+        existing_sl = 0.0
+    if existing_sl > 0:
+        try:
+            database.insert_agent_log(run_id, "DECISION_CRYPTO_SL_KEPT", json.dumps({
+                "ticker": ticker, "action": action, "qty": quantity,
+                "existing_sl": existing_sl, "proposed_sl": stop_loss,
+                "sl_fail_reason": str(reason)[:300],
+            }, default=str))
+        except Exception:
+            pass
+        logger.warning("[%s][DEC-CRYPTO] SL proposto %s su %s RIFIUTATO (%s) "
+                       "ma esiste SL valido a %s → posizione mantenuta, "
+                       "stop esistente attivo (niente fail-closed)",
+                       run_id, stop_loss, ticker, str(reason)[:120], existing_sl)
+        return {"aborted": False, "kept_existing_stop": True,
+                "existing_sl": existing_sl, "reason": reason}
+
     try:
         if str(action).upper() == "SHORT":
             close_res = portfolio.execute_cover(
@@ -1147,6 +1184,28 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                         if _cg.get("take_profit") and not take_profit:
                             take_profit = float(_cg["take_profit"])
 
+            # ── Guard pre-esecuzione (Step 7-8 analisi 13/07) ──
+            # Cooldown ri-entrata post-chiusura meccanica (attivo default) +
+            # isteresi anti-inversione (flag OFF). Solo aperture BUY/SHORT.
+            if action in ("BUY", "SHORT"):
+                import trade_guards
+                _ok, _why = trade_guards.check_reentry_cooldown(ticker, action)
+                if _ok:
+                    _ok, _why = trade_guards.check_anti_inversion(
+                        ticker, action, confidence,
+                        tool_input.get("thesis_invalidation"))
+                if not _ok:
+                    database.insert_agent_log(
+                        run_id, "DECISION_CRYPTO_GUARD_BLOCKED", json.dumps({
+                            "ticker": ticker, "action": action,
+                            "reason": _why[:400],
+                        }, default=str))
+                    return json.dumps({
+                        "executed": False, "rejected": True,
+                        "ticker": ticker, "action": action,
+                        "reason": _why, "at": timestamp,
+                    }, default=str)
+
             if action == "BUY":
                 result = portfolio.execute_buy(
                     ticker, quantity, current_price,
@@ -1206,6 +1265,19 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                 _abort = _enforce_open_has_stop(
                     action, ticker, quantity, current_price, stop_loss,
                     sl_result, run_id, portfolio, database)
+                if _abort is not None and _abort.get("kept_existing_stop"):
+                    # Trade ESEGUITO; solo lo SL proposto e' stato rifiutato
+                    # (cricchetto): resta attivo lo SL esistente. Informa
+                    # l'LLM invece di chiudere (fix loop fail-closed 13/07).
+                    return json.dumps({
+                        "executed": True, "ticker": ticker, "action": action,
+                        "quantity": quantity, "price": current_price,
+                        "result": result,
+                        "warning": (f"SL proposto {stop_loss} RIFIUTATO "
+                                    f"({_abort['reason']}); resta attivo lo "
+                                    f"SL esistente a {_abort['existing_sl']}"),
+                        "at": timestamp,
+                    }, default=str)
                 if _abort is not None:
                     return json.dumps({
                         "executed": False, "ticker": ticker, "action": action,
