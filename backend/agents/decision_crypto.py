@@ -466,6 +466,15 @@ CRYPTO_DECISION_TOOLS = [
                     "take_profit": {"type": "number"},
                     "logic_chain": {"type": "string", "description": "Reasoning tecnico"},
                     "confidence_level": {"type": "number", "minimum": 0, "maximum": 100},
+                    "thesis_invalidation": {
+                        "type": "string",
+                        "description": (
+                            "OBBLIGATORIO se INVERTI direzione su un ticker "
+                            "tradato di recente (BUY dopo uno SHORT o "
+                            "viceversa): quale FATTO NUOVO ha invalidato la "
+                            "tesi precedente (min 30 caratteri). Un segnale "
+                            "minore non basta per un'inversione."),
+                    },
                 },
                 "required": ["ticker", "action", "quantity", "logic_chain", "confidence_level"],
             },

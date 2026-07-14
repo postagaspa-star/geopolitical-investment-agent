@@ -142,6 +142,11 @@ PROCEDURA OBBLIGATORIA (3 sezioni in ordine)
     - Tesi precedente confermata/modificata/invalidata? Se cambi idea
       rispetto al turno scorso, DICHIARALO ("al T2 dicevo X, ora Y
       perché Z") — i ribaltoni silenziosi sono l'errore #1 delle run.
+      REGOLA ISTERESI: per INVERTIRE direzione su un asset tradato nei
+      turni recenti (BUY dopo SELL/short o viceversa) devi citare il
+      FATTO NUOVO che ha invalidato la tesi precedente. Nessun fatto
+      nuovo = mantieni o chiudi, NON invertire: l'inversione su segnale
+      minore paga due volte le commissioni e storicamente perde.
     - CHECK PIANI D'USCITA: per ogni posizione aperta rileggi l'exit_plan
       che avevi dichiarato (te lo ripresento accanto alla posizione):
       stop/target raggiunti? Agisci o deroga DICHIARANDOLO.

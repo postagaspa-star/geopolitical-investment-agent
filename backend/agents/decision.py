@@ -1986,6 +1986,15 @@ DECISION_TOOLS = [
                         "verificabile (probabilita' × payoff), non un "
                         "numero a sensazione.")
                 },
+                "thesis_invalidation": {
+                    "type": "string",
+                    "description": (
+                        "OBBLIGATORIO se INVERTI direzione su un ticker "
+                        "tradato di recente (BUY dopo uno SHORT o viceversa): "
+                        "quale FATTO NUOVO ha invalidato la tesi precedente "
+                        "(min 30 caratteri). Un segnale minore non basta per "
+                        "un'inversione."),
+                },
             },
             "required": ["ticker", "action", "quantity", "logic_chain", "confidence_level", "expected_reward_risk"],
         },
