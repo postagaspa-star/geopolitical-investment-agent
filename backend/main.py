@@ -7351,11 +7351,14 @@ async def test_anthropic():
         models_to_try = []
         if model:
             models_to_try.append(model)
+        # Modelli CORRENTI. I vecchi 3.x/3.5 e sonnet-4-20250514 sono
+        # ritirati o in ritiro → 404 (era la causa dell'errore mostrato dal
+        # pulsante "Testa Anthropic"). Cheapest-first: per un test di
+        # connessione basta il primo che risponde. Aggiornato 14/07/2026.
         models_to_try.extend([
-            "claude-3-5-haiku-20241022",
-            "claude-sonnet-4-20250514",
-            "claude-3-5-sonnet-20241022",
-            "claude-3-haiku-20240307",
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5",
+            "claude-sonnet-5",
         ])
         last_err = None
         for m in models_to_try:

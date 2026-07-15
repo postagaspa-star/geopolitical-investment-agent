@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-FALLBACK_MODEL = "claude-sonnet-4-20250514"
+FALLBACK_MODEL = "claude-sonnet-4-5"   # era sonnet-4-20250514 (deprecato/in ritiro)
 
 TECH_PROMPT_DEFAULT = """You are an ASSERTIVE quantitative technical analyst. You receive
 raw OHLCV data, pre-calculated indicators, AND a pre-interpreted "signals_summary"

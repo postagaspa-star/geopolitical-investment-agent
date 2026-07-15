@@ -65,7 +65,7 @@ def _satellite_exposure_pct(pstate: dict) -> float | None:
 # ── Claude Sonnet 4.5 (production) ──────────────────────────────────────────
 # NOTA: verifica che questo ID sia corretto sulla tua dashboard Anthropic
 DECISION_MODEL = "claude-sonnet-4-5-20250929"
-DECISION_MODEL_FALLBACK = "claude-sonnet-4-20250514"  # Fallback a Sonnet 4 se 4.5 non disponibile
+DECISION_MODEL_FALLBACK = "claude-sonnet-4-5"  # era sonnet-4-20250514 (deprecato); allineato al primario
 
 # ── DeepSeek-R1 (tournament, cost-optimized) ────────────────────────────────
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"

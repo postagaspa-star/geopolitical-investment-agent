@@ -27,7 +27,7 @@ import technical_analysis
 logger = logging.getLogger(__name__)
 
 # --- Configurazione modelli ---
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-4-5"   # era sonnet-4-20250514 (deprecato/in ritiro)
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 

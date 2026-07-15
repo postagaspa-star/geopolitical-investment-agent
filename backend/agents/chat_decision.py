@@ -47,8 +47,10 @@ logger = logging.getLogger(__name__)
 #   - max_tokens 2500 → 1800
 # Per ulteriori save in futuro: tool use API (invece di JSON inline)
 # permetterebbe di tornare a Haiku — refactoring non triviale.
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
-CLAUDE_MODEL_FALLBACK = "claude-3-5-sonnet-20241022"
+CLAUDE_MODEL = "claude-sonnet-4-5"   # era sonnet-4-20250514 (deprecato/in ritiro)
+# claude-3-5-sonnet-20241022 e' RITIRATO (404): il fallback era gia' morto.
+# Sonnet 4.5 e' attivo, stesso tier (affidabilita' JSON) del primario.
+CLAUDE_MODEL_FALLBACK = "claude-sonnet-4-5"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_R1_MODEL = "deepseek-reasoner"
 

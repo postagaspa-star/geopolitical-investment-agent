@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# Claude Sonnet — fallback se DeepSeek non risponde
-SCOUT_MODEL_FALLBACK = "claude-sonnet-4-20250514"
+# Claude Sonnet 4.5 — fallback se DeepSeek non risponde (era sonnet-4-20250514, deprecato)
+SCOUT_MODEL_FALLBACK = "claude-sonnet-4-5"
 
 # ============================================================
 # Source-type taxonomy
