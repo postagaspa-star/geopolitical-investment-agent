@@ -1185,6 +1185,28 @@ async def _coach_cards_weekly_job():
         logger.error("Coach Cards weekly job crash: %s", e, exc_info=True)
 
 
+async def _provider_health_job():
+    """
+    Sentinella oraria dei fornitori esterni (Anthropic + DeepSeek + fonti Scout).
+
+    Motivazione (analisi 24/07): in 10 giorni il sistema si e' fermato TRE
+    volte per guasti a dipendenze esterne, ognuna scoperta a valle ore/giorni
+    dopo. Un test orario da pochi token li intercetta in minuti. Alert solo
+    sulle transizioni (ok<->down), Telegram best-effort se configurato.
+    Fail-safe: un errore qui non deve mai fermare lo scheduler.
+    """
+    try:
+        import provider_health
+        result = await provider_health.run_check(alert=True)
+        downs = [n for n, i in (result.get("providers") or {}).items() if not i.get("ok")]
+        if downs:
+            logger.warning("[PROVIDER-HEALTH] provider giu': %s", downs)
+        else:
+            logger.info("[PROVIDER-HEALTH] tutti i fornitori ok")
+    except Exception as e:
+        logger.error("Provider health job crash: %s", e, exc_info=True)
+
+
 # ============================================================
 # Gestione scheduler
 # ============================================================
@@ -1582,6 +1604,26 @@ def start_scheduler() -> AsyncIOScheduler:
     if cc_first_run is not None:
         cc_kwargs["next_run_time"] = cc_first_run
     _scheduler.add_job(_coach_cards_weekly_job, **cc_kwargs)
+
+    # ── Provider health: ogni ora al minuto :17 (evita i job a :00) ──────
+    # Testa Anthropic + DeepSeek (pochi token) + copertura fonti Scout, e
+    # allerta (log + Telegram best-effort) SOLO sulle transizioni ok<->down.
+    # first_run a boot+120s: un check subito dopo l'avvio.
+    try:
+        ph_first_run = datetime.now(pytz.utc) + timedelta(seconds=120)
+    except Exception:
+        ph_first_run = None
+    ph_kwargs = dict(
+        trigger=CronTrigger(minute=17),
+        id="provider_health",
+        name="Provider health (oraria :17)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    if ph_first_run is not None:
+        ph_kwargs["next_run_time"] = ph_first_run
+    _scheduler.add_job(_provider_health_job, **ph_kwargs)
 
     # ── Simulator AUTO-MODE: ogni 30 minuti ──────────────────────────────
     # No-op se auto_mode_enabled = false. Quando abilitato, fa girare un

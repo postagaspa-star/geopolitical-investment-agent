@@ -7511,6 +7511,23 @@ async def test_deepseek():
         return {"status": "error", "message": str(e)}
 
 
+@app.get("/api/settings/provider-health")
+async def provider_health_status(run_now: bool = Query(default=False)):
+    """
+    Stato dei fornitori esterni (Anthropic + DeepSeek + fonti Scout).
+    Default: ritorna l'ultimo risultato del job orario (cache).
+    ?run_now=true: esegue un check fresco (costa pochi token).
+    """
+    try:
+        import provider_health
+        if run_now:
+            return await provider_health.run_check(alert=True)
+        last = provider_health.get_last_result()
+        return last or {"status": "no_data", "hint": "job non ancora eseguito; usa ?run_now=true"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/settings/test-gdelt")
 async def test_gdelt():
     """
