@@ -59,6 +59,25 @@ REBALANCE_COOLDOWN_HOURS = 4
 # è COMPLETATO recentemente — qui controlliamo se il trigger è stato INVIATO.
 GLOBAL_TRIGGER_COOLDOWN_MIN = 15
 
+# Finestra entro cui un Decision appena avviato e' considerato "forse ancora
+# in corso", per non farne partire due in parallelo. Poco piu' larga del hard
+# timeout della pipeline standard (12 min, scheduler.py): oltre questa soglia
+# un run non completato e' morto, non in esecuzione, e non deve zittire nulla.
+CONCURRENCY_GUARD_MIN = 20
+
+# Attesa dopo un guasto ripetuto delle chiamate LLM. Era 240 min (4h) ed era
+# silenziosa: durante l'incidente dei modelli ritirati (24/07/2026) significava
+# che piu' il sistema era rotto, piu' a lungo taceva. Ora e' molto piu' corta e
+# ogni attivazione emette un log WATCHDOG_DEGRADED.
+ERROR_BACKOFF_MIN = 60
+
+# Soglie del cancello DETERMINISTICO (vedi evaluate_price_gate). Sono
+# volutamente in CODICE e non nel prompt: erano l'unico vincolo del sistema a
+# vivere in linguaggio naturale, quindi l'unico non testabile e non misurabile.
+# Misurano il movimento INTRADAY (dalla chiusura precedente), non a 5 minuti.
+DETERMINISTIC_MOVE_PCT_HOLDING = 2.0   # su una posizione aperta
+DETERMINISTIC_MOVE_PCT_WATCH = 3.0     # su un nome solo osservato
+
 
 def _is_crypto_ticker(ticker: str) -> bool:
     """Determina se un ticker e' crypto (per applicare threshold differenziato)."""
@@ -131,6 +150,78 @@ Respond ONLY with valid JSON, no other text:
 }"""
 
 
+def evaluate_price_gate(price_snap: dict,
+                        portfolio_tickers: list[str] | None = None) -> dict:
+    """
+    Cancello DETERMINISTICO di risveglio, basato solo sui prezzi disponibili.
+
+    Perche' esiste: la decisione "vale la pena svegliare il Decision?" viveva
+    ESCLUSIVAMENTE dentro il prompt di un LLM esterno. Era l'unico vincolo del
+    sistema a non essere codice — non testabile, non deterministico, e
+    soprattutto: quando l'LLM non rispondeva, la risposta diventava
+    implicitamente "no". Nei log di produzione del 24-25/07/2026, 250 cicli su
+    512 sono usciti con reason="http_400": un guasto dell'API era
+    indistinguibile da "il mercato e' calmo".
+
+    Questa funzione e' la rete: se l'LLM non risponde, il sistema guarda
+    comunque i prezzi invece di restare cieco. E' pura (nessun I/O), quindi
+    testabile.
+
+    SEMANTICA DEL DATO — importante, qui c'era un equivoco.
+    `chg_pct` in price_quotes e' (prezzo - chiusura_precedente)/chiusura_prec,
+    cioe' la variazione INTRADAY, NON un movimento a 5 minuti. Il prompt
+    dell'LLM diceva "PRICE SNAPSHOT (last 5min)" mentre gli passava questo
+    numero: chiedeva un giudizio su una finestra che non stava osservando.
+    Qui la finestra e' dichiarata per quella che e'. Per un agente con
+    orizzonte swing (giorni-settimane) il movimento intraday e' anche la
+    grandezza piu' pertinente: un salto del 3% in giornata conta, uno strappo
+    di cinque minuti poi riassorbito no.
+    """
+    tickers = set(portfolio_tickers or [])
+    best_ticker, best_move, best_is_holding = None, 0.0, False
+
+    for ticker, quote in (price_snap or {}).items():
+        try:
+            move = abs(float(quote.get("chg_pct") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        is_holding = ticker in tickers
+        # Una posizione aperta ha priorita': li' il movimento richiede una
+        # decisione (prendere profitto, stringere, uscire), non solo una
+        # valutazione di opportunita'.
+        better = (is_holding and not best_is_holding) or \
+                 (is_holding == best_is_holding and move > best_move)
+        if better:
+            best_ticker, best_move, best_is_holding = ticker, move, is_holding
+
+    if best_ticker is None:
+        return {"trigger": False, "urgency": 0,
+                "reason": "price_gate: nessun prezzo disponibile",
+                "focus_tickers": [], "deterministic": True}
+
+    threshold = (DETERMINISTIC_MOVE_PCT_HOLDING if best_is_holding
+                 else DETERMINISTIC_MOVE_PCT_WATCH)
+    if best_move < threshold:
+        return {"trigger": False, "urgency": 0,
+                "reason": (f"price_gate: max mossa intraday {best_move:.2f}% "
+                           f"({best_ticker}) sotto soglia {threshold:.1f}%"),
+                "focus_tickers": [], "deterministic": True}
+
+    # Urgenza proporzionale all'ampiezza, con un gradino per le posizioni
+    # aperte. Cap a 9: il 10 resta ai trigger di rebalance forzato.
+    urgency = min(9, int(URGENCY_THRESHOLD + (best_move - threshold) + (2 if best_is_holding else 0)))
+    urgency = max(urgency, URGENCY_THRESHOLD)
+    kind = "posizione aperta" if best_is_holding else "watchlist"
+    return {
+        "trigger": True,
+        "urgency": urgency,
+        "reason": (f"price_gate deterministico: {best_ticker} {best_move:.2f}% "
+                   f"intraday ({kind}, soglia {threshold:.1f}%)"),
+        "focus_tickers": [best_ticker],
+        "deterministic": True,
+    }
+
+
 def _get_deepseek_key() -> str:
     key = os.environ.get("DEEPSEEK_API_KEY", "")
     if not key:
@@ -142,18 +233,48 @@ def _get_deepseek_key() -> str:
     return key
 
 
-def _get_last_decision_time(database) -> datetime | None:
-    """Recupera il timestamp dell'ultimo run di QUALSIASI Decision Agent
-    (standard Sonnet, R1, oppure Decision Crypto).
+def _last_log_time(database, phases: list[str]) -> datetime | None:
+    """Timestamp del log piu' recente fra le `phases` indicate. None se assente."""
+    try:
+        client = database.get_client()
+        if not client:
+            return None
+        result = client.table("agent_logs") \
+            .select("timestamp,phase") \
+            .in_("phase", phases) \
+            .order("timestamp", desc=True) \
+            .limit(1) \
+            .execute()
+        if result.data:
+            ts_str = result.data[0]["timestamp"]
+            return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    return None
 
-    Bug precedente: la query filtrava solo `agent_name='decision'` (standard),
-    quindi DOPO un run del Decision Crypto a 13:00 il throttle 60-min NON
-    si attivava per Sonnet. Risultato: watchdog alle 13:18 triggerava
-    crypto pipeline (mixed focus_tickers), poi alle 13:19 triggerava
-    Decision standard sulle stesse news → due decisional in 1 minuto.
 
-    Fix: query include sia 'decision' che 'decision_crypto' nel checkpoint,
-    e include `DECISION_CRYPTO_*` nel fallback agent_logs.
+def _get_last_decision_success(database) -> datetime | None:
+    """Timestamp dell'ultimo Decision COMPLETATO CON SUCCESSO (standard o crypto).
+
+    Alimenta il throttle economico: "ho gia' deciso di recente, non rifarlo
+    subito". Solo i successi contano.
+
+    ATTENZIONE — QUI VIVEVA UN BUG COSTOSO (24-25/07/2026).
+    Questa funzione includeva anche DECISION_ERROR e DECISION_CRYPTO_ERROR fra
+    i timestamp validi: un Decision FALLITO aggiornava "l'ultima volta che
+    abbiamo deciso" esattamente come uno riuscito. Combinato con il backoff su
+    errori (che allungava il throttle a 4h), il risultato era una spirale:
+    l'API DeepSeek rifiutava i modelli ritirati -> ogni run falliva -> ogni
+    fallimento zittiva il watchdog per ore -> il guasto si nascondeva da solo.
+    Nei log di produzione di quel periodo: 229 cicli su 512 usciti con
+    "decision_ran_recently" mentre nessuna decisione era stata completata.
+
+    Un errore NON e' una decisione. Fallire non deve comprare silenzio.
+
+    Nota sul bug storico opposto (che resta risolto): la query includeva solo
+    agent_name='decision', quindi un run crypto non throttlava lo standard e
+    partivano due decisional a un minuto di distanza. Per questo qui si
+    guardano ENTRAMBI gli agenti — ma solo i loro successi.
     """
     try:
         client = database.get_client()
@@ -171,32 +292,30 @@ def _get_last_decision_time(database) -> datetime | None:
     except Exception:
         pass
 
-    # Fallback: agent_logs — sia standard che crypto vengono throttled insieme.
-    try:
-        client = database.get_client()
-        if client:
-            result = client.table("agent_logs") \
-                .select("timestamp,phase") \
-                .in_("phase", [
-                    "DECISION_COMPLETE", "DECISION_ERROR", "DECISION_CONTEXT",
-                    "DECISION_CRYPTO_COMPLETE", "DECISION_CRYPTO_ERROR",
-                    "DECISION_CRYPTO_CONTEXT",
-                ]) \
-                .order("timestamp", desc=True) \
-                .limit(1) \
-                .execute()
-            if result.data:
-                ts_str = result.data[0]["timestamp"]
-                return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-    except Exception:
-        pass
-    return None
+    # Fallback su agent_logs: SOLO le fasi di completamento riuscito.
+    return _last_log_time(
+        database, ["DECISION_COMPLETE", "DECISION_CRYPTO_COMPLETE"])
+
+
+def _get_last_decision_start(database) -> datetime | None:
+    """Timestamp dell'ultimo Decision AVVIATO (fase di contesto).
+
+    Serve solo a impedire che due Decision girino in parallelo. E' un concetto
+    diverso dal throttle economico e ha una finestra molto piu' corta: un run
+    avviato e mai completato e' un run morto, non una decisione presa, e non
+    deve zittire il sistema per ore.
+    """
+    return _last_log_time(
+        database, ["DECISION_CONTEXT", "DECISION_CRYPTO_CONTEXT"])
 
 
 def _count_recent_decision_errors(database, minutes: int = 60) -> int:
     """
-    Conta i DECISION_ERROR negli ultimi N minuti. Usato per backoff
-    esponenziale: se troppi errori consecutivi, throttle aggressivo.
+    Conta i Decision FALLITI (standard + crypto) negli ultimi N minuti.
+
+    Prima contava solo DECISION_ERROR, mancando tutti i DECISION_CRYPTO_ERROR:
+    nell'incidente dei modelli ritirati (24/07/2026) il Decision Crypto falliva
+    ogni ora e questo conteggio restava a zero.
     """
     try:
         client = database.get_client()
@@ -205,7 +324,7 @@ def _count_recent_decision_errors(database, minutes: int = 60) -> int:
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
         result = client.table("agent_logs") \
             .select("id") \
-            .eq("phase", "DECISION_ERROR") \
+            .in_("phase", ["DECISION_ERROR", "DECISION_CRYPTO_ERROR"]) \
             .gte("timestamp", cutoff) \
             .limit(20) \
             .execute()
@@ -214,39 +333,100 @@ def _count_recent_decision_errors(database, minutes: int = 60) -> int:
         return 0
 
 
-def _is_throttled(database, throttle_minutes: int = 120) -> bool:
+def _is_throttled(database, throttle_minutes: int = 120) -> tuple[bool, str]:
     """
-    Ritorna True se il Decision Agent ha tentato di girare negli ultimi N min.
+    Ritorna (throttled, motivo). Tre guardie DISTINTE, prima confuse in una.
 
-    Default 120 min (2h): allineato al cron standard (14/16/18/20 UTC = ogni
-    2h). Anche se il Watchdog rileva un trigger valido, NON sveglia il
-    Decision Agent piu' di una volta ogni 2h — riduce sia i costi token
-    Claude sia il carico DB. Un evento davvero critico (urgency molto alta)
-    resta comunque catturato al successivo slot.
+    1. ANTI-CONCORRENZA (finestra corta, CONCURRENCY_GUARD_MIN)
+       Un Decision avviato da poco potrebbe essere ancora in corso: non se ne
+       avvia un secondo in parallelo. La finestra e' volutamente poco piu'
+       larga del hard timeout della pipeline (12 min), non ore: un run morto
+       non deve zittire il sistema per mezza giornata.
 
-    BACKOFF SU ERRORI: se gli ultimi N minuti contengono 2+ DECISION_ERROR,
-    estende il throttle a 4h (240 min) per evitare di bruciare token su
-    chiamate API che falliscono sistematicamente (es. quota esaurita,
-    chiave invalida, modello deprecato).
+    2. THROTTLE ECONOMICO (finestra lunga, throttle_minutes)
+       Se un Decision e' stato COMPLETATO CON SUCCESSO di recente, non serve
+       rifarlo subito. Allineato al cron standard (ogni 2h).
+
+    3. BACKOFF SU GUASTO (ERROR_BACKOFF_MIN)
+       Se le chiamate stanno fallendo, ha senso non martellare l'API. Ma —
+       ed e' il punto della riscrittura — questo NON deve piu' essere un
+       silenzio invisibile: viene loggato come stato DEGRADATO esplicito.
+
+    COSA E' CAMBIATO E PERCHE' (incidente 24-25/07/2026)
+    Prima, un Decision fallito contava come "aver deciso" (throttle 2h) E
+    faceva scattare il backoff a 4h. Un'API rotta comprava fino a quattro ore
+    di silenzio, e piu' il sistema era guasto piu' a lungo taceva — senza che
+    nessuna metrica lo segnalasse. Ora fallire non compra silenzio: gli errori
+    non aggiornano piu' "l'ultima decisione", il backoff e' sceso da 240 a
+    ERROR_BACKOFF_MIN minuti ed e' rumoroso.
     """
-    last = _get_last_decision_time(database)
-    if last is None:
-        return False
-    elapsed_min = (datetime.now(timezone.utc) - last).total_seconds() / 60
+    now = datetime.now(timezone.utc)
 
-    # Backoff esponenziale: se 2+ errori recenti, allunga il throttle
+    # 1. Un run potrebbe essere ancora in volo → non affiancarne un altro.
+    started = _get_last_decision_start(database)
+    if started is not None:
+        since_start = (now - started).total_seconds() / 60
+        if since_start < CONCURRENCY_GUARD_MIN:
+            done = _get_last_decision_success(database)
+            still_running = done is None or done < started
+            if still_running:
+                logger.debug("Watchdog: Decision avviato %.0f min fa, forse in corso",
+                             since_start)
+                return True, "decision_possibly_running"
+
+    # 2. Throttle economico: solo un SUCCESSO recente compra silenzio.
+    last_ok = _get_last_decision_success(database)
+    if last_ok is not None:
+        elapsed_min = (now - last_ok).total_seconds() / 60
+        if elapsed_min < throttle_minutes:
+            logger.debug("Watchdog throttled: ultimo Decision riuscito %.0f min fa "
+                         "(limit %d min)", elapsed_min, throttle_minutes)
+            return True, "decision_ran_recently"
+
+    # 3. Guasto in corso: rallenta, ma dillo forte.
     error_count = _count_recent_decision_errors(database, minutes=60)
-    effective_throttle = throttle_minutes
     if error_count >= 2:
-        effective_throttle = max(throttle_minutes, 240)  # min 4h
-        logger.info("Watchdog: %d errori Decision in 60min → backoff a %d min",
-                    error_count, effective_throttle)
+        last_err = _last_log_time(
+            database, ["DECISION_ERROR", "DECISION_CRYPTO_ERROR"])
+        if last_err is not None:
+            since_err = (now - last_err).total_seconds() / 60
+            if since_err < ERROR_BACKOFF_MIN:
+                logger.error(
+                    "WATCHDOG DEGRADATO: %d Decision falliti in 60 min, ultimo "
+                    "%.0f min fa. Backoff %d min. Il sistema NON sta valutando "
+                    "il mercato: controllare le API.",
+                    error_count, since_err, ERROR_BACKOFF_MIN)
+                _log_degraded(database, "decision_failing", {
+                    "errors_60min": error_count,
+                    "minutes_since_last_error": round(since_err, 1),
+                    "backoff_minutes": ERROR_BACKOFF_MIN,
+                })
+                return True, "decision_failing_backoff"
 
-    if elapsed_min < effective_throttle:
-        logger.debug("Watchdog throttled: ultimo Decision %.0f min fa (limit %d min)",
-                     elapsed_min, effective_throttle)
-        return True
-    return False
+    return False, ""
+
+
+def _log_degraded(database, kind: str, detail: dict) -> None:
+    """
+    Registra uno stato DEGRADATO in modo interrogabile.
+
+    Esiste perche' nell'incidente del 24/07 il guasto era interamente nei log
+    (250 cicli con reason="http_400") ma nessuna fase dedicata lo rendeva
+    cercabile e nessun allarme lo aggregava. Una fase dedicata permette di
+    rispondere in una query alla domanda "il sistema sta funzionando o sta
+    solo tacendo?".
+
+    Complementare a provider_health.py, che sorveglia i fornitori dall'esterno:
+    qui si registra l'effetto sul comportamento del watchdog.
+    """
+    try:
+        database.insert_agent_log(
+            f"watchdog_degraded_{int(time.time())}",
+            "WATCHDOG_DEGRADED",
+            json.dumps({"kind": kind, **detail}),
+        )
+    except Exception:
+        pass  # la diagnostica non deve mai poter rompere il ciclo
 
 
 def _get_recent_headlines(database, minutes: int = 10) -> list[str]:
@@ -554,7 +734,9 @@ async def _call_deepseek(context: str) -> dict:
     """Chiama DeepSeek-V3 per la valutazione ultra-rapida."""
     key = _get_deepseek_key()
     if not key:
-        return {"trigger": False, "urgency": 0, "reason": "no_deepseek_key", "focus_tickers": []}
+        return {"trigger": False, "urgency": 0, "reason": "no_deepseek_key",
+                "focus_tickers": [], "llm_failed": True,
+                "llm_error": "DEEPSEEK_API_KEY non configurata"}
 
     payload = {
         "model": DEEPSEEK_MODEL,
@@ -575,8 +757,11 @@ async def _call_deepseek(context: str) -> dict:
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             ) as resp:
                 if resp.status != 200:
-                    logger.warning("Watchdog DeepSeek HTTP %d", resp.status)
-                    return {"trigger": False, "urgency": 0, "reason": f"http_{resp.status}", "focus_tickers": []}
+                    body = (await resp.text())[:200]
+                    logger.error("Watchdog DeepSeek HTTP %d: %s", resp.status, body)
+                    return {"trigger": False, "urgency": 0,
+                            "reason": f"http_{resp.status}", "focus_tickers": [],
+                            "llm_failed": True, "llm_error": body}
                 data = await resp.json()
                 text = data["choices"][0]["message"]["content"].strip()
                 # Estrai JSON dalla risposta in modo tollerante:
@@ -602,10 +787,12 @@ async def _call_deepseek(context: str) -> dict:
                 return payload
     except json.JSONDecodeError as e:
         logger.warning("Watchdog JSON parse error: %s", e)
-        return {"trigger": False, "urgency": 0, "reason": "json_parse_error", "focus_tickers": []}
+        return {"trigger": False, "urgency": 0, "reason": "json_parse_error",
+                "focus_tickers": [], "llm_failed": True, "llm_error": str(e)[:200]}
     except Exception as e:
         logger.warning("Watchdog DeepSeek error: %s", e)
-        return {"trigger": False, "urgency": 0, "reason": str(e)[:80], "focus_tickers": []}
+        return {"trigger": False, "urgency": 0, "reason": str(e)[:80],
+                "focus_tickers": [], "llm_failed": True, "llm_error": str(e)[:200]}
 
 
 async def run_watchdog(run_id: str) -> dict:
@@ -798,12 +985,17 @@ async def run_watchdog(run_id: str) -> dict:
     # 1. Controlla throttle prima di fare qualsiasi altra cosa
     # 120 min = 2h: il Decision Standard non viene svegliato dal watchdog
     # piu' di una volta ogni 2 ore (allineato al cron 14/16/18/20 UTC).
-    if _is_throttled(database, throttle_minutes=120):
+    # Il motivo esatto viene loggato invece di essere assunto: prima ogni
+    # uscita da qui scriveva "decision_ran_recently" anche quando la causa era
+    # tutt'altra (un run fallito, un run bloccato). Nei log del 24-25/07 questo
+    # rendeva indistinguibile "ho gia' deciso" da "sto fallendo da ore".
+    throttled, throttle_reason = _is_throttled(database, throttle_minutes=120)
+    if throttled:
         database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
             "event": "watchdog_throttled",
-            "reason": "decision_ran_recently",
+            "reason": throttle_reason,
         }))
-        return {"should_trigger": False, "reason": "throttled", "urgency": 0}
+        return {"should_trigger": False, "reason": throttle_reason, "urgency": 0}
 
     # 1a. COST GUARD: se il mercato è chiuso E il buffer intelligence non
     # contiene news rilevanti recenti (ultimi 15 min), skip la chiamata
@@ -913,6 +1105,27 @@ async def run_watchdog(run_id: str) -> dict:
     # 4. Chiama DeepSeek
     result = await _call_deepseek(context)
 
+    # 4b. RETE DETERMINISTICA — se l'LLM non ha risposto, NON restare cieco.
+    # Prima un guasto dell'API produceva {"trigger": False} indistinguibile da
+    # un giudizio "niente di rilevante": nell'incidente del 24-25/07 sono stati
+    # 250 cicli su 512. Ora il fallimento e' dichiarato e la valutazione viene
+    # rifatta sui prezzi, in codice.
+    llm_failed = bool(result.get("llm_failed"))
+    if llm_failed:
+        llm_error = str(result.get("llm_error") or result.get("reason") or "")
+        logger.error("[%s][WATCHDOG] LLM non disponibile (%s) -> cancello "
+                     "deterministico sui prezzi", run_id, llm_error[:120])
+        _log_degraded(database, "watchdog_llm_unavailable", {
+            "llm_reason": result.get("reason", ""),
+            "llm_error": llm_error[:300],
+            "prices_seen": len(price_snap or {}),
+        })
+        fallback = evaluate_price_gate(price_snap, portfolio_tickers)
+        # Conserva la causa tecnica nel motivo: deve restare leggibile nei log
+        # che quel ciclo e' passato dalla rete e non dal giudizio dell'LLM.
+        fallback["reason"] = f"{fallback.get('reason','')} [LLM ko: {result.get('reason','')}]"
+        result = fallback
+
     # Coercizione difensiva: l'LLM può rendere urgency come "8" o null →
     # "8" >= 5 solleva TypeError, non era in try/except e disattivava il
     # watchdog per quel ciclo (perdendo eventi critici).
@@ -960,8 +1173,11 @@ async def run_watchdog(run_id: str) -> dict:
             logger.warning("[%s][WATCHDOG] dedup check failed: %s", run_id, exc)
 
     # 5. Logga
+    # `event` distingue il giudizio riuscito dal ripiego sulla rete: senza
+    # questa distinzione un'API rotta e un mercato calmo producevano la stessa
+    # identica riga, ed e' il motivo per cui l'incidente e' rimasto invisibile.
     database.insert_agent_log(run_id, "WATCHDOG", json.dumps({
-        "event": "watchdog_complete",
+        "event": "watchdog_llm_failed" if llm_failed else "watchdog_complete",
         "trigger": trigger,
         "urgency": urgency,
         "reason": reason,
@@ -971,6 +1187,8 @@ async def run_watchdog(run_id: str) -> dict:
         "portfolio_tickers": portfolio_tickers if deep_check else [],
         "run_counter": counter,
         "suppressed_by_dedup": suppressed_by_dedup,
+        "llm_failed": llm_failed,
+        "deterministic_gate": bool(result.get("deterministic")),
     }))
 
     logger.info("[%s][WATCHDOG] trigger=%s urgency=%d reason='%s' (%.2fs)%s",
