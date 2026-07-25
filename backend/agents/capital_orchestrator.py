@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_V3_MODEL = "deepseek-chat"   # V3, non R1
+DEEPSEEK_V3_MODEL = "deepseek-v4-flash"   # V3, non R1
 
 ORCHESTRATOR_COOLDOWN_HOURS = 2
 MAX_TRANSFER_PCT_NAV = 25.0           # Max % del NAV per singola riallocazione

@@ -28,7 +28,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_R1_MODEL = "deepseek-reasoner"
+DEEPSEEK_R1_MODEL = "deepseek-v4-pro"
 
 # Limite di output per R1. ATTENZIONE: per deepseek-reasoner il budget di
 # output copre ragionamento + risposta: con contesto lungo (portfolio + fino a

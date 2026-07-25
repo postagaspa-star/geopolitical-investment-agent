@@ -69,7 +69,7 @@ if _AURIKO_KEY:
 else:
     _LLM_PROVIDER = "deepseek"
     DEEPSEEK_API_URL = _DEEPSEEK_OFFICIAL_URL
-    DEEPSEEK_MODEL = "deepseek-chat"   # V4-Flash via DeepSeek ufficiale
+    DEEPSEEK_MODEL = "deepseek-v4-flash"   # V4-Flash via DeepSeek ufficiale
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_QUERY = (
@@ -220,7 +220,7 @@ def _llm_configs_inline() -> list[tuple]:
     Standalone: gira su GitHub Actions, non importa sim_llm (cwd != backend/).
     "DeepSeek-V3" non esiste piu': deepseek-chat = V4-Flash.
     """
-    ds_cfg = (_DEEPSEEK_OFFICIAL_URL, _DEEPSEEK_KEY, "deepseek-chat", "deepseek")
+    ds_cfg = (_DEEPSEEK_OFFICIAL_URL, _DEEPSEEK_KEY, "deepseek-v4-flash", "deepseek")
     if not (_LLM_PROVIDER == "auriko" and _AURIKO_KEY):
         return [ds_cfg]
 

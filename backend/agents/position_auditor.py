@@ -31,7 +31,7 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_MODEL = "deepseek-chat"   # V3
+DEEPSEEK_MODEL = "deepseek-v4-flash"   # V3
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 

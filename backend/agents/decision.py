@@ -69,7 +69,7 @@ DECISION_MODEL_FALLBACK = "claude-sonnet-4-5"  # era sonnet-4-20250514 (deprecat
 
 # ── DeepSeek-R1 (tournament, cost-optimized) ────────────────────────────────
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_R1_MODEL = "deepseek-reasoner"   # DeepSeek-R1 (reasoning model)
+DEEPSEEK_R1_MODEL = "deepseek-v4-pro"   # DeepSeek-R1 (reasoning model)
 
 
 def _get_decision_engine() -> str:

@@ -52,7 +52,7 @@ CLAUDE_MODEL = "claude-sonnet-4-5"   # era sonnet-4-20250514 (deprecato/in ritir
 # Sonnet 4.5 e' attivo, stesso tier (affidabilita' JSON) del primario.
 CLAUDE_MODEL_FALLBACK = "claude-sonnet-4-5"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_R1_MODEL = "deepseek-reasoner"
+DEEPSEEK_R1_MODEL = "deepseek-v4-pro"
 
 MAX_HISTORY_MESSAGES = 30   # ultimi N msg passati al modello (per contenere context)
 MAX_OHLCV_TICKERS = 8       # quanti ticker live OHLCV iniettare (top P&L positions)

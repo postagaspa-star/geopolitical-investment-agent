@@ -28,7 +28,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # DeepSeek-V3 — modello primario per lo Scout (JSON extraction, molto più economico di Sonnet)
-DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 # Claude Sonnet 4.5 — fallback se DeepSeek non risponde (era sonnet-4-20250514, deprecato)

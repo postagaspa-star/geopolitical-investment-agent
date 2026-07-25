@@ -34,7 +34,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_R1_MODEL = "deepseek-reasoner"
+DEEPSEEK_R1_MODEL = "deepseek-v4-pro"
 
 # Riusiamo l'helper del decision.py per coerenza dashboard.
 # Import lazy per evitare circular dependency a load-time.

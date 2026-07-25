@@ -59,8 +59,8 @@ logger = logging.getLogger(__name__)
 
 # Endpoint/modelli DeepSeek diretti (default, comportamento storico)
 _DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-_DEEPSEEK_R1 = "deepseek-reasoner"
-_DEEPSEEK_V3 = "deepseek-chat"
+_DEEPSEEK_R1 = "deepseek-v4-pro"
+_DEEPSEEK_V3 = "deepseek-v4-flash"
 
 # ── CIRCUIT BREAKER Auriko ──────────────────────────────────────────────────
 # Problema risolto: il Simulator auto-mode ha un timeout HARD di 480s per run

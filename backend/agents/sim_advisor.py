@@ -50,7 +50,7 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 #   - Per il task (coaching su trade-decision, output strutturato JSON),
 #     V3 e' piu' che sufficiente; il reasoning esplicito di R1 e' overkill
 #   - Costo simile (~$0.0006/run V3 vs ~$0.005/run R1) ma latenza incomparabile
-DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
 MAX_RESPONSE_TOKENS = 3000
 
 # ─── Storage helpers (sim_settings con fallback a database.settings) ────────

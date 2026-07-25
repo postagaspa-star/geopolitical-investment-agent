@@ -47,7 +47,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_V3_MODEL = "deepseek-chat"   # V3: ~10x piu' economico di R1, fast
+DEEPSEEK_V3_MODEL = "deepseek-v4-flash"   # V3: ~10x piu' economico di R1, fast
 
 # Setting key per disabilitare totalmente il monitor (default: enabled)
 SETTING_ENABLED = "crypto_monitor_enabled"

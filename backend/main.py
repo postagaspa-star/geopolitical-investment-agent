@@ -2842,7 +2842,7 @@ async def sim_generate_patterns():
             async with sess.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 json={
-                    "model": "deepseek-reasoner",
+                    "model": "deepseek-v4-pro",
                     "messages": [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": "\n".join(summary_lines)},
@@ -2969,7 +2969,7 @@ async def coach_cards_from_chat(req: ChatToCardReq):
                 "Solo JSON, niente preambolo o markdown."
             )
             payload = {
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "messages": [
                     {"role": "system", "content": extract_prompt},
                     {"role": "user", "content": (
@@ -7494,7 +7494,7 @@ async def test_deepseek():
         import aiohttp
         headers = {"Authorization": f"Bearer {deepseek_key}", "Content-Type": "application/json"}
         payload = {
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 5,
         }
@@ -7503,7 +7503,7 @@ async def test_deepseek():
                                     json=payload, headers=headers,
                                     timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
-                    return {"status": "ok", "model": "deepseek-chat"}
+                    return {"status": "ok", "model": "deepseek-v4-flash"}
                 else:
                     body = await resp.text()
                     return {"status": "error", "message": f"HTTP {resp.status}: {body[:200]}"}

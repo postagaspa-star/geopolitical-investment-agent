@@ -22,7 +22,7 @@ from simulator import scenarios, db as sim_db
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_R1 = "deepseek-reasoner"
+DEEPSEEK_R1 = "deepseek-v4-pro"
 
 # In-memory state dei run attivi (single-step + multi-step in corso).
 # Su Render i pod si riavviano (deploy, scaling, idle), il dict si svuota
