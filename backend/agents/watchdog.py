@@ -510,10 +510,17 @@ async def _get_price_snapshot(extra_tickers: list[str] | None = None) -> dict:
                 if t and t not in seen:
                     tickers.append(t)
                     seen.add(t)
-        # Cache age allineato al polling rate (600s = 10 min) + 100s margine.
-        # Bug precedente: TTL 900s permetteva trade su prezzi di 15 min fa
-        # in fast-moving crypto/equity → decisioni su dati stale.
-        cached = await asyncio.to_thread(get_cached_prices_bulk, tickers, 700)
+        # Freschezza derivata dalla cadenza REALE del polling (fonte unica in
+        # price_polling.py) invece che da un numero scritto a mano qui.
+        # Il valore precedente era 700s con un commento che lo diceva
+        # "allineato al polling rate (600s)", ma il polling era gia' passato a
+        # 1200s: per ~500s di ogni ciclo TUTTI i prezzi risultavano scaduti e
+        # questo snapshot tornava vuoto. Il watchdog valutava il mercato senza
+        # vedere un solo prezzo — e ora ci si appoggia anche il cancello
+        # deterministico, quindi la finestra cieca sarebbe doppiamente costosa.
+        from price_polling import POLLING_MAX_AGE_SECONDS
+        cached = await asyncio.to_thread(get_cached_prices_bulk, tickers,
+                                         POLLING_MAX_AGE_SECONDS)
         for t, q in cached.items():
             snapshot[t] = {
                 "price": round(q["price"], 2),

@@ -1,6 +1,19 @@
 """
 Price Polling Service — Massive API (primary) + yfinance (fallback) → Supabase ogni 60s.
 
+CADENZA E FRESCHEZZA — leggere prima di cambiare i numeri.
+La cadenza del polling e la finestra di validita' della cache DEVONO restare
+legate: se un consumatore scarta i prezzi piu' vecchi della cadenza con cui
+vengono prodotti, per una parte di ogni ciclo non vede NULLA. E' successo:
+il polling gira ogni 1200s mentre il watchdog chiedeva max_age 700s, quindi
+per ~500s su 1200 (il 41% del tempo) lo snapshot prezzi era vuoto e il
+cancello di risveglio valutava il mercato senza un solo prezzo sotto gli
+occhi. Il commento nel watchdog diceva "allineato al polling rate (600s)":
+descriveva una cadenza che nel frattempo era stata cambiata.
+Per questo la cadenza vive QUI, accanto al codice che la realizza, e i
+consumatori derivano la propria finestra da POLLING_MAX_AGE_SECONDS invece di
+scrivere un numero a mano.
+
 Aggiorna la tabella `price_quotes` con i prezzi correnti delle posizioni aperte
 e dei ticker della watchlist. Mantiene anche uno storico minuto-per-minuto
 in `price_history` per analisi e dashboard.
@@ -58,6 +71,15 @@ def seconds_since_last_poll() -> float:
 MASSIVE_BASE_URL = "https://api.massive.com"
 POLYGON_BASE_URL = "https://api.polygon.io"
 PROVIDER_TIMEOUT = 10  # secondi (uguale per Polygon e Massive)
+
+# ─── Cadenza del polling e freschezza della cache (vedi testata) ────────────
+# Fonte unica: lo scheduler pianifica il job con POLLING_INTERVAL_SECONDS e i
+# consumatori (watchdog, snapshot) usano POLLING_MAX_AGE_SECONDS. Il margine
+# copre la durata del giro stesso e i ritardi dei provider, cosi' i prezzi
+# dell'ultimo poll restano validi fino al successivo e non esistono finestre
+# cieche.
+POLLING_INTERVAL_SECONDS = 1200          # 20 minuti
+POLLING_MAX_AGE_SECONDS = POLLING_INTERVAL_SECONDS + 300   # 25 minuti
 MASSIVE_TIMEOUT = PROVIDER_TIMEOUT  # back-compat
 
 

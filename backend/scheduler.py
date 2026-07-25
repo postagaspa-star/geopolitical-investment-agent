@@ -1246,10 +1246,16 @@ def start_scheduler() -> AsyncIOScheduler:
     # tra un giro e l'altro (prima la finestra 11,6 min < cadenza scartava i
     # prezzi → apparivano "vecchi"). Provider: twelvedata/stooq/binance/polygon.
     # next_run_time: primo run dopo 15s dall'avvio (no attesa al deploy).
+    # Cadenza dalla fonte unica (price_polling.py): i consumatori derivano da
+    # li' anche la finestra di freschezza, cosi' le due non si disallineano.
+    try:
+        from price_polling import POLLING_INTERVAL_SECONDS as _poll_interval
+    except Exception:
+        _poll_interval = 1200
     _scheduler.add_job(
         _price_polling_job,
         trigger="interval",
-        seconds=1200,
+        seconds=_poll_interval,
         id="price_polling_job",
         name="Price Polling 20min",
         replace_existing=True,
