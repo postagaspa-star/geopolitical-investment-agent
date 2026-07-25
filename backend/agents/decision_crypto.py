@@ -1037,6 +1037,30 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
             if not current_price or current_price <= 0:
                 return json.dumps({"error": f"Prezzo non disponibile per {ticker}"})
 
+            # ── Anti-churn: attrito sul dietrofront, non sull'operare ───────
+            # Il nucleo deterministico crypto ha banda morta ZERO sulla
+            # direzione (segno di una somma pesata) e non riceve mai la
+            # posizione corrente: e' strutturalmente incapace di isteresi.
+            # Qui si blocca solo il rientro dopo uno stop e il ribaltamento
+            # rapido; le chiusure passano sempre. Fail-open (churn_guard.py).
+            if action in ("BUY", "SHORT"):
+                try:
+                    import churn_guard as _cg
+                    _churn_ok, _churn_why = _cg.check_trade_live(ticker, action, database)
+                except Exception:
+                    _churn_ok, _churn_why = True, ""
+                if not _churn_ok:
+                    logger.warning("[%s][DEC-CRYPTO] CHURN_GUARD blocked: %s",
+                                   run_id, _churn_why)
+                    database.insert_agent_log(run_id, "DECISION_CRYPTO_CHURN_BLOCKED",
+                        json.dumps({"ticker": ticker, "action": action,
+                                    "reason": _churn_why}, default=str))
+                    return json.dumps({
+                        "executed": False, "rejected": True,
+                        "ticker": ticker, "action": action,
+                        "reason": _churn_why,
+                    })
+
             # ── Risk Profile validation (HARD CONSTRAINTS, asset_class=crypto) ─
             # Per le APERTURE (BUY long, SHORT) — non per le chiusure SELL/COVER.
             if action in ("BUY", "SHORT"):
