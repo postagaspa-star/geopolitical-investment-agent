@@ -1117,12 +1117,35 @@ def set_take_profit(ticker: str, target_price: float, run_id: str = "") -> dict:
     ok = update_position_auto_exit(ticker, take_profit_price=target_price, set_by=run_id)
     if not ok:
         return {"success": False, "reason": "Aggiornamento DB fallito"}
+
+    # La nota deve dire la VERITA' sullo stato del sistema.
+    # Prima rispondeva sempre "verra' eseguito automaticamente al
+    # raggiungimento", ma l'unico esecutore di take_profit_price e'
+    # check_and_execute_auto_exits, spento di default dopo l'incidente NVDA:
+    # il target veniva raggiunto e non succedeva nulla, in silenzio. L'agente
+    # pianificava un'uscita che nessuno avrebbe onorato — e in un sistema che
+    # si sveglia di rado, quei profitti tornavano indietro.
+    # Chi vuole un target che ESEGUE davvero deve usare il ladder dei parziali
+    # (add_partial_exit), che ha un esecutore attivo.
+    auto_on = False
+    try:
+        auto_on = bool(_get_auto_exits_config().get("enabled"))
+    except Exception:
+        auto_on = False
+    note = ("Il take-profit verra' eseguito automaticamente al raggiungimento."
+            if auto_on else
+            "ATTENZIONE: l'esecuzione automatica dei take-profit e' DISATTIVATA. "
+            "Il livello viene registrato e al raggiungimento produce un evento "
+            "TAKE_PROFIT_REACHED, ma la posizione NON viene chiusa da sola: "
+            "decidi tu se incassare. Per un'uscita che esegue davvero usa un "
+            "ordine parziale (add_partial_exit).")
     return {
         "success": True, "ticker": ticker,
         "take_profit_price": target_price,
         "current_price": pos.get("current_price"),
         "avg_buy_price": pos.get("avg_buy_price"),
-        "note": "Il take-profit verra' eseguito automaticamente al raggiungimento.",
+        "auto_execution_enabled": auto_on,
+        "note": note,
     }
 
 
@@ -1331,6 +1354,33 @@ def check_and_execute_partial_exits(prices: dict | None = None) -> list:
     return executed
 
 
+SETTING_TRAILING_ACTIVATION_PCT = "trailing_activation_pct"
+
+
+def _trail_activation_pct(default_pct: float) -> float:
+    """
+    Guadagno minimo (%) prima che il trailing stop entri in funzione.
+
+    Default: la stessa distanza del trailing, cosi' al primo scatto lo stop
+    finisce al pareggio e mai sotto. Con 0 il trailing torna ad attivarsi al
+    primo centesimo di guadagno (comportamento storico).
+
+    A differenza delle distanze, qui 0 e' un valore valido e va rispettato:
+    per questo non passa da _trail_setting.
+    """
+    try:
+        import database
+        raw = (database.get_setting(SETTING_TRAILING_ACTIVATION_PCT, "") or "").strip()
+        if raw == "":
+            return default_pct
+        value = float(raw)
+        return value if value >= 0 else default_pct
+    except (TypeError, ValueError):
+        return default_pct
+    except Exception:
+        return default_pct
+
+
 def enforce_stops(prices: dict | None = None) -> list:
     """Governor DETERMINISTICO sull'uscita (richiesta Andrea).
 
@@ -1431,8 +1481,33 @@ def enforce_stops(prices: dict | None = None) -> list:
         # 1) TRAILING: su posizione in PROFITTO ratchet dello SL verso il prezzo,
         #    MAI allentando. Lo SL stesso e' il ratchet (max long / min short),
         #    quindi non serve memorizzare il picco.
+        #
+        #    SOGLIA DI ATTIVAZIONE — perche' esiste.
+        #    La condizione era il solo `cur > avg`: bastava UN CENTESIMO di
+        #    guadagno perche' lo stop venisse portato a prezzo-4%, cioe' a
+        #    -3,99% dall'ingresso. Il profilo autorizza stop fra il 7% e il 15%
+        #    (midpoint d'ufficio 11%): il trailing lo scavalcava di fatto,
+        #    riducendo di circa tre volte il respiro concesso alla posizione, e
+        #    lo faceva scrivendo diretto in DB senza passare da set_stop_loss,
+        #    quindi in silenzio. Su un orizzonte swing (giorni-settimane) uno
+        #    stop al 4% dal massimo viene toccato dall'oscillazione ordinaria
+        #    in un paio di giorni: il sistema tagliava i vincitori prima che
+        #    respirassero, mentre le perdite correvano fino allo stop pieno.
+        #    Payoff esattamente rovesciato rispetto a quello che serve.
+        #
+        #    Ora il trailing entra in funzione solo quando c'e' un cuscinetto
+        #    vero: guadagno >= trailing_activation_pct (default = la stessa
+        #    distanza del trailing, quindi al primo scatto lo stop finisce al
+        #    pareggio e non sotto). Mettere il setting a 0 ripristina il
+        #    comportamento storico.
         if trailing and avg > 0:
-            in_profit = (cur > avg) if not is_short else (cur < avg)
+            profit_pct = ((cur - avg) / avg * 100.0) if not is_short \
+                else ((avg - cur) / avg * 100.0)
+            # Lettura dedicata: _trail_setting scarta i valori <= 0 (per le
+            # distanze ha senso), ma qui lo 0 e' un valore LEGITTIMO — e' la
+            # via per ripristinare il comportamento storico.
+            activation = _trail_activation_pct(trail_pct)
+            in_profit = profit_pct >= activation
             if in_profit:
                 trail_sl = (round(cur * (1 - trail_pct / 100.0), 6) if not is_short
                             else round(cur * (1 + trail_pct / 100.0), 6))
@@ -1450,6 +1525,40 @@ def enforce_stops(prices: dict | None = None) -> list:
                         }, default=str))
                     except Exception as _te:
                         logger.debug("[ENFORCE-STOP] trailing %s: %s", ticker, _te)
+
+        # 1b) TAKE-PROFIT RAGGIUNTO: segnala, non eseguire.
+        #
+        #     Il target NON viene eseguito da qui, e non deve esserlo: l'unico
+        #     esecutore di take_profit_price e' check_and_execute_auto_exits,
+        #     spento di proposito dopo che il sistema liquido' NVDA da solo.
+        #     Il problema e' che quando e' spento non fa NULLA, in silenzio: un
+        #     target dichiarato veniva raggiunto e nessuno lo sapeva, mentre
+        #     set_take_profit aveva risposto "verra' eseguito automaticamente".
+        #     L'agente pianificava uscite che nessuno avrebbe onorato, e in un
+        #     sistema che si sveglia di rado quei profitti tornavano indietro.
+        #
+        #     Qui il target raggiunto diventa almeno un EVENTO: un log
+        #     interrogabile che il watchdog puo' usare come motivo deterministico
+        #     per svegliare il Decision, che e' chi deve decidere se incassare.
+        #     Nessuna posizione viene toccata.
+        try:
+            tp = float(p.get("take_profit_price") or 0)
+        except (TypeError, ValueError):
+            tp = 0.0
+        if tp > 0:
+            tp_hit = (cur >= tp) if not is_short else (cur <= tp)
+            if tp_hit:
+                try:
+                    from database import insert_agent_log as _ial
+                    _ial("auto_exit", "TAKE_PROFIT_REACHED", json.dumps({
+                        "ticker": ticker, "take_profit": tp, "price": cur,
+                        "qty": qty, "direction": "SHORT" if is_short else "LONG",
+                        "executed": False,
+                        "note": ("target raggiunto; l'esecuzione automatica dei "
+                                 "take-profit e' disattivata: decide il Decision"),
+                    }, default=str))
+                except Exception:
+                    pass
 
         # 2) HARD STOP: se il prezzo tocca lo SL (con margine anti-noise) →
         #    chiude TUTTA la posizione. Long: prezzo <= SL; Short: prezzo >= SL.
