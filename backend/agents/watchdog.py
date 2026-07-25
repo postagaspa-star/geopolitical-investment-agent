@@ -253,7 +253,21 @@ def _last_log_time(database, phases: list[str]) -> datetime | None:
     return None
 
 
-def _get_last_decision_success(database) -> datetime | None:
+# Fasi di completamento riuscito, per agente. Il throttle va valutato per
+# AGENTE e non globalmente: standard e crypto operano su universi disgiunti e
+# su calendari diversi (crypto 24/7 ogni ora, standard 4 slot nei feriali).
+# Trattarli come un blocco unico significa che il crypto, girando ogni ora,
+# teneva l'equity zittito in permanenza.
+DECISION_PHASES = {
+    "standard": {"complete": "DECISION_COMPLETE", "context": "DECISION_CONTEXT",
+                 "error": "DECISION_ERROR", "checkpoint": "decision"},
+    "crypto": {"complete": "DECISION_CRYPTO_COMPLETE",
+               "context": "DECISION_CRYPTO_CONTEXT",
+               "error": "DECISION_CRYPTO_ERROR", "checkpoint": "decision_crypto"},
+}
+
+
+def _get_last_decision_success(database, agent: str | None = None) -> datetime | None:
     """Timestamp dell'ultimo Decision COMPLETATO CON SUCCESSO (standard o crypto).
 
     Alimenta il throttle economico: "ho gia' deciso di recente, non rifarlo
@@ -276,12 +290,16 @@ def _get_last_decision_success(database) -> datetime | None:
     partivano due decisional a un minuto di distanza. Per questo qui si
     guardano ENTRAMBI gli agenti — ma solo i loro successi.
     """
+    names = ([DECISION_PHASES[agent]["checkpoint"]] if agent
+             else [v["checkpoint"] for v in DECISION_PHASES.values()])
+    phases = ([DECISION_PHASES[agent]["complete"]] if agent
+              else [v["complete"] for v in DECISION_PHASES.values()])
     try:
         client = database.get_client()
         if client:
             result = client.table("agent_checkpoints") \
                 .select("updated_at") \
-                .in_("agent_name", ["decision", "decision_crypto"]) \
+                .in_("agent_name", names) \
                 .eq("status", "COMPLETED") \
                 .order("updated_at", desc=True) \
                 .limit(1) \
@@ -293,11 +311,10 @@ def _get_last_decision_success(database) -> datetime | None:
         pass
 
     # Fallback su agent_logs: SOLO le fasi di completamento riuscito.
-    return _last_log_time(
-        database, ["DECISION_COMPLETE", "DECISION_CRYPTO_COMPLETE"])
+    return _last_log_time(database, phases)
 
 
-def _get_last_decision_start(database) -> datetime | None:
+def _get_last_decision_start(database, agent: str | None = None) -> datetime | None:
     """Timestamp dell'ultimo Decision AVVIATO (fase di contesto).
 
     Serve solo a impedire che due Decision girino in parallelo. E' un concetto
@@ -305,8 +322,9 @@ def _get_last_decision_start(database) -> datetime | None:
     avviato e mai completato e' un run morto, non una decisione presa, e non
     deve zittire il sistema per ore.
     """
-    return _last_log_time(
-        database, ["DECISION_CONTEXT", "DECISION_CRYPTO_CONTEXT"])
+    phases = ([DECISION_PHASES[agent]["context"]] if agent
+              else [v["context"] for v in DECISION_PHASES.values()])
+    return _last_log_time(database, phases)
 
 
 def _count_recent_decision_errors(database, minutes: int = 60) -> int:
@@ -362,28 +380,44 @@ def _is_throttled(database, throttle_minutes: int = 120) -> tuple[bool, str]:
     """
     now = datetime.now(timezone.utc)
 
-    # 1. Un run potrebbe essere ancora in volo → non affiancarne un altro.
-    started = _get_last_decision_start(database)
-    if started is not None:
-        since_start = (now - started).total_seconds() / 60
-        if since_start < CONCURRENCY_GUARD_MIN:
-            done = _get_last_decision_success(database)
-            still_running = done is None or done < started
-            if still_running:
-                logger.debug("Watchdog: Decision avviato %.0f min fa, forse in corso",
-                             since_start)
-                return True, "decision_possibly_running"
+    # 1 e 2 sono valutate PER AGENTE: basta che uno dei due sia libero perche'
+    # svegliarsi abbia senso. Prima erano globali, e siccome il Decision Crypto
+    # gira a cron ogni ora 24/7 mentre il throttle e' di 120 minuti, ogni run
+    # crypto riuscito teneva zittito anche l'equity — che opera su un universo
+    # completamente disgiunto. In pratica il ramo equity del watchdog non
+    # poteva quasi mai partire. Chi puo' davvero operare lo decide comunque il
+    # routing dell'orchestrator (mercato aperto, agente attivo).
+    per_agent: dict[str, str] = {}
+    for agent in DECISION_PHASES:
+        started = _get_last_decision_start(database, agent)
+        done = _get_last_decision_success(database, agent)
 
-    # 2. Throttle economico: solo un SUCCESSO recente compra silenzio.
-    last_ok = _get_last_decision_success(database)
-    if last_ok is not None:
-        elapsed_min = (now - last_ok).total_seconds() / 60
-        if elapsed_min < throttle_minutes:
-            logger.debug("Watchdog throttled: ultimo Decision riuscito %.0f min fa "
-                         "(limit %d min)", elapsed_min, throttle_minutes)
-            return True, "decision_ran_recently"
+        # Un run potrebbe essere ancora in volo → non affiancarne un altro
+        # DELLO STESSO agente.
+        if started is not None:
+            since_start = (now - started).total_seconds() / 60
+            if since_start < CONCURRENCY_GUARD_MIN and (done is None or done < started):
+                per_agent[agent] = "decision_possibly_running"
+                continue
+
+        # Throttle economico: solo un SUCCESSO recente compra silenzio.
+        if done is not None:
+            elapsed_min = (now - done).total_seconds() / 60
+            if elapsed_min < throttle_minutes:
+                per_agent[agent] = "decision_ran_recently"
+                continue
+        # else: agente libero — non finisce in per_agent.
+
+    if len(per_agent) == len(DECISION_PHASES):
+        reasons = sorted(set(per_agent.values()))
+        detail = ",".join(f"{a}:{r}" for a, r in sorted(per_agent.items()))
+        logger.debug("Watchdog throttled su entrambi gli agenti (%s)", detail)
+        return True, reasons[0] if len(reasons) == 1 else "all_agents_busy"
 
     # 3. Guasto in corso: rallenta, ma dillo forte.
+    # Va valutato ANCHE quando un agente sarebbe libero: se le chiamate stanno
+    # fallendo in serie, svegliare il Decision non produce una decisione, solo
+    # un altro errore.
     error_count = _count_recent_decision_errors(database, minutes=60)
     if error_count >= 2:
         last_err = _last_log_time(

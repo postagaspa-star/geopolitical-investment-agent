@@ -85,14 +85,27 @@ def _minutes_ago(n):
 
 @pytest.fixture
 def wd(monkeypatch):
-    """Isola _is_throttled dal DB: si controllano i tre segnali a mano."""
-    state = {"success": None, "start": None, "errors": 0, "last_error": None,
-             "degraded": []}
+    """Isola _is_throttled dal DB: si controllano i segnali a mano.
 
-    monkeypatch.setattr(watchdog, "_get_last_decision_success",
-                        lambda db: state["success"])
-    monkeypatch.setattr(watchdog, "_get_last_decision_start",
-                        lambda db: state["start"])
+    `success`/`start` valgono per entrambi gli agenti; `success_by`/`start_by`
+    permettono di differenziarli (serve a verificare che il crypto non zittisca
+    piu' l'equity).
+    """
+    state = {"success": None, "start": None, "errors": 0, "last_error": None,
+             "degraded": [], "success_by": {}, "start_by": {}}
+
+    def _success(db, agent=None):
+        if agent is not None and agent in state["success_by"]:
+            return state["success_by"][agent]
+        return state["success"]
+
+    def _start(db, agent=None):
+        if agent is not None and agent in state["start_by"]:
+            return state["start_by"][agent]
+        return state["start"]
+
+    monkeypatch.setattr(watchdog, "_get_last_decision_success", _success)
+    monkeypatch.setattr(watchdog, "_get_last_decision_start", _start)
     monkeypatch.setattr(watchdog, "_count_recent_decision_errors",
                         lambda db, minutes=60: state["errors"])
     monkeypatch.setattr(watchdog, "_last_log_time",
@@ -169,3 +182,40 @@ def test_run_bloccato_non_zittisce_per_ore(wd):
     wd["start"] = _minutes_ago(watchdog.CONCURRENCY_GUARD_MIN + 5)
     wd["success"] = None
     assert watchdog._is_throttled(None)[0] is False
+
+
+# ── Throttle per agente ─────────────────────────────────────────────────────
+
+def test_crypto_recente_non_zittisce_lo_standard(wd):
+    """
+    IL BUG: il Decision Crypto gira a cron OGNI ORA, 24/7, e il throttle e' di
+    120 minuti. Valutandoli insieme, ogni run crypto riuscito teneva zittito
+    anche l'equity — che opera su un universo completamente disgiunto. Il ramo
+    equity del watchdog non poteva quasi mai partire.
+    """
+    wd["success_by"] = {"crypto": _minutes_ago(10), "standard": _minutes_ago(600)}
+    throttled, reason = watchdog._is_throttled(None, throttle_minutes=120)
+    assert throttled is False, (
+        "lo standard e' libero da 10 ore: il watchdog deve potersi svegliare")
+
+
+def test_standard_recente_non_zittisce_il_crypto(wd):
+    """Simmetrico: il crypto e' 24/7, non deve dipendere dai cron equity."""
+    wd["success_by"] = {"standard": _minutes_ago(10), "crypto": _minutes_ago(600)}
+    assert watchdog._is_throttled(None, throttle_minutes=120)[0] is False
+
+
+def test_entrambi_recenti_throttla(wd):
+    wd["success_by"] = {"standard": _minutes_ago(10), "crypto": _minutes_ago(20)}
+    throttled, reason = watchdog._is_throttled(None, throttle_minutes=120)
+    assert throttled is True
+    assert reason == "decision_ran_recently"
+
+
+def test_un_agente_in_corso_e_laltro_appena_deciso(wd):
+    """Motivi diversi sui due agenti: il log deve dirlo, non inventarne uno."""
+    wd["start_by"] = {"crypto": _minutes_ago(2), "standard": _minutes_ago(999)}
+    wd["success_by"] = {"crypto": None, "standard": _minutes_ago(10)}
+    throttled, reason = watchdog._is_throttled(None, throttle_minutes=120)
+    assert throttled is True
+    assert reason == "all_agents_busy"
