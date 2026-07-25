@@ -181,6 +181,114 @@ def _apply_trend_participation(max_pos: float, asset_class: str,
                TREND_PARTICIPATION_ABS_CAP), True
 
 
+# ─── Denominatore del sizing ────────────────────────────────────────────────
+#
+# QUESTO E' IL PUNTO CHE PRODUCE IL PORTAFOGLIO PERENNEMENTE LIQUIDO.
+#
+# `max_position_pct_*` si legge come "percentuale massima del PORTAFOGLIO per
+# una posizione", ed e' cosi' che viene descritta nel prompt e nella UI. Ma il
+# calcolo in execute_trade la applicava al CASH DISPONIBILE:
+#
+#     alloc_pct = trade_value / cash * 100
+#
+# La differenza non e' cosmetica, e' una progressione geometrica. Con cap 15%,
+# ogni apertura puo' prendere al massimo il 15% di quel che RESTA:
+#
+#     cash dopo n posizioni = 100.000 x 0.85^n
+#     n=1 -> 85.000    n=2 -> 72.250    n=3 -> 61.400    n=6 -> 37.700
+#
+# Il portafoglio osservato in produzione (2 posizioni, ~76% di liquidita') e'
+# esattamente questo regime: non una scelta prudente dell'agente, l'output
+# aritmetico della formula. Anche saturando tutte e 6 le posizioni ammesse dal
+# profilo, il sistema non potrebbe scendere sotto il ~38% di cash: ha una
+# garanzia strutturale di non essere mai pienamente investito.
+#
+# Peggiora l'incoerenza il fatto che ogni ALTRO controllo di concentrazione del
+# sistema e' denominato in NAV (rebalance 35%, concentration trigger 35%): due
+# metri diversi per la stessa grandezza, e quello che limita gli acquisti si
+# stringe progressivamente mentre l'altro no.
+#
+# Il cambio e' pero' un cambio di COMPORTAMENTO sul capitale, non un fix
+# neutro: a parita' di cap, passare al NAV alza l'esposizione raggiungibile.
+# Per questo e' dietro flag e il default resta il comportamento storico —
+# accenderlo e' una decisione del proprietario, non un effetto collaterale di
+# un deploy. Con il flag OFF il calcolo e' byte-identico a prima.
+SETTING_SIZING_DENOMINATOR = "sizing_denominator"   # "cash" (default) | "nav"
+
+
+def sizing_denominator() -> str:
+    """Ritorna "cash" o "nav". Fail-safe: qualunque errore -> "cash"."""
+    try:
+        import database as _db
+        value = (_db.get_setting(SETTING_SIZING_DENOMINATOR, "cash")
+                 or "cash").strip().lower()
+        return "nav" if value == "nav" else "cash"
+    except Exception as e:
+        logger.debug("sizing_denominator: fail-safe cash (%s)", e)
+        return "cash"
+
+
+def compute_allocation_pct(trade_value: float, portfolio_state: dict,
+                           denominator: str | None = None) -> tuple[float, str]:
+    """
+    Percentuale di portafoglio impegnata da un'apertura, piu' il denominatore
+    effettivamente usato (per il log: la stessa soglia significa cose diverse
+    a seconda della base, e senza questo dato i rifiuti sono illeggibili).
+
+    Il valore 999.0 in caso di base non positiva conserva il comportamento
+    storico: un denominatore nullo deve far fallire la validazione, non
+    passare.
+    """
+    denominator = denominator or sizing_denominator()
+    try:
+        trade_value = float(trade_value or 0.0)
+    except (TypeError, ValueError):
+        return 999.0, denominator
+
+    state = portfolio_state or {}
+    try:
+        cash = float(state.get("cash", 0) or 0)
+    except (TypeError, ValueError):
+        cash = 0.0
+
+    base = cash
+    if denominator == "nav":
+        # NAV = cash + valore delle posizioni. Si preferisce il totale gia'
+        # calcolato dal portafoglio (direction-aware, vedi accounting.py)
+        # invece di ricalcolarlo qui: quella matematica ha una sola casa.
+        base = 0.0
+        for key in ("total_value", "nav", "portfolio_value"):
+            try:
+                candidate = float(state.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if candidate > 0:
+                base = candidate
+                break
+        if base <= 0:
+            # Ricostruzione esplicita solo se il valore delle posizioni c'e':
+            # sommare uno zero implicito darebbe "NAV == cash", cioe' il cash
+            # travestito da NAV. Il numero sarebbe pure corretto, ma il log
+            # direbbe una cosa falsa su QUALE soglia e' stata applicata — ed e'
+            # esattamente il tipo di ambiguita' che ha reso illeggibili i
+            # rifiuti finora.
+            try:
+                positions_value = float(state.get("positions_value") or 0)
+            except (TypeError, ValueError):
+                positions_value = 0.0
+            if positions_value > 0:
+                base = cash + positions_value
+            else:
+                # NAV non ricostruibile: si torna al cash, che e' la base piu'
+                # PICCOLA. Un dato mancante non deve mai allargare il cap.
+                base = cash
+                denominator = "cash_fallback"
+
+    if base <= 0:
+        return 999.0, denominator
+    return (trade_value / base) * 100.0, denominator
+
+
 # ─── Prompt block ──────────────────────────────────────────────────────────
 
 def build_risk_block(asset_class: str = "equity") -> str:

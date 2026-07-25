@@ -1055,7 +1055,10 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                             crypto_count += 1
                     open_count = crypto_count
                     trade_value = float(quantity) * float(current_price)
-                    alloc_pct = (trade_value / cash * 100.0) if cash > 0 else 999.0
+                    # Vedi risk_profile.compute_allocation_pct: col denominatore
+                    # a cash residuo il portafoglio segue 0.85^n e non puo'
+                    # strutturalmente raggiungere l'esposizione target.
+                    alloc_pct, alloc_base = _rp.compute_allocation_pct(trade_value, pstate)
                     conf_norm = float(confidence) / 100.0 if confidence and confidence > 1 else float(confidence or 0)
 
                     dd_pct = None
@@ -1081,6 +1084,7 @@ async def _handle_tool(tool_name: str, tool_input: dict, run_id: str,
                                 "ticker": ticker, "action": action,
                                 "qty": quantity, "price": current_price,
                                 "alloc_pct": round(alloc_pct, 2),
+                                "alloc_base": alloc_base,
                                 "confidence": conf_norm,
                                 "open_positions": open_count,
                                 "drawdown_pct": dd_pct,
