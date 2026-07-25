@@ -6782,6 +6782,74 @@ def _compute_closed_trades_py(trades: list) -> list:
     return trade_analytics.compute_closed_trades(trades)
 
 
+@app.get("/api/live/inaction")
+async def live_inaction(hours: float = Query(default=24.0, ge=1.0, le=720.0)):
+    """
+    Il costo dell'omissione, che finora non era misurato da nessuna parte.
+
+    Tutte le altre analytics hanno per denominatore il numero di TRADE: se il
+    sistema smette di operare non producono metriche cattive, non producono
+    metriche affatto. Qui si guarda l'altra coda:
+
+      - perche' il cancello di risveglio non ha svegliato, distinguendo
+        "ho valutato e non c'era niente" da "non ho nemmeno valutato"
+        (guasto / throttle / risparmio);
+      - da quanto non si opera, quanta liquidita' e' ferma;
+      - quante promesse condizionate scadono senza essere onorate — il
+        numero che descrive "mi pongo un livello e aspetto indefinitamente";
+      - quanto e' costato il capitale fermo rispetto al benchmark.
+
+    Sola lettura, nessun effetto sulle decisioni.
+    """
+    import inaction_metrics as im
+
+    out: dict = {"window_hours": hours}
+    try:
+        logs = database.get_agent_logs(limit=5000) or []
+        out["gate"] = im.watchdog_breakdown(logs, hours=hours)
+    except Exception as e:
+        out["gate"] = {"error": str(e)[:200]}
+
+    try:
+        trades = database.get_trades(limit=5000) or []
+        pstate = portfolio.get_portfolio_state()
+        commitments = []
+        for agent in ("standard", "crypto"):
+            try:
+                commitments += database.get_active_agent_commitments(agent, limit=100) or []
+            except Exception:
+                pass
+        out["portfolio"] = im.inaction_summary(trades, pstate, commitments)
+
+        # Costo-opportunita': rendimento del benchmark sulla finestra, se lo
+        # storico prezzi lo copre. Best-effort — se manca, il campo lo dice
+        # invece di inventare un numero.
+        bench_return = None
+        try:
+            client = database.get_client() if hasattr(database, "get_client") else None
+            if client:
+                since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+                rows = (client.table("price_history")
+                        .select("price,timestamp")
+                        .eq("ticker", "SPY")
+                        .gte("timestamp", since)
+                        .order("timestamp", desc=False)
+                        .limit(500)
+                        .execute())
+                values = [float(r.get("price") or 0) for r in (rows.data or [])]
+                values = [v for v in values if v > 0]
+                if len(values) >= 2:
+                    bench_return = (values[-1] - values[0]) / values[0] * 100.0
+        except Exception:
+            bench_return = None
+        out["opportunity_cost"] = im.opportunity_cost(
+            pstate.get("cash", 0), bench_return)
+    except Exception as e:
+        out["portfolio"] = {"error": str(e)[:200]}
+
+    return out
+
+
 @app.get("/api/live/edge-tracker")
 async def live_edge_tracker():
     """
