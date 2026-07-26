@@ -120,3 +120,30 @@ def test_pesi_fissi_semplici():
     for _ in range(n - 1):
         expected *= 1 + 0.001 * 0.5
     assert out["equity"][-1] == pytest.approx(expected, rel=1e-9)
+
+
+# ── quota cripto fissa (manopola aggiunta su richiesta di Andrea) ───────────
+
+def test_quota_cripto_fissa_rispettata():
+    vols = {"SPY": 0.15, "TLT": 0.14, "GLD": 0.13, "BTC-USD": 0.70}
+    w = bt.base_weights(vols, btc_share=0.25)
+    assert w["BTC-USD"] == pytest.approx(0.25)
+    assert sum(w.values()) == pytest.approx(1.0)
+    # gli altri si spartiscono il resto in inverse-vol: GLD (piu' calmo) > SPY
+    assert w["GLD"] > w["SPY"]
+
+
+def test_senza_quota_fissa_comportamento_storico():
+    vols = {"SPY": 0.15, "TLT": 0.14, "GLD": 0.13, "BTC-USD": 0.01}
+    a = bt.base_weights(vols, btc_share=None, caps={"BTC-USD": bt.BTC_CAP})
+    b = bt.inverse_vol_weights(vols, caps={"BTC-USD": bt.BTC_CAP})
+    assert a == b
+
+
+def test_perche_la_cripto_esce_piccola_dalla_formula():
+    """La risposta alla domanda di Andrea, come test: con volatilita'
+    realistiche (BTC ~4x gli altri), l'inverse-vol da' alla cripto una fetta
+    strutturalmente piccola — il tetto del 10% nemmeno interviene."""
+    vols = {"SPY": 0.18, "TLT": 0.15, "GLD": 0.14, "BTC-USD": 0.65}
+    w = bt.inverse_vol_weights(vols, caps={"BTC-USD": bt.BTC_CAP})
+    assert w["BTC-USD"] < 0.08, "ballando 4x, pesa ~1/4: sotto il tetto da sola"

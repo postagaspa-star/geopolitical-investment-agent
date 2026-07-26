@@ -71,52 +71,89 @@ scostamenti si azzerano da soli e resta la base. Il termometro viene
 ricontrollato anche **a metà mese**: quello mensile, da solo, è cieco sulle
 tempeste improvvise.
 
-## I numeri della prova storica (10 anni: lug 2016 → lug 2026)
+## La frontiera completa (richiesta da Andrea): un menu per ogni livello di rischio
 
-Da 100.000, commissioni incluse, ribilancio mensile, cash che rende un 3%
-medio annuo (approssimazione dichiarata), nessuno sguardo al futuro
-(verificato da un test automatico), controllato anche su tre spezzoni
-separati del decennio:
+150 combinazioni provate: 6 modalità di quota cripto (dalla formula pura
+alla quota fissa al 30%) × 25 termometri, su 10 anni di dati, con la
+verifica sugli spezzoni del decennio e sugli inverni cripto (sotto).
 
-| termometro | 100k diventano | annuo | max perdita storica |
+**Perché la cripto usciva così piccola (la tua domanda).** La formula pesa
+gli ingredienti al contrario del nervosismo: la cripto balla 3-4 volte più
+degli altri, quindi la formula da sola le dà 3-4 volte meno — il tetto del
+10% nemmeno interveniva. Per alzarla serviva una manopola nuova, che ho
+aggiunto: **la quota cripto fissa**, decisa da te, con il resto del paniere
+che continua a pesarsi da solo.
+
+**Il miglior guadagno per ogni livello di perdita tollerata** (da 100.000,
+commissioni e cash al 3% inclusi):
+
+| limite | migliore combinazione | annuo | perdita storica | 100k → |
+|---|---|---|---|---|
+| −2% | nessuna combinazione ci sta | — | — | — |
+| −4% | cripto 30%, term. 2,5% | 5,9% | −3,9% | 176.690 |
+| −6% | cripto 30%, term. 3,5% | 7,0% | −5,6% | 196.410 |
+| −8% | cripto 30%, term. 4,5% | 8,1% | −7,9% | 218.050 |
+| −10% | cripto 30%, term. 5,0% | 8,7% | −9,1% | 229.630 |
+| −12% | cripto 30%, term. 6,0% | 9,8% | −11,3% | 254.420 |
+| −14% | cripto 30%, term. 7,0% | 10,9% | −13,6% | 281.520 |
+| −16% | cripto 30%, term. 8,0% | 12,1% | −15,8% | 311.090 |
+| −18% | cripto 30%, term. 9,0% | 13,2% | −17,9% | 343.690 |
+| −20% | cripto 30%, term. 10,0% | 14,3% | −20,0% | 377.390 |
+
+### La lettura onesta: perché "vince sempre cripto 30%"
+
+Vince sempre la quota cripto più alta provata, a ogni livello di rischio. E
+se avessi provato il 40%, avrebbe vinto il 40%. Questo NON è una scoperta:
+è il senno di poi — questo è stato il miglior decennio della storia di
+Bitcoin (~100 volte), quindi "più Bitcoin" vinceva per forza, a posteriori.
+La divisione onesta dei meriti è questa:
+
+- **il controllo della perdita è merito del termometro**, ed è credibile:
+  quando il nervosismo esplode, taglia l'esposizione. Ha retto anche negli
+  inverni cripto (sotto);
+- **il guadagno extra è merito di Bitcoin**, ed è una scommessa sul suo
+  futuro, non una misura. Il calcolo non può dirti se il prossimo decennio
+  sarà come il precedente.
+
+### La prova degli inverni cripto (il test che conta davvero)
+
+Ho fatto girare le combinazioni sui tre periodi peggiori del decennio:
+
+- **Inverno 2018** (Bitcoin −52% nella finestra): la formula perde il 5,9%
+  annuo con max −12%; la cripto-30% perde il 10,4% annuo con max −17%. Qui
+  la quota alta costa cara — ma il termometro la tiene comunque dentro il
+  −20%.
+- **Inverno 2022** (Bitcoin −67%): sorpresa — tutte le combinazioni quasi
+  uguali (max perdita −16/−18%), e la formula è la PEGGIORE (−18,1%),
+  perché il 2022 è stato l'anno peggiore della storia per le obbligazioni,
+  su cui la formula pesa di più. Lezione: il −20% di budget verrà quasi
+  tutto usato negli anni in cui TUTTO scende insieme, qualunque quota
+  cripto tu scelga.
+- **Covid 2020**: tutte positive, perdite massime sotto il −6%: il
+  termometro ha fatto il suo mestiere.
+
+### La chiave per decidere: quota misurata in RISCHIO, non in peso
+
+"Complementare, non dominante" ha una traduzione precisa: quanta parte del
+**rischio totale** viene dalla cripto. Ballando ~4 volte più degli altri,
+la cripto al 20% di peso contribuisce già **metà del rischio** del paniere;
+al 30% ne contribuisce circa **due terzi** — cioè dominante di fatto, la
+vecchia scommessa con l'airbag montato sopra. Il menu con margine sotto il
+−20% (perdita storica ~−17/−18%, non a filo):
+
+| scelta | annuo | perdita storica | rischio da cripto |
 |---|---|---|---|
-| 4,0% (vecchia regola −10%) | 188.860 | 6,6% | −9,2% |
-| 6,0% | 219.000 | 8,2% | −13,7% |
-| 7,0% | 230.620 | 8,8% | −16,0% |
-| **8,0% — scelta raccomandata** | **241.140** | **9,2%** | **−18,4%** |
-| 8,5% (a filo del limite) | 245.650 | 9,4% | −19,5% |
-| 9,0% (sfora) | 250.360 | 9,7% | −20,4% |
-| 10,0% (sfora) | 260.000 ca. | 10,0% | −22,2% |
+| formula (term. 8%) | 9,2% | −18,4% | ~un quinto |
+| cripto 15% (term. 8%) | 11,4% | −17,6% | ~40% |
+| **cripto 20% (term. 8%) — parità** | **11,8%** | **−16,9%** | **~metà** |
+| cripto 25% (term. 8,5%) | 12,5% | −17,4% | ~60% |
+| cripto 30% (term. 9%) | 13,2% | −17,9% | ~due terzi |
 
-### Come leggerla
-
-**L'8% è la scelta coerente col nuovo limite.** Perdita massima storica
-−18,4%: margine sotto il −20% nella stessa proporzione che avevamo usato per
-la vecchia regola (il backtest è ottimista per costruzione: dieci anni
-contengono solo 2-3 tempeste, il peggio futuro tende a superare il peggio
-passato). L'8,5% arriva a −19,5%: a filo, scartato. La robustezza regge
-anche qui: cambiando la finestra di misura da 60 a 90 giorni i numeri quasi
-non si muovono (9,5% annuo, −18,6%).
-
-**Cosa compra davvero il rischio in più — attenzione, non è proporzionale.**
-Raddoppiare la tolleranza di perdita (da −10% a −20%) NON raddoppia la
-resa: si passa dal 6,6% al 9,2% l'anno, cioè +2,6 punti. E oltre non c'è
-quasi niente da comprare: sopra il termometro ~9% la formula smette di
-mordere, perché l'esposizione è già al 100% in metà dei mesi e il sistema
-non usa leva. **Questa base ha un tetto naturale intorno al 10% l'anno**,
-qualunque rischio si accetti. Sul decennio, la scelta nuova produce ~52.000
-in più della vecchia (241.000 contro 189.000).
-
-**Con più spazio di rischio, anche la cripto respira di più.** Al termometro
-8% la base sta investita in media all'83% (contro il 46% di prima) e la
-fetta cripto effettiva sale al 5,7% medio del patrimonio, toccando il tetto
-del 10% nei periodi tranquilli. Complementare, ma non più simbolica.
-
-**Il confronto onesto con le alternative.** Tutto-azioni ha reso di più
-(13,1%) ma con −34% di perdita massima: fuori anche dal nuovo limite, e con
-anni interi a −21%. La vecchia posizione "25% Bitcoin" (17-20% annuo, −30%)
-resta fuori regola pure lei. La base all'8% è il punto più alto
-raggiungibile **dentro** la tua regola con questi ingredienti.
+La mia raccomandazione, se vuoi restare coerente col principio che hai
+dichiarato tu ("complementari, non dominanti"): **cripto 20%, termometro
+8%** — 11,8% l'anno storico, perdita massima −16,9% (margine vero sotto il
+−20%), e il rischio diviso a metà esatta tra cripto e resto del mondo.
+Oltre quel punto non è più complemento: è di nuovo la scommessa.
 
 ### Cosa questa prova NON dice (limiti, senza sconti)
 

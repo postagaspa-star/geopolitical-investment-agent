@@ -103,12 +103,41 @@ def month_key(date_iso: str) -> str:
     return date_iso[:7]
 
 
+def base_weights(vols: dict[str, float],
+                 btc_share: float | None = None,
+                 caps: dict[str, float] | None = None) -> dict[str, float]:
+    """
+    Pesi del paniere investito (somma = 1), in due modalita':
+
+    - btc_share=None (storica): inverse-vol su TUTTI gli ingredienti, con
+      eventuali tetti. Qui la cripto esce strutturalmente PICCOLA: ballando
+      3-4 volte piu' degli altri, l'inverse-vol le assegna 3-4 volte meno —
+      il tetto al 10% quasi non serve, la formula da sola sta sotto.
+
+    - btc_share=X (quota fissa, richiesta di Andrea per alzare la cripto):
+      la cripto riceve ESATTAMENTE la quota X della parte investita, decisa
+      a monte e non dalla formula; gli altri ingredienti si spartiscono il
+      resto in inverse-vol. Attenzione: e' una scelta strategica, non una
+      misura — piu' quota cripto = piu' rendimento NEL DECENNIO IN CUI BTC
+      ha fatto ~100x, il che e' senno di poi, non una legge.
+    """
+    if btc_share is None:
+        return inverse_vol_weights(vols, caps)
+    others = {t: v for t, v in vols.items() if t != "BTC-USD"}
+    w = inverse_vol_weights(others)
+    out = {t: x * (1.0 - btc_share) for t, x in w.items()}
+    if "BTC-USD" in vols:
+        out["BTC-USD"] = btc_share
+    return out
+
+
 def simulate(dates: list[str], closes: dict[str, list[float]],
              mode: str, target_vol: float = TARGET_VOL_DEFAULT,
              fixed_weights: dict[str, float] | None = None,
              cost_bps: float = COST_BPS_SIDE,
              window: int = WINDOW,
-             cash_rate: float = 0.0) -> dict:
+             cash_rate: float = 0.0,
+             btc_share: float | None = None) -> dict:
     """
     Simulazione a pesi mensili. mode:
       "base"  -> inverse-vol + tetto BTC + termometro (scala a target_vol)
@@ -138,7 +167,8 @@ def simulate(dates: list[str], closes: dict[str, list[float]],
             else:
                 if i >= window:
                     vols = {t: ann_vol(rets[t][i - window:i]) for t in tickers}
-                    w = inverse_vol_weights(vols, caps={"BTC-USD": BTC_CAP})
+                    w = base_weights(vols, btc_share=btc_share,
+                                     caps={"BTC-USD": BTC_CAP})
                     port_window = [sum(w[t] * rets[t][j] for t in tickers)
                                    for j in range(i - window, i)]
                     pv = ann_vol(port_window)
@@ -267,5 +297,58 @@ def main(folder: str) -> None:
               f"{m['vol_pct']:>6.1f}% {m['max_dd_pct']:>11.1f}% {m['worst_12m_pct']:>12.1f}%")
 
 
+def frontier(folder: str) -> None:
+    """
+    Frontiera rischio/rendimento richiesta da Andrea: per ogni livello di
+    perdita massima tollerata (-2% ... -20%, a passi di 2), trova la
+    combinazione termometro x quota-cripto col rendimento migliore che resta
+    DENTRO quel livello sull'intero decennio.
+
+    AVVERTENZA DI ONESTA' (stampata anche in coda): scegliere la quota cripto
+    guardando questo decennio significa ottimizzare sul miglior decennio
+    della storia di BTC (~100x). I vincitori di ogni riga vanno letti come
+    "cosa avrebbe pagato", non "cosa paghera'".
+    """
+    series = {t: load_yahoo(f"{folder}/hist_{t}.json")
+              for t in ["SPY", "TLT", "GLD", "BTC-USD"]}
+    dates, closes = align(series)
+    print(f"periodo: {dates[0]} -> {dates[-1]}  ({len(dates)} sedute)")
+
+    modes = [(None, "formula (inv-vol, tetto 10%)"), (0.10, "cripto fissa 10%"),
+             (0.15, "cripto fissa 15%"), (0.20, "cripto fissa 20%"),
+             (0.25, "cripto fissa 25%"), (0.30, "cripto fissa 30%")]
+    vols_grid = [x / 200.0 for x in range(4, 29)]     # 2.0% ... 14.0% passo 0.5
+
+    all_runs = []
+    for share, label in modes:
+        for tv in vols_grid:
+            m = simulate(dates, closes, mode="base", target_vol=tv,
+                         cash_rate=0.03, btc_share=share)["metrics"]
+            all_runs.append({"share": share, "label": label, "tv": tv, **m})
+
+    print(f"\ncombinazioni provate: {len(all_runs)} "
+          f"({len(modes)} modalita' cripto x {len(vols_grid)} termometri)\n")
+    header = (f"{'limite':>7s} | {'migliore combinazione':32s} "
+              f"{'annuo':>6s} {'max perdita':>12s} {'100k ->':>9s}")
+    print(header)
+    print("-" * len(header))
+    for bucket in range(2, 21, 2):
+        ok = [r for r in all_runs if r["max_dd_pct"] >= -bucket]
+        if not ok:
+            print(f"{-bucket:>6d}% | (nessuna combinazione resta nel limite)")
+            continue
+        best = max(ok, key=lambda r: r["cagr_pct"])
+        combo = f"{best['label']}, term. {best['tv']*100:.1f}%"
+        print(f"{-bucket:>6d}% | {combo:32s} {best['cagr_pct']:>5.1f}% "
+              f"{best['max_dd_pct']:>11.1f}% {100000*best['final_x']:>9,.0f}")
+
+    print("\nAVVERTENZA: le righe con quota cripto alta vincono PERCHE' questo")
+    print("e' stato il miglior decennio della storia di BTC. E' senno di poi:")
+    print("una quota fissa alta e' una scommessa strategica, non una misura.")
+
+
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else ".")
+    if len(sys.argv) > 2 and sys.argv[2] == "frontier":
+        frontier(sys.argv[1])
+    else:
+        main(sys.argv[1] if len(sys.argv) > 1 else ".")
