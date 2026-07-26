@@ -97,10 +97,19 @@ spezzoni separati del decennio (non un solo percorso):
 decennio ma su tre spezzoni separati (2016-19, 2019-22 con il crollo Covid,
 2022-26): il peggiore dei tre non ha mai superato −9,2%. Il 4,5% invece sfora
 il −10% in **due** dei tre spezzoni (−10,1% e −10,3%): fuori dalla tua
-regola, non un caso isolato. Rende il 6,6% l'anno — un po' meno di prima
-perché con le cripto ridotte a fetta complementare (10%, non più dominanti)
-il motore di crescita principale torna ad azioni-obbligazioni-oro, che sono
-più lente ma anche più prevedibili.
+regola, non un caso isolato.
+
+**Quanto pesa davvero la cripto qui dentro (misurato, non stimato).** Il
+tetto è al 10%, ma il peso medio *effettivo* della cripto nel decennio è
+stato il **3% del patrimonio** (mai oltre il 6%): i pesi "al contrario del
+nervosismo" assegnano poco all'ingrediente più ballerino, e il termometro
+stretto — imposto dalla regola del −10% — comprime tutto (la base sta
+investita in media al 46%). Eppure quel 3% lavora: rispetto alla stessa base
+senza cripto rende **+1,5 punti l'anno** (6,6% contro 5,1%, cioè +24.250 sul
+decennio). Questo È "complementare, non dominante" tradotto in numeri: la
+riga da 17-20% l'anno aveva la cripto al 25%, otto volte tanto — e infatti
+perdeva il 30% nei momenti neri. La manopola che decide quanto la cripto può
+spingere non è la sua presenza nel paniere: è la tua regola di rischio.
 
 **Anche con le cripto dentro, il vincolo resta il −10% secco.** Il
 rendimento massimo osservato in tutta la griglia — spingendo il termometro
