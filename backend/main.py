@@ -6782,6 +6782,41 @@ def _compute_closed_trades_py(trades: list) -> list:
     return trade_analytics.compute_closed_trades(trades)
 
 
+@app.get("/api/live/shadow")
+async def live_shadow():
+    """
+    Scoreboard dell'agente ombra: il radar del sistema batte il caso?
+
+    Previsioni FINTE (zero capitale): ogni giorno di borsa 3 long sui titoli
+    piu' forti del radar e 3 short sui piu' deboli, verificate dopo 5 sedute;
+    in parallelo un gemello cieco che sceglie a caso dagli stessi titoli.
+    Nessun verdetto sotto le 50 previsioni chiuse per parte: prima risponde
+    "campione insufficiente" invece di scambiare il rumore per un destino.
+    """
+    import shadow_thesis as sh
+
+    try:
+        logs = database.get_agent_logs(limit=5000) or []
+        theses, resolved = sh.load_shadow_state(logs)
+        closed = [r for r in resolved if r.get("status") == "RESOLVED"]
+        real = [r for r in closed if r.get("kind") == "real"]
+        rnd = [r for r in closed if r.get("kind") == "random"]
+        void_n = sum(1 for r in resolved if r.get("status") == "VOID")
+        open_n = len({t.get("id") for t in theses}
+                     - {r.get("id") for r in resolved})
+        out = sh.compare(real, rnd)
+        out.update({
+            "theses_total": len(theses),
+            "open": open_n,
+            "void": void_n,
+            "ultimi_esiti": sorted(closed, key=lambda r: r.get("date") or "",
+                                   reverse=True)[:6],
+        })
+        return out
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
 @app.get("/api/live/inaction")
 async def live_inaction(hours: float = Query(default=24.0, ge=1.0, le=720.0)):
     """

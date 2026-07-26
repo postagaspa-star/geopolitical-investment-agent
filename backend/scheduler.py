@@ -1185,6 +1185,22 @@ async def _coach_cards_weekly_job():
         logger.error("Coach Cards weekly job crash: %s", e, exc_info=True)
 
 
+async def _shadow_thesis_job():
+    """
+    Agente ombra, una volta al giorno (vedi shadow_thesis.py).
+
+    Previsioni finte (senza capitale) dal radar di rotazione + gemello
+    casuale, per misurare in settimane — invece che in anni — se il segnale
+    del sistema batte il caso. Fail-safe: un errore qui non ferma lo
+    scheduler, e il modulo stesso e' no-op a borsa chiusa o a flag spento.
+    """
+    try:
+        import shadow_thesis
+        await shadow_thesis.run_shadow_job()
+    except Exception as e:
+        logger.warning("[SHADOW] job fallito (non fatale): %s", e)
+
+
 async def _provider_health_job():
     """
     Sentinella oraria dei fornitori esterni (Anthropic + DeepSeek + fonti Scout).
@@ -1630,6 +1646,22 @@ def start_scheduler() -> AsyncIOScheduler:
     if ph_first_run is not None:
         ph_kwargs["next_run_time"] = ph_first_run
     _scheduler.add_job(_provider_health_job, **ph_kwargs)
+
+    # ── Agente ombra: una volta al giorno, dopo la chiusura USA ──────────
+    # Scrive le previsioni finte del giorno (radar + gemello casuale) e
+    # chiude quelle mature. Non tocca capitale: e' il banco di prova che
+    # misura se il segnale del sistema batte il caso (vedi shadow_thesis.py).
+    # 22:10 UTC: borsa USA chiusa, nessun cron affollato a quell'ora.
+    # No-op nei giorni di borsa chiusa e con shadow_thesis_enabled=false.
+    _scheduler.add_job(
+        _shadow_thesis_job,
+        trigger=CronTrigger(hour=22, minute=10),
+        id="shadow_thesis",
+        name="Agente ombra (giornaliero 22:10 UTC)",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
 
     # ── Simulator AUTO-MODE: ogni 30 minuti ──────────────────────────────
     # No-op se auto_mode_enabled = false. Quando abilitato, fa girare un
