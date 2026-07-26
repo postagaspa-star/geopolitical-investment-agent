@@ -196,6 +196,17 @@ così ogni effetto è attribuibile alla sua causa:
   giorno (3 forti long + 3 deboli short) + gemello cieco, verifica a 5
   sedute, scoreboard su `/api/live/shadow`. Parte a raccogliere dati dal
   giorno del deploy; primo verdetto possibile dopo ~2-3 settimane di borsa.
-- [ ] Fase 3 — progetto su carta + prova storica (prossimo passo)
+- [x] **Fase 3 — progetto su carta + prova storica** (fatta): base a 4
+  ingredienti con termometro, prova su 10 anni di dati veri (motore testato,
+  nessuno sguardo al futuro), passata da 3 giudici critici indipendenti e
+  corretta dove serviva (incluso un mio errore: il termometro 5% NON rispetta
+  il 12%, lo sfora a -12,4%). Documento: docs/progetto-posizione-normale.md
+- [!] **SCOPERTA IN CHECKPOINT (da risolvere, serve Andrea)**: una SECONDA
+  copia del programma, con codice vecchio, e' ancora accesa da qualche parte
+  e scrive sullo stesso archivio (79 cicli su 82 in 6h hanno la firma del
+  codice vecchio; sul PC non c'e' nulla). Sospetti: vecchia istanza Render mai
+  spenta, o un secondo servizio (Railway? staging?). Finche' vive, i freni
+  nuovi sulle uscite sono aggirati dalla copia vecchia. Da controllare nei
+  pannelli Render/Railway e spegnere.
 - [ ] ✋ Checkpoint "posizione normale" (decisione di Andrea)
 - [ ] Fase 4 — accensioni graduali (decisioni di Andrea)
