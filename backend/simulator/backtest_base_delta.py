@@ -228,24 +228,29 @@ def main(folder: str) -> None:
     dates, closes = align(series)
     print(f"periodo: {dates[0]} -> {dates[-1]}  ({len(dates)} sedute)\n")
 
-    # SCELTA DI ANDREA (fine luglio 2026, corretta il giorno dopo): le cripto
-    # restano nel paniere ma COMPLEMENTARI (tetto 10%, non piu' il fulcro).
-    # Vincolo di rischio: quasi mai sotto -10%; fino a -12% SOLO se il
-    # potenziale annuo supera il +18% (anche con le cripto non lo sfiora mai:
-    # il CAGR massimo osservato in griglia e' 9.7%, quindi il vincolo resta
-    # -10% netto). Il 4% e' la scelta con margine, verificata anche su 3
-    # sotto-periodi separati: il peggiore arriva a -9.2% (2019-2022, include
-    # il crollo Covid); il 4.5% sfora -10% in DUE dei tre sotto-periodi
-    # (-10.1% e -10.3%), fuori regola.
+    # REGOLA DI RISCHIO DI ANDREA (aggiornata ancora a fine luglio 2026):
+    # limite di perdita massima alzato CONSAPEVOLMENTE a -20% (prima: quasi
+    # mai sotto -10%). Le cripto restano COMPLEMENTARI (tetto 10%).
+    #
+    # Scelta raccomandata: termometro 8% -> 9,2%/anno, max perdita storica
+    # -18,4% (margine ~8% relativo sotto il limite, stessa disciplina usata
+    # per la regola precedente: il backtest e' ottimista per costruzione).
+    # L'8,5% arriva a -19,5%: troppo a filo. NOTA su cosa compra il rischio:
+    # raddoppiare la tolleranza (da -10% a -20%) NON raddoppia la resa
+    # (6,6% -> 9,2%); e sopra il termometro ~9% la formula smette di mordere
+    # perche' l'esposizione e' gia' al 100% in meta' dei mesi (niente leva):
+    # questa base ha un tetto naturale intorno al 10%/anno.
     runs = [
-        ("BASE (cripto tetto 10%), term. 3.5%", closes, dict(mode="base",
-         target_vol=0.035, cash_rate=0.03)),
-        ("BASE (cripto tetto 10%), term. 4% -- SCELTA", closes, dict(mode="base",
-         target_vol=0.04, cash_rate=0.03)),
-        ("BASE (cripto tetto 10%), term. 4.5% (fuori regola)", closes,
-         dict(mode="base", target_vol=0.045, cash_rate=0.03)),
-        ("BASE, term. 4%, finestra 90g", closes, dict(mode="base",
-         target_vol=0.04, cash_rate=0.03, window=90)),
+        ("BASE (cripto 10%), term. 7%", closes, dict(mode="base",
+         target_vol=0.07, cash_rate=0.03)),
+        ("BASE (cripto 10%), term. 8% -- SCELTA", closes, dict(mode="base",
+         target_vol=0.08, cash_rate=0.03)),
+        ("BASE (cripto 10%), term. 8.5% (a filo)", closes,
+         dict(mode="base", target_vol=0.085, cash_rate=0.03)),
+        ("BASE, term. 8%, finestra 90g", closes, dict(mode="base",
+         target_vol=0.08, cash_rate=0.03, window=90)),
+        ("BASE prudente term. 4% (vecchia regola -10%)", closes,
+         dict(mode="base", target_vol=0.04, cash_rate=0.03)),
         ("OGGI: 25% BTC + 75% fermo (scartata)", closes,
          dict(mode="fixed", fixed_weights={"BTC-USD": 0.25}, cash_rate=0.03)),
         ("Tutto azioni (SPY 100%)", closes,
