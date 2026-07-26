@@ -161,10 +161,36 @@ così ogni effetto è attribuibile alla sua causa:
 ## Stato dei lavori (aggiorno qui man mano)
 
 - [x] Piano scritto e condiviso
-- [ ] Fase 0 — ricontrollo
-- [ ] Fase 1 — misure (A: ballo del portafoglio, B: fotografia sistema vero)
-- [ ] ✋ Checkpoint deploy (decisione di Andrea)
-- [ ] Fase 2 — agente ombra costruito e in osservazione
-- [ ] Fase 3 — progetto su carta + prova storica
+- [x] **Fase 0 — ricontrollo** (26/07): 601 controlli automatici verdi, il
+  programma parte, le modifiche si inseriscono su main senza conflitti.
+  Scoperto e curato un guasto NUOVO vivo in produzione: il nuovo modello
+  DeepSeek è più prolisso del vecchio e la risposta veniva tagliata a metà
+  dal limite di spazio (139 cicli su 254 in 24h finivano "illeggibile" =
+  non svegliare). Cura: più spazio + recupero d'emergenza della risposta
+  tagliata + (già nel branch) la rete sui prezzi se tutto fallisce.
+- [x] **Fase 1 — misure** (26/07):
+  - **Misura A — rapporto U = 1,11**: il portafoglio attuale balla GIÀ più
+    di quanto ballerebbe una base ben distribuita investita al 57,5%.
+    E le posizioni sono 3, tutte cripto, tutte long (AVAX, TRX, ETH):
+    si muovono insieme. Conclusione: il problema oggi non è "troppo pochi
+    soldi investiti" ma "troppo concentrati sulla stessa scommessa".
+    La cura giusta è distribuire, non solo alzare l'esposizione.
+    (Nota: ~19 giorni di dati, misura indicativa ma il punto strutturale —
+    3 posizioni correlate — non dipende dalla statistica.)
+  - **Misura B — parziale**: il filtro per stato delle "promesse" sul
+    sistema attuale non funziona (risponde uguale per ogni stato); il
+    quadro completo arriverà con la nuova pagella dopo il deploy.
+  - Liquidità oggi: ~65% (non più 76: il sistema ha investito un po' negli
+    ultimi giorni, sempre e solo cripto).
+- [ ] ✋ **Checkpoint deploy** (decisione di Andrea) — proposta: portare in
+  produzione il branch così com'è. Contiene: riparazioni dei guasti,
+  respiro sui guadagni, freno ai ripensamenti, pagella dell'inazione,
+  agente ombra. L'interruttore del "calcolo sul patrimonio totale" resta
+  spento anche dopo il deploy.
+- [x] **Fase 2 — agente ombra costruito** (26/07): 6 previsioni finte al
+  giorno (3 forti long + 3 deboli short) + gemello cieco, verifica a 5
+  sedute, scoreboard su `/api/live/shadow`. Parte a raccogliere dati dal
+  giorno del deploy; primo verdetto possibile dopo ~2-3 settimane di borsa.
+- [ ] Fase 3 — progetto su carta + prova storica (prossimo passo)
 - [ ] ✋ Checkpoint "posizione normale" (decisione di Andrea)
 - [ ] Fase 4 — accensioni graduali (decisioni di Andrea)
