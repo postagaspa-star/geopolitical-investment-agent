@@ -182,11 +182,16 @@ così ogni effetto è attribuibile alla sua causa:
     quadro completo arriverà con la nuova pagella dopo il deploy.
   - Liquidità oggi: ~65% (non più 76: il sistema ha investito un po' negli
     ultimi giorni, sempre e solo cripto).
-- [ ] ✋ **Checkpoint deploy** (decisione di Andrea) — proposta: portare in
-  produzione il branch così com'è. Contiene: riparazioni dei guasti,
-  respiro sui guadagni, freno ai ripensamenti, pagella dell'inazione,
-  agente ombra. L'interruttore del "calcolo sul patrimonio totale" resta
-  spento anche dopo il deploy.
+- [x] ✋ **Checkpoint deploy — APPROVATO da Andrea ed ESEGUITO** (26/07):
+  main portato alla versione testata (12 commit), il server ha ricostruito
+  e riavviato da solo in ~2 minuti. Verifiche post-pubblicazione: motore
+  ok, pagella dell'inazione attiva sui dati veri, agente ombra in attesa
+  del primo giorno di borsa (risponde correttamente "campione
+  insufficiente" con 0 previsioni). L'interruttore del "calcolo sul
+  patrimonio totale" resta spento, come concordato.
+  **Numero da guardare nei prossimi giorni**: nella pagella, la voce
+  "guasto" deve scendere verso zero e "ha valutato davvero" deve salire
+  ben sopra il 45% attuale (che include le 24 ore PRIMA della cura).
 - [x] **Fase 2 — agente ombra costruito** (26/07): 6 previsioni finte al
   giorno (3 forti long + 3 deboli short) + gemello cieco, verifica a 5
   sedute, scoreboard su `/api/live/shadow`. Parte a raccogliere dati dal
