@@ -8,13 +8,13 @@ dimensionata da una formula (non dal modello), come sarebbe andata negli ultimi
 concentrati — e (b) il restare investiti e basta?
 
 LA BASE (deterministica, nessun LLM nel giro)
-- 3 ingredienti diversificati: azioni USA (SPY), obbligazioni lunghe (TLT),
-  oro (GLD). NIENTE CRIPTO: scelta esplicita di Andrea (fine luglio 2026) —
-  la spinta iniziale a favore delle cripto era motivata dal voler guadagnare
-  di piu' puntando sulla bravura matematica/quant dell'AI invece che sulla
-  sua capacita' di interpretare le notizie; quel ragionamento e' stato
-  ritirato. Il supporto BTC_CAP resta nel motore (per esperimenti futuri)
-  ma non e' usato nella configurazione raccomandata.
+- 4 ingredienti diversificati: azioni USA (SPY), obbligazioni lunghe (TLT),
+  oro (GLD), crypto (BTC) con TETTO al 10% del portafoglio. Scelta di Andrea
+  (fine luglio 2026, corretta il giorno dopo): le cripto NON vanno tolte,
+  restano nel paniere ma come fetta COMPLEMENTARE — non piu' il centro della
+  strategia. Il tetto 10% e' gia' cosi' dalla prima stesura del motore; qui
+  si conferma la scelta e si ricalibra il termometro sulla regola di rischio
+  di Andrea con le cripto incluse (vedi sotto).
 - Pesi "al contrario del nervosismo" (inverse-vol sui 60 giorni precedenti):
   chi balla di piu' pesa di meno.
 - Quanto investire in totale lo decide un TERMOMETRO: si stima quanto
@@ -228,25 +228,24 @@ def main(folder: str) -> None:
     dates, closes = align(series)
     print(f"periodo: {dates[0]} -> {dates[-1]}  ({len(dates)} sedute)\n")
 
-    no_btc = {t: v for t, v in closes.items() if t != "BTC-USD"}
-    # SCELTA DI ANDREA (fine luglio 2026): niente cripto nella base. Vincolo
-    # di rischio dichiarato: quasi mai sotto -10%; fino a -12% SOLO se il
-    # potenziale annuo supera il +18% (senza cripto non lo sfiora mai, vedi
-    # sotto: il vincolo resta -10% netto). Il 4% e' la scelta con margine
-    # (storicamente mai oltre -8.7%, anche nel sotto-periodo con il crollo
-    # Covid); il 4.5% sfiora -9.8% in quello stesso sotto-periodo, troppo
-    # vicino al limite per un backtest che tende a essere ottimista.
+    # SCELTA DI ANDREA (fine luglio 2026, corretta il giorno dopo): le cripto
+    # restano nel paniere ma COMPLEMENTARI (tetto 10%, non piu' il fulcro).
+    # Vincolo di rischio: quasi mai sotto -10%; fino a -12% SOLO se il
+    # potenziale annuo supera il +18% (anche con le cripto non lo sfiora mai:
+    # il CAGR massimo osservato in griglia e' 9.7%, quindi il vincolo resta
+    # -10% netto). Il 4% e' la scelta con margine, verificata anche su 3
+    # sotto-periodi separati: il peggiore arriva a -9.2% (2019-2022, include
+    # il crollo Covid); il 4.5% sfora -10% in DUE dei tre sotto-periodi
+    # (-10.1% e -10.3%), fuori regola.
     runs = [
-        ("BASE senza cripto, term. 4%", no_btc, dict(mode="base",
+        ("BASE (cripto tetto 10%), term. 3.5%", closes, dict(mode="base",
+         target_vol=0.035, cash_rate=0.03)),
+        ("BASE (cripto tetto 10%), term. 4% -- SCELTA", closes, dict(mode="base",
          target_vol=0.04, cash_rate=0.03)),
-        ("BASE senza cripto, term. 4.5%", no_btc, dict(mode="base",
-         target_vol=0.045, cash_rate=0.03)),
-        ("BASE senza cripto, term. 5%", no_btc, dict(mode="base",
-         target_vol=0.05, cash_rate=0.03)),
-        ("BASE senza cripto, finestra 90g", no_btc, dict(mode="base",
+        ("BASE (cripto tetto 10%), term. 4.5% (fuori regola)", closes,
+         dict(mode="base", target_vol=0.045, cash_rate=0.03)),
+        ("BASE, term. 4%, finestra 90g", closes, dict(mode="base",
          target_vol=0.04, cash_rate=0.03, window=90)),
-        ("BASE CON cripto, termometro 7% (scartata)", closes,
-         dict(mode="base", target_vol=0.07, cash_rate=0.03)),
         ("OGGI: 25% BTC + 75% fermo (scartata)", closes,
          dict(mode="fixed", fixed_weights={"BTC-USD": 0.25}, cash_rate=0.03)),
         ("Tutto azioni (SPY 100%)", closes,

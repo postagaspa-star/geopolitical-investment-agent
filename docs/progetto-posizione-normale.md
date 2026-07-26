@@ -1,10 +1,12 @@
 # Progetto "posizione normale" — Fase 3, su carta
 
 **Fine luglio 2026 — nessuna riga di questo progetto è attiva sul sistema vero.**
-Passato da tre giudici critici indipendenti, poi **ricalibrato dopo la
-decisione di Andrea**: niente cripto nella base, e una regola di rischio
-precisa (quasi mai sotto −10%; fino a −12% solo se il potenziale supera il
-+18%). Questo documento riflette la versione aggiornata.
+Passato da tre giudici critici indipendenti, poi **ricalibrato due volte**
+dopo il confronto con Andrea: prima tolte le cripto per errore di
+interpretazione, poi **rimesse come fetta complementare** (non più il centro
+della strategia), con una regola di rischio precisa (quasi mai sotto −10%;
+fino a −12% solo se il potenziale supera il +18%). Questo documento riflette
+la versione finale di questo giro.
 
 ---
 
@@ -25,26 +27,22 @@ motivandoli. Stare fermi smette di essere gratis.
    capitale lasciato fermo. Con una base di riferimento, ogni giorno passato
    sotto la base diventa un costo contato in euro, come una commissione.
 
-## La decisione che ha cambiato il progetto
+## Il ruolo delle cripto (chiarito da Andrea)
 
-Andrea ha tolto le cripto dalla base: la spinta iniziale a favore delle
-cripto era nata dal voler guadagnare di più puntando sulla bravura
-matematica/quant dell'AI invece che sulla sua capacità di interpretare le
-notizie — un ragionamento ora ritirato. E ha fissato una regola di rischio
-precisa: **quasi mai sotto −10%**; si può scendere fino a −12% **solo se il
-potenziale di rendimento supera il +18%**.
-
-Ho ricalcolato tutto su questa base a **tre soli ingredienti**: azioni
-americane, obbligazioni lunghe, oro. Risultato onesto: **senza cripto, il
-rendimento massimo osservato in tutta la griglia — anche spingendo il
-rischio al limite — è il 6% l'anno.** La soglia del +18% non viene mai
-sfiorata: per questa base la regola si riduce, di fatto, al vincolo secco
-del −10%.
+Le cripto **restano** nel paniere. Non sono più il centro della strategia —
+la spinta iniziale a puntarci sopra era motivata dal voler guadagnare di più
+scommettendo sulla bravura matematica/quant dell'AI invece che sulla sua
+capacità di interpretare le notizie, un ragionamento ora ridimensionato — ma
+restano una fetta **complementare**, con lo stesso tetto che il progetto
+aveva fin dall'inizio: **massimo 10% del portafoglio**.
 
 ## Come funziona la base (in parole)
 
-- **Tre ingredienti che si muovono in modo diverso**: azioni americane,
-  obbligazioni lunghe, oro. Niente cripto (vedi sopra).
+- **Quattro ingredienti che si muovono in modo diverso**: azioni americane,
+  obbligazioni lunghe, oro, e cripto con un **tetto fisso al 10%** — tetto
+  che vale sul portafoglio finale, scostamenti del robot inclusi (senza
+  questa clausola il robot potrebbe ricreare la concentrazione di oggi a
+  colpi di scostamenti "piccoli" e rinnovabili).
 - **Pesi "al contrario del nervosismo"**: ogni mese, chi ha ballato di più
   negli ultimi 60 giorni pesa di meno. Niente opinioni: solo aritmetica.
 - **Un termometro decide quanto investire in totale**: si stima quanto
@@ -58,78 +56,76 @@ del −10%.
 
 ## Cosa resta al robot
 
-Gli **scostamenti** dalla base, con i paletti fissati dai giudici (validi
-anche ora, a maggior ragione senza la valvola di sfogo delle cripto):
+Gli **scostamenti** dalla base, con i paletti fissati dai giudici:
 - il budget di scostamento si misura in **rischio aggiunto**, non in
   percentuale di peso (sennò tanti scostamenti piccoli = una scommessa
   grossa);
-- i tetti per-ingrediente valgono **dopo** gli scostamenti;
+- i tetti (cripto 10% incluso) valgono **dopo** gli scostamenti — un
+  robot che ha già la base al 10% di cripto non può portarla al 25% con
+  uno "scostamento" mascherato;
 - **niente rinnovo automatico**: uno scostamento scaduto ha un periodo di
   riposo prima di poter essere riproposto, e i rinnovi si contano;
 - la pagella del robot è il suo guadagno rispetto alla base **corretto per
   il rischio che ha aggiunto** — non il guadagno nudo, che premierebbe i
-  biglietti della lotteria;
-- **domanda aperta, sospesa** (vedi in fondo): se anche gli scostamenti
-  cripto sono da escludere o solo quelli della base.
+  biglietti della lotteria.
 
 In più, un **paracadute sul portafoglio vero**: se la perdita dal picco
 supera l'8% (margine sotto il 10%, non a ridosso), gli scostamenti si
 azzerano da soli e resta la base. Il termometro viene ricontrollato anche
 **a metà mese**: quello mensile, da solo, è cieco sulle tempeste improvvise.
 
-## I numeri della prova storica (10 anni: lug 2016 → lug 2026, senza cripto)
+## I numeri della prova storica (10 anni: lug 2016 → lug 2026)
 
 Da 100.000, commissioni incluse, ribilancio mensile, cash che rende un 3%
 medio annuo (approssimazione: 0-2% nei primi anni, 4-5% negli ultimi), nessuno
 sguardo al futuro (verificato da un test automatico), verificato anche su tre
 spezzoni separati del decennio (non un solo percorso):
 
-| termometro | 100k diventano | annuo | max perdita storica |
-|---|---|---|---|
-| 2,5% | 153.150 | 4,4% | −5,4% |
-| 3,0% | 156.940 | 4,6% | −6,5% |
-| 3,5% | 160.770 | 4,9% | −7,6% |
-| **4,0% — scelta raccomandata** | **164.630** | **5,1%** | **−8,7%** |
-| 4,5% | 168.290 | 5,4% | −9,8% |
-| 5,0% | 171.340 | 5,5% | −10,8% |
-| 5,5% | 174.370 | 5,7% | −11,8% |
-| 6,0% | 176.950 | 5,9% | −12,4% |
-| 7,0% | 180.930 | 6,1% | −14,7% |
+| termometro | 100k diventano | annuo | max perdita storica | peggiore sotto-periodo |
+|---|---|---|---|---|
+| 3,0% | 173.960 | 5,7% | −6,9% | −6,9% |
+| 3,5% | 181.290 | 6,2% | −8,1% | −8,1% |
+| **4,0% — scelta raccomandata** | **188.860** | **6,6%** | **−9,2%** | **−9,2%** |
+| 4,5% (fuori regola) | 196.670 | 7,0% | −10,3% | −10,3% |
+| 5,0% | 204.520 | 7,4% | −11,5% | — |
+| 7,0% | 230.620 | 8,8% | −16,0% | — |
+| 9,0% | 250.360 | 9,7% | −20,4% | — |
 
 ### Come leggerla
 
-**Il 4% è la scelta con margine reale, non al filo del rasoio.** Nel pezzo di
-decennio con la crisi Covid (2019-2022, il più duro dei tre testati), il 4%
-non ha mai superato −8,7%; il 4,5% arriva a −9,8%, troppo vicino al limite
-per un backtest che — per costruzione — tende a essere ottimista sulle
-perdite future (dieci anni contengono solo 2-3 tempeste vere, quindi il
-peggio storico non è il peggio possibile). Dal 5% in su si sfora il −10% già
-nei dati passati: fuori regola.
+**Il 4% è la scelta con margine reale.** Testato non solo sull'intero
+decennio ma su tre spezzoni separati (2016-19, 2019-22 con il crollo Covid,
+2022-26): il peggiore dei tre non ha mai superato −9,2%. Il 4,5% invece sfora
+il −10% in **due** dei tre spezzoni (−10,1% e −10,3%): fuori dalla tua
+regola, non un caso isolato. Rende il 6,6% l'anno — un po' meno di prima
+perché con le cripto ridotte a fetta complementare (10%, non più dominanti)
+il motore di crescita principale torna ad azioni-obbligazioni-oro, che sono
+più lente ma anche più prevedibili.
 
-**Il prezzo di questa scelta è un rendimento modesto: circa il 5% l'anno.**
-Non è un difetto del calcolo, è l'aritmetica onesta di tre ingredienti
-tradizionali tenuti dentro un vincolo di rischio stretto. Un portafoglio
-azioni-obbligazioni-oro non produce il 18% l'anno, quindi la clausola di
-deroga al −12% non troverà mai applicazione qui: è bene saperlo prima, non
-scoprirlo dopo aver costruito qualcosa che promette il contrario.
+**Anche con le cripto dentro, il vincolo resta il −10% secco.** Il
+rendimento massimo osservato in tutta la griglia — spingendo il termometro
+fino al 9%, ben oltre quanto la tua regola permetterebbe — è il 9,7% l'anno.
+La soglia di deroga al +18% non si avvicina mai: per questa base la clausola
+"fino a −12% se il potenziale supera il +18%" non troverà mai applicazione,
+va saputo prima e non scoperto dopo.
 
-**Cosa succede alla resa complessiva del robot dipende ora dagli scostamenti.**
-La base da sola rende poco per disegno — è la parte "noiosa e sicura". Il
-guadagno più consistente dovrà venire dal lavoro dell'intelligenza sopra la
-base (gli scostamenti motivati), un budget di rischio a parte, misurato
-separatamente. È esattamente il compito che l'agente ombra sta già
-verificando in questi giorni: se quel fiuto esiste davvero.
+**La riga "Oggi" resta un promemoria, non una tentazione.** Il 25% fisso in
+Bitcoin dal 2016 avrebbe reso il 17-20% l'anno, ma con una perdita massima
+del 30%: quasi il triplo del tuo limite. È il motivo per cui la base tiene
+il tetto cripto al 10% invece di lasciarlo salire — un tetto pensato apposta
+per evitare che quel guadagno enorme trascini con sé quella perdita enorme.
 
 ### Cosa questa prova NON dice (limiti, senza sconti)
 
 - È un solo percorso storico (per quanto testato a pezzi): le perdite
-  massime sono stime, non garanzie.
+  massime sono stime, non garanzie — il futuro tende a essere peggiore del
+  passato, perché dieci anni contengono solo 2-3 tempeste vere.
 - Il termometro guarda indietro: le tempeste improvvise (marzo 2020)
   colpiscono prima che reagisca. Il controllo settimanale aggiunto su
   richiesta dei giudici riduce ma non elimina questo buco.
 - Esecuzione alla chiusura, niente scivolamenti oltre le commissioni,
   niente tasse; il "cash al 3%" è una media piatta, non la serie vera.
-- Due dei tre ingredienti (SPY e TLT) oggi **non sono comprabili dal
+- Due dei quattro ingredienti (SPY e TLT) oggi **non sono comprabili dal
   robot**: serve accendere l'estensione dell'universo (esiste, spenta) o
   replicare con titoli singoli. I numeri vanno rifatti sugli strumenti
   effettivamente comprabili PRIMA della decisione finale.
@@ -138,7 +134,17 @@ verificando in questi giorni: se quel fiuto esiste davvero.
   proprie (vedi sotto): la perdita massima reale andrà rimisurata nella
   tappa pilota, non promessa oggi.
 - Questa è SOLO la base: gli scostamenti del robot si aggiungono sopra, in
-  meglio o in peggio.
+  meglio o in peggio — è esattamente ciò che l'agente ombra sta misurando.
+
+## Un'osservazione a parte, non un'azione da fare ora
+
+Il principio "le cripto sono complementari, non dominanti" descrive bene
+come dovrebbe essere la **base**. Ma oggi, sul sistema vero, il portafoglio
+reale è fatto al 100% di cripto (le tre posizioni aperte — AVAX, TRX, ETH —
+sono tutte cripto, zero azioni). È l'opposto di "complementare". Non è
+qualcosa che ho toccato né che serve decidere adesso: è solo un fatto da
+tenere a mente per quando, più avanti, si deciderà come far convivere questa
+base con il comportamento del robot dal vivo.
 
 ## Il nodo tecnico più delicato (dai giudici, in una riga)
 
@@ -176,10 +182,3 @@ addosso a ogni scelta.
    o la base va replicata con titoli singoli? (Prima della decisione finale
    i numeri vanno rifatti sugli strumenti scelti.)
 2. **Si parte con la tappa 1?** Zero rischio: due settimane di soli numeri.
-3. **⏸ Domanda in sospeso (chiesta separatamente, non ancora risposta)**:
-   togliere le cripto riguarda solo questa base — con il robot che continua
-   a fare trading cripto tattico come scostamento — oppure vuoi ripensare
-   anche il pezzo cripto del sistema vero, comprese le tre posizioni aperte
-   adesso (AVAX, TRX, ETH) e il ciclo che gira ogni ora giorno e notte?
-   Sono due cambi di scala molto diversi: il primo tocca solo questo
-   progetto su carta, il secondo tocca capitale reale già investito.
