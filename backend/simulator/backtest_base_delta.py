@@ -8,8 +8,13 @@ dimensionata da una formula (non dal modello), come sarebbe andata negli ultimi
 concentrati — e (b) il restare investiti e basta?
 
 LA BASE (deterministica, nessun LLM nel giro)
-- 4 ingredienti diversificati: azioni USA (SPY), obbligazioni lunghe (TLT),
-  oro (GLD), crypto (BTC, con TETTO al 10% del portafoglio).
+- 3 ingredienti diversificati: azioni USA (SPY), obbligazioni lunghe (TLT),
+  oro (GLD). NIENTE CRIPTO: scelta esplicita di Andrea (fine luglio 2026) —
+  la spinta iniziale a favore delle cripto era motivata dal voler guadagnare
+  di piu' puntando sulla bravura matematica/quant dell'AI invece che sulla
+  sua capacita' di interpretare le notizie; quel ragionamento e' stato
+  ritirato. Il supporto BTC_CAP resta nel motore (per esperimenti futuri)
+  ma non e' usato nella configurazione raccomandata.
 - Pesi "al contrario del nervosismo" (inverse-vol sui 60 giorni precedenti):
   chi balla di piu' pesa di meno.
 - Quanto investire in totale lo decide un TERMOMETRO: si stima quanto
@@ -224,21 +229,25 @@ def main(folder: str) -> None:
     print(f"periodo: {dates[0]} -> {dates[-1]}  ({len(dates)} sedute)\n")
 
     no_btc = {t: v for t, v in closes.items() if t != "BTC-USD"}
+    # SCELTA DI ANDREA (fine luglio 2026): niente cripto nella base. Vincolo
+    # di rischio dichiarato: quasi mai sotto -10%; fino a -12% SOLO se il
+    # potenziale annuo supera il +18% (senza cripto non lo sfiora mai, vedi
+    # sotto: il vincolo resta -10% netto). Il 4% e' la scelta con margine
+    # (storicamente mai oltre -8.7%, anche nel sotto-periodo con il crollo
+    # Covid); il 4.5% sfiora -9.8% in quello stesso sotto-periodo, troppo
+    # vicino al limite per un backtest che tende a essere ottimista.
     runs = [
-        ("BASE (termometro 7%)", closes, dict(mode="base", target_vol=0.07)),
-        ("BASE (termometro 5%)", closes, dict(mode="base", target_vol=0.05)),
-        ("BASE (termometro 4%)", closes, dict(mode="base", target_vol=0.04)),
-        ("BASE (termometro 9%)", closes, dict(mode="base", target_vol=0.09)),
-        ("BASE 7% SENZA crypto", no_btc, dict(mode="base", target_vol=0.07)),
-        ("BASE 7%, finestra 90g", closes, dict(mode="base", target_vol=0.07,
-                                               window=90)),
-        ("BASE 7% + cash al 3%", closes, dict(mode="base", target_vol=0.07,
-                                              cash_rate=0.03)),
-        ("BASE 5% + cash al 3%", closes, dict(mode="base", target_vol=0.05,
-                                              cash_rate=0.03)),
-        ("OGGI: 25% BTC + 75% fermo", closes,
-         dict(mode="fixed", fixed_weights={"BTC-USD": 0.25})),
-        ("OGGI + cash al 3%", closes,
+        ("BASE senza cripto, term. 4%", no_btc, dict(mode="base",
+         target_vol=0.04, cash_rate=0.03)),
+        ("BASE senza cripto, term. 4.5%", no_btc, dict(mode="base",
+         target_vol=0.045, cash_rate=0.03)),
+        ("BASE senza cripto, term. 5%", no_btc, dict(mode="base",
+         target_vol=0.05, cash_rate=0.03)),
+        ("BASE senza cripto, finestra 90g", no_btc, dict(mode="base",
+         target_vol=0.04, cash_rate=0.03, window=90)),
+        ("BASE CON cripto, termometro 7% (scartata)", closes,
+         dict(mode="base", target_vol=0.07, cash_rate=0.03)),
+        ("OGGI: 25% BTC + 75% fermo (scartata)", closes,
          dict(mode="fixed", fixed_weights={"BTC-USD": 0.25}, cash_rate=0.03)),
         ("Tutto azioni (SPY 100%)", closes,
          dict(mode="fixed", fixed_weights={"SPY": 1.0})),
