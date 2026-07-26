@@ -216,6 +216,54 @@ def compute_metrics(equity: list[float]) -> dict:
 
 # ── caricamento dati (I/O) ──────────────────────────────────────────────────
 
+def build_crypto_index(series: dict[str, dict[str, float]],
+                       min_history_days: int = 90,
+                       start_value: float = 100.0) -> dict[str, float]:
+    """
+    Indice-paniere delle cripto: media a pesi uguali dei rendimenti
+    giornalieri delle monete disponibili. Sostituisce il solo BTC nello
+    slot cripto della base (richiesta di Andrea: "metti le top 20, non
+    solo Bitcoin").
+
+    Regole di costruzione, dichiarate:
+    - una moneta entra nell'indice solo dopo `min_history_days` giorni di
+      storia: le prime settimane dopo una quotazione sono fiammate anomale;
+    - pesi uguali fra le monete attive quel giorno (l'insieme cresce nel
+      tempo: nel 2016 c'erano solo BTC e LTC, dal 2017 le altre major, dal
+      2020 SOL/AVAX/DOT);
+    - AVVERTENZA GRANDE: questo e' comunque il paniere dei SOPRAVVISSUTI di
+      oggi. Il paniere vero comprato nel passato avrebbe incluso monete oggi
+      morte o azzerate (LUNA era top-10 nel 2022, FTT era top-25: valgono
+      ~zero). Questi numeri restano quindi OTTIMISTI sul lato cripto — piu'
+      realistici del solo BTC come composizione, non come rendimento.
+    """
+    first_day: dict[str, str] = {t: min(s) for t, s in series.items() if s}
+    all_days = sorted(set().union(*[set(s) for s in series.values()]))
+
+    def active(ticker: str, day: str) -> bool:
+        try:
+            from datetime import date as _d
+            listed = (_d.fromisoformat(day)
+                      - _d.fromisoformat(first_day[ticker])).days
+            return listed >= min_history_days
+        except (KeyError, ValueError):
+            return False
+
+    index: dict[str, float] = {}
+    value, prev_day = start_value, None
+    for day in all_days:
+        if prev_day is not None:
+            rets = []
+            for t, s in series.items():
+                if day in s and prev_day in s and active(t, day):
+                    rets.append(s[day] / s[prev_day] - 1.0)
+            if rets:
+                value *= 1.0 + sum(rets) / len(rets)
+        index[day] = value
+        prev_day = day
+    return index
+
+
 def load_yahoo(path: str) -> dict[str, float]:
     """Da file Yahoo v8 chart a {data_iso: close}."""
     raw = json.load(open(path, encoding="utf-8"))

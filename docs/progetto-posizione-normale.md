@@ -149,11 +149,62 @@ vecchia scommessa con l'airbag montato sopra. Il menu con margine sotto il
 | cripto 25% (term. 8,5%) | 12,5% | −17,4% | ~60% |
 | cripto 30% (term. 9%) | 13,2% | −17,9% | ~due terzi |
 
-La mia raccomandazione, se vuoi restare coerente col principio che hai
-dichiarato tu ("complementari, non dominanti"): **cripto 20%, termometro
-8%** — 11,8% l'anno storico, perdita massima −16,9% (margine vero sotto il
-−20%), e il rischio diviso a metà esatta tra cripto e resto del mondo.
-Oltre quel punto non è più complemento: è di nuovo la scommessa.
+(La raccomandazione originaria di questa sezione — cripto 20% — è stata
+superata dall'aggiornamento col paniere, qui sotto: i numeri sopra usavano
+il solo Bitcoin come fetta cripto.)
+
+## L'aggiornamento che cambia il quadro: il paniere di 16 cripto
+
+Andrea ha fatto notare, giustamente, che usare solo Bitcoin era troppo
+comodo. Ho costruito un **indice-paniere di 16 monete principali** (Bitcoin,
+Ethereum, e le altre major con storia sufficiente; le monete entrano
+nell'indice solo dopo 90 giorni dalla quotazione, per saltare le fiammate da
+esordio) e l'ho messo al posto del solo Bitcoin nella fetta cripto.
+
+Prima l'avvertenza, perché qui è ancora più pesante: **questo è il paniere
+dei sopravvissuti di oggi**. Da solo ha reso il 51% l'anno nel decennio
+(più del Bitcoin!), perché contiene i vincitori di oggi comprati col senno
+di poi; il paniere vero comprato allora avrebbe incluso monete oggi morte
+(LUNA era tra le prime 10 nel 2022, oggi vale zero). Quindi: la struttura è
+più realistica, i rendimenti restano ottimisti.
+
+I numeri col paniere (decennio, commissioni e cash al 3% inclusi):
+
+| combinazione | annuo | perdita storica | 100k → |
+|---|---|---|---|
+| formula, term. 8% | 9,7% | −17,9% | 250.550 |
+| cripto 15%, term. 8% | 12,6% | −16,2% | 325.910 |
+| cripto 20%, term. 8% | 12,8% | −15,1% | 332.070 |
+| **cripto 30%, term. 8% — scelta di Andrea** | **12,9%** | **−13,8%** | **335.780** |
+| cripto 30%, term. 9% | 14,2% | −15,8% | 373.850 |
+| cripto 30%, term. 10% | 15,3% | −17,7% | 414.920 |
+
+**La scelta di Andrea (cripto 30%, termometro 8%) regge, ed è anzi la più
+solida del gruppo.** L'ho passata al setaccio completo: nei tre spezzoni del
+decennio non ha mai perso più del −13,3%; negli inverni cripto (Bitcoin
+−52% e −67%) si è fermata a −11,8%; nel Covid a −4,2%. Tutto con ampio
+margine sotto il −20%.
+
+**Il paradosso che la rende sensata** (e che spiega perché più quota cripto
+può dare MENO perdita massima): il paniere balla tantissimo, quindi il
+termometro, vedendo tanto nervosismo, tiene l'esposizione totale bassa — in
+media solo il 36% del patrimonio investito. Risultato: la cripto REALE in
+portafoglio è in media **il 10,7% del patrimonio** (con punte al 30% nei
+mesi più calmi). Il termometro, da solo, trasforma la "quota 30%" in una
+posizione complementare di fatto: pochi soldi su un motore potente, il
+resto in liquidità che rende. È la vecchia idea "poco ma buono" fatta con
+disciplina.
+
+**Le tre onestà da mettere a verbale prima di adottarla:**
+1. Il 12,9% storico è gonfiato dal paniere dei sopravvissuti: in avanti,
+   se le cripto renderanno "solo" quanto le azioni, questa combinazione
+   renderà più vicina al 7-9% che al 13%.
+2. Nei mesi calmi la cripto reale può salire fino al 30% del patrimonio: se
+   la tempesta arriva proprio da lì, all'improvviso, il termometro reagisce
+   dopo. Gli inverni storici dicono −12/−13%, ma il futuro può essere
+   peggiore.
+3. L'indice non conta i costi di gestire 16 monete (ribilanciamenti interni
+   al paniere): nella costruzione reale andranno misurati.
 
 ### Cosa questa prova NON dice (limiti, senza sconti)
 
@@ -210,7 +261,11 @@ orari di borsa, contabilità: intatti ovunque.
 
 ## Le decisioni che restano tue
 
-1. **L'universo**: accendo l'estensione già pronta (SPY/TLT/GLD comprabili)
+1. **Confermi i parametri emersi dal confronto?** Cripto come paniere di
+   monete principali (non solo Bitcoin), quota 30% della parte investita,
+   termometro 8% — che in pratica significa: cripto reale ~11% del
+   patrimonio in media, tutto il resto governato dal termometro.
+2. **L'universo**: accendo l'estensione già pronta (SPY/TLT/GLD comprabili)
    o la base va replicata con titoli singoli? (Prima della decisione finale
    i numeri vanno rifatti sugli strumenti scelti.)
-2. **Si parte con la tappa 1?** Zero rischio: due settimane di soli numeri.
+3. **Si parte con la tappa 1?** Zero rischio: due settimane di soli numeri.

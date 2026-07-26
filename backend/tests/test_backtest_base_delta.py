@@ -147,3 +147,45 @@ def test_perche_la_cripto_esce_piccola_dalla_formula():
     vols = {"SPY": 0.18, "TLT": 0.15, "GLD": 0.14, "BTC-USD": 0.65}
     w = bt.inverse_vol_weights(vols, caps={"BTC-USD": bt.BTC_CAP})
     assert w["BTC-USD"] < 0.08, "ballando 4x, pesa ~1/4: sotto il tetto da sola"
+
+
+# ── indice-paniere cripto ───────────────────────────────────────────────────
+
+def _serie(days, start=100.0, ret=0.01, from_day=0):
+    """Serie giornaliera sintetica su un calendario 2020-01-01.. (ISO)."""
+    from datetime import date, timedelta
+    out = {}
+    v = start
+    for i in range(from_day, days):
+        d = (date(2020, 1, 1) + timedelta(days=i)).isoformat()
+        out[d] = v
+        v *= 1 + ret
+    return out
+
+
+def test_indice_media_a_pesi_uguali():
+    a = _serie(200, ret=0.02)          # +2% al giorno
+    b = _serie(200, ret=0.00)          # piatta
+    idx = bt.build_crypto_index({"A": a, "B": b}, min_history_days=0)
+    days = sorted(idx)
+    # media dei rendimenti: ~+1% al giorno
+    r = idx[days[100]] / idx[days[99]] - 1
+    assert r == pytest.approx(0.01, abs=1e-9)
+
+
+def test_moneta_nuova_entra_solo_dopo_lo_stage():
+    a = _serie(200, ret=0.00)                       # c'e' da sempre, piatta
+    nuova = _serie(200, ret=0.05, from_day=150)     # quotata tardi, +5%/giorno
+    idx = bt.build_crypto_index({"A": a, "NUOVA": nuova}, min_history_days=90)
+    days = sorted(idx)
+    # entro i 90 giorni dallo sbarco della nuova, l'indice resta piatto
+    assert idx[days[160]] == pytest.approx(idx[days[100]])
+
+
+def test_indice_regge_buchi_di_dati():
+    a = _serie(100, ret=0.01)
+    del a[sorted(a)[50]]                            # un giorno mancante
+    idx = bt.build_crypto_index({"A": a}, min_history_days=0)
+    assert len(idx) == 99                           # calendario senza il buco
+    days = sorted(idx)
+    assert idx[days[-1]] > idx[days[0]]             # e il calcolo prosegue
