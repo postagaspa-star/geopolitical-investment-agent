@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -219,6 +220,52 @@ def evaluate_price_gate(price_snap: dict,
                    f"intraday ({kind}, soglia {threshold:.1f}%)"),
         "focus_tickers": [best_ticker],
         "deterministic": True,
+    }
+
+
+def _salvage_watchdog_json(text: str) -> dict | None:
+    """
+    Recupero d'emergenza per una risposta LLM troncata o mal impacchettata.
+
+    Dopo la migrazione a deepseek-v4-flash (25/07/2026), il modello — piu'
+    prolisso del precedente — sforava spesso il cap di token e il JSON
+    arrivava tagliato a meta' stringa: niente graffa di chiusura, parsing
+    fallito, e il ciclo finiva come "json_parse_error" = non svegliare.
+    In 24h: 139 cicli su 254. Il giudizio pero' c'era, ed era gia' stato
+    pagato: qui si estraggono i campi essenziali con regex tolleranti.
+
+    Ritorna un dict con almeno trigger/urgency/reason, o None se nel testo
+    non c'e' nemmeno un segnale riconoscibile (in quel caso il chiamante
+    passa alla rete deterministica sui prezzi).
+    """
+    if not text:
+        return None
+    trigger_match = re.search(r'"trigger"\s*:\s*(true|false)', text, re.IGNORECASE)
+    if not trigger_match:
+        return None
+    urgency = 0.0
+    urgency_match = re.search(r'"urgency"\s*:\s*"?(\d+(?:\.\d+)?)"?', text)
+    if urgency_match:
+        try:
+            urgency = float(urgency_match.group(1))
+        except ValueError:
+            urgency = 0.0
+    # La reason puo' essere proprio il campo troncato: si accetta anche una
+    # stringa senza chiusura.
+    reason = ""
+    reason_match = re.search(r'"reason"\s*:\s*"([^"]*)', text)
+    if reason_match:
+        reason = reason_match.group(1).strip()
+    focus: list[str] = []
+    focus_match = re.search(r'"focus_tickers"\s*:\s*\[([^\]]*)', text)
+    if focus_match:
+        focus = re.findall(r'"([A-Za-z0-9\.\-:]{1,15})"', focus_match.group(1))
+    return {
+        "trigger": trigger_match.group(1).lower() == "true",
+        "urgency": urgency,
+        "reason": reason or "(reason troncata dal cap di token)",
+        "focus_tickers": focus,
+        "parse_salvaged": True,
     }
 
 
@@ -786,7 +833,12 @@ async def _call_deepseek(context: str) -> dict:
             {"role": "user", "content": context},
         ],
         "temperature": 0.1,
-        "max_tokens": 200,
+        # Era 200 e con deepseek-chat bastava. deepseek-v4-flash e' piu'
+        # prolisso: nelle 24h successive alla migrazione, 139 cicli su 254
+        # sono usciti con reason="json_parse_error" perche' la risposta veniva
+        # TRONCATA a meta' JSON dal cap. 500 lascia margine largo restando
+        # economico; il salvataggio regex sotto copre i casi residui.
+        "max_tokens": 500,
     }
 
     try:
@@ -824,7 +876,24 @@ async def _call_deepseek(context: str) -> dict:
                         except Exception:
                             pass
                 if payload is None:
-                    payload = json.loads(text)  # tenta diretto, lascia che fallisca se invalido
+                    try:
+                        payload = json.loads(text)
+                    except json.JSONDecodeError:
+                        # Ultima spiaggia: risposta troncata o impacchettata in
+                        # modo imprevisto. Meglio recuperare trigger/urgency
+                        # con una regex che buttare via un giudizio pagato —
+                        # per 24h in produzione il 55% dei cicli finiva qui e
+                        # veniva trattato come "non svegliare".
+                        payload = _salvage_watchdog_json(text)
+                        if payload is not None:
+                            logger.info("Watchdog: risposta non-JSON recuperata "
+                                        "via salvage (%r...)", text[:80])
+                if payload is None:
+                    logger.warning("Watchdog: risposta illeggibile: %r", text[:160])
+                    return {"trigger": False, "urgency": 0,
+                            "reason": "json_parse_error", "focus_tickers": [],
+                            "llm_failed": True,
+                            "llm_error": "risposta non-JSON: " + text[:200]}
                 return payload
     except json.JSONDecodeError as e:
         logger.warning("Watchdog JSON parse error: %s", e)

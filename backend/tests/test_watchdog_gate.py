@@ -219,3 +219,45 @@ def test_un_agente_in_corso_e_laltro_appena_deciso(wd):
     throttled, reason = watchdog._is_throttled(None, throttle_minutes=120)
     assert throttled is True
     assert reason == "all_agents_busy"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Recupero di una risposta LLM troncata (incidente v4-flash, 25-26/07)
+# ══════════════════════════════════════════════════════════════════════════
+# Dopo la migrazione a deepseek-v4-flash, il modello — piu' prolisso del
+# precedente — sforava il cap di token e il JSON arrivava tagliato a meta':
+# 139 cicli su 254 in 24h finivano come "json_parse_error" = non svegliare,
+# buttando via un giudizio gia' pagato.
+
+def test_salvage_recupera_json_troncato():
+    testo = '{"trigger": true, "urgency": 7, "reason": "LMT up 3.1% on defen'
+    out = watchdog._salvage_watchdog_json(testo)
+    assert out is not None
+    assert out["trigger"] is True
+    assert out["urgency"] == 7.0
+    assert "LMT" in out["reason"]
+    assert out["parse_salvaged"] is True
+
+
+def test_salvage_recupera_anche_il_false():
+    testo = '{"trigger": false, "urgency": 2, "reason": "market calm, no cat'
+    out = watchdog._salvage_watchdog_json(testo)
+    assert out is not None and out["trigger"] is False
+
+
+def test_salvage_recupera_focus_tickers_parziali():
+    testo = ('{"trigger": true, "urgency": 8, "reason": "crypto spike", '
+             '"focus_tickers": ["BTC-USD", "ETH-')
+    out = watchdog._salvage_watchdog_json(testo)
+    assert out["focus_tickers"] == ["BTC-USD"]
+
+
+def test_salvage_su_testo_senza_segnale_ritorna_none():
+    assert watchdog._salvage_watchdog_json("I think the market is calm today.") is None
+    assert watchdog._salvage_watchdog_json("") is None
+
+
+def test_salvage_urgency_come_stringa():
+    testo = '{"trigger": true, "urgency": "8", "reason": "spike'
+    out = watchdog._salvage_watchdog_json(testo)
+    assert out["urgency"] == 8.0
