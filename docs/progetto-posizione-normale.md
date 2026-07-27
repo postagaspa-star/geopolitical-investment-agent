@@ -291,20 +291,59 @@ tutto crolla — toglie l'airbag nel momento in cui serve. Per rispettare
 insieme "minimo 60% investito" e "mai oltre −20%", la quota cripto deve
 scendere al 10-15%.
 
-**Raccomandata: cripto 12%, termometro 8%, pavimento 60%.** Rende il 13,1%
-storico (più della configurazione attuale), sta investita al 61% medio come
-chiedi, e regge ovunque: −18,8% sul decennio, mai oltre −16% negli spezzoni,
-−12,7% e −17,4% negli inverni cripto. Se accetti di stare a filo del limite
-senza margine, la variante cripto 15% rende il 14,5% (−19,5%).
+## LA DECISIONE (presa da Claude su delega di Andrea)
+
+Andrea ha delegato la scelta finale tra le due finaliste:
+- **A**: cripto 30%, senza pavimento → 12,9% annuo, perdita max −13,8%,
+  investito medio 36%;
+- **D2**: cripto 12%, pavimento 60% → 13,1% annuo, perdita max −18,8%,
+  investito medio 61%.
+
+**Scelta: D2 — cripto 12%, termometro 8%, pavimento 60%.** Il ragionamento,
+in ordine di peso:
+
+1. **Sul rendimento storico sono pari** (13,1% contro 12,9%: la differenza è
+   rumore). Quindi la decisione si gioca sulla struttura, non sui decimali.
+2. **D2 regge meglio un futuro in cui le cripto deludono.** Il motore di A è
+   per ~due terzi la fetta cripto — quella gonfiata dal paniere dei
+   sopravvissuti. Se il prossimo decennio le cripto rendessero "solo" quanto
+   le azioni, A scenderebbe verso il ~5% annuo, D2 verso il ~6%: D2 ha 54
+   punti di patrimonio in azioni/obbligazioni/oro che lavorano davvero, A ne
+   ha 25. La base deve essere il pezzo *affidabile* del sistema: il
+   biglietto sul futuro delle cripto semmai lo gioca il robot con gli
+   scostamenti, non la base.
+3. **D2 ha la coda più corta.** In A, nei mesi calmi, la cripto reale può
+   salire fino al 30% del patrimonio: un crollo improvviso partito da un
+   periodo tranquillo colpirebbe prima che il termometro reagisca. In D2 la
+   cripto non supera mai il 12% per costruzione.
+4. **D2 rispetta i principi dichiarati da Andrea**: cripto complementare
+   *nella sostanza* (7% del patrimonio medio, non il motore di tutto),
+   investito minimo 60%, e — soprattutto — cura la malattia per cui questo
+   progetto esiste: A, a guardarla bene, è "64% fermo + rendimento
+   concentrato sulle cripto", cioè il profilo del vecchio GeoInvest con
+   l'airbag montato sopra.
+5. **Il prezzo pagato**: perdita massima storica −18,8% contro −13,8%. È
+   dentro il budget del −20% dichiarato da Andrea, con verifiche ovunque
+   (spezzoni mai oltre −16%, inverni −12,7% e −17,4%), ma va detto: si
+   compra robustezza strutturale spendendo margine di rischio.
+
+A resta a verbale come **alternativa conservativa**: se un domani si vorrà
+una base a perdite più piccole accettando la dipendenza dal ciclo cripto,
+è lì, già misurata. E se accetti zero margine, la variante cripto 15% +
+pavimento (14,5% annuo, −19,5%) resta la più redditizia dentro il limite.
+
+## PARAMETRI FISSATI (fine luglio 2026)
+
+Paniere di monete principali (non solo Bitcoin) · quota cripto **12%** della
+parte investita · termometro **8%** · pavimento di esposizione **60%** ·
+limite di perdita di riferimento **−20%** · paracadute scostamenti al 16%.
+Atteso storico: 13,1% l'anno, perdita massima −18,8%, investito medio 61%.
+Atteso onesto in avanti: 6-9% se le cripto renderanno come le azioni.
 
 ## Le decisioni che restano tue
 
-1. **Confermi i parametri aggiornati?** Paniere di monete principali, quota
-   cripto 12% della parte investita, termometro 8%, pavimento di esposizione
-   al 60% → storicamente 13,1% l'anno, perdita massima −18,8%, investito
-   medio 61%. (Alternativa più spinta: cripto 15%, stessa struttura, 14,5%
-   l'anno ma margine quasi nullo sotto il −20%.)
-2. **L'universo**: accendo l'estensione già pronta (SPY/TLT/GLD comprabili)
-   o la base va replicata con titoli singoli? (Prima della decisione finale
-   i numeri vanno rifatti sugli strumenti scelti.)
-3. **Si parte con la tappa 1?** Zero rischio: due settimane di soli numeri.
+1. **L'universo**: accendo l'estensione già pronta (SPY/TLT/GLD comprabili)
+   o la base va replicata con titoli singoli? (Prima della costruzione i
+   numeri vanno rifatti sugli strumenti effettivamente scelti.)
+2. **Si parte con la tappa 1?** Zero rischio: due settimane di soli numeri,
+   la base calcolata e scritta ogni giorno accanto al portafoglio reale.

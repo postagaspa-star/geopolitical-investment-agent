@@ -314,31 +314,51 @@ def main(folder: str) -> None:
     dates, closes = align(series)
     print(f"periodo: {dates[0]} -> {dates[-1]}  ({len(dates)} sedute)\n")
 
-    # REGOLA DI RISCHIO DI ANDREA (aggiornata ancora a fine luglio 2026):
-    # limite di perdita massima alzato CONSAPEVOLMENTE a -20% (prima: quasi
-    # mai sotto -10%). Le cripto restano COMPLEMENTARI (tetto 10%).
-    #
-    # Scelta raccomandata: termometro 8% -> 9,2%/anno, max perdita storica
-    # -18,4% (margine ~8% relativo sotto il limite, stessa disciplina usata
-    # per la regola precedente: il backtest e' ottimista per costruzione).
-    # L'8,5% arriva a -19,5%: troppo a filo. NOTA su cosa compra il rischio:
-    # raddoppiare la tolleranza (da -10% a -20%) NON raddoppia la resa
-    # (6,6% -> 9,2%); e sopra il termometro ~9% la formula smette di mordere
-    # perche' l'esposizione e' gia' al 100% in meta' dei mesi (niente leva):
-    # questa base ha un tetto naturale intorno al 10%/anno.
+    # CONFIGURAZIONE FISSATA (fine luglio 2026, decisione delegata a Claude
+    # dopo tre giri di calibrazione con Andrea — la storia completa e' in
+    # docs/progetto-posizione-normale.md):
+    #   - limite di perdita: -20% (budget UNICO: spendibile in quota cripto
+    #     O in esposizione, non entrambi al massimo — misurato);
+    #   - slot cripto = PANIERE di major (build_crypto_index), non solo BTC;
+    #   - quota cripto FISSA 12% dell'investito, termometro 8%, pavimento
+    #     di esposizione 60% -> storico 13,1%/anno, maxDD -18,8%, investito
+    #     medio 61%; inverni cripto -12,7%/-17,4%; spezzoni mai oltre -16%.
+    #   - scartate: cripto30+pavimento60 (21,7%/anno MA -27,9%: il pavimento
+    #     toglie l'airbag negli inverni); cripto30 senza pavimento (12,9%,
+    #     -13,8%, ma 36% investito e ~2/3 del motore sulla fetta cripto dei
+    #     sopravvissuti = il profilo del vecchio GeoInvest con l'airbag).
+    # NOTA: queste righe usano il solo BTC come slot cripto se i file del
+    # paniere non sono presenti nella cartella; per l'analisi col paniere
+    # vero servono gli hist_*.json delle 16 monete (vedi build_crypto_index).
+    try:
+        coin_files = ["ETH-USD", "XRP-USD", "LTC-USD", "ADA-USD", "DOGE-USD",
+                      "TRX-USD", "LINK-USD", "BNB-USD", "SOL-USD", "AVAX-USD",
+                      "DOT-USD", "MATIC-USD", "XLM-USD", "XMR-USD", "BCH-USD"]
+        coins = {"BTC-USD": load_yahoo(f"{folder}/hist_BTC-USD.json")}
+        for c in coin_files:
+            coins[c] = load_yahoo(f"{folder}/hist_{c}.json")
+        crypto_slot = build_crypto_index(coins, min_history_days=90)
+        series_b = {t: load_yahoo(f"{folder}/hist_{t}.json")
+                    for t in ["SPY", "TLT", "GLD"]}
+        series_b["BTC-USD"] = crypto_slot
+        dates, closes = align(series_b)
+        print("(slot cripto = paniere di 16 major)")
+    except Exception:
+        print("(file del paniere assenti: slot cripto = solo BTC, numeri "
+              "NON confrontabili con la configurazione fissata)")
+
     runs = [
-        ("BASE (cripto 10%), term. 7%", closes, dict(mode="base",
-         target_vol=0.07, cash_rate=0.03)),
-        ("BASE (cripto 10%), term. 8% -- SCELTA", closes, dict(mode="base",
-         target_vol=0.08, cash_rate=0.03)),
-        ("BASE (cripto 10%), term. 8.5% (a filo)", closes,
-         dict(mode="base", target_vol=0.085, cash_rate=0.03)),
-        ("BASE, term. 8%, finestra 90g", closes, dict(mode="base",
-         target_vol=0.08, cash_rate=0.03, window=90)),
-        ("BASE prudente term. 4% (vecchia regola -10%)", closes,
-         dict(mode="base", target_vol=0.04, cash_rate=0.03)),
-        ("OGGI: 25% BTC + 75% fermo (scartata)", closes,
-         dict(mode="fixed", fixed_weights={"BTC-USD": 0.25}, cash_rate=0.03)),
+        ("BASE FISSATA: cripto 12%, term 8%, pav 60%", closes,
+         dict(mode="base", target_vol=0.08, cash_rate=0.03,
+              btc_share=0.12, min_exposure=0.60)),
+        ("variante spinta: cripto 15% (a filo)", closes,
+         dict(mode="base", target_vol=0.08, cash_rate=0.03,
+              btc_share=0.15, min_exposure=0.60)),
+        ("alternativa conservativa: cripto 30, no pav", closes,
+         dict(mode="base", target_vol=0.08, cash_rate=0.03, btc_share=0.30)),
+        ("BOCCIATA: cripto 30 + pav 60", closes,
+         dict(mode="base", target_vol=0.08, cash_rate=0.03,
+              btc_share=0.30, min_exposure=0.60)),
         ("Tutto azioni (SPY 100%)", closes,
          dict(mode="fixed", fixed_weights={"SPY": 1.0})),
         ("Classico 60/40", closes,
