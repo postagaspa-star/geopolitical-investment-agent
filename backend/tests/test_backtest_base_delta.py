@@ -189,3 +189,32 @@ def test_indice_regge_buchi_di_dati():
     assert len(idx) == 99                           # calendario senza il buco
     days = sorted(idx)
     assert idx[days[-1]] > idx[days[0]]             # e il calcolo prosegue
+
+
+# ── pavimento di esposizione (richiesta di Andrea: minimo 60% investito) ────
+
+def test_pavimento_zero_identico_a_prima():
+    n = 210
+    dates = _dates(n)
+    closes = {"A": _wobble(n), "B": _wobble(n, up=0.003, down=-0.001)}
+    a = bt.simulate(dates, closes, mode="base")["equity"]
+    b = bt.simulate(dates, closes, mode="base", min_exposure=0.0)["equity"]
+    assert a == b
+
+
+def test_pavimento_scavalca_il_termometro():
+    """Asset nervosissimo: il termometro da solo investirebbe pochissimo; col
+    pavimento al 60% l'esposizione (e quindi il ballo) deve salire."""
+    import random
+    rng = random.Random(7)
+    n = 400
+    prices = [100.0]
+    for _ in range(n - 1):
+        prices.append(prices[-1] * (1 + rng.gauss(0.0, 0.03)))
+    dates = _dates(n)
+    senza = bt.simulate(dates, {"X": prices}, mode="base", target_vol=0.05)
+    con = bt.simulate(dates, {"X": prices}, mode="base", target_vol=0.05,
+                      min_exposure=0.60)
+    assert con["metrics"]["vol_pct"] > senza["metrics"]["vol_pct"] * 2, (
+        "il pavimento deve forzare piu' esposizione di quanta il termometro "
+        "ne concederebbe")

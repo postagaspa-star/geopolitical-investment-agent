@@ -137,7 +137,8 @@ def simulate(dates: list[str], closes: dict[str, list[float]],
              cost_bps: float = COST_BPS_SIDE,
              window: int = WINDOW,
              cash_rate: float = 0.0,
-             btc_share: float | None = None) -> dict:
+             btc_share: float | None = None,
+             min_exposure: float = 0.0) -> dict:
     """
     Simulazione a pesi mensili. mode:
       "base"  -> inverse-vol + tetto BTC + termometro (scala a target_vol)
@@ -173,6 +174,13 @@ def simulate(dates: list[str], closes: dict[str, list[float]],
                                    for j in range(i - window, i)]
                     pv = ann_vol(port_window)
                     scale = min(1.0, target_vol / pv) if pv > 1e-9 else 0.0
+                    # PAVIMENTO DI ESPOSIZIONE (richiesta di Andrea: "minimo
+                    # 60% investito"). Attenzione al costo nascosto: il
+                    # pavimento scavalca il termometro proprio nei momenti
+                    # nervosi — cioe' toglie l'airbag quando serve di piu'.
+                    # Le conseguenze vanno misurate, non promesse: vedi i run
+                    # con/senza pavimento nel doc.
+                    scale = max(scale, min(min_exposure, 1.0))
                     new_w = {t: w[t] * scale for t in tickers}
                 else:
                     new_w = {t: 0.0 for t in tickers}   # warm-up: liquidi

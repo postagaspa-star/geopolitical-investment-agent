@@ -259,12 +259,51 @@ orari di borsa, contabilità: intatti ovunque.
 3. **Regime pieno**: base + scostamenti del robot con budget di rischio.
    Solo se le prime due tappe convincono, e con un tuo sì a ciascuna.
 
+## Il pavimento di esposizione (richiesta: "investito minimo al 60%")
+
+Andrea ha obiettato che il 36% medio investito è troppo poco: circa 64.000
+dei 100.000 (virtuali) restano quasi sempre fermi. Obiezione legittima — è
+la stessa critica di costo-opportunità che questo progetto muove al robot.
+Due precisazioni prima dei numeri: quel capitale non è del tutto morto (nel
+calcolo rende il 3%, e nel disegno completo è la munizione degli scostamenti
+del robot), e soprattutto **l'esposizione bassa non era una soglia scelta ma
+una conseguenza**: paniere molto nervoso (quota cripto 30%) × termometro 8%
+= si investe ~36% per tenere il ballo all'8%. Era proprio ciò che comprava
+la perdita massima piccola.
+
+Ho aggiunto la manopola **pavimento di esposizione** (mai investiti meno di
+X%) e misurato cosa costa. Il risultato chiave: **il −20% è un budget unico,
+e lo si può spendere in quota cripto O in esposizione, non in entrambi al
+massimo.**
+
+| configurazione | annuo | max perdita | investito medio | inverni |
+|---|---|---|---|---|
+| attuale (cripto 30, term 8, senza pavimento) | 12,9% | −13,8% | 36% | −11,8% / −11,8% |
+| cripto 30 + pavimento 60% — **BOCCIATA** | 21,7% | **−27,9%** | 61% | −22,7% / −21,7% |
+| cripto 15 + pavimento 60% | 14,5% | −19,5% (a filo) | 64% | −12,9% / −17,7% |
+| **cripto 12 + pavimento 60% — raccomandata** | **13,1%** | **−18,8%** | **61%** | −12,7% / −17,4% |
+| cripto 10 + pavimento 60% | 12,5% | −18,6% | 73% | −12,7% / −17,5% |
+
+La combinazione precedente col pavimento sotto (riga 2) rende tantissimo sul
+decennio ma **sfonda il tuo limite** (−27,9%, e oltre −20% in entrambi gli
+inverni cripto): il pavimento tiene fermo il 60% investito proprio mentre
+tutto crolla — toglie l'airbag nel momento in cui serve. Per rispettare
+insieme "minimo 60% investito" e "mai oltre −20%", la quota cripto deve
+scendere al 10-15%.
+
+**Raccomandata: cripto 12%, termometro 8%, pavimento 60%.** Rende il 13,1%
+storico (più della configurazione attuale), sta investita al 61% medio come
+chiedi, e regge ovunque: −18,8% sul decennio, mai oltre −16% negli spezzoni,
+−12,7% e −17,4% negli inverni cripto. Se accetti di stare a filo del limite
+senza margine, la variante cripto 15% rende il 14,5% (−19,5%).
+
 ## Le decisioni che restano tue
 
-1. **Confermi i parametri emersi dal confronto?** Cripto come paniere di
-   monete principali (non solo Bitcoin), quota 30% della parte investita,
-   termometro 8% — che in pratica significa: cripto reale ~11% del
-   patrimonio in media, tutto il resto governato dal termometro.
+1. **Confermi i parametri aggiornati?** Paniere di monete principali, quota
+   cripto 12% della parte investita, termometro 8%, pavimento di esposizione
+   al 60% → storicamente 13,1% l'anno, perdita massima −18,8%, investito
+   medio 61%. (Alternativa più spinta: cripto 15%, stessa struttura, 14,5%
+   l'anno ma margine quasi nullo sotto il −20%.)
 2. **L'universo**: accendo l'estensione già pronta (SPY/TLT/GLD comprabili)
    o la base va replicata con titoli singoli? (Prima della decisione finale
    i numeri vanno rifatti sugli strumenti scelti.)
