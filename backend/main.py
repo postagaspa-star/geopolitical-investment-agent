@@ -550,12 +550,13 @@ async def trigger_agent_run(background_tasks: BackgroundTasks):
 
 @app.post("/api/agent/start")
 async def start_continuous_monitoring():
-    """Avvia il monitoraggio continuo (scheduler ogni 20 minuti)."""
+    """Riattiva il trading (toglie la pausa) e assicura lo scheduler acceso."""
     try:
-        if scheduler.is_scheduler_running():
-            return {"status": "already_running", "message": "Il monitoraggio e' gia' attivo."}
-        scheduler.start_scheduler()
-        return {"status": "started", "message": "Monitoraggio continuo avviato."}
+        database.set_setting(scheduler.SETTING_TRADING_PAUSED, "false")
+        if not scheduler.is_scheduler_running():
+            scheduler.start_scheduler()
+        return {"status": "started",
+                "message": "Trading riattivato: il robot torna a decidere."}
     except Exception as e:
         logger.error(f"Errore nell'avvio del monitoraggio: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -563,10 +564,23 @@ async def start_continuous_monitoring():
 
 @app.post("/api/agent/stop")
 async def stop_continuous_monitoring():
-    """Ferma il monitoraggio continuo."""
+    """
+    Ferma il TRADING in modo persistente. NON spegne lo scheduler.
+
+    Perche' e' cambiato: prima questo endpoint spegneva l'intero scheduler,
+    ma (a) l'avvio dell'app lo riaccendeva sempre — con i riavvii frequenti
+    del servizio, per l'utente il tasto "non funzionava: cliccato, riparte
+    subito" — e (b) spegnere tutto fermava anche il polling prezzi e gli
+    stop di protezione sulle posizioni aperte, che invece devono continuare.
+    Ora si scrive un flag persistente (trading_paused) rispettato da tutti i
+    job decisionali a ogni giro, riavvii inclusi.
+    """
     try:
-        scheduler.stop_scheduler()
-        return {"status": "stopped", "message": "Monitoraggio continuo fermato."}
+        database.set_setting(scheduler.SETTING_TRADING_PAUSED, "true")
+        return {"status": "stopped",
+                "message": ("Trading fermato (persistente, sopravvive ai "
+                            "riavvii). La protezione delle posizioni — stop "
+                            "automatici e monitor prezzi — resta ATTIVA.")}
     except Exception as e:
         logger.error(f"Errore nell'arresto del monitoraggio: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -581,8 +595,15 @@ async def get_agent_status():
     try:
         status = agent.agent_status.copy()
         scheduler_info = scheduler.get_scheduler_info()
+        # In pausa, la UI deve mostrare FERMO anche se lo scheduler di fondo
+        # resta acceso per la protezione: "running" qui significa "il robot
+        # sta decidendo", che e' il modello mentale dell'utente sul tasto.
+        trading_paused = scheduler.is_trading_paused()
         status.update({
-            "scheduler_running": scheduler_info["running"],
+            "trading_paused": trading_paused,
+            "protection_running": scheduler_info["running"],
+            "scheduler_running": (scheduler_info["running"]
+                                  and not trading_paused),
             "mode": scheduler_info["mode"],
             "market_open": scheduler_info["market_open"],
             "is_weekend": scheduler_info["is_weekend"],
@@ -592,6 +613,8 @@ async def get_agent_status():
             "architecture": "multi-agent" if scheduler_info["mode"] == "full" else "single-agent",
             "deepseek_available": bool(os.environ.get("DEEPSEEK_API_KEY")),
         })
+        if trading_paused:
+            status["running"] = False
         return status
     except Exception as e:
         logger.error(f"Errore nel recupero dello stato dell'agente: {e}", exc_info=True)

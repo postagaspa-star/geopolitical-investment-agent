@@ -1283,7 +1283,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # ── Watchdog: ogni 1 minuto, MA solo durante orari di mercato (US/UK/DE) ──
     # Il check interno is_market_open() fa exit immediato fuori orario.
     _scheduler.add_job(
-        _watchdog_job,
+        _gated(_watchdog_job, "watchdog"),
         trigger="interval",
         minutes=1,
         id="watchdog_job",
@@ -1356,7 +1356,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # APScheduler fa partire il job ogni 20 min; il job stesso ha un gate
     # interno (vedi _scout_hourly_job) che salta i run extra nei weekend.
     _scheduler.add_job(
-        _scout_hourly_job,
+        _gated(_scout_hourly_job, "scout"),
         trigger="interval",
         minutes=20,
         id="scout_hourly_job",
@@ -1409,7 +1409,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # 8H — ogni 8 ore. Il job stesso fa un check anti-double-run leggendo
     # l'ultimo AGG_8H dal buffer (skip se < 6h fa).
     _scheduler.add_job(
-        _scout_8h_report_job,
+        _gated(_scout_8h_report_job, "scout_8h"),
         trigger="interval",
         hours=8,
         id="scout_8h_report",
@@ -1423,7 +1423,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # 4D — ogni 4 giorni. Il job stesso fa skip se l'ultimo AGG_4D è
     # < 3 giorni fa.
     _scheduler.add_job(
-        _scout_4d_report_job,
+        _gated(_scout_4d_report_job, "scout_4d"),
         trigger="interval",
         days=4,
         id="scout_4d_report",
@@ -1464,7 +1464,7 @@ def start_scheduler() -> AsyncIOScheduler:
     )
     if weekend_first_run is not None:
         weekend_kwargs["next_run_time"] = weekend_first_run
-    _scheduler.add_job(_scout_weekend_report_job, **weekend_kwargs)
+    _scheduler.add_job(_gated(_scout_weekend_report_job, "scout_weekend"), **weekend_kwargs)
 
 
     # ── Crypto pipeline: CRON ogni ora a :00, 24/7 ──
@@ -1505,7 +1505,7 @@ def start_scheduler() -> AsyncIOScheduler:
     )
     if crypto_first_run is not None:
         crypto_kwargs["next_run_time"] = crypto_first_run
-    _scheduler.add_job(_crypto_pipeline_job, **crypto_kwargs)
+    _scheduler.add_job(_gated(_crypto_pipeline_job, "decisione_crypto"), **crypto_kwargs)
 
     # ── CryptoMonitor: ogni 15 minuti, 24/7 ──────────────────────────────
     # Sorveglianza trend-health delle posizioni crypto aperte tramite
@@ -1518,7 +1518,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # non e' rilevante. Per disabilitare in toto: set
     # crypto_monitor_enabled=false in settings.
     _scheduler.add_job(
-        _crypto_monitor_job,
+        _gated(_crypto_monitor_job, "monitor_crypto"),
         trigger="interval",
         minutes=15,
         id="crypto_monitor_job",
@@ -1588,7 +1588,7 @@ def start_scheduler() -> AsyncIOScheduler:
     )
     if standard_first_run is not None:
         standard_kwargs["next_run_time"] = standard_first_run
-    _scheduler.add_job(_standard_pipeline_job, **standard_kwargs)
+    _scheduler.add_job(_gated(_standard_pipeline_job, "decisione_standard"), **standard_kwargs)
 
     # ── Coach Cards weekly synthesis: ogni Lunedi' alle 06:00 UTC ──
     # Legge la memoria del Sim Advisor e produce 3-5 Coach Cards per il
@@ -1625,7 +1625,7 @@ def start_scheduler() -> AsyncIOScheduler:
     )
     if cc_first_run is not None:
         cc_kwargs["next_run_time"] = cc_first_run
-    _scheduler.add_job(_coach_cards_weekly_job, **cc_kwargs)
+    _scheduler.add_job(_gated(_coach_cards_weekly_job, "coach_cards"), **cc_kwargs)
 
     # ── Provider health: ogni ora al minuto :17 (evita i job a :00) ──────
     # Testa Anthropic + DeepSeek (pochi token) + copertura fonti Scout, e
@@ -1668,7 +1668,7 @@ def start_scheduler() -> AsyncIOScheduler:
     # run V2 completo (alterna equity/crypto) rispettando il daily_cap
     # configurato dalla SimDashboard. Idempotente, lock soft cross-pod.
     _scheduler.add_job(
-        _simulator_auto_run_job,
+        _gated(_simulator_auto_run_job, "simulator_auto"),
         trigger="interval",
         minutes=30,
         id="simulator_auto_mode",
@@ -1716,6 +1716,44 @@ def stop_scheduler(persist=True):
 def is_scheduler_running() -> bool:
     """Restituisce True se lo scheduler e' attivo."""
     return _scheduler is not None and _scheduler.running
+
+
+# ─── PAUSA DEL TRADING (il tasto STOP che finalmente ferma) ─────────────────
+#
+# STORIA: il tasto stop spegneva l'intero scheduler, ma l'avvio dell'app lo
+# riaccendeva SEMPRE ("il monitoraggio e' sempre attivo") — e siccome il
+# servizio si riavvia spesso (OOM sul piano da 512MB), per l'utente il tasto
+# "non funzionava: cliccato, riparte subito". In piu' spegnere TUTTO lo
+# scheduler era pericoloso: dentro ci girano anche il polling prezzi ed
+# enforce_stops, cioe' gli stop di protezione sulle posizioni aperte.
+#
+# ORA: "stop" = pausa PERSISTENTE (settings, sopravvive a ogni riavvio) dei
+# soli ingranaggi che DECIDONO o spendono token LLM (watchdog, decisioni
+# standard/crypto, monitor crypto, scout, simulator auto, coach cards).
+# La PROTEZIONE resta sempre accesa: polling prezzi + stop automatici,
+# risk-safety, health, e le misure passive (agente ombra, diversita').
+SETTING_TRADING_PAUSED = "trading_paused"
+
+
+def is_trading_paused() -> bool:
+    """True se l'utente ha premuto STOP. Fail-safe: errori DB -> non in pausa."""
+    try:
+        raw = (database.get_setting(SETTING_TRADING_PAUSED, "false") or "false")
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return False
+
+
+def _gated(job_fn, name: str):
+    """Avvolge un job 'decisionale' con il controllo di pausa."""
+    async def _wrapper():
+        if is_trading_paused():
+            logger.info("[PAUSA] job '%s' saltato: trading fermato dall'utente "
+                        "(la protezione delle posizioni resta attiva).", name)
+            return
+        await job_fn()
+    _wrapper.__name__ = f"gated_{name}"
+    return _wrapper
 
 
 def _last_log_for_phases(phase_prefixes: list[str], limit: int = 200) -> str | None:
