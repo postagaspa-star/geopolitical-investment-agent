@@ -1,83 +1,92 @@
 """
-churn_guard — attrito minimo contro il ribaltamento rapido di posizione.
+churn_guard — attrito minimo contro il ribaltamento e il ricompro compulsivo.
 
-IL PROBLEMA MISURATO
-In una finestra di osservazione: 13 inversioni di direzione sullo STESSO
-titolo entro 72 ore, su 51 operazioni decise dall'AI. Una operazione su
-quattro era un dietrofront.
+STORIA, IN DUE INCIDENTI
+1) Prima versione (misurata sul passato): 13 inversioni sullo stesso titolo
+   in 72h. Il guard copriva ribaltamenti e rientri post-stop.
+2) Produzione 26-30/07/2026, a sistema sbloccato: 80 operazioni in 4 giorni.
+   Il sanguinamento e' passato dai DUE buchi rimasti:
+   a. il "vendo e ricompro NELLA STESSA direzione" era permesso per scelta
+      (pensavo alla presa di profitto legittima): ETH venduto e ricomprato in
+      5 minuti, TRX in 54, XRP in 14, DOT ricostruito in 4 ore pagando di
+      piu'. Ogni giro = commissioni doppie + scarto avverso.
+   b. il guard leggeva solo `action` dallo storico, ma execute_short registra
+      l'apertura come action="SELL" (direction="SHORT") ed execute_cover la
+      chiusura come action="BUY" (direction="SHORT"): meta' delle operazioni
+      veniva classificata al contrario, e la protezione sui ribaltamenti era
+      cieca proprio sui flip verso short — quelli del 29/07 sera, richiusi il
+      30/07 in perdita (~1.100 EUR realizzati in un giorno).
 
-PERCHE' SUCCEDE
-Nel percorso che esegue davvero i trade non esiste alcun attrito temporale:
-nessun periodo minimo di detenzione, nessun cooldown dopo uno stop, nessun
-controllo di coerenza con la direzione precedente. `validate_trade` non
-riceve nemmeno il parametro `ticker`. Ogni run ricalcola la direzione da zero
-e il costo di cambiare idea non e' modellato da nessuna parte — quindi
-cambiare idea e' sempre localmente ottimale. Il nucleo deterministico crypto
-lo rende evidente: la direzione e' il SEGNO di una somma pesata, con banda
-morta zero, e la funzione non riceve mai la posizione corrente.
-
-La logica giusta era gia' scritta nel repo (crypto_regime: conferma su piu'
-barre; crypto_scalper: minimo di barre fra ingressi, "il nemico e' il
-laterale, flippare senza trend = morte per mille tagli"; crypto_meanrev:
-cooldown di rientro dopo lo stop) — ma vive tutta dietro flag spenti e fuori
-dallo scheduler, cioe' nel ramo che NON esegue.
-
-COSA FA QUESTO MODULO, E COSA NON FA
-Non impedisce di operare: impedisce di CONTRADDIRSI troppo in fretta. La
-distinzione conta, perche' il sistema soffre gia' di eccesso di veti
-sull'entrata. Qui non si aggiunge un altro cancello all'apertura in generale:
-si mette attrito su due gesti specifici e patologici su un orizzonte swing
-(giorni-settimane):
-
-  1. rientrare su un titolo che ti ha appena stoppato;
-  2. aprire nella direzione OPPOSTA a quella che hai appena chiuso.
-
-Le CHIUSURE non sono mai bloccate: uscire da una posizione deve restare
-sempre possibile, in qualunque momento. Un guard che potesse impedire
-un'uscita sarebbe un rischio, non una disciplina.
-
-Modulo puro: riceve la lista dei trade e decide. Nessun I/O, testabile.
+COSA FA ORA
+- Classifica ogni riga dello storico con action+direction (la sola action
+  mente sugli short).
+- TRE regole, tutte solo sull'APRIRE (le chiusure non sono MAI bloccate:
+  un guard che puo' impedire un'uscita e' un rischio, non una disciplina):
+  1. RIENTRO POST-STOP (12h, per ticker): il mercato ti ha appena dato torto.
+  2. RIBALTAMENTO (24h, per ticker): chiuso LONG -> niente SHORT subito, e
+     viceversa. Ora vede anche i flip verso short.
+  3. RICOMPRO A FREDDO (4h, per ticker, QUALUNQUE direzione): dopo una
+     chiusura — incluse le prese di profitto parziali — non si riapre lo
+     stesso nome per qualche ora. Chiude anche il litigio "il take-profit
+     vende e il Decision ricompra cinque minuti dopo".
+- Fail-open: se lo storico non e' leggibile NON blocca (disciplina, non
+  governatore di sicurezza). Tutto configurabile, 0 = spento.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 SETTING_ENABLED = "churn_guard_enabled"
 SETTING_POST_STOP_HOURS = "churn_post_stop_cooldown_hours"
 SETTING_FLIP_HOURS = "churn_flip_cooldown_hours"
+SETTING_REOPEN_HOURS = "churn_reopen_cooldown_hours"
 
-# Dopo che uno stop ha chiuso una posizione, rientrare sullo stesso nome
-# entro poche ore significa quasi sempre ripagare lo spread per rifare la
-# stessa scommessa appena invalidata dal mercato.
 DEFAULT_POST_STOP_COOLDOWN_HOURS = 12.0
-
-# Ribaltare la direzione sullo stesso nome: e' il gesto che ha prodotto le 13
-# inversioni in 72h. Su un orizzonte swing, una tesi che si capovolge in meno
-# di un giorno non era una tesi.
 DEFAULT_FLIP_COOLDOWN_HOURS = 24.0
+# Il piu' importante dei tre dopo l'incidente del 26-30/07: vieta il
+# "vendo e ricompro" ravvicinato in QUALUNQUE direzione.
+DEFAULT_REOPEN_COOLDOWN_HOURS = 4.0
 
-# Azioni che APRONO o aumentano esposizione. Solo queste sono soggette al
-# guard; SELL e COVER passano sempre.
+# Azioni che il Decision puo' chiedere e che APRONO esposizione.
 OPENING_ACTIONS = {"BUY", "SHORT"}
-
-# Direzione implicata da un'azione di apertura.
 _ACTION_DIRECTION = {"BUY": "LONG", "SHORT": "SHORT"}
 
-# Chiusure: l'azione che termina una posizione di quella direzione.
-_CLOSING_ACTION_DIRECTION = {"SELL": "LONG", "COVER": "SHORT"}
+
+def classify_history_row(trade: dict) -> tuple[str, str] | None:
+    """
+    (tipo, direzione) di una riga dello storico: ("open"|"close", "LONG"|"SHORT").
+
+    La sola `action` NON basta: execute_short scrive l'apertura short come
+    action="SELL" (direction="SHORT") ed execute_cover la chiusura come
+    action="BUY" (direction="SHORT"). Verificato in portfolio.py e confermato
+    dai dati di produzione del 29-30/07/2026.
+    """
+    action = (trade.get("action") or "").upper().strip()
+    direction = (trade.get("direction") or "LONG").upper().strip()
+    if action == "BUY":
+        return ("close", "SHORT") if direction == "SHORT" else ("open", "LONG")
+    if action == "SELL":
+        return ("open", "SHORT") if direction == "SHORT" else ("close", "LONG")
+    if action == "COVER":
+        return ("close", "SHORT")
+    if action == "SHORT":
+        return ("open", "SHORT")
+    return None
 
 
 def _parse_ts(value) -> datetime | None:
-    """Timestamp dei trade: ISO con o senza timezone. Mai solleva."""
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     if not value:
         return None
     try:
         text = str(value).strip().replace("Z", "+00:00")
+        # lo storico usa anche "YYYY-MM-DD HH:MM:SS" senza timezone
+        if "T" not in text and " " in text:
+            text = text.replace(" ", "T", 1)
         parsed = datetime.fromisoformat(text)
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
@@ -86,22 +95,16 @@ def _parse_ts(value) -> datetime | None:
 
 def is_enabled(database=None) -> bool:
     try:
-        if database is None:
-            import database as _db
-        else:
-            _db = database
+        _db = database if database is not None else __import__("database")
         raw = (_db.get_setting(SETTING_ENABLED, "true") or "").strip().lower()
         return raw not in ("0", "false", "no", "off")
     except Exception:
-        return True   # in dubbio, la disciplina resta attiva
+        return True
 
 
 def _hours(database, key: str, default: float) -> float:
     try:
-        if database is None:
-            import database as _db
-        else:
-            _db = database
+        _db = database if database is not None else __import__("database")
         raw = (_db.get_setting(key, "") or "").strip()
         if raw == "":
             return default
@@ -114,78 +117,68 @@ def _hours(database, key: str, default: float) -> float:
 def check_trade(ticker: str, action: str, trades: list[dict],
                 now: datetime | None = None,
                 post_stop_hours: float = DEFAULT_POST_STOP_COOLDOWN_HOURS,
-                flip_hours: float = DEFAULT_FLIP_COOLDOWN_HOURS) -> tuple[bool, str]:
-    """
-    (consentito, motivo). Funzione PURA.
-
-    `trades` e' lo storico piu' recente (qualunque ordine): vengono considerati
-    solo quelli sul `ticker` indicato.
-    """
+                flip_hours: float = DEFAULT_FLIP_COOLDOWN_HOURS,
+                reopen_hours: float = DEFAULT_REOPEN_COOLDOWN_HOURS) -> tuple[bool, str]:
+    """(consentito, motivo). Funzione PURA. Le chiusure passano sempre."""
     action = (action or "").upper().strip()
     if action not in OPENING_ACTIONS:
-        return True, ""          # le uscite non si bloccano mai
+        return True, ""
 
     now = now or datetime.now(timezone.utc)
-    wanted_direction = _ACTION_DIRECTION[action]
+    wanted = _ACTION_DIRECTION[action]
 
-    # Chiusure recenti sullo stesso nome, dalla piu' recente.
     closings: list[tuple[datetime, str, str]] = []
     for trade in trades or []:
         if (trade.get("ticker") or "").upper() != (ticker or "").upper():
             continue
-        act = (trade.get("action") or "").upper().strip()
-        closed_direction = _CLOSING_ACTION_DIRECTION.get(act)
-        if closed_direction is None:
+        kind = classify_history_row(trade)
+        if kind is None or kind[0] != "close":
             continue
         stamp = _parse_ts(trade.get("timestamp"))
         if stamp is None:
             continue
-        closings.append((stamp, closed_direction,
+        closings.append((stamp, kind[1],
                          (trade.get("execution_type") or "").lower()))
     if not closings:
         return True, ""
     closings.sort(key=lambda item: item[0], reverse=True)
 
-    for stamp, closed_direction, exec_type in closings:
-        age_h = (now - stamp).total_seconds() / 3600.0
-        if age_h < 0:
-            continue   # timestamp nel futuro: dato sporco, si ignora
+    stamp, closed_direction, exec_type = closings[0]
+    age_h = (now - stamp).total_seconds() / 3600.0
+    if age_h < 0:
+        return True, ""          # timestamp nel futuro: dato sporco
 
-        # 1. Rientro dopo uno stop sullo stesso nome.
-        if "stop" in exec_type and age_h < post_stop_hours:
-            return False, (
-                f"churn_guard: {ticker} e' stato chiuso da uno stop "
-                f"{age_h:.1f}h fa; rientro consentito dopo {post_stop_hours:.0f}h. "
-                f"Rientrare subito ripaga i costi per rifare la scommessa che il "
-                f"mercato ha appena invalidato.")
+    # 1. Rientro dopo uno stop (ora vede anche gli stop sugli short).
+    if "stop" in exec_type and age_h < post_stop_hours:
+        return False, (
+            f"churn_guard: {ticker} chiuso da uno stop {age_h:.1f}h fa; "
+            f"rientro dopo {post_stop_hours:.0f}h. Il mercato ha appena "
+            f"invalidato la scommessa: ripagarla subito e' churn.")
 
-        # 2. Ribaltamento della direzione sullo stesso nome.
-        if closed_direction != wanted_direction and age_h < flip_hours:
-            return False, (
-                f"churn_guard: {ticker} chiuso {age_h:.1f}h fa come "
-                f"{closed_direction}; aprire {wanted_direction} ora e' "
-                f"un'inversione entro {flip_hours:.0f}h. Su un orizzonte swing "
-                f"una tesi che si capovolge in meno di un giorno non era una tesi.")
+    # 2. Ribaltamento di direzione.
+    if closed_direction != wanted and age_h < flip_hours:
+        return False, (
+            f"churn_guard: {ticker} chiuso {age_h:.1f}h fa come "
+            f"{closed_direction}; aprire {wanted} ora e' un'inversione entro "
+            f"{flip_hours:.0f}h. Una tesi che si capovolge in ore non era "
+            f"una tesi.")
 
-        # La chiusura piu' recente non blocca: le precedenti sono piu' vecchie.
-        break
+    # 3. Ricompro a freddo, qualunque direzione (il buco del 26-30/07:
+    #    ETH venduto e ricomprato in 5 minuti, 80 operazioni in 4 giorni).
+    if age_h < reopen_hours:
+        return False, (
+            f"churn_guard: {ticker} chiuso {age_h:.1f}h fa; riaprirlo prima "
+            f"di {reopen_hours:.0f}h paga due commissioni per la stessa idea. "
+            f"Se la tesi e' buona tra qualche ora ci sara' ancora.")
 
     return True, ""
 
 
 def check_trade_live(ticker: str, action: str, database=None,
                      limit: int = 200) -> tuple[bool, str]:
-    """
-    Variante con I/O per i call-site. Fail-open: se lo storico non e'
-    leggibile NON si blocca il trade — questo modulo impone disciplina, non
-    e' un governatore di sicurezza, e non deve poter congelare l'operativita'
-    per un guasto del DB.
-    """
+    """Variante con I/O. Fail-open: un guasto del DB non blocca mai il trade."""
     try:
-        if database is None:
-            import database as _db
-        else:
-            _db = database
+        _db = database if database is not None else __import__("database")
         if not is_enabled(_db):
             return True, ""
         trades = _db.get_trades(limit=limit) or []
@@ -195,6 +188,8 @@ def check_trade_live(ticker: str, action: str, database=None,
                                    DEFAULT_POST_STOP_COOLDOWN_HOURS),
             flip_hours=_hours(_db, SETTING_FLIP_HOURS,
                               DEFAULT_FLIP_COOLDOWN_HOURS),
+            reopen_hours=_hours(_db, SETTING_REOPEN_HOURS,
+                                DEFAULT_REOPEN_COOLDOWN_HOURS),
         )
     except Exception as exc:
         logger.debug("churn_guard non valutabile (%s): passo", exc)
