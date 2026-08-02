@@ -127,27 +127,58 @@ function LiveApp() {
     return () => clearInterval(countdownRef.current);
   }, [nextRun, nextMarketOpen, schedulerRunning, marketOpen]);
 
+  // I comandi POST sono protetti dal backend (ADMIN_API_TOKEN): senza il
+  // token in Impostazioni la risposta e' 401. PRIMA questi handler la
+  // ignoravano e aggiornavano la UI in modo ottimistico: il tasto "Ferma
+  // Monitoraggio" sembrava funzionare, poi il refresh mostrava di nuovo
+  // "attivo" — per l'utente "cliccato, riparte subito", per settimane.
+  // Un comando fallito ora LO DICE, e non finge mai il successo.
+  const comandoProtetto = async (path, descrizione) => {
+    const res = await fetch(`${API}${path}`, { method: "POST" });
+    let corpo = {};
+    try { corpo = await res.json(); } catch { /* risposta non-JSON */ }
+    if (res.status === 401) {
+      alert(
+        `${descrizione}: comando RIFIUTATO dal server (non autorizzato).\n\n` +
+        `Serve l'Admin Token: vai in Impostazioni → Admin Token e inserisci ` +
+        `il valore di ADMIN_API_TOKEN configurato su Render. Senza, nessun ` +
+        `comando (ferma/avvia/esegui) arriva davvero al sistema.`
+      );
+      return null;
+    }
+    if (!res.ok) {
+      alert(`${descrizione}: errore dal server (${res.status}) ` +
+            `${corpo.error || corpo.message || ""}`);
+      return null;
+    }
+    return corpo;
+  };
+
   const handleStartMonitoring = async () => {
     try {
-      await fetch(`${API}/api/agent/start`, { method: "POST" });
-      setSchedulerRunning(true);
+      const out = await comandoProtetto("/api/agent/start", "Avvia Monitoraggio");
+      if (out) setSchedulerRunning(true);
       fetchAll();
-    } catch (err) { console.error(err); }
+    } catch (err) { console.error(err); alert("Avvia Monitoraggio: errore di rete"); }
   };
 
   const handleStopMonitoring = async () => {
     try {
-      await fetch(`${API}/api/agent/stop`, { method: "POST" });
-      setSchedulerRunning(false);
-      setCountdown("");
+      const out = await comandoProtetto("/api/agent/stop", "Ferma Monitoraggio");
+      if (out) {
+        setSchedulerRunning(false);
+        setCountdown("");
+        if (out.message) alert(out.message);
+      }
       fetchAll();
-    } catch (err) { console.error(err); }
+    } catch (err) { console.error(err); alert("Ferma Monitoraggio: errore di rete"); }
   };
 
   const handleRunOnce = async () => {
     setAgentStatus("running");
     try {
-      await fetch(`${API}/api/agent/run`, { method: "POST" });
+      const out = await comandoProtetto("/api/agent/run", "Esegui Manuale");
+      if (!out) setAgentStatus("idle");
       setTimeout(fetchAll, 2000);
     } catch { setAgentStatus("error"); }
   };
