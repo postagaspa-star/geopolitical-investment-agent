@@ -1727,11 +1727,12 @@ def is_scheduler_running() -> bool:
 # scheduler era pericoloso: dentro ci girano anche il polling prezzi ed
 # enforce_stops, cioe' gli stop di protezione sulle posizioni aperte.
 #
-# ORA: "stop" = pausa PERSISTENTE (settings, sopravvive a ogni riavvio) dei
-# soli ingranaggi che DECIDONO o spendono token LLM (watchdog, decisioni
-# standard/crypto, monitor crypto, scout, simulator auto, coach cards).
-# La PROTEZIONE resta sempre accesa: polling prezzi + stop automatici,
-# risk-safety, health, e le misure passive (agente ombra, diversita').
+# ORA (semantica chiarita da Andrea: "deve fermare tutto, anche il
+# Simulator"): il tasto stop scrive il flag persistente E spegne l'intero
+# scheduler; il lifespan di main.py RISPETTA il flag e non riavvia nulla
+# finche' l'utente non preme Start. Il lucchetto _gated sui job decisionali
+# resta come DIFESA IN PROFONDITA': se qualcosa riaccendesse lo scheduler
+# col flag attivo, le decisioni resterebbero comunque ferme.
 SETTING_TRADING_PAUSED = "trading_paused"
 
 

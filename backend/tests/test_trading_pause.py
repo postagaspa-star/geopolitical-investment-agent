@@ -84,16 +84,30 @@ def test_quali_job_sono_dietro_il_lucchetto():
 
 # ── Gli endpoint ────────────────────────────────────────────────────────────
 
-def test_stop_scrive_il_flag_e_non_spegne_lo_scheduler(monkeypatch):
+def test_stop_ferma_tutto(monkeypatch):
+    """Semantica chiarita da Andrea: il tasto ferma TUTTO, Simulator incluso."""
     import main
     spento = {"si": False}
     monkeypatch.setattr(scheduler, "stop_scheduler",
                         lambda *a, **k: spento.update(si=True))
     out = asyncio.run(main.stop_continuous_monitoring())
     assert out["status"] == "stopped"
-    assert scheduler.is_trading_paused() is True
-    assert spento["si"] is False, "lo scheduler (protezione) NON va spento"
-    assert "protezione" in out["message"].lower() or "ATTIVA" in out["message"]
+    assert scheduler.is_trading_paused() is True, "la scelta deve persistere"
+    assert spento["si"] is True, "lo scheduler va spento DAVVERO, tutto incluso"
+    # e il messaggio deve dire la verita' scomoda sulle posizioni non gestite
+    assert "stop automatici" in out["message"]
+
+
+def test_l_avvio_dell_app_rispetta_lo_stop():
+    """IL BUG ORIGINARIO: il lifespan riavviava SEMPRE lo scheduler,
+    vanificando il tasto al primo riavvio (frequente, con l'OOM)."""
+    import inspect
+    import main
+    src = inspect.getsource(main)
+    assert "SISTEMA FERMATO DALL'UTENTE" in src, (
+        "il lifespan deve controllare is_trading_paused() prima di avviare")
+    assert "sempre attivo al deploy" not in src, (
+        "il vecchio avvio incondizionato non deve tornare")
 
 
 def test_start_toglie_la_pausa(monkeypatch):
@@ -109,10 +123,10 @@ def test_status_mostra_fermo_quando_in_pausa(monkeypatch):
     import main
     database.set_setting(scheduler.SETTING_TRADING_PAUSED, "true")
     monkeypatch.setattr(scheduler, "get_scheduler_info", lambda: {
-        "running": True, "mode": "full", "market_open": True,
+        "running": False, "mode": "idle", "market_open": True,
         "is_weekend": False, "agents": {}})
     out = asyncio.run(main.get_agent_status())
     assert out["trading_paused"] is True
     assert out["running"] is False, "la UI deve vedere FERMO"
     assert out["scheduler_running"] is False
-    assert out["protection_running"] is True, "ma la protezione risulta viva"
+    assert out["protection_running"] is False, "fermo vuol dire fermo: tutto"

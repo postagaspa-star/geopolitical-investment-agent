@@ -123,21 +123,33 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Auto-load preset documents fallito: %s", e)
 
-    # Avvia SEMPRE lo scheduler al deploy — il monitoraggio è sempre attivo
-    try:
-        logger.info("Avvio automatico dello scheduler (sempre attivo al deploy)...")
-        scheduler.start_scheduler()
-        logger.info("Scheduler avviato con successo al deploy.")
-    except Exception as e:
-        logger.error("ERRORE avvio scheduler al deploy: %s", e, exc_info=True)
-        # Ritenta dopo un breve delay (il DB potrebbe non essere pronto)
-        import asyncio
-        await asyncio.sleep(2)
+    # Avvio dello scheduler al deploy — MA rispettando la scelta dell'utente.
+    # PRIMA qui c'era "avvia SEMPRE, il monitoraggio e' sempre attivo": il
+    # tasto "Ferma Monitoraggio" spegneva lo scheduler e questo blocco lo
+    # riaccendeva al primo riavvio (che con l'OOM del piano 512MB arriva nel
+    # giro di ore) — per l'utente "cliccato, riparte subito". Il tasto deve
+    # fermare TUTTO il sistema, Simulator compreso, finche' l'utente non
+    # preme Start: la scelta vive nel flag persistente trading_paused.
+    if scheduler.is_trading_paused():
+        logger.warning("SISTEMA FERMATO DALL'UTENTE (trading_paused=true): lo "
+                       "scheduler NON viene avviato. Nessun job attivo — "
+                       "nemmeno gli stop di protezione. Riattivare con il "
+                       "tasto Start (/api/agent/start).")
+    else:
         try:
+            logger.info("Avvio automatico dello scheduler al deploy...")
             scheduler.start_scheduler()
-            logger.info("Scheduler avviato al secondo tentativo.")
-        except Exception as e2:
-            logger.error("Scheduler non avviato dopo 2 tentativi: %s", e2, exc_info=True)
+            logger.info("Scheduler avviato con successo al deploy.")
+        except Exception as e:
+            logger.error("ERRORE avvio scheduler al deploy: %s", e, exc_info=True)
+            # Ritenta dopo un breve delay (il DB potrebbe non essere pronto)
+            import asyncio
+            await asyncio.sleep(2)
+            try:
+                scheduler.start_scheduler()
+                logger.info("Scheduler avviato al secondo tentativo.")
+            except Exception as e2:
+                logger.error("Scheduler non avviato dopo 2 tentativi: %s", e2, exc_info=True)
 
     yield
 
@@ -565,22 +577,29 @@ async def start_continuous_monitoring():
 @app.post("/api/agent/stop")
 async def stop_continuous_monitoring():
     """
-    Ferma il TRADING in modo persistente. NON spegne lo scheduler.
+    Ferma TUTTO il sistema, in modo persistente: decisioni, watchdog, scout,
+    Simulator, e anche polling prezzi + stop di protezione.
 
-    Perche' e' cambiato: prima questo endpoint spegneva l'intero scheduler,
-    ma (a) l'avvio dell'app lo riaccendeva sempre — con i riavvii frequenti
-    del servizio, per l'utente il tasto "non funzionava: cliccato, riparte
-    subito" — e (b) spegnere tutto fermava anche il polling prezzi e gli
-    stop di protezione sulle posizioni aperte, che invece devono continuare.
-    Ora si scrive un flag persistente (trading_paused) rispettato da tutti i
-    job decisionali a ogni giro, riavvii inclusi.
+    Storia in due atti. (1) In origine spegneva lo scheduler ma l'avvio
+    dell'app lo riaccendeva SEMPRE: coi riavvii frequenti (OOM), "cliccato,
+    riparte subito". (2) Il primo fix rendeva lo stop persistente ma teneva
+    accesa la protezione: Andrea ha chiarito che il tasto deve fermare TUTTO,
+    Simulator compreso. Ora: flag persistente trading_paused (il lifespan lo
+    rispetta e NON riavvia) + spegnimento immediato dello scheduler. I job
+    decisionali restano comunque dietro il lucchetto _gated come difesa in
+    profondita'. Capitale virtuale: il rischio di posizioni non gestite e'
+    dichiarato nel messaggio ed e' una scelta esplicita del proprietario.
     """
     try:
         database.set_setting(scheduler.SETTING_TRADING_PAUSED, "true")
+        scheduler.stop_scheduler(persist=True)
         return {"status": "stopped",
-                "message": ("Trading fermato (persistente, sopravvive ai "
-                            "riavvii). La protezione delle posizioni — stop "
-                            "automatici e monitor prezzi — resta ATTIVA.")}
+                "message": ("SISTEMA FERMATO del tutto (persistente: resta "
+                            "fermo anche dopo i riavvii). Nessun job attivo: "
+                            "niente decisioni, niente Simulator, e ATTENZIONE "
+                            "— anche gli stop automatici di protezione sono "
+                            "fermi: le posizioni aperte non sono gestite "
+                            "finche' non premi Start.")}
     except Exception as e:
         logger.error(f"Errore nell'arresto del monitoraggio: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
