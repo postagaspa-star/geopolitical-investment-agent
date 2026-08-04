@@ -1,90 +1,59 @@
 # Agente di Investimento Geopolitico
 
-Agente AI di investimento simulato guidato da analisi geopolitica. Il sistema monitora notizie e eventi geopolitici in tempo reale, analizza il loro potenziale impatto sui mercati finanziari e gestisce un portafoglio di investimenti simulato utilizzando Claude di Anthropic come motore decisionale.
+Sistema multi-agente che legge eventi geopolitici e macroeconomici, ne stima
+l'impatto sui mercati e gestisce un portafoglio **simulato** (paper trading).
+Nessun capitale reale viene movimentato.
 
-## Architettura
+## Perché esiste
 
-```
-frontend/          React + TypeScript (dashboard di visualizzazione)
-backend/           FastAPI + Python (API, agente AI, gestione portafoglio)
-```
+Il progetto nasce come banco di prova su una domanda precisa: cosa serve perché
+un LLM prenda decisioni ripetibili invece che plausibili. Un modello che
+"ragiona" su una notizia produce sempre una risposta convincente, anche quando i
+dati sotto sono sbagliati o mancanti. Quasi tutto il lavoro sta quindi nei
+vincoli attorno al modello, non nel prompt.
 
-- **Backend**: API REST con FastAPI, integrazione con Claude (Anthropic) per l'analisi geopolitica, raccolta notizie tramite News API, database SQLite per lo storico operazioni e portafoglio.
-- **Frontend**: Dashboard React con grafici interattivi per monitorare il portafoglio, le operazioni e gli eventi geopolitici analizzati.
+Non vengono pubblicati risultati di rendimento: il sistema è un esperimento di
+architettura decisionale, e numeri di performance su un simulatore direbbero poco
+di onesto.
 
-## Prerequisiti
+## Come funziona
 
-- Python 3.11+
-- Node.js 18+
+Pipeline a più stadi, con modelli diversi secondo il costo del passaggio: uno
+stadio economico filtra e struttura il flusso di notizie, Claude interviene sulla
+sintesi e sulla decisione. Sopra ci sono agenti separati con ruoli distinti —
+chi propone candidati, chi decide, chi verifica a posteriori — e un livello di
+regole deterministiche che può vincolare l'esito ma non inventarlo.
 
-## Sviluppo Locale
+Le uscite dalle posizioni seguono regole scritte in codice, non lasciate al
+modello: in particolare uno stop loss può stringersi ma **mai** allargarsi, per
+impedire la razionalizzazione a posteriori di una posizione in perdita.
 
-### 1. Installare le dipendenze
+## Stack
 
-```bash
-# Backend
-cd backend
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scriptsctivate
-pip install -r requirements.txt
+Backend Python + FastAPI, frontend React + TypeScript + Vite, persistenza su
+Supabase (Postgres), deploy su Render, notifiche operative via Telegram. LLM:
+Claude (Anthropic) e un modello economico per gli stadi ad alto volume.
 
-# Frontend
-cd ../frontend
-npm install
-```
+## Note tecniche
 
-### 2. Configurare le variabili d'ambiente
+- **Dati corrotti che sembravano un bug di arrotondamento**: alcune serie
+  storiche arrivavano deformate. La causa non era il calcolo ma il *fetch
+  parallelo*, che superava il rate limit del provider e riceveva risposte
+  troncate senza errore esplicito. Diagnosi corretta e serializzazione del
+  recupero dati.
+- **Paralisi decisionale**: il sistema aveva imparato che non agire non produce
+  mai un errore misurabile, e tendeva a restare liquido. Corretto sostituendo la
+  soglia secca di confidenza con un cancello sul valore atteso, così l'inazione
+  smette di essere gratis.
+- **Fragilità dei fornitori**: tre rotture da dipendenze esterne in dieci giorni
+  (endpoint rimosso, credito esaurito, modelli ritirati dal provider). Aggiunto
+  un monitor orario sullo stato dei fornitori con alert, perché il guasto va
+  visto quando accade, non a posteriori.
+- **Blackout silenzioso**: il polling dei prezzi si è fermato a lungo senza
+  crash, per coroutine appese senza timeout. Da lì timeout espliciti e vincolo di
+  istanza singola sui job periodici.
 
-Creare un file `.env` nella cartella `backend/`:
+## Avvertenza
 
-```env
-ANTHROPIC_API_KEY=la-tua-chiave-api
-NEWS_API_KEY=la-tua-chiave-news-api
-INITIAL_PORTFOLIO_BALANCE=100000
-AGENT_RUN_INTERVAL_HOURS=6
-```
-
-### 3. Avviare i servizi
-
-```bash
-# Backend (dalla cartella backend/)
-uvicorn main:app --reload --port 8000
-
-# Frontend (dalla cartella frontend/)
-npm run dev
-```
-
-## Variabili d'Ambiente
-
-| Variabile | Descrizione | Default |
-|-----------|-------------|---------|
-| `ANTHROPIC_API_KEY` | Chiave API di Anthropic (obbligatoria) | - |
-| `NEWS_API_KEY` | Chiave API di News API (obbligatoria) | - |
-| `FINNHUB_API_KEY` | Chiave API di Finnhub per congressional trading (opzionale) | - |
-| `DB_PATH` | Percorso del database SQLite (su Render: `/data/portfolio.db`) | `backend/investment_agent.db` |
-| `DOCUMENTS_PATH` | Percorso documenti caricati (su Render: `/data/documents`) | `backend/documents/` |
-
-## Deploy su Render
-
-1. Creare un nuovo **Web Service** su [Render](https://render.com)
-2. Collegare il repository GitHub
-3. Render rileverà automaticamente `render.yaml`
-4. Configurare le variabili d'ambiente: `ANTHROPIC_API_KEY`, `NEWS_API_KEY`, `FINNHUB_API_KEY`
-5. Il disco persistente (`/data`, 1GB) viene creato automaticamente per database e documenti
-
-## Endpoint API
-
-| Metodo | Percorso | Descrizione |
-|--------|----------|-------------|
-| `GET` | `/health` | Controllo stato del servizio |
-| `GET` | `/api/portfolio` | Stato attuale del portafoglio |
-| `GET` | `/api/trades` | Storico delle operazioni |
-| `GET` | `/api/analysis` | Ultime analisi geopolitiche |
-| `POST` | `/api/agent/run` | Avvia manualmente un ciclo dell'agente |
-
-## Stack Tecnologico
-
-- **Backend**: Python, FastAPI, SQLite, Anthropic SDK
-- **Frontend**: React, TypeScript, Vite, Recharts
-- **AI**: Claude (Anthropic) per analisi geopolitica e decisioni di investimento
-- **Deploy**: Railway (Nixpacks)
+Progetto personale a scopo di studio. Non è consulenza finanziaria e non
+costituisce raccomandazione di investimento.
