@@ -1,5 +1,14 @@
 # La funzione obiettivo dell'agente Live — diagnosi, interventi, prossimi passi
 
+> **Note for English readers.** Internal analysis, in Italian. Bottom line: the
+> agent had an unwritten objective function — minimise *visible* errors of
+> commission, at unlimited cost of errors of omission — and was optimising the
+> wrong thing well. The 76% cash figure below is not caution but the arithmetic
+> of a sizing formula, and 94% of the "don't act" cycles turned out to be a
+> broken external API rather than any judgement about the market. The document
+> also concludes that what was running was a cautious momentum trader with a
+> geopolitical narrative on top. Simulated portfolio throughout.
+
 **25 luglio 2026** — branch `fix/watchdog-blind-spot` (7 commit, 578 test verdi).
 
 Documento di consegna. Le decisioni che restano ad Andrea sono in fondo.

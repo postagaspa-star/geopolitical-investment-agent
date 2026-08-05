@@ -1,5 +1,14 @@
 # Progetto "posizione normale" — Fase 3, su carta
 
+> **Note for English readers.** Internal design study, in Italian. Nothing in it
+> was ever switched on — it is a paper proposal with a ten-year backtest behind
+> it. Bottom line: the return figures in the tables below are inflated twice
+> over, by survivorship bias in the crypto basket (today's winners, bought with
+> hindsight) and by a test window that happened to be the best decade in
+> Bitcoin's history. The document says so itself and puts the honest forward
+> estimate at 6-9% a year rather than the ~13% the tables show. The maximum-loss
+> figures are estimates from a single historical path, not guarantees.
+
 **Fine luglio 2026 — nessuna riga di questo progetto è attiva sul sistema vero.**
 Passato da tre giudici critici indipendenti e ricalibrato più volte nel
 confronto con Andrea. Impostazione attuale: cripto **complementari** (tetto

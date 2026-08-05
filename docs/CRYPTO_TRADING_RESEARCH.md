@@ -1,5 +1,13 @@
 # Ricerca sul trading automatico crypto — sintesi onesta
 
+> **Note for English readers.** Internal research notes, in Italian, kept as a
+> record of what was tested. Bottom line: no alpha was found — every apparent
+> edge dissolved once a data-alignment bug, survivorship bias and hand-picked
+> periods were removed. The one result that survived every honest test is a
+> weekly crash shield, and section 12 is explicit that it is not alpha: it
+> returns *less* than the market while prices rise, and pays off only when a
+> bear market arrives. All figures below are backtests, never live trading.
+
 > Documento di consolidamento dopo ~150 backtest su dati reali Binance.
 > Tutto il codice descritto è committato in locale, **tutti i flag OFF, niente
 > in produzione**. Scopo: dare il quadro VERO (inclusi i limiti) prima di

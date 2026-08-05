@@ -1,5 +1,14 @@
 # Piano di lavoro — il robot deve imparare a guadagnare, non solo a non sbagliare
 
+> **Note for English readers.** Internal work plan, in Italian, deliberately
+> written in plain language. The figures below are diagnostic measurements, not
+> results. Bottom line: most of the inactivity under investigation turned out to
+> be a broken external service rather than caution, and the key measurement
+> (U = 1.11) says the portfolio's problem is concentration — three correlated
+> crypto positions — rather than being under-invested. Whether the agent has any
+> real edge is left unanswered here: the shadow agent built to falsify it had
+> only just started collecting data.
+
 **26 luglio 2026 — area di lavoro separata (branch `fix/watchdog-blind-spot`)**
 
 Questo documento è la mappa di quello che farò. Serve a te per seguire i lavori

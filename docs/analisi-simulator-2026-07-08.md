@@ -1,5 +1,13 @@
 # Analisi Simulator — 8 luglio 2026
 
+> **Note for English readers.** Internal post-mortem, in Italian. The figures
+> below are a diagnosis of what was going wrong, not results being claimed: over
+> 90 reconstructed runs the agent came out ahead 19% of the time, and this
+> document exists to explain why. Bottom line: a defensive posture that pays in
+> crashes and strangles returns in calm and rising markets, plus seven specific
+> reasoning failures and two platform bugs that were losing trades silently.
+> Everything here is a paper-trading simulator.
+
 Diagnosi completa dei 4 problemi segnalati (pipeline scenari, run autonome,
 database che si svuota, qualità del ragionamento) con fix applicati e
 raccomandazioni sui blocchi nei prompt.
