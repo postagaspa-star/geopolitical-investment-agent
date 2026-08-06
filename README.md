@@ -11,24 +11,23 @@ make repeatable decisions rather than merely plausible ones?
 
 Ask a model to reason about a news story and it will always hand back something
 convincing, even when the data underneath is stale, partial, or wrong. So most of
-the work here isn't in the prompts. It's in the scaffolding around the model, and
-specifically in the parts that are allowed to say no.
+the work here sits in the scaffolding around the model rather than in the
+prompts, and specifically in the parts that are allowed to say no.
 
-There are no performance figures in this repo, and that's deliberate. It's an
-experiment in decision architecture. Returns from a simulator wouldn't tell you
-anything honest.
+There are no performance figures in this repo, and that's deliberate. Returns
+from a simulator wouldn't tell you anything honest about a decision architecture.
 
 ## How it works
 
 The pipeline runs in stages, and the model tier matches what each stage is worth:
 a cheap model filters and structures the raw news flow, Claude handles synthesis
-and the decision itself. Above that sit separate agents with distinct jobs — one
-proposes candidates, one decides, one audits after the fact — plus a layer of
-deterministic rules that can veto an outcome but never invent one.
+and the decision itself. Above that sit separate agents with distinct jobs, one
+proposing candidates, one deciding and one auditing after the fact, plus a layer
+of deterministic rules that can veto an outcome but never invent one.
 
-Position exits are code, not judgement. A stop loss can tighten. It can never
-widen. That single rule closes off the most common failure mode there is, which
-is talking yourself into holding a loser.
+Position exits are handled in code rather than left to judgement. A stop loss can
+tighten, but it can never widen, which closes off the most common failure mode
+there is: talking yourself into holding a loser.
 
 ## Stack
 
@@ -40,7 +39,7 @@ high-volume stages.
 ## Things worth knowing
 
 **Corrupted data that looked like a rounding bug.** Some price series were coming
-back deformed. The arithmetic was fine — the real cause was parallel fetching,
+back deformed. The arithmetic was fine. The real cause was parallel fetching,
 which blew past the provider's rate limit and got truncated responses back with
 no error to signal it. Serializing the fetch fixed it.
 
@@ -54,7 +53,7 @@ endpoint removed, credit exhausted, models retired by the provider. There's now
 an hourly health check across every provider, because you want to hear about that
 when it happens rather than days later.
 
-**A blackout nobody noticed.** Price polling stopped without crashing — coroutines
+**A blackout nobody noticed.** Price polling stopped without crashing: coroutines
 hung with no timeout, so from the outside the job looked alive. Explicit timeouts
 now, plus a single-instance lock on the periodic jobs.
 
