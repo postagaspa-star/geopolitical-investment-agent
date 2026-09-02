@@ -19,6 +19,9 @@ import main
 
 @pytest.fixture()
 def client():
+    # Il report e' in cache per 60s: senza svuotarla un test leggerebbe il
+    # report costruito dal test precedente.
+    main._RESP_CACHE.clear()
     return TestClient(main.app)
 
 
@@ -170,3 +173,19 @@ def test_csv_e_pagina_raccontano_gli_stessi_numeri(client, portafoglio_con_trade
     totale_csv = sum(float(r.split(",")[idx] or 0) for r in rows)
 
     assert round(totale_csv, 2) == body["commissioni"]["commissioni_totali_usd"]
+
+
+def test_il_taglio_delle_righe_non_sporca_la_cache(client, portafoglio_con_trade):
+    """Il JSON taglia le tabelle a max_rows su una copia: il CSV, che legge lo
+    stesso report in cache, deve restare completo."""
+    client.get("/api/live/performance?period=all&max_rows=50")
+    res = client.get("/api/live/performance/export?dataset=transazioni&period=all")
+    assert len(_csv_lines(res)) == 4          # intestazione + 3 transazioni
+
+
+def test_cambiare_commissione_invalida_la_cache(client, portafoglio_con_trade):
+    prima = client.get("/api/live/performance?period=all").json()
+    database.set_setting("commission_bps", "50")
+    dopo = client.get("/api/live/performance?period=all").json()
+    assert dopo["commissioni"]["commissione_bps"] == 50.0
+    assert dopo["commissioni"]["commissioni_totali_usd"] > prima["commissioni"]["commissioni_totali_usd"]

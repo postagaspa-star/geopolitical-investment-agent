@@ -6552,7 +6552,9 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
     import math as _math
     try:
         days_map = {"1h": 1, "4h": 1, "1d": 1, "7d": 7, "1w": 7,
-                    "30d": 30, "1m": 30, "90d": 90, "3m": 90, "all": 3650}
+                    "30d": 30, "1m": 30, "90d": 90, "3m": 90,
+                    "180d": 180, "6m": 180, "365d": 365, "1y": 365,
+                    "all": 3650}
         days = days_map.get(period.lower(), 30)
 
         history = database.get_portfolio_history(days=days) or []
@@ -7002,6 +7004,18 @@ async def _collect_performance_data(period: str, with_benchmark: bool = True) ->
     """
     import performance_report as pr
 
+    # Cache di 60 secondi, chiave = periodo + commissione. Senza, ogni clic su
+    # "scarica CSV" rifaceva l'intero calcolo: 20.000 trade da Supabase, lo
+    # storico completo e una chiamata a Yahoo per l'S&P. Sette download, sette
+    # chiamate a Yahoo — che limita, e risponde con dati troncati senza
+    # errore (vedi README). La commissione nella chiave fa si' che cambiarla
+    # in Impostazioni produca subito un report nuovo.
+    bps = _perf_commission_bps()
+    cache_key = f"perf::{period}::{bps}::{int(with_benchmark)}"
+    cached = _cache_get(cache_key, ttl_seconds=60)
+    if cached is not None:
+        return cached
+
     days = _PERF_PERIOD_DAYS.get(str(period).lower(), 3650)
 
     trades = database.get_trades(limit=_PERF_TRADES_CAP) or []
@@ -7035,17 +7049,19 @@ async def _collect_performance_data(period: str, with_benchmark: bool = True) ->
         except Exception as e:
             logger.warning("performance: benchmark non disponibile: %s", e)
 
-    return pr.build_report(
+    report = pr.build_report(
         trades=trades,
         positions=positions,
         portfolio_state=pstate,
         history=history,
-        commission_bps=_perf_commission_bps(),
+        commission_bps=bps,
         initial_balance=initial_balance,
         cash_adjustments=cash_adjustments,
         benchmark=benchmark,
         period=period,
     )
+    _cache_set(cache_key, report)
+    return report
 
 
 @app.get("/api/live/performance")
@@ -7067,7 +7083,9 @@ async def live_performance(
     tutte.
     """
     try:
-        report = await _collect_performance_data(period)
+        # Copia superficiale: il taglio delle righe qui sotto non deve toccare
+        # il report in cache, che il CSV restituisce per intero.
+        report = dict(await _collect_performance_data(period))
 
         transactions = report.get("transazioni") or []
         operations = report.get("operazioni") or []

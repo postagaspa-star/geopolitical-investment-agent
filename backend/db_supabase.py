@@ -737,9 +737,36 @@ def insert_trade(ticker, action, quantity, price, geo_reasoning, tech_reasoning,
 
 
 def get_trades(limit=50):
+    """Ultimi `limit` trade, dal piu' recente.
+
+    PostgREST (Supabase) tronca OGNI risposta a 1000 righe, qualunque sia il
+    .limit(): chiedere 5000 o 20000 trade ne restituiva 1000 in silenzio. Con
+    piu' di 1000 gambe il FIFO dei trade chiusi partiva da meta' storia:
+    chiusure senza la loro apertura, P&L realizzato e win rate falsi in
+    Analytics, Edge Tracker, benchmark e report Performance. Stesso tetto gia'
+    incontrato sugli snapshot (vedi get_portfolio_history): sopra le 1000
+    righe si pagina con .range(). L'ordine secondario per id rende stabile la
+    paginazione quando piu' trade hanno lo stesso timestamp.
+    """
     client = _get_client()
-    result = client.table("trades").select("*").order("timestamp", desc=True).limit(limit).execute()
-    return result.data or []
+    PAGE = 1000
+    want = max(1, int(limit or 50))
+    rows: list = []
+    page = 0
+    while len(rows) < want:
+        lo = page * PAGE
+        hi = min(lo + PAGE, want) - 1
+        result = (client.table("trades").select("*")
+                  .order("timestamp", desc=True)
+                  .order("id", desc=True)
+                  .range(lo, hi)
+                  .execute())
+        batch = result.data or []
+        rows.extend(batch)
+        if len(batch) < (hi - lo + 1):
+            break
+        page += 1
+    return rows[:want]
 
 
 def get_recent_trades_by_ticker(ticker, hours, execution_types=None):
