@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   Brain,
   BarChart3,
+  Receipt,
   Settings,
   Play,
   Square,
@@ -315,6 +316,12 @@ export default function Sidebar({
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             onClick={onCloseSidebar}>
             <BarChart3 /> Analytics
+          </NavLink>
+          <NavLink to="/live/performance"
+            className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
+            onClick={onCloseSidebar}
+            title="Rendiconto completo: rendimento, rischio, commissioni, confronto con l'S&P 500 e download in CSV">
+            <Receipt /> Performance
           </NavLink>
           <NavLink to="/live/edge-tracker"
             className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}

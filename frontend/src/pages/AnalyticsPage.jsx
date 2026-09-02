@@ -239,14 +239,16 @@ function CapitalOrchestratorPanel() {
 // mostrato era 'grezzo' e sovrastimava il vero rendimento di ~0.20% per
 // round-trip — significativo su tanti trade piccoli.
 //
-// NOTA: questo deve restare ALLINEATO al backend (trade_analytics.py).
-// Se cambi commission_bps nel DB, aggiorna anche FEE_BPS qui.
-const FEE_BPS = 10.0;
-function feeOf(grossValue) {
-  return Math.abs(grossValue) * (FEE_BPS / 10000.0);
-}
+// La commissione NON e' piu' scritta qui dentro. Prima c'era una costante
+// FEE_BPS = 10 con accanto il commento "se la cambi nel DB ricordati di
+// aggiornarla anche qui": bastava cambiarla in Impostazioni e questa pagina
+// mostrava un P&L diverso da quello del backend, senza che niente lo
+// segnalasse. Ora il valore arriva da /api/live/commission, che legge la
+// stessa impostazione usata da trade_analytics.
+const FEE_BPS_FALLBACK = 10.0;
 
-function computeClosedTrades(trades) {
+function computeClosedTrades(trades, feeBps = FEE_BPS_FALLBACK) {
+  const feeOf = (grossValue) => Math.abs(grossValue) * (feeBps / 10000.0);
   // Due code FIFO separate: long e short non si matchano mai tra loro.
   // Una gamba APRE se: BUY su book long, oppure SELL su book short.
   // I trade senza 'direction' → 'LONG' (retro-compatibile).
@@ -1265,6 +1267,10 @@ export default function AnalyticsPage() {
   const [history, setHistory] = useState([]);
   const [portfolio, setPortfolio] = useState(null);
   const [benchmark, setBenchmark] = useState(null);
+  // Commissione reale configurata sul backend. Finche' non arriva si usa il
+  // default storico (10 bps): un P&L leggermente approssimato per una frazione
+  // di secondo e' meglio di una pagina vuota.
+  const [commissionBps, setCommissionBps] = useState(FEE_BPS_FALLBACK);
   // Default "all" (non "30d"): l'utente vuole vedere TUTTO il periodo da
   // quando investe, non solo l'ultimo mese. Valeva sia qui sia nel grafico
   // equity/benchmark che usano ?period=. Con 250+ trade chiusi, 30gg
@@ -1273,6 +1279,18 @@ export default function AnalyticsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [researchOpen, setResearchOpen] = useState(false);
+
+  // La commissione cambia solo quando l'utente la modifica in Impostazioni:
+  // si legge una volta, non a ogni cambio di periodo.
+  useEffect(() => {
+    fetch(`${API}/api/live/commission`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const bps = Number(d?.commission_bps);
+        if (Number.isFinite(bps) && bps >= 0) setCommissionBps(bps);
+      })
+      .catch(() => { /* backend giu': resta il default */ });
+  }, []);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -1317,7 +1335,8 @@ export default function AnalyticsPage() {
     fetchData();
   }, [period]);
 
-  const closedTrades = useMemo(() => computeClosedTrades(trades), [trades]);
+  const closedTrades = useMemo(
+    () => computeClosedTrades(trades, commissionBps), [trades, commissionBps]);
   const kpis = useMemo(() => computeKpis(positions, trades, closedTrades), [positions, trades, closedTrades]);
 
   if (loading) {

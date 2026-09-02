@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import BackgroundTasks, FastAPI, File, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -3913,7 +3913,7 @@ async def reset_portfolio(payload: ResetPayload, confirm: bool = Query(default=F
 @app.post("/api/portfolio/history/cleanup")
 async def cleanup_portfolio_history(
     threshold_pct: float = Query(default=25.0, ge=10.0, le=100.0),
-    mode: str = Query(default="median", regex="^(median|wipe)$"),
+    mode: str = Query(default="median", pattern="^(median|wipe)$"),
     confirm: bool = Query(default=False),
 ):
     """
@@ -6783,6 +6783,237 @@ async def get_portfolio_benchmark(period: str = Query(default="30d")):
         }
     except Exception as e:
         logger.error("benchmark error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# REPORT DI PERFORMANCE — "quanto ho guadagnato, quanto mi e' costato, e
+# rispetto a cosa"
+# ═══════════════════════════════════════════════════════════════════════════
+# Una sola raccolta dati (trade, posizioni, portafoglio, storico del valore,
+# movimenti di cassa manuali, benchmark) usata da due endpoint:
+#   GET /api/live/performance         → il report in JSON, per la pagina
+#   GET /api/live/performance/export  → gli stessi dati in CSV, da scaricare
+# Cosi' il numero che leggi a schermo e quello che trovi nel foglio di calcolo
+# vengono dallo stesso calcolo: non possono divergere.
+#
+# La matematica non e' riscritta qui: performance_report.py delega FIFO,
+# commissioni e P&L netto ad accounting.py (fonte unica di verita').
+
+# Quanti trade leggere dal DB per il report. 20.000 gambe coprono anni di
+# operativita': serve il registro COMPLETO, perche' un FIFO che parte da meta'
+# storia accoppia chiusure ad aperture sbagliate e il P&L esce falso.
+_PERF_TRADES_CAP = 20000
+
+# Righe di dettaglio restituite in JSON alla pagina. Il CSV le contiene TUTTE:
+# qui il tetto serve solo a non spedire megabyte a ogni apertura della pagina.
+_PERF_JSON_ROWS = 500
+
+_PERF_PERIOD_DAYS = {
+    "1d": 1, "7d": 7, "1w": 7, "30d": 30, "1m": 30,
+    "90d": 90, "3m": 90, "180d": 180, "6m": 180,
+    "365d": 365, "1y": 365, "all": 3650,
+}
+
+
+def _perf_commission_bps() -> float:
+    """La commissione configurata per il LIVE, in basis points.
+
+    Stessa fonte usata da trade_analytics per il P&L dei trade chiusi: se
+    l'utente la cambia in Impostazioni, report, CSV e Analytics si spostano
+    insieme. Prima il frontend la teneva scritta a mano nel codice."""
+    try:
+        return float(database.get_setting("commission_bps", "10") or 10)
+    except (TypeError, ValueError):
+        return accounting.DEFAULT_COMMISSION_BPS
+
+
+@app.get("/api/live/commission")
+async def live_commission():
+    """La commissione applicata al LIVE, in basis points e in percentuale.
+
+    Esiste per un motivo preciso: il frontend teneva la commissione scritta a
+    mano nel proprio codice (FEE_BPS = 10) con accanto il commento "se la
+    cambi nel DB ricordati di aggiornarla anche qui". Bastava cambiarla in
+    Impostazioni e Analytics mostrava un P&L diverso da quello del backend,
+    senza che niente segnalasse la divergenza. Ora il valore ha una sola
+    fonte e la pagina lo chiede.
+    """
+    bps = _perf_commission_bps()
+    return {
+        "commission_bps": round(bps, 4),
+        "commission_pct": round(bps / 100.0, 6),
+        "fonte": "settings.commission_bps",
+    }
+
+
+async def _collect_performance_data(period: str, with_benchmark: bool = True) -> dict:
+    """Raccoglie i dati e costruisce il report. Nessuna logica di calcolo qui
+    dentro: solo lettura dal DB e passaggio a performance_report.build_report.
+
+    Le letture accessorie (movimenti di cassa, benchmark) sono best-effort: se
+    una fallisce il report esce lo stesso, con quella sezione vuota, invece di
+    restituire un errore per tutto.
+    """
+    import performance_report as pr
+
+    days = _PERF_PERIOD_DAYS.get(str(period).lower(), 3650)
+
+    trades = database.get_trades(limit=_PERF_TRADES_CAP) or []
+    positions = database.get_positions() or []
+    pstate = database.get_portfolio() or {}
+    history = database.get_portfolio_history(days=days) or []
+
+    try:
+        initial_balance = float(database.get_setting("initial_balance", "100000")
+                                or 100000)
+    except (TypeError, ValueError):
+        initial_balance = 100000.0
+
+    # Versamenti/prelievi manuali: se ci sono, il rendimento "valore oggi meno
+    # capitale iniziale" li include e NON e' tutto guadagno di trading. Il
+    # report lo dice apertamente invece di lasciarlo scoprire all'utente.
+    cash_adjustments = []
+    try:
+        if hasattr(database, "get_cash_audit_log"):
+            cash_adjustments = database.get_cash_audit_log(
+                limit=200, reason="manual_adjust") or []
+    except Exception as e:
+        logger.debug("performance: cash audit non disponibile: %s", e)
+
+    benchmark = None
+    if with_benchmark:
+        try:
+            bench = await get_portfolio_benchmark(period=period)
+            if isinstance(bench, dict) and bench.get("available"):
+                benchmark = bench
+        except Exception as e:
+            logger.warning("performance: benchmark non disponibile: %s", e)
+
+    return pr.build_report(
+        trades=trades,
+        positions=positions,
+        portfolio_state=pstate,
+        history=history,
+        commission_bps=_perf_commission_bps(),
+        initial_balance=initial_balance,
+        cash_adjustments=cash_adjustments,
+        benchmark=benchmark,
+        period=period,
+    )
+
+
+@app.get("/api/live/performance")
+async def live_performance(
+    period: str = Query(default="all"),
+    max_rows: int = Query(default=_PERF_JSON_ROWS, ge=50, le=5000),
+):
+    """Il report completo delle performance del portafoglio live.
+
+    Contiene: sintesi del portafoglio, metriche di rendimento e rischio sulla
+    curva del valore, statistiche delle operazioni chiuse, il conto delle
+    commissioni, il rendimento mese per mese, la scomposizione per strumento,
+    la curva del valore con il drawdown e il confronto con l'S&P 500.
+
+    Le due tabelle di dettaglio (transazioni e operazioni chiuse) sono tagliate
+    alle ultime `max_rows` righe per non spedire megabyte a ogni apertura della
+    pagina; il CSV le contiene tutte. Il taglio e' dichiarato nella risposta
+    (`troncato`), cosi' la pagina puo' dirlo invece di far credere che siano
+    tutte.
+    """
+    try:
+        report = await _collect_performance_data(period)
+
+        transactions = report.get("transazioni") or []
+        operations = report.get("operazioni") or []
+        report["transazioni"] = transactions[-max_rows:]
+        report["operazioni"] = operations[-max_rows:]
+        report["troncato"] = {
+            "transazioni_mostrate": len(report["transazioni"]),
+            "transazioni_totali": len(transactions),
+            "operazioni_mostrate": len(report["operazioni"]),
+            "operazioni_totali": len(operations),
+            "limite": max_rows,
+        }
+        return report
+    except Exception as e:
+        logger.error("live_performance error: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# Nome del file scaricato per ciascun blocco di dati.
+_PERF_CSV_FILES = {
+    "transazioni": "transazioni",
+    "operazioni": "operazioni-chiuse",
+    "curva_valore": "curva-valore",
+    "mensile": "rendimento-mensile",
+    "per_strumento": "per-strumento",
+    "sintesi": "sintesi",
+    "benchmark": "confronto-benchmark",
+}
+
+
+@app.get("/api/live/performance/export")
+async def live_performance_export(
+    dataset: str = Query(default="transazioni"),
+    period: str = Query(default="all"),
+    sep: str = Query(default=","),
+):
+    """Scarica un blocco del report in CSV.
+
+    `dataset` sceglie cosa scaricare:
+      transazioni   — OGNI operazione eseguita, con la sua commissione
+      operazioni    — le posizioni chiuse (apertura↔chiusura) con P&L netto
+      curva_valore  — il valore del portafoglio giorno per giorno + drawdown
+      mensile       — il rendimento mese per mese
+      per_strumento — P&L, commissioni e win rate per ticker
+      sintesi       — tutte le metriche in due colonne (metrica, valore)
+      benchmark     — portafoglio e S&P 500 affiancati, base 100
+
+    `sep` accetta "," (standard, per Fogli Google/pandas) oppure ";" per Excel
+    in italiano, che con la virgola mette tutto in una colonna sola.
+
+    Il file esce con il BOM UTF-8: senza, Excel storpia gli accenti.
+    """
+    import performance_report as pr
+
+    key = str(dataset).lower().strip()
+    if key not in _PERF_CSV_FILES:
+        return JSONResponse(status_code=400, content={
+            "error": f"dataset '{dataset}' non riconosciuto",
+            "disponibili": sorted(_PERF_CSV_FILES),
+        })
+    separator = ";" if str(sep).strip() == ";" else ","
+
+    try:
+        report = await _collect_performance_data(period)
+
+        if key == "sintesi":
+            rows = pr.summary_rows(report)
+            columns = pr.CSV_COLUMNS["sintesi"]
+        elif key == "benchmark":
+            rows = pr.benchmark_series_rows(report.get("benchmark"))
+            columns = ["pct_periodo_trascorso", "portafoglio_base100",
+                       "sp500_base100"]
+        else:
+            rows = report.get(key) or []
+            columns = pr.CSV_COLUMNS.get(key)
+
+        body = pr.to_csv(rows, columns, separator=separator)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+        filename = f"geoinvest-{_PERF_CSV_FILES[key]}-{period}-{stamp}.csv"
+        # ﻿ = BOM UTF-8. Excel senza BOM legge il file come latin-1 e
+        # trasforma gli accenti in caratteri illeggibili.
+        return Response(
+            content="﻿" + body,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
+    except Exception as e:
+        logger.error("live_performance_export error: %s", e, exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
