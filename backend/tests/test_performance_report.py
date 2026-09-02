@@ -461,3 +461,57 @@ def test_benchmark_series_rows_affianca_le_due_curve():
 def test_benchmark_series_rows_vuoto_se_manca_il_benchmark():
     assert pr.benchmark_series_rows(None) == []
     assert pr.benchmark_series_rows({"available": False}) == []
+
+
+# ── Periodo, mesi parziali, decimali italiani (dalla revisione) ──────────────
+
+def test_periodo_filtra_transazioni_e_operazioni_ma_il_fifo_resta_intero():
+    """Apertura vecchia, chiusura recente: con un periodo che copre solo la
+    chiusura, l'operazione chiusa DEVE comparire (il FIFO vede tutta la storia)
+    ma la transazione di apertura NO (e' fuori periodo)."""
+    from datetime import datetime, timezone
+    trades = [
+        _trade("AAPL", "BUY", 10, 100.0, "2026-06-01T10:00:00Z", tid=1),
+        _trade("AAPL", "SELL", 10, 110.0, "2026-08-20T10:00:00Z", tid=2),
+        _trade("MSFT", "BUY", 5, 300.0, "2026-05-01T10:00:00Z", tid=3),
+    ]
+    inizio = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    rep = pr.build_report(trades=trades, positions=[], portfolio_state={},
+                          history=[], commission_bps=BPS, period="30d",
+                          period_start=inizio)
+    assert [r["id"] for r in rep["transazioni"]] == [2]
+    assert len(rep["operazioni"]) == 1
+    assert rep["operazioni"][0]["pnl_netto_usd"] > 0
+    assert rep["sintesi"]["transazioni_totali"] == 1
+    assert rep["periodo_inizio"] == "2026-08-01"
+    assert any("filtrati dal 2026-08-01" in w for w in rep["avvertenze"])
+
+
+def test_senza_periodo_niente_filtro():
+    trades = [
+        _trade("AAPL", "BUY", 10, 100.0, "2026-06-01T10:00:00Z"),
+        _trade("AAPL", "SELL", 10, 110.0, "2026-08-20T10:00:00Z"),
+    ]
+    rep = pr.build_report(trades=trades, positions=[], portfolio_state={},
+                          history=[], commission_bps=BPS)
+    assert rep["sintesi"]["transazioni_totali"] == 2
+    assert rep["periodo_inizio"] is None
+
+
+def test_monthly_breakdown_marca_il_mese_in_corso_come_parziale():
+    daily = [
+        {"date": "2026-07-01", "value": 100.0},
+        {"date": "2026-07-31", "value": 110.0},
+        {"date": "2026-08-02", "value": 112.0},   # agosto appena iniziato
+    ]
+    months = pr.monthly_breakdown(daily)
+    assert months[0]["parziale"] is False       # luglio: dal 1 al 31
+    assert months[1]["parziale"] is True        # agosto: solo 2 giorni
+
+
+def test_csv_excel_italiano_usa_la_virgola_anche_nei_decimali():
+    body = pr.to_csv([{"a": 12.5, "b": 3, "c": "x"}], ["a", "b", "c"], separator=";")
+    assert body.strip().split("\r\n")[1] == "12,5;3;x"
+    # Con il separatore standard i decimali restano col punto.
+    body = pr.to_csv([{"a": 12.5}], ["a"], separator=",")
+    assert body.strip().split("\r\n")[1] == "12.5"

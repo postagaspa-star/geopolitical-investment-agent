@@ -189,3 +189,11 @@ def test_cambiare_commissione_invalida_la_cache(client, portafoglio_con_trade):
     dopo = client.get("/api/live/performance?period=all").json()
     assert dopo["commissioni"]["commissione_bps"] == 50.0
     assert dopo["commissioni"]["commissioni_totali_usd"] > prima["commissioni"]["commissioni_totali_usd"]
+
+
+def test_periodo_sconosciuto_risponde_400(client):
+    for path in ("/api/live/performance?period=6mo",
+                 "/api/live/performance/export?dataset=transazioni&period=a%22b"):
+        res = client.get(path)
+        assert res.status_code == 400, path
+        assert "disponibili" in res.json()

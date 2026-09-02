@@ -752,9 +752,8 @@ def get_trades(limit=50):
     PAGE = 1000
     want = max(1, int(limit or 50))
     rows: list = []
-    page = 0
+    lo = 0
     while len(rows) < want:
-        lo = page * PAGE
         hi = min(lo + PAGE, want) - 1
         result = (client.table("trades").select("*")
                   .order("timestamp", desc=True)
@@ -762,10 +761,13 @@ def get_trades(limit=50):
                   .range(lo, hi)
                   .execute())
         batch = result.data or []
-        rows.extend(batch)
-        if len(batch) < (hi - lo + 1):
+        if not batch:
             break
-        page += 1
+        rows.extend(batch)
+        # Si avanza di quante righe sono ARRIVATE, non di quante ne abbiamo
+        # chieste: se il tetto del progetto fosse 500 invece di 1000, fermarsi
+        # alla prima pagina "corta" tronchererebbe di nuovo in silenzio.
+        lo += len(batch)
     return rows[:want]
 
 

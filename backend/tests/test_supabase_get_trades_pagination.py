@@ -12,7 +12,14 @@ import pytest
 
 import db_supabase
 
-POSTGREST_MAX_ROWS = 1000
+POSTGREST_MAX_ROWS = 1000   # il default di Supabase; un progetto puo' abbassarlo
+
+
+_CAP = {"n": POSTGREST_MAX_ROWS}
+
+
+def _cap():
+    return _CAP["n"]
 
 
 class _FakeQuery:
@@ -38,7 +45,7 @@ class _FakeQuery:
 
     def execute(self):
         hi = self._hi if self._hi is not None else self._lo + POSTGREST_MAX_ROWS - 1
-        hi = min(hi, self._lo + POSTGREST_MAX_ROWS - 1)   # il tetto di PostgREST
+        hi = min(hi, self._lo + _cap() - 1)               # il tetto di PostgREST
         self._log.append((self._lo, hi))
         return SimpleNamespace(data=self._data[self._lo:hi + 1])
 
@@ -79,7 +86,7 @@ def test_sopra_il_tetto_recupera_tutte_le_righe(finto):
     ids = [r["id"] for r in out]
     assert ids == sorted(ids, reverse=True)          # dal piu' recente
     assert len(set(ids)) == 2500                      # nessun duplicato
-    assert len(c.calls) == 3                          # 1000 + 1000 + 500
+    assert len(c.calls) == 4                          # 1000 + 1000 + 500 + pagina vuota
 
 
 def test_rispetta_il_limite_richiesto(finto):
@@ -90,3 +97,14 @@ def test_rispetta_il_limite_richiesto(finto):
 def test_tabella_vuota(finto):
     finto(0)
     assert db_supabase.get_trades(limit=5000) == []
+
+
+def test_tetto_piu_basso_di_1000_non_tronca(finto, monkeypatch):
+    """Un progetto con max_rows=500: la prima pagina torna "corta" senza che
+    la tabella sia finita. Fermarsi li' riprodurrebbe il bug originale."""
+    monkeypatch.setitem(_CAP, "n", 500)
+    c = finto(2500)
+    out = db_supabase.get_trades(limit=5000)
+    assert len(out) == 2500
+    assert len({r["id"] for r in out}) == 2500
+    assert len(c.calls) == 6                          # 5 pagine da 500 + vuota

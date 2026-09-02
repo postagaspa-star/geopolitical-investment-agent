@@ -118,60 +118,9 @@ async def _start_scheduler_if_allowed() -> None:
             logger.error("Scheduler non avviato dopo 2 tentativi: %s", e2, exc_info=True)
 
 
-async def _db_recovery_loop() -> None:
-    """Riprova init_db() finche' il database non torna, poi completa l'avvio
-    (scheduler compreso). Senza questo, dopo un'interruzione del DB al boot
-    il trading resterebbe spento finche' qualcuno non rifa' il deploy."""
-    global _DB_STARTUP_ERROR
-    attempt = 0
-    while True:
-        await asyncio.sleep(_DB_RETRY_SECONDS)
-        attempt += 1
-        try:
-            database.init_db()
-        except Exception as e:
-            _DB_STARTUP_ERROR = _describe_db_error(e, masked=True)
-            # Log fitto all'inizio, poi uno ogni dieci: un'interruzione lunga
-            # non deve riempire i log di Render dello stesso rigo.
-            if attempt <= 3 or attempt % 10 == 0:
-                logger.error("Database ancora non raggiungibile (tentativo %d): %s",
-                             attempt, _describe_db_error(e, masked=False))
-            continue
-        _DB_STARTUP_ERROR = None
-        logger.warning("Database tornato raggiungibile dopo %d tentativi: "
-                       "completo l'avvio.", attempt)
-        await _start_scheduler_if_allowed()
-        return
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Gestione del ciclo di vita dell'applicazione.
-    All'avvio: inizializza il database e riavvia lo scheduler se era attivo.
-    Alla chiusura: arresta lo scheduler.
-    """
-    # Fase di avvio
-    global _DB_STARTUP_ERROR, _db_retry_task
-    logger.info("Inizializzazione del database...")
-    try:
-        database.init_db()
-        _DB_STARTUP_ERROR = None
-        logger.info("Database inizializzato con successo.")
-    except Exception as e:
-        # PRIMA questa riga non era protetta: con Supabase irraggiungibile il
-        # processo moriva ("Application startup failed. Exiting.", exit 3),
-        # Render segnava il deploy come fallito e l'utente restava senza sito
-        # e senza diagnostica. Un'interruzione del database non deve
-        # diventare un'interruzione totale: l'app parte, /health dice cosa
-        # manca, la dashboard lo mostra, e _db_recovery_loop riprova.
-        _DB_STARTUP_ERROR = _describe_db_error(e, masked=True)
-        logger.critical(
-            "DATABASE NON RAGGIUNGIBILE ALL'AVVIO: %s\n"
-            "L'app parte in MODALITA' DEGRADATA: dashboard e diagnostica "
-            "attive, scheduler e agenti FERMI. Riprovo la connessione ogni "
-            "%d secondi.", _describe_db_error(e, masked=False), _DB_RETRY_SECONDS)
-
+def _post_init_steps() -> None:
+    """Migrazioni e allineamenti idempotenti che richiedono il database.
+    Ognuno e' "non bloccante": se fallisce logga e si va avanti."""
     # Schema Simulator (idempotente, fail-safe)
     try:
         from simulator import db as sim_db
@@ -251,6 +200,80 @@ async def lifespan(app: FastAPI):
             logger.info("Preset crypto documenti caricati: %d", n_loaded)
     except Exception as e:
         logger.warning("Auto-load preset documents fallito: %s", e)
+
+
+async def _db_recovery_loop() -> None:
+    """Riprova init_db() finche' il database non torna, poi completa l'avvio
+    (scheduler compreso). Senza questo, dopo un'interruzione del DB al boot
+    il trading resterebbe spento finche' qualcuno non rifa' il deploy."""
+    global _DB_STARTUP_ERROR
+    attempt = 0
+    while True:
+        await asyncio.sleep(_DB_RETRY_SECONDS)
+        attempt += 1
+        try:
+            # In un thread: init_db e' sincrona e fa rete. Eseguita sul loop
+            # bloccherebbe TUTTE le richieste per la durata dei suoi timeout,
+            # ogni minuto — la "modalita' degradata" diventerebbe un sito che
+            # si inceppa a intervalli.
+            await asyncio.to_thread(database.init_db)
+        except Exception as e:
+            _DB_STARTUP_ERROR = _describe_db_error(e, masked=True)
+            # Log fitto all'inizio, poi uno ogni dieci: un'interruzione lunga
+            # non deve riempire i log di Render dello stesso rigo.
+            if attempt <= 3 or attempt % 10 == 0:
+                logger.error("Database ancora non raggiungibile (tentativo %d): %s",
+                             attempt, _describe_db_error(e, masked=False))
+            continue
+        logger.warning("Database tornato raggiungibile dopo %d tentativi: "
+                       "completo l'avvio.", attempt)
+        await asyncio.to_thread(_post_init_steps)
+        await _start_scheduler_if_allowed()
+        # La bandierina si abbassa per ULTIMA: /health deve dire "ok" solo
+        # quando l'avvio e' davvero completo, scheduler compreso. Prima veniva
+        # azzerata subito e per qualche secondo il sistema si dichiarava sano
+        # con lo scheduler ancora fermo.
+        _DB_STARTUP_ERROR = None
+        return
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Gestione del ciclo di vita dell'applicazione.
+    All'avvio: inizializza il database e riavvia lo scheduler se era attivo.
+    Alla chiusura: arresta lo scheduler.
+    """
+    # Fase di avvio
+    global _DB_STARTUP_ERROR, _db_retry_task
+    logger.info("Inizializzazione del database...")
+    try:
+        database.init_db()
+        _DB_STARTUP_ERROR = None
+        logger.info("Database inizializzato con successo.")
+    except Exception as e:
+        # PRIMA questa riga non era protetta: con Supabase irraggiungibile il
+        # processo moriva ("Application startup failed. Exiting.", exit 3),
+        # Render segnava il deploy come fallito e l'utente restava senza sito
+        # e senza diagnostica. Un'interruzione del database non deve
+        # diventare un'interruzione totale: l'app parte, /health dice cosa
+        # manca, la dashboard lo mostra, e _db_recovery_loop riprova.
+        _DB_STARTUP_ERROR = _describe_db_error(e, masked=True)
+        logger.critical(
+            "DATABASE NON RAGGIUNGIBILE ALL'AVVIO: %s\n"
+            "L'app parte in MODALITA' DEGRADATA: dashboard e diagnostica "
+            "attive, scheduler e agenti FERMI. Riprovo la connessione ogni "
+            "%d secondi.", _describe_db_error(e, masked=False), _DB_RETRY_SECONDS)
+
+    # Passi che hanno bisogno del database: solo se il database risponde.
+    # Con il database giu' ognuno aspetterebbe il proprio timeout PRIMA che
+    # uvicorn apra la porta, e Render vedrebbe comunque un deploy morto.
+    # Vengono eseguiti da _db_recovery_loop quando la connessione torna.
+    if _DB_STARTUP_ERROR is None:
+        _post_init_steps()
+    else:
+        logger.warning("Passi di avvio dipendenti dal database rimandati a "
+                       "quando la connessione torna.")
 
     # Avvio dello scheduler al deploy — MA rispettando la scelta dell'utente
     # (vedi _start_scheduler_if_allowed) e SOLO se il database risponde:
@@ -6963,6 +6986,17 @@ _PERF_PERIOD_DAYS = {
 }
 
 
+def _perf_period_key(period) -> str:
+    """Normalizza il periodo. Solleva ValueError se non e' tra quelli noti: un
+    periodo inventato finiva nel nome del file scaricato e nella chiave della
+    cache, e il benchmark lo interpretava come 30 giorni mentre il resto del
+    report lo leggeva come "tutto"."""
+    key = str(period or "all").lower().strip()
+    if key not in _PERF_PERIOD_DAYS:
+        raise ValueError(f"periodo '{period}' non riconosciuto")
+    return key
+
+
 def _perf_commission_bps() -> float:
     """La commissione configurata per il LIVE, in basis points.
 
@@ -6971,7 +7005,10 @@ def _perf_commission_bps() -> float:
     insieme. Prima il frontend la teneva scritta a mano nel codice."""
     try:
         return float(database.get_setting("commission_bps", "10") or 10)
-    except (TypeError, ValueError):
+    except Exception:
+        # Anche un database irraggiungibile: il valore di default e' meglio di
+        # un 500 su un endpoint che serve solo a evitare un numero scritto a
+        # mano nel frontend.
         return accounting.DEFAULT_COMMISSION_BPS
 
 
@@ -7010,13 +7047,17 @@ async def _collect_performance_data(period: str, with_benchmark: bool = True) ->
     # chiamate a Yahoo — che limita, e risponde con dati troncati senza
     # errore (vedi README). La commissione nella chiave fa si' che cambiarla
     # in Impostazioni produca subito un report nuovo.
+    period = _perf_period_key(period)
     bps = _perf_commission_bps()
     cache_key = f"perf::{period}::{bps}::{int(with_benchmark)}"
     cached = _cache_get(cache_key, ttl_seconds=60)
     if cached is not None:
         return cached
 
-    days = _PERF_PERIOD_DAYS.get(str(period).lower(), 3650)
+    days = _PERF_PERIOD_DAYS[period]
+    # "all" = nessun filtro sulle righe; altrimenti dall'inizio del periodo.
+    period_start = (None if period == "all"
+                    else datetime.now(timezone.utc) - timedelta(days=days))
 
     trades = database.get_trades(limit=_PERF_TRADES_CAP) or []
     positions = database.get_positions() or []
@@ -7059,6 +7100,7 @@ async def _collect_performance_data(period: str, with_benchmark: bool = True) ->
         cash_adjustments=cash_adjustments,
         benchmark=benchmark,
         period=period,
+        period_start=period_start,
     )
     _cache_set(cache_key, report)
     return report
@@ -7082,6 +7124,11 @@ async def live_performance(
     (`troncato`), cosi' la pagina puo' dirlo invece di far credere che siano
     tutte.
     """
+    try:
+        period = _perf_period_key(period)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={
+            "error": str(e), "disponibili": sorted(_PERF_PERIOD_DAYS)})
     try:
         # Copia superficiale: il taglio delle righe qui sotto non deve toccare
         # il report in cache, che il CSV restituisce per intero.
@@ -7147,6 +7194,11 @@ async def live_performance_export(
             "disponibili": sorted(_PERF_CSV_FILES),
         })
     separator = ";" if str(sep).strip() == ";" else ","
+    try:
+        period = _perf_period_key(period)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={
+            "error": str(e), "disponibili": sorted(_PERF_PERIOD_DAYS)})
 
     try:
         report = await _collect_performance_data(period)

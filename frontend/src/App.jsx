@@ -96,7 +96,11 @@ function LiveApp() {
     // Online se ALMENO un endpoint ha risposto. Se tutti null →
     // backend irraggiungibile: non tocchiamo gli stati (restano gli
     // ultimi dati buoni) e mostriamo solo il banner.
-    setOnline(!!(pData || posData || tData || statusData || logsData));
+    // Anche un /api/health "degraded" prova che il backend risponde: senza
+    // `health` qui, con il database giu' comparivano DUE banner rossi in
+    // contraddizione ("backend non raggiungibile" sotto a "il backend dice
+    // che il database non e' raggiungibile").
+    setOnline(!!(pData || posData || tData || statusData || logsData || health));
     if (pData) setPortfolio(pData);
     if (posData) setPositions(Array.isArray(posData) ? posData : []);
     if (tData) setTrades(Array.isArray(tData) ? tData : []);

@@ -35,6 +35,7 @@ Il numero che esce e' confrontabile con lo Sharpe che pubblicano i fondi.
 """
 from __future__ import annotations
 
+import calendar
 import csv
 import io
 import math
@@ -383,11 +384,20 @@ def monthly_breakdown(daily: list) -> list:
 
     out = []
     prev_close = None
-    for i, month in enumerate(sorted(by_month)):
+    months = sorted(by_month)
+    for i, month in enumerate(months):
         points = by_month[month]
         start = prev_close if prev_close is not None else points[0]["value"]
         end = points[-1]["value"]
         ret = (end / start - 1.0) * 100.0 if start > 0 else None
+        # Parziale = non copre il mese intero: il primo se i dati non partono
+        # dal giorno 1, l'ultimo se non arrivano all'ultimo giorno del mese
+        # (tipicamente il mese in corso). Un mese in corso presentato come
+        # pieno falsa il confronto con quelli prima.
+        year, mon = int(month[:4]), int(month[5:7])
+        month_end = f"{year:04d}-{mon:02d}-{calendar.monthrange(year, mon)[1]:02d}"
+        first_partial = (i == 0 and points[0]["date"] != f"{month}-01")
+        last_partial = (i == len(months) - 1 and points[-1]["date"] < month_end)
         out.append({
             "mese": month,
             "valore_iniziale_usd": _r(start),
@@ -395,7 +405,7 @@ def monthly_breakdown(daily: list) -> list:
             "rendimento_pct": _r(ret),
             "variazione_usd": _r(end - start),
             "giorni_osservati": len(points),
-            "parziale": (i == 0 and prev_close is None),
+            "parziale": bool(first_partial or last_partial),
         })
         prev_close = end
     return out
@@ -590,11 +600,27 @@ def build_report(trades: list,
                  initial_balance: float | None = None,
                  cash_adjustments: list | None = None,
                  benchmark: dict | None = None,
-                 period: str = "all") -> dict:
+                 period: str = "all",
+                 period_start: datetime | None = None) -> dict:
     """Assembla l'intero report. Nessuna chiamata di rete, nessun accesso al DB:
-    tutto arriva dai parametri, cosi' il test lo puo' ricostruire a mano."""
+    tutto arriva dai parametri, cosi' il test lo puo' ricostruire a mano.
+
+    `period_start`: se valorizzato, transazioni e operazioni vengono filtrate
+    da quella data in poi (le transazioni per data di esecuzione, le
+    operazioni per data di chiusura). Il FIFO viene comunque costruito su
+    TUTTA la storia, perche' una chiusura di oggi puo' avere l'apertura di sei
+    mesi fa: il filtro si applica dopo, sulle righe. Senza, "ultimi 7 giorni"
+    mostrava il rendimento di una settimana accanto alle commissioni di tutta
+    la vita del portafoglio.
+    """
     ledger = transaction_ledger(trades, commission_bps)
     round_trips = round_trip_ledger(trades, commission_bps)
+    if period_start is not None:
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        ledger = [r for r in ledger
+                  if (parse_ts(r.get("timestamp")) or floor) >= period_start]
+        round_trips = [r for r in round_trips
+                       if (parse_ts(r.get("data_chiusura")) or floor) >= period_start]
     daily = daily_nav(history)
     nav = nav_metrics(daily)
     stats = trade_stats(round_trips)
@@ -631,6 +657,12 @@ def build_report(trades: list,
     adj_total = sum(_f(a.get("delta_usd")) for a in adjustments)
 
     warnings = []
+    if period_start is not None:
+        warnings.append(
+            f"Transazioni, operazioni, commissioni e dettaglio per titolo sono "
+            f"filtrati dal {period_start.strftime('%Y-%m-%d')} in poi. Capitale "
+            f"iniziale, valore attuale e guadagno totale restano riferiti "
+            f"all'intera vita del portafoglio.")
     if adjustments:
         warnings.append(
             f"Rilevati {len(adjustments)} movimenti di cassa manuali per "
@@ -657,6 +689,7 @@ def build_report(trades: list,
     return {
         "generato_il": datetime.now(timezone.utc).isoformat(),
         "periodo": period,
+        "periodo_inizio": period_start.strftime("%Y-%m-%d") if period_start else None,
         "valuta": "USD",
         "sintesi": {
             "capitale_iniziale_usd": _r(start_capital),
@@ -726,7 +759,10 @@ def to_csv(rows: list, columns: list | None = None, separator: str = ",") -> str
     - I None diventano stringa vuota (una cella vuota si legge come "non
       disponibile"; uno 0 si leggerebbe come una misura).
     - `separator` esiste per Excel in italiano, che si aspetta il punto e
-      virgola. Il valore standard resta la virgola.
+      virgola. In quel caso anche i decimali usano la virgola (12,5 e non
+      12.5): con il punto, Excel italiano legge i numeri come testo e la
+      somma della colonna fa zero. Il valore standard resta la virgola come
+      separatore e il punto come decimale.
     """
     if not rows:
         header = columns or []
@@ -742,9 +778,16 @@ def to_csv(rows: list, columns: list | None = None, separator: str = ",") -> str
     writer = csv.DictWriter(buf, fieldnames=keys, delimiter=separator,
                             extrasaction="ignore", lineterminator="\r\n")
     writer.writeheader()
+
+    def _cell(v):
+        if v is None:
+            return ""
+        if separator == ";" and isinstance(v, float):
+            return str(v).replace(".", ",")
+        return v
+
     for row in rows:
-        writer.writerow({k: ("" if row.get(k) is None else row.get(k))
-                         for k in keys})
+        writer.writerow({k: _cell(row.get(k)) for k in keys})
     return buf.getvalue()
 
 
