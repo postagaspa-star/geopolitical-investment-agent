@@ -68,7 +68,15 @@ def init_db():
         _ensure_schema_migrations()
 
     except Exception as e:
-        logger.error("Errore connessione Supabase: %s", e, exc_info=True)
+        # L'host nel log: "[Errno -2] Name or service not known" da solo non
+        # dice VERSO CHI stavamo parlando, e per capire se SUPABASE_URL e'
+        # giusta bisogna vederla accanto all'errore.
+        try:
+            from urllib.parse import urlparse
+            _host = urlparse(SUPABASE_URL).hostname or "?"
+        except Exception:
+            _host = "?"
+        logger.error("Errore connessione Supabase (host %s): %s", _host, e, exc_info=True)
         raise
 
 

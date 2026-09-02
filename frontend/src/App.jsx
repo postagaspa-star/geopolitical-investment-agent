@@ -48,6 +48,11 @@ function LiveApp() {
   // backend e' giu'/in riavvio → banner non bloccante (i dati restano
   // quelli ultimi noti, non si azzera nulla).
   const [online, setOnline] = useState(true);
+  // Motivo per cui il backend e' partito senza database (/api/health risponde
+  // 503 "degraded"): null quando tutto va. E' l'unico modo in cui l'utente
+  // scopre dalla dashboard che Supabase non risponde, invece che dai log di
+  // Render.
+  const [dbError, setDbError] = useState(null);
   // Percorso corrente: cambiare pagina azzera un eventuale errore di render
   // catturato dall'ErrorBoundary (vedi resetKey piu' sotto).
   const location = useLocation();
@@ -67,14 +72,27 @@ function LiveApp() {
     } catch { return null; }
   }, []);
 
+  // /api/health va letto a prescindere dallo status HTTP: il 503 "degraded"
+  // e' proprio l'informazione che cerchiamo, e fetchData lo scarterebbe.
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/health`);
+      return await res.json();
+    } catch { return null; }
+  }, []);
+
   const fetchAll = useCallback(async () => {
-    const [pData, posData, tData, statusData, logsData] = await Promise.all([
+    const [pData, posData, tData, statusData, logsData, health] = await Promise.all([
       fetchData("/api/portfolio"),
       fetchData("/api/positions"),
       fetchData("/api/trades"),
       fetchData("/api/agent/status"),
       fetchData("/api/logs"),
+      fetchHealth(),
     ]);
+    setDbError(health && health.status === "degraded"
+      ? (health.db_error || "database non raggiungibile")
+      : null);
     // Online se ALMENO un endpoint ha risposto. Se tutti null →
     // backend irraggiungibile: non tocchiamo gli stati (restano gli
     // ultimi dati buoni) e mostriamo solo il banner.
@@ -92,7 +110,7 @@ function LiveApp() {
       setNextMarketOpen(statusData.next_market_open || null);
       setAgentsInfo(statusData.agents || {});
     }
-  }, [fetchData]);
+  }, [fetchData, fetchHealth]);
 
   useEffect(() => {
     fetchAll();
@@ -241,6 +259,24 @@ function LiveApp() {
       />
 
       <main className="main-content">
+        {dbError && (
+          <div style={{
+            background: "#7f1d1d", color: "#fecaca",
+            border: "1px solid #b91c1c", borderRadius: 8,
+            padding: "10px 14px", marginBottom: 14, fontSize: "0.8rem",
+            lineHeight: 1.5,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>
+              ⛔ Database non raggiungibile: il sistema e' partito in modalita' diagnostica
+            </div>
+            <div>{dbError}</div>
+            <div style={{ marginTop: 4, color: "#fca5a5" }}>
+              Nessun agente e' attivo finche' il database non torna. Il backend
+              riprova da solo ogni minuto; i numeri qui sotto possono essere
+              vuoti o vecchi.
+            </div>
+          </div>
+        )}
         {!online && (
           <div style={{
             background: "#7f1d1d", color: "#fecaca",

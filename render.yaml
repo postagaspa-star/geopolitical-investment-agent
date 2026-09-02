@@ -18,6 +18,12 @@ services:
       # Fallback equity/crypto OHLCV (opzionale): se gia' configurato, resta.
       - key: POLYGON_API_KEY
         sync: false
+      # Versione di Python. La CI gira su 3.11; il deploy del 2 settembre 2026
+      # ha creato il venv con Python 3.14 (quella dell'immagine di Render) senza
+      # che nessuno l'avesse scelto. Il pin vale solo se il servizio usa il
+      # runtime "Python" di Render: oggi il servizio risulta "Rust".
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       # Riduzione memoria glibc (fix OOM 512MB) — vedi start.sh
       - key: MALLOC_ARENA_MAX
         value: "2"

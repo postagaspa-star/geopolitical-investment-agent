@@ -30,6 +30,119 @@ os.makedirs(DOCUMENTS_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+import asyncio  # noqa: E402  (usato dal loop di recupero del database)
+
+# ── Stato del database all'avvio ────────────────────────────────────────────
+# None = il database e' stato raggiunto. Una stringa = l'app e' partita in
+# MODALITA' DEGRADATA perche' init_db() e' fallita: serve la dashboard e la
+# diagnostica, ma NON avvia lo scheduler (tradare senza database brucia
+# crediti LLM e non persiste nulla) e riprova la connessione ogni
+# _DB_RETRY_SECONDS. La stringa e' pensata per essere mostrata: host mascherato.
+_DB_STARTUP_ERROR: str | None = None
+_DB_RETRY_SECONDS = 60
+_db_retry_task: "asyncio.Task | None" = None
+
+
+def _db_host(masked: bool) -> str:
+    """Host del database (Supabase). Mascherato per le risposte pubbliche:
+    /api/health non e' autenticato e il riferimento del progetto non deve
+    finire in giro, ma "abc….supabase.co" basta a capire DI QUALE progetto
+    si parla quando si confronta con la dashboard Supabase."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(getattr(database, "SUPABASE_URL", "") or "").hostname or ""
+    except Exception:
+        host = ""
+    if not host:
+        return ""
+    if not masked:
+        return host
+    dot = host.find(".")
+    return (host[:3] + "…" + host[dot:]) if dot > 3 else host[:3] + "…"
+
+
+def _describe_db_error(e: Exception, masked: bool = True) -> str:
+    """L'errore del database in parole: cosa e' successo, verso quale host, e
+    che cosa vuol dire di solito. Un "[Errno -2]" da solo non aiuta nessuno."""
+    msg = (str(e) or e.__class__.__name__).strip()
+    low = msg.lower()
+    if ("name or service not known" in low or "nodename nor servname" in low
+            or "getaddrinfo" in low or "name resolution" in low):
+        hint = ("Il nome host non si risolve: il progetto Supabase e' stato "
+                "cancellato o spostato, oppure SUPABASE_URL e' sbagliata.")
+    elif "timed out" in low or "timeout" in low:
+        hint = "Il database non risponde in tempo: progetto in pausa, sospeso o sovraccarico."
+    elif "connection refused" in low or "connect call failed" in low:
+        hint = "Connessione rifiutata: il servizio database e' spento o irraggiungibile."
+    elif "401" in msg or "403" in msg or "jwt" in low or "api key" in low or "apikey" in low:
+        hint = "Chiave rifiutata: SUPABASE_KEY non valida o ruotata."
+    else:
+        hint = ""
+    host = _db_host(masked)
+    parts = [msg]
+    if host:
+        parts.append(f"(host {host})")
+    if hint:
+        parts.append("— " + hint)
+    return " ".join(parts)
+
+
+async def _start_scheduler_if_allowed() -> None:
+    """Avvia lo scheduler rispettando la scelta dell'utente.
+
+    PRIMA qui c'era "avvia SEMPRE, il monitoraggio e' sempre attivo": il tasto
+    "Ferma Monitoraggio" spegneva lo scheduler e questo blocco lo riaccendeva
+    al primo riavvio (che con l'OOM del piano 512MB arriva nel giro di ore) —
+    per l'utente "cliccato, riparte subito". Il tasto deve fermare TUTTO il
+    sistema, Simulator compreso, finche' l'utente non preme Start: la scelta
+    vive nel flag persistente trading_paused.
+    """
+    if scheduler.is_trading_paused():
+        logger.warning("SISTEMA FERMATO DALL'UTENTE (trading_paused=true): lo "
+                       "scheduler NON viene avviato. Nessun job attivo — "
+                       "nemmeno gli stop di protezione. Riattivare con il "
+                       "tasto Start (/api/agent/start).")
+        return
+    try:
+        logger.info("Avvio automatico dello scheduler al deploy...")
+        scheduler.start_scheduler()
+        logger.info("Scheduler avviato con successo al deploy.")
+    except Exception as e:
+        logger.error("ERRORE avvio scheduler al deploy: %s", e, exc_info=True)
+        # Ritenta dopo un breve delay (il DB potrebbe non essere pronto)
+        await asyncio.sleep(2)
+        try:
+            scheduler.start_scheduler()
+            logger.info("Scheduler avviato al secondo tentativo.")
+        except Exception as e2:
+            logger.error("Scheduler non avviato dopo 2 tentativi: %s", e2, exc_info=True)
+
+
+async def _db_recovery_loop() -> None:
+    """Riprova init_db() finche' il database non torna, poi completa l'avvio
+    (scheduler compreso). Senza questo, dopo un'interruzione del DB al boot
+    il trading resterebbe spento finche' qualcuno non rifa' il deploy."""
+    global _DB_STARTUP_ERROR
+    attempt = 0
+    while True:
+        await asyncio.sleep(_DB_RETRY_SECONDS)
+        attempt += 1
+        try:
+            database.init_db()
+        except Exception as e:
+            _DB_STARTUP_ERROR = _describe_db_error(e, masked=True)
+            # Log fitto all'inizio, poi uno ogni dieci: un'interruzione lunga
+            # non deve riempire i log di Render dello stesso rigo.
+            if attempt <= 3 or attempt % 10 == 0:
+                logger.error("Database ancora non raggiungibile (tentativo %d): %s",
+                             attempt, _describe_db_error(e, masked=False))
+            continue
+        _DB_STARTUP_ERROR = None
+        logger.warning("Database tornato raggiungibile dopo %d tentativi: "
+                       "completo l'avvio.", attempt)
+        await _start_scheduler_if_allowed()
+        return
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,9 +152,25 @@ async def lifespan(app: FastAPI):
     Alla chiusura: arresta lo scheduler.
     """
     # Fase di avvio
+    global _DB_STARTUP_ERROR, _db_retry_task
     logger.info("Inizializzazione del database...")
-    database.init_db()
-    logger.info("Database inizializzato con successo.")
+    try:
+        database.init_db()
+        _DB_STARTUP_ERROR = None
+        logger.info("Database inizializzato con successo.")
+    except Exception as e:
+        # PRIMA questa riga non era protetta: con Supabase irraggiungibile il
+        # processo moriva ("Application startup failed. Exiting.", exit 3),
+        # Render segnava il deploy come fallito e l'utente restava senza sito
+        # e senza diagnostica. Un'interruzione del database non deve
+        # diventare un'interruzione totale: l'app parte, /health dice cosa
+        # manca, la dashboard lo mostra, e _db_recovery_loop riprova.
+        _DB_STARTUP_ERROR = _describe_db_error(e, masked=True)
+        logger.critical(
+            "DATABASE NON RAGGIUNGIBILE ALL'AVVIO: %s\n"
+            "L'app parte in MODALITA' DEGRADATA: dashboard e diagnostica "
+            "attive, scheduler e agenti FERMI. Riprovo la connessione ogni "
+            "%d secondi.", _describe_db_error(e, masked=False), _DB_RETRY_SECONDS)
 
     # Schema Simulator (idempotente, fail-safe)
     try:
@@ -123,37 +252,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Auto-load preset documents fallito: %s", e)
 
-    # Avvio dello scheduler al deploy — MA rispettando la scelta dell'utente.
-    # PRIMA qui c'era "avvia SEMPRE, il monitoraggio e' sempre attivo": il
-    # tasto "Ferma Monitoraggio" spegneva lo scheduler e questo blocco lo
-    # riaccendeva al primo riavvio (che con l'OOM del piano 512MB arriva nel
-    # giro di ore) — per l'utente "cliccato, riparte subito". Il tasto deve
-    # fermare TUTTO il sistema, Simulator compreso, finche' l'utente non
-    # preme Start: la scelta vive nel flag persistente trading_paused.
-    if scheduler.is_trading_paused():
-        logger.warning("SISTEMA FERMATO DALL'UTENTE (trading_paused=true): lo "
-                       "scheduler NON viene avviato. Nessun job attivo — "
-                       "nemmeno gli stop di protezione. Riattivare con il "
-                       "tasto Start (/api/agent/start).")
+    # Avvio dello scheduler al deploy — MA rispettando la scelta dell'utente
+    # (vedi _start_scheduler_if_allowed) e SOLO se il database risponde:
+    # senza database gli agenti non possono leggere ne' scrivere niente,
+    # e ogni run sarebbe solo crediti LLM buttati.
+    if _DB_STARTUP_ERROR:
+        logger.error("Scheduler NON avviato: database non raggiungibile. "
+                     "Ripartira' da solo quando la connessione torna.")
+        _db_retry_task = asyncio.create_task(_db_recovery_loop())
     else:
-        try:
-            logger.info("Avvio automatico dello scheduler al deploy...")
-            scheduler.start_scheduler()
-            logger.info("Scheduler avviato con successo al deploy.")
-        except Exception as e:
-            logger.error("ERRORE avvio scheduler al deploy: %s", e, exc_info=True)
-            # Ritenta dopo un breve delay (il DB potrebbe non essere pronto)
-            import asyncio
-            await asyncio.sleep(2)
-            try:
-                scheduler.start_scheduler()
-                logger.info("Scheduler avviato al secondo tentativo.")
-            except Exception as e2:
-                logger.error("Scheduler non avviato dopo 2 tentativi: %s", e2, exc_info=True)
+        await _start_scheduler_if_allowed()
 
     yield
 
     # Fase di chiusura (deploy/restart — NON salvare stato nel DB)
+    if _db_retry_task is not None and not _db_retry_task.done():
+        _db_retry_task.cancel()
+        try:
+            await _db_retry_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _db_retry_task = None
     logger.info("Arresto dello scheduler (deploy/restart, non persiste)...")
     scheduler.stop_scheduler(persist=False)
     logger.info("Applicazione chiusa correttamente.")
@@ -233,7 +352,22 @@ async def _admin_token_guard(request: Request, call_next):
 @app.get("/health")
 @app.get("/api/health")
 async def health_check():
-    """Controllo dello stato di salute del servizio."""
+    """Stato di salute del servizio.
+
+    200 {"status": "ok"} quando tutto va. 503 {"status": "degraded", ...}
+    quando all'avvio il database non era raggiungibile: il processo e' vivo
+    (serve la dashboard e questa diagnostica) ma scheduler e agenti sono
+    fermi. Il 503 e' voluto: il workflow GitHub degli scenari aspetta un 200
+    prima di caricare dati, e un monitor esterno deve vedere il problema.
+    """
+    if _DB_STARTUP_ERROR:
+        return JSONResponse(status_code=503, content={
+            "status": "degraded",
+            "db": "unreachable",
+            "db_error": _DB_STARTUP_ERROR,
+            "scheduler": "fermo finche' il database non torna",
+            "retry_seconds": _DB_RETRY_SECONDS,
+        })
     return {"status": "ok"}
 
 
