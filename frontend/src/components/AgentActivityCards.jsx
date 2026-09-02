@@ -18,6 +18,7 @@ const API = window.location.origin;
 export default function AgentActivityCards() {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
 
   const reload = async () => {
     try {
@@ -25,8 +26,24 @@ export default function AgentActivityCards() {
       // (.slice(0,30)). 80 log bastano per coprirle anche dopo il
       // filtraggio del rumore. Riduce ~60% del payload egress Supabase.
       const res = await fetch(`${API}/api/logs?limit=80`);
-      if (res.ok) setLogs(await res.json());
-    } catch {}
+      let data = null;
+      try { data = await res.json(); } catch { /* corpo non JSON */ }
+      // Quando la lettura fallisce il backend risponde {error: "..."}: NON
+      // e' una lista. Prima finiva dritto in setLogs, `for (const log of
+      // logs)` esplodeva con "e is not iterable" e l'INTERA Dashboard Live
+      // moriva nell'ErrorBoundary. Un endpoint che fallisce deve spegnere
+      // questa card, non la pagina — e dirlo, non fingere "nessuna
+      // attivita'". I log gia' caricati restano: un intoppo di 30 secondi
+      // non deve svuotare la vista.
+      if (res.ok && Array.isArray(data)) {
+        setLogs(data);
+        setFetchError(null);
+      } else {
+        setFetchError((data && data.error) || `il server ha risposto ${res.status}`);
+      }
+    } catch (err) {
+      setFetchError(err?.message || "rete non raggiungibile");
+    }
     setLoading(false);
   };
 
@@ -42,11 +59,26 @@ export default function AgentActivityCards() {
   const cards = useMemo(() => buildCards(logs), [logs]);
 
   if (loading) return <div style={S.empty}>Caricamento…</div>;
+  if (fetchError && !cards.length) {
+    return (
+      <div style={S.fetchError}>
+        <div style={{ fontWeight: 700, marginBottom: 4 }}>
+          Attività degli agenti non disponibile
+        </div>
+        <div>Il server non ha restituito i log: {fetchError}. Riprovo da solo ogni 30 secondi.</div>
+      </div>
+    );
+  }
   if (!cards.length) return <div style={S.empty}>Nessuna attività recente</div>;
 
   return (
     <>
       <style>{KEYFRAMES}</style>
+      {fetchError && (
+        <div style={{ ...S.fetchError, marginBottom: 10, padding: "8px 12px" }}>
+          Ultimo aggiornamento fallito ({fetchError}): mostro le attività già caricate.
+        </div>
+      )}
       <div style={S.list}>
         {cards.slice(0, 30).map((c, i) => (
           <div
@@ -73,7 +105,9 @@ function buildCards(logs) {
   const cards = [];
   const skipNoise = new Set(["watchdog_throttled", "watchdog_complete"]);
 
-  for (const log of logs) {
+  // Difesa in profondita': anche se un giorno qualcuno passasse qui un
+  // oggetto, il parser non deve far cadere la pagina.
+  for (const log of (Array.isArray(logs) ? logs : [])) {
     const phase = (log.phase || "").toUpperCase();
     let content;
     try { content = JSON.parse(log.content || "{}"); }
@@ -828,5 +862,9 @@ const S = {
   empty: {
     color: "#64748b", padding: "32px 24px", textAlign: "center", fontSize: 13,
     background: "#0f172a", borderRadius: 8, border: "1px dashed #1f2937",
+  },
+  fetchError: {
+    color: "#fecaca", padding: "14px 18px", fontSize: 13, lineHeight: 1.5,
+    background: "#7f1d1d33", borderRadius: 8, border: "1px solid #b91c1c",
   },
 };

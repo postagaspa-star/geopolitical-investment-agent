@@ -582,14 +582,24 @@ function IntelligencePage() {
   const fetchIntelligence = useCallback(async () => {
     try {
       const res = await fetch(`${API}/api/intelligence?limit=20`);
-      if (res.ok) setIntelligence(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        // {error: ...} non e' una lista: senza questa guardia .map() piu'
+        // avanti fa cadere la pagina (stesso bug della Dashboard Live).
+        setIntelligence(Array.isArray(data) ? data : []);
+      }
     } catch (err) { console.error(err); }
   }, []);
 
   const fetchBriefings = useCallback(async () => {
     try {
       const res = await fetch(`${API}/api/briefings?limit=20`);
-      if (res.ok) setBriefings(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        // {error: ...} non e' una lista: senza questa guardia .map() piu'
+        // avanti fa cadere la pagina (stesso bug della Dashboard Live).
+        setBriefings(Array.isArray(data) ? data : []);
+      }
     } catch (err) { console.error(err); }
   }, []);
 

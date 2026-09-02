@@ -32,6 +32,16 @@ export default class ErrorBoundary extends React.Component {
     }
   }
 
+  // Se chi lo usa passa `resetKey` (es. il percorso corrente), un cambio di
+  // chiave azzera l'errore: senza, dopo un crash sulla Dashboard ogni voce
+  // del menu mostrava ancora il pannello rosso finche' l'utente non
+  // premeva "Riprova" o ricaricava — sembrava che TUTTA l'app fosse rotta.
+  componentDidUpdate(prevProps) {
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false, err: null });
+    }
+  }
+
   handleRetry = () => this.setState({ hasError: false, err: null });
 
   render() {

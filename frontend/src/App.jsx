@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { BrowserRouter, Routes, Route, Navigate, NavLink } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation } from "react-router-dom";
 import { Menu, BookOpen } from "lucide-react";
 
 import Sidebar from "./components/Sidebar";
@@ -48,6 +48,9 @@ function LiveApp() {
   // backend e' giu'/in riavvio → banner non bloccante (i dati restano
   // quelli ultimi noti, non si azzera nulla).
   const [online, setOnline] = useState(true);
+  // Percorso corrente: cambiare pagina azzera un eventuale errore di render
+  // catturato dall'ErrorBoundary (vedi resetKey piu' sotto).
+  const location = useLocation();
 
   const countdownRef = useRef(null);
 
@@ -253,7 +256,7 @@ function LiveApp() {
         {/* ErrorBoundary attorno alle pagine: se UNA pagina va in
             errore (dati parziali da backend instabile) resta viva la
             shell — niente piu' "schermo blu" su tutta l'app. */}
-        <ErrorBoundary>
+        <ErrorBoundary resetKey={location.pathname}>
           <Routes>
             <Route index element={
               <DashboardPage portfolio={portfolio} positions={positions} trades={trades} logs={logs} />

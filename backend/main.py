@@ -240,6 +240,17 @@ async def health_check():
 # --- Endpoint del portafoglio ---
 
 
+# ── Contratto degli endpoint di lettura ─────────────────────────────────────
+# Se la lettura fallisce (Supabase in timeout, servizio in riavvio, quota
+# esaurita) la risposta e' HTTP 500 con {"error": ...}. PRIMA era HTTP 200 con
+# lo stesso corpo: "successo" con dentro un errore. Il frontend controllava
+# res.ok, vedeva 200, e passava {error: "..."} a codice che si aspettava una
+# lista → `for (const log of logs)` esplodeva con "e is not iterable" e
+# l'intera Dashboard Live finiva nell'ErrorBoundary. Stessa malattia dei
+# comandi che fingevano il successo (commit 2872cd9), lato lettura. Un errore
+# deve viaggiare come errore: cosi' chi legge lo gestisce con un solo `if`.
+# Il test test_read_endpoints_fail_loud.py blocca la regressione.
+
 @app.get("/api/portfolio")
 async def get_portfolio():
     """Restituisce lo stato attuale del portafoglio."""
@@ -248,7 +259,7 @@ async def get_portfolio():
         return state
     except Exception as e:
         logger.error(f"Errore nel recupero dello stato del portafoglio: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # --- Endpoint delle posizioni ---
@@ -309,7 +320,7 @@ async def get_positions():
         return positions
     except Exception as e:
         logger.error(f"Errore nel recupero delle posizioni: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/api/prices/trigger-poll")
@@ -415,7 +426,7 @@ async def get_price_quotes(tickers: str = Query(default="")):
             return {r["ticker"]: r for r in (rows.data or [])}
     except Exception as e:
         logger.error(f"Errore /api/prices/quotes: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # --- Endpoint della cronologia dei trade ---
@@ -432,7 +443,7 @@ async def get_trades(limit: int = Query(default=50, ge=1, le=5000)):
         return trades
     except Exception as e:
         logger.error(f"Errore nel recupero dei trade: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # ─── Cache TTL in-memory per endpoint aggregati read-heavy ──────────────────
@@ -492,7 +503,7 @@ async def get_logs(
         return logs
     except Exception as e:
         logger.error(f"Errore nel recupero dei log: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # --- Endpoint dei dati geopolitici ---
@@ -506,7 +517,7 @@ async def get_geopolitical():
         return snapshots
     except Exception as e:
         logger.error(f"Errore nel recupero degli snapshot geopolitici: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # --- Endpoint di controllo dell'agente ---
@@ -637,7 +648,7 @@ async def get_agent_status():
         return status
     except Exception as e:
         logger.error(f"Errore nel recupero dello stato dell'agente: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/api/intelligence")
@@ -648,7 +659,7 @@ async def get_intelligence(limit: int = Query(default=20, ge=1, le=100)):
         return data
     except Exception as e:
         logger.error(f"Errore nel recupero dell'intelligence: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/api/briefings")
@@ -659,7 +670,7 @@ async def get_briefings(limit: int = Query(default=20, ge=1, le=100)):
         return data
     except Exception as e:
         logger.error(f"Errore nel recupero dei briefings: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/api/scout-buffer")
@@ -708,7 +719,7 @@ async def get_scout_buffer(
         return enriched
     except Exception as e:
         logger.error(f"Errore /api/scout-buffer: {e}", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 # --- Endpoint delle impostazioni ---
@@ -7087,7 +7098,7 @@ async def live_shadow():
         })
         return out
     except Exception as e:
-        return {"error": str(e)[:200]}
+        return JSONResponse(status_code=500, content={"error": str(e)[:200]})
 
 
 @app.get("/api/live/inaction")
