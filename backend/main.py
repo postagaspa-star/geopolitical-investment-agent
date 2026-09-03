@@ -6997,6 +6997,24 @@ def _perf_period_key(period) -> str:
     return key
 
 
+# Benchmark di riferimento per il confronto "a parita' di rischio". SPY replica
+# l'S&P 500, lo stesso indice usato da /api/portfolio/benchmark.
+_PERF_BENCHMARK_TICKER = "SPY"
+_PERF_BENCHMARK_NAME = "S&P 500"
+
+
+def _fetch_benchmark_rows(span_days: int) -> list:
+    """Chiusure giornaliere del benchmark per gli ultimi `span_days` giorni:
+    [{"date": "YYYY-MM-DD", "close": float}, ...]. Sincrona (fa rete): va
+    chiamata in un thread."""
+    import data_fetchers
+    data = data_fetchers.fetch_market_data(_PERF_BENCHMARK_TICKER,
+                                           period_days=max(30, int(span_days)))
+    rows = (data or {}).get("data") or []
+    return [{"date": str(r.get("date") or "")[:10], "close": r.get("close")}
+            for r in rows if r.get("close")]
+
+
 def _perf_commission_bps() -> float:
     """La commissione configurata per il LIVE, in basis points.
 
@@ -7082,6 +7100,7 @@ async def _collect_performance_data(period: str, with_benchmark: bool = True) ->
         logger.debug("performance: cash audit non disponibile: %s", e)
 
     benchmark = None
+    benchmark_rows: list = []
     if with_benchmark:
         try:
             bench = await get_portfolio_benchmark(period=period)
@@ -7089,6 +7108,19 @@ async def _collect_performance_data(period: str, with_benchmark: bool = True) ->
                 benchmark = bench
         except Exception as e:
             logger.warning("performance: benchmark non disponibile: %s", e)
+        # Chiusure giornaliere del benchmark per il confronto a parita' di
+        # rischio: bastano dalla prima data del portafoglio in poi (con un
+        # margine), non dieci anni. In un thread: fa rete.
+        try:
+            first_day = None
+            daily = pr.daily_nav(history)
+            if daily:
+                first_day = pr.parse_ts(daily[0]["date"])
+            span = (datetime.now(timezone.utc) - first_day).days + 10 if first_day else days
+            benchmark_rows = await asyncio.to_thread(_fetch_benchmark_rows, min(span, days + 10))
+        except Exception as e:
+            logger.warning("performance: chiusure del benchmark non disponibili: %s", e)
+            benchmark_rows = []
 
     report = pr.build_report(
         trades=trades,
@@ -7101,6 +7133,8 @@ async def _collect_performance_data(period: str, with_benchmark: bool = True) ->
         benchmark=benchmark,
         period=period,
         period_start=period_start,
+        benchmark_rows=benchmark_rows,
+        benchmark_name=_PERF_BENCHMARK_NAME,
     )
     _cache_set(cache_key, report)
     return report
@@ -7159,7 +7193,10 @@ _PERF_CSV_FILES = {
     "mensile": "rendimento-mensile",
     "per_strumento": "per-strumento",
     "sintesi": "sintesi",
-    "benchmark": "confronto-benchmark",
+    "benchmark": "confronto-benchmark-giornaliero",
+    "confronto_rischio": "confronto-parita-di-rischio",
+    "confronto_mensile": "confronto-mensile-vs-benchmark",
+    "confronto_episodi": "cadute-e-risalite-del-mercato",
 }
 
 
@@ -7207,9 +7244,36 @@ async def live_performance_export(
             rows = pr.summary_rows(report)
             columns = pr.CSV_COLUMNS["sintesi"]
         elif key == "benchmark":
-            rows = pr.benchmark_series_rows(report.get("benchmark"))
-            columns = ["pct_periodo_trascorso", "portafoglio_base100",
-                       "sp500_base100"]
+            rows = pr.benchmark_series_rows(report.get("benchmark"),
+                                            report.get("confronto_rischio"))
+            columns = (pr.CSV_COLUMNS["benchmark"] if rows and "data" in rows[0]
+                       else ["pct_periodo_trascorso", "portafoglio_base100",
+                             "sp500_base100"])
+        elif key in ("confronto_rischio", "confronto_mensile", "confronto_episodi"):
+            cr = report.get("confronto_rischio") or {}
+            sub = {"confronto_rischio": "metriche", "confronto_mensile": "mensile",
+                   "confronto_episodi": "episodi"}[key]
+            rows = list(cr.get(sub) or []) if cr.get("disponibile") else []
+            if key == "confronto_rischio" and rows:
+                # In coda le grandezze di relazione col mercato (beta, alpha,
+                # catture): stesse colonne, cosi' il file resta una tabella.
+                rel = cr.get("relazione") or {}
+                for label, k, how in (
+                    ("Beta", "beta", "1 = si muove come il mercato, 0.5 = la meta'"),
+                    ("Correlazione", "correlazione", "da -1 a 1: quanto segue il mercato"),
+                    ("Alpha annuo (%)", "alpha_annuo_pct", "rendimento in piu' NON spiegato dal mercato"),
+                    ("Tracking error annuo (%)", "tracking_error_pct", "quanto ti allontani dal mercato"),
+                    ("Information ratio", "information_ratio", "extra-rendimento per unita' di scostamento"),
+                    ("Cattura delle salite (%)", "cattura_salite_pct", "sopra 100 = prendi piu' del mercato quando sale"),
+                    ("Cattura delle discese (%)", "cattura_discese_pct", "sotto 100 = perdi meno del mercato quando scende; negativa = sali"),
+                    ("Giorni in cui hai battuto il mercato (%)", "giorni_battuto_mercato_pct", "quota di giorni con rendimento maggiore"),
+                ):
+                    rows.append({"metrica": label, "portafoglio": rel.get(k),
+                                 "benchmark": "", "differenza": "", "come_leggerla": how})
+                rows.append({"metrica": "Verdetto a parita' di rischio",
+                             "portafoglio": cr.get("verdetto"), "benchmark": "",
+                             "differenza": "", "come_leggerla": cr.get("verdetto_dettaglio")})
+            columns = pr.CSV_COLUMNS[key]
         else:
             rows = report.get(key) or []
             columns = pr.CSV_COLUMNS.get(key)

@@ -84,9 +84,24 @@ const DOWNLOADS = [
     hint: 'Guadagno, commissioni e percentuale di operazioni vincenti su ogni ticker.',
   },
   {
+    dataset: 'confronto_rischio',
+    label: 'A parita\' di rischio',
+    hint: 'Rendimento, volatilita\', Sharpe, Sortino, perdita massima: tu e l\'S&P 500 affiancati sulle stesse date, piu\' beta, alpha e quanto catturi di salite e discese.',
+  },
+  {
+    dataset: 'confronto_episodi',
+    label: 'Cadute e risalite del mercato',
+    hint: 'Le cadute piu\' forti dell\'S&P 500 e cosa ha fatto il portafoglio negli stessi giorni, e le risalite che le seguono.',
+  },
+  {
+    dataset: 'confronto_mensile',
+    label: 'Mese per mese contro l\'S&P 500',
+    hint: 'Ogni mese: rendimento tuo, rendimento dell\'indice, differenza e chi ha fatto meglio.',
+  },
+  {
     dataset: 'benchmark',
-    label: 'Confronto con S&P 500',
-    hint: 'Le due curve affiancate, entrambe partite da 100.',
+    label: 'Confronto giornaliero con S&P 500',
+    hint: 'Una riga per giorno di borsa: valore tuo e chiusura dell\'indice, base 100 e rendimenti giornalieri.',
   },
 ];
 
@@ -362,6 +377,40 @@ export default function PerformancePage() {
   const st = report.statistiche_operazioni || {};
   const fees = report.commissioni || {};
   const troncato = report.troncato || {};
+  const cr = report.confronto_rischio || null;
+  const crOk = Boolean(cr && cr.disponibile);
+  const crRel = (cr && cr.relazione) || {};
+  // Le metriche in percentuale portano "(%)" nell'etichetta; le altre sono
+  // rapporti (Sharpe, Sortino, Calmar) e si mostrano come numero.
+  // Volatilita' e "giorni in guadagno" sono percentuali senza segno: il "+"
+  // davanti li farebbe leggere come rendimenti.
+  const fmtMetrica = (label, v) => {
+    const l = String(label);
+    if (/Volatilita|Giorni in guadagno/.test(l)) return v == null ? '—' : `${num(v)}%`;
+    return l.includes('(%)') ? pct(v) : num(v);
+  };
+  const fmtDiff = (label, v) => {
+    if (v == null) return '—';
+    const segno = Number(v) > 0 ? '+' : '';
+    return String(label).includes('(%)') ? `${segno}${num(v)} pp` : `${segno}${num(v)}`;
+  };
+  // Per la perdita massima e la volatilita' "meno" e' meglio: il colore
+  // della differenza segue il senso della metrica, non il segno.
+  const megliOseMinore = (label) => /Perdita massima|Volatilita/.test(String(label));
+  const colDiff = (label, v) => {
+    if (v == null) return C.inkMuted;
+    const buono = megliOseMinore(label) ? Number(v) < 0 : Number(v) > 0;
+    return buono ? C.positive : C.negative;
+  };
+  const VERDETTO = {
+    sovraperformato_a_parita_di_rischio: { c: C.positive, t: 'Si\': hai battuto il mercato anche a parita\' di rischio' },
+    rendimento_maggiore_ma_rischio_maggiore: { c: C.fee, t: 'Rendimento piu\' alto, ma pagato con piu\' rischio: a parita\' di rischio no' },
+    sotto_il_mercato: { c: C.negative, t: 'No: il mercato ha reso di piu\' per unita\' di rischio' },
+    insufficiente: { c: C.inkMuted, t: 'Dati insufficienti per un verdetto' },
+  };
+  const vd = crOk ? (VERDETTO[cr.verdetto] || VERDETTO.insufficiente) : VERDETTO.insufficiente;
+  const thStyle = { padding: '6px 8px', color: C.inkMuted, fontWeight: 600, whiteSpace: 'nowrap' };
+  const tdStyle = { padding: '6px 8px', color: C.inkSoft, whiteSpace: 'nowrap' };
 
   const selectStyle = {
     background: C.surfaceDeep, color: C.ink,
@@ -643,6 +692,171 @@ export default function PerformancePage() {
                 {bench.verdict_detail}
               </div>
             )}
+          </>
+        )}
+      </Card>
+
+      {/* A parita' di rischio: la domanda vera. Tutto sulle stesse date di
+          borsa, tu e l'indice, con le stesse formule per entrambi. */}
+      <Card
+        title="Hai battuto il mercato a parita' di rischio?"
+        hint="Quanto hai fatto non basta: conta quanto hai fatto rispetto al mercato e con quanto rischio. Qui portafoglio e S&P 500 sono misurati sugli stessi giorni di borsa, con le stesse formule. Quando il mercato scende, tu quanto perdi? Quando risale, tu prendi di piu'? E il tuo rendimento per unita' di rischio (Sharpe, Sortino) e' migliore del suo?"
+        right={crOk ? (
+          <span style={{ fontSize: '0.7rem', color: C.inkMuted, paddingTop: 3, textAlign: 'right' }}>
+            {int(cr.giorni_comuni)} giorni di borsa in comune<br />dal {cr.dal} al {cr.al}
+          </span>
+        ) : null}
+        style={{ marginBottom: '1rem' }}>
+        {!crOk ? (
+          <EmptyChart message={`Confronto non disponibile: ${(cr && cr.motivo) || 'chiusure del benchmark mancanti'}.`} />
+        ) : (
+          <>
+            <div style={{
+              padding: '10px 12px', borderRadius: 8, marginBottom: 14,
+              background: `${vd.c}1a`, border: `1px solid ${vd.c}55`,
+            }}>
+              <div style={{ fontSize: '0.86rem', fontWeight: 700, color: vd.c }}>{vd.t}</div>
+              <div style={{ fontSize: '0.76rem', color: C.inkSoft, marginTop: 4, lineHeight: 1.5 }}>
+                {cr.verdetto_dettaglio}
+              </div>
+            </div>
+
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem', minWidth: 640 }}>
+                <thead>
+                  <tr style={{ textAlign: 'right' }}>
+                    <th style={{ ...thStyle, textAlign: 'left' }}>Metrica</th>
+                    <th style={thStyle}>Portafoglio</th>
+                    <th style={thStyle}>S&P 500</th>
+                    <th style={thStyle}>Differenza</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(cr.metriche || []).map((m) => (
+                    <tr key={m.metrica} style={{ borderTop: `1px solid ${C.grid}`, textAlign: 'right' }}>
+                      <td style={{ ...tdStyle, textAlign: 'left', whiteSpace: 'normal' }}>
+                        <div style={{ color: C.ink }}>{m.metrica}</div>
+                        <div style={{ fontSize: '0.66rem', color: C.inkMuted }}>{m.come_leggerla}</div>
+                      </td>
+                      <td style={{ ...tdStyle, color: C.ink, fontWeight: 700 }}>{fmtMetrica(m.metrica, m.portafoglio)}</td>
+                      <td style={tdStyle}>{fmtMetrica(m.metrica, m.benchmark)}</td>
+                      <td style={{ ...tdStyle, color: colDiff(m.metrica, m.differenza), fontWeight: 600 }}>
+                        {fmtDiff(m.metrica, m.differenza)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ display: 'grid', gap: 10, marginTop: 14,
+                          gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))' }}>
+              <MetricRow label="Beta" value={num(crRel.beta)}
+                         meaning="1 = ti muovi come il mercato, 0.5 = la meta'. Sopra 1 amplifichi." />
+              <MetricRow label="Alpha annuo" value={pct(crRel.alpha_annuo_pct)}
+                         color={signColor(crRel.alpha_annuo_pct)}
+                         meaning="Rendimento in piu' NON spiegato dal mercato. E' la bravura, se e' positivo e stabile." />
+              <MetricRow label="Cattura delle salite"
+                         value={crRel.cattura_salite_pct != null ? `${num(crRel.cattura_salite_pct, 0)}%` : '—'}
+                         meaning="Quando il mercato sale, quanto di quella salita prendi. 100% = tutta." />
+              <MetricRow label="Cattura delle discese"
+                         value={crRel.cattura_discese_pct != null ? `${num(crRel.cattura_discese_pct, 0)}%` : '—'}
+                         color={crRel.cattura_discese_pct != null && crRel.cattura_discese_pct < 100 ? C.positive : C.ink}
+                         meaning="Quando il mercato scende, quanto della discesa subisci. Sotto 100% perdi meno di lui; negativa = sali quando lui scende." />
+              <MetricRow label="Correlazione" value={num(crRel.correlazione)}
+                         meaning="Da -1 a 1: quanto segui il mercato giorno per giorno." />
+              <MetricRow label="Information ratio" value={num(crRel.information_ratio)}
+                         meaning="Extra-rendimento per unita' di scostamento dal mercato. Sopra 0.5 e' buono." />
+              <MetricRow label="Giorni in cui hai battuto il mercato"
+                         value={crRel.giorni_battuto_mercato_pct != null ? `${num(crRel.giorni_battuto_mercato_pct, 0)}%` : '—'} />
+              <MetricRow label="Nei giorni di ribasso, in media"
+                         value={`tu ${pct(crRel.ribasso_medio_portafoglio_pct)} · lui ${pct(crRel.ribasso_medio_benchmark_pct)}`}
+                         meaning="Il rendimento medio giornaliero nei giorni in cui l'indice chiude in perdita." />
+            </div>
+
+            {(cr.episodi || []).length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: '0.84rem', fontWeight: 700, color: C.ink, marginBottom: 4 }}>
+                  Le cadute piu' forti del mercato, e cosa hai fatto tu negli stessi giorni
+                </div>
+                <div style={{ fontSize: '0.7rem', color: C.inkMuted, marginBottom: 8 }}>
+                  Ogni caduta dell'indice (dal massimo al minimo) e la risalita che la segue, con il rendimento del portafoglio nelle stesse date.
+                </div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.76rem', minWidth: 720 }}>
+                    <thead>
+                      <tr style={{ textAlign: 'right' }}>
+                        <th style={{ ...thStyle, textAlign: 'left' }}>Episodio</th>
+                        <th style={{ ...thStyle, textAlign: 'left' }}>Dal</th>
+                        <th style={{ ...thStyle, textAlign: 'left' }}>Al</th>
+                        <th style={thStyle}>S&P 500</th>
+                        <th style={thStyle}>Portafoglio</th>
+                        <th style={thStyle}>Differenza</th>
+                        <th style={{ ...thStyle, textAlign: 'left' }}>Esito</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cr.episodi.map((e, i) => (
+                        <tr key={i} style={{ borderTop: `1px solid ${C.grid}`, textAlign: 'right' }}>
+                          <td style={{ ...tdStyle, textAlign: 'left', color: e.tipo.startsWith('caduta') ? C.negative : C.positive }}>
+                            {e.tipo}{e.recuperato_il === 'non ancora' ? ' (in corso)' : ''}
+                          </td>
+                          <td style={{ ...tdStyle, textAlign: 'left' }}>{e.dal}</td>
+                          <td style={{ ...tdStyle, textAlign: 'left' }}>{e.al}</td>
+                          <td style={tdStyle}>{pct(e.benchmark_pct)}</td>
+                          <td style={{ ...tdStyle, color: C.ink, fontWeight: 700 }}>{pct(e.portafoglio_pct)}</td>
+                          <td style={{ ...tdStyle, color: signColor(e.differenza_pp), fontWeight: 600 }}>
+                            {e.differenza_pp != null ? `${e.differenza_pp > 0 ? '+' : ''}${num(e.differenza_pp)} pp` : '—'}
+                          </td>
+                          <td style={{ ...tdStyle, textAlign: 'left', color: signColor(e.differenza_pp) }}>{e.esito || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {(cr.mensile || []).length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: '0.84rem', fontWeight: 700, color: C.ink, marginBottom: 8 }}>
+                  Mese per mese contro l'indice
+                </div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.76rem', minWidth: 520 }}>
+                    <thead>
+                      <tr style={{ textAlign: 'right' }}>
+                        <th style={{ ...thStyle, textAlign: 'left' }}>Mese</th>
+                        <th style={thStyle}>Portafoglio</th>
+                        <th style={thStyle}>S&P 500</th>
+                        <th style={thStyle}>Differenza</th>
+                        <th style={{ ...thStyle, textAlign: 'left' }}>Meglio</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cr.mensile.map((m) => (
+                        <tr key={m.mese} style={{ borderTop: `1px solid ${C.grid}`, textAlign: 'right',
+                                                  opacity: m.parziale ? 0.7 : 1 }}>
+                          <td style={{ ...tdStyle, textAlign: 'left', color: C.ink }}>
+                            {m.mese}{m.parziale ? ' (parziale)' : ''}
+                          </td>
+                          <td style={{ ...tdStyle, color: signColor(m.portafoglio_pct), fontWeight: 700 }}>{pct(m.portafoglio_pct)}</td>
+                          <td style={{ ...tdStyle, color: signColor(m.benchmark_pct) }}>{pct(m.benchmark_pct)}</td>
+                          <td style={{ ...tdStyle, color: signColor(m.differenza_pp), fontWeight: 600 }}>
+                            {m.differenza_pp != null ? `${m.differenza_pp > 0 ? '+' : ''}${num(m.differenza_pp)} pp` : '—'}
+                          </td>
+                          <td style={{ ...tdStyle, textAlign: 'left' }}>{m.meglio || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            <div style={{ fontSize: '0.68rem', color: C.inkMuted, marginTop: 12, lineHeight: 1.5 }}>
+              {cr.nota}
+            </div>
           </>
         )}
       </Card>

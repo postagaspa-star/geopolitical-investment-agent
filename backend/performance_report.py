@@ -58,6 +58,11 @@ TRADING_DAYS_PER_YEAR = 252
 # restituisce None invece di un numero che sembra una misura ma non lo e'.
 MIN_DAYS_FOR_ANNUALIZED = 10
 
+# Sotto questa quantita' di giorni di borsa in comune con il benchmark, il
+# verdetto "a parita' di rischio" e' indicativo: tre mesi non distinguono
+# bravura da fortuna di regime.
+MIN_DAYS_FOR_RISK_VERDICT = 60
+
 
 # ── Utility di parsing ──────────────────────────────────────────────────────
 
@@ -601,7 +606,9 @@ def build_report(trades: list,
                  cash_adjustments: list | None = None,
                  benchmark: dict | None = None,
                  period: str = "all",
-                 period_start: datetime | None = None) -> dict:
+                 period_start: datetime | None = None,
+                 benchmark_rows: list | None = None,
+                 benchmark_name: str = "S&P 500") -> dict:
     """Assembla l'intero report. Nessuna chiamata di rete, nessun accesso al DB:
     tutto arriva dai parametri, cosi' il test lo puo' ricostruire a mano.
 
@@ -615,6 +622,8 @@ def build_report(trades: list,
     """
     ledger = transaction_ledger(trades, commission_bps)
     round_trips = round_trip_ledger(trades, commission_bps)
+    confronto = benchmark_comparison(daily_nav(history), benchmark_rows,
+                                     benchmark_name=benchmark_name)
     if period_start is not None:
         floor = datetime.min.replace(tzinfo=timezone.utc)
         ledger = [r for r in ledger
@@ -657,6 +666,15 @@ def build_report(trades: list,
     adj_total = sum(_f(a.get("delta_usd")) for a in adjustments)
 
     warnings = []
+    if not confronto.get("disponibile"):
+        warnings.append(
+            "Confronto a parita' di rischio non calcolabile: "
+            + str(confronto.get("motivo") or "dati del benchmark mancanti") + ".")
+    elif confronto.get("giorni_comuni", 0) < MIN_DAYS_FOR_RISK_VERDICT:
+        warnings.append(
+            f"Il confronto a parita' di rischio poggia su "
+            f"{confronto['giorni_comuni']} giorni di borsa in comune: sotto i "
+            f"{MIN_DAYS_FOR_RISK_VERDICT} il verdetto e' indicativo, non una prova.")
     if period_start is not None:
         warnings.append(
             f"Transazioni, operazioni, commissioni e dettaglio per titolo sono "
@@ -714,6 +732,7 @@ def build_report(trades: list,
         "curva_valore": drawdown_series(daily),
         "movimenti_cassa": adjustments,
         "benchmark": benchmark,
+        "confronto_rischio": confronto,
         "avvertenze": warnings,
         "transazioni": ledger,
         "operazioni": round_trips,
@@ -748,6 +767,20 @@ CSV_COLUMNS = {
         "posizione_aperta",
     ],
     "sintesi": ["metrica", "valore"],
+    "confronto_rischio": ["metrica", "portafoglio", "benchmark", "differenza", "come_leggerla"],
+    "confronto_mensile": [
+        "mese", "portafoglio_pct", "benchmark_pct", "differenza_pp", "meglio",
+        "giorni_comuni", "parziale",
+    ],
+    "confronto_episodi": [
+        "tipo", "dal", "al", "giorni", "benchmark_pct", "portafoglio_pct",
+        "differenza_pp", "esito", "recuperato_il",
+    ],
+    "benchmark": [
+        "data", "portafoglio_usd", "benchmark_close", "portafoglio_base100",
+        "benchmark_base100", "portafoglio_giorno_pct", "benchmark_giorno_pct",
+        "differenza_giorno_pp",
+    ],
 }
 
 
@@ -872,18 +905,48 @@ def summary_rows(report: dict) -> list:
         add("Max drawdown S&P 500 (%)", bench.get("sp500_max_drawdown_pct"))
         add("Verdetto", bench.get("verdict"))
         add("Dettaglio verdetto", bench.get("verdict_detail"))
+    cr = report.get("confronto_rischio") or {}
+    if cr.get("disponibile"):
+        add("--- A PARITA' DI RISCHIO (stesse date, " + str(cr.get("benchmark_nome")) + ") ---", "")
+        add("Finestra comune", f"{cr.get('dal')} -> {cr.get('al')} ({cr.get('giorni_comuni')} giorni di borsa)")
+        for m in cr.get("metriche") or []:
+            add(f"{m['metrica']} - portafoglio", m.get("portafoglio"))
+            add(f"{m['metrica']} - {cr.get('benchmark_nome')}", m.get("benchmark"))
+        rel = cr.get("relazione") or {}
+        for label, key in (
+            ("Beta", "beta"), ("Correlazione", "correlazione"),
+            ("Alpha annuo (%)", "alpha_annuo_pct"),
+            ("Tracking error annuo (%)", "tracking_error_pct"),
+            ("Information ratio", "information_ratio"),
+            ("Cattura delle salite (%)", "cattura_salite_pct"),
+            ("Cattura delle discese (%)", "cattura_discese_pct"),
+            ("Giorni in cui ha battuto il mercato (%)", "giorni_battuto_mercato_pct"),
+            ("Rendimento medio nei giorni di ribasso - portafoglio (%)", "ribasso_medio_portafoglio_pct"),
+            ("Rendimento medio nei giorni di ribasso - benchmark (%)", "ribasso_medio_benchmark_pct"),
+        ):
+            add(label, rel.get(key))
+        add("Verdetto a parita' di rischio", cr.get("verdetto"))
+        add("Dettaglio verdetto", cr.get("verdetto_dettaglio"))
     for i, w in enumerate(report.get("avvertenze") or [], start=1):
         add(f"Avvertenza {i}", w)
     return rows
 
 
-def benchmark_series_rows(benchmark: dict | None) -> list:
+def benchmark_series_rows(benchmark: dict | None, confronto: dict | None = None) -> list:
     """Le due curve base 100 (portafoglio e S&P 500) affiancate, per il CSV.
+
+    Se il confronto a parita' di rischio e' disponibile, la serie e' quella
+    allineata PER DATA (una riga per giorno di borsa, con i rendimenti
+    giornalieri di entrambi): e' la forma giusta per un foglio di calcolo. Il
+    ricampionamento per "percentuale di periodo" resta come ripiego quando
+    le chiusure dell'indice non sono arrivate.
 
     Le due serie hanno lunghezze diverse (snapshot del portafoglio contro
     chiusure giornaliere dell'indice): l'asse comune e' la percentuale di
     periodo trascorso, cosi' le righe si confrontano una a una.
     """
+    if confronto and confronto.get("disponibile") and confronto.get("serie"):
+        return list(confronto["serie"])
     if not benchmark or not benchmark.get("available"):
         return []
     port = benchmark.get("portfolio_series_norm") or []
@@ -911,3 +974,323 @@ def benchmark_series_rows(benchmark: dict | None) -> list:
             "sp500_base100": at(spy, frac),
         })
     return rows
+
+
+# ── 9. Confronto con il benchmark A PARITA' DI RISCHIO ──────────────────────
+# La domanda vera non e' "quanto hai fatto" ma "quanto hai fatto RISPETTO al
+# mercato, e con quanto rischio". Quando il mercato scende del 30%, tu quanto
+# perdi? Quando risale del 10%, tu fai di piu'? E i tuoi Sharpe e Sortino
+# sono migliori dei suoi? Tutto sulle STESSE date: un portafoglio nato a
+# giugno non si confronta con l'indice da gennaio.
+
+def _daily_returns(values: list) -> list:
+    return [(values[i] / values[i - 1] - 1.0) for i in range(1, len(values))
+            if values[i - 1] > 0]
+
+
+def _compound(returns: list) -> float:
+    total = 1.0
+    for r in returns:
+        total *= (1.0 + r)
+    return total - 1.0
+
+
+def align_daily(port_daily: list, bench_rows: list) -> list:
+    """Giunge le due serie sulle date in comune (i giorni di borsa: gli
+    snapshot del weekend, che l'indice non ha, restano fuori).
+    Ritorna [{"date", "p", "b"}] in ordine crescente."""
+    bmap = {}
+    for r in bench_rows or []:
+        d = str(r.get("date") or "")[:10]
+        c = _f(r.get("close"))
+        if d and c > 0:
+            bmap[d] = c
+    out = []
+    for pt in port_daily or []:
+        d = pt.get("date")
+        if d in bmap and _f(pt.get("value")) > 0:
+            out.append({"date": d, "p": float(pt["value"]), "b": bmap[d]})
+    return out
+
+
+def relative_stats(rp: list, rb: list) -> dict:
+    """Come il portafoglio si muove RISPETTO al mercato, sui rendimenti
+    giornalieri allineati.
+
+    beta:     quanto amplifica i movimenti del mercato (1 = uguale, 0.5 = meta').
+    alpha:    rendimento annuo in piu' NON spiegato dal mercato (Jensen).
+    cattura:  nei giorni in cui il mercato sale/scende, quanto di quel
+              movimento prendi. Discese sotto 100 = perdi meno del mercato;
+              negativa = sali quando lui scende.
+    """
+    n = min(len(rp), len(rb))
+    rp, rb = rp[:n], rb[:n]
+    out = {
+        "beta": None, "correlazione": None, "alpha_annuo_pct": None,
+        "tracking_error_pct": None, "information_ratio": None,
+        "cattura_salite_pct": None, "cattura_discese_pct": None,
+        "giorni_battuto_mercato_pct": None,
+        "ribasso_medio_portafoglio_pct": None, "ribasso_medio_benchmark_pct": None,
+        "rialzo_medio_portafoglio_pct": None, "rialzo_medio_benchmark_pct": None,
+        "giorni": n,
+    }
+    if n < 3:
+        return out
+    mp = sum(rp) / n
+    mb = sum(rb) / n
+    cov = sum((rp[i] - mp) * (rb[i] - mb) for i in range(n)) / (n - 1)
+    var_b = sum((x - mb) ** 2 for x in rb) / (n - 1)
+    var_p = sum((x - mp) ** 2 for x in rp) / (n - 1)
+    if var_b > 0:
+        beta = cov / var_b
+        out["beta"] = round(beta, 2)
+        out["alpha_annuo_pct"] = round((mp - beta * mb) * TRADING_DAYS_PER_YEAR * 100.0, 2)
+    if var_b > 0 and var_p > 0:
+        out["correlazione"] = round(cov / math.sqrt(var_b * var_p), 2)
+    diff = [rp[i] - rb[i] for i in range(n)]
+    md = sum(diff) / n
+    vd = sum((x - md) ** 2 for x in diff) / (n - 1)
+    if vd > 0:
+        te = math.sqrt(vd)
+        out["tracking_error_pct"] = round(te * math.sqrt(TRADING_DAYS_PER_YEAR) * 100.0, 2)
+        out["information_ratio"] = round(md / te * math.sqrt(TRADING_DAYS_PER_YEAR), 2)
+    up = [i for i in range(n) if rb[i] > 0]
+    down = [i for i in range(n) if rb[i] < 0]
+    if up:
+        cb = _compound([rb[i] for i in up])
+        cp = _compound([rp[i] for i in up])
+        if cb > 0:
+            out["cattura_salite_pct"] = round(cp / cb * 100.0, 1)
+        out["rialzo_medio_portafoglio_pct"] = round(sum(rp[i] for i in up) / len(up) * 100.0, 3)
+        out["rialzo_medio_benchmark_pct"] = round(sum(rb[i] for i in up) / len(up) * 100.0, 3)
+    if down:
+        cb = _compound([rb[i] for i in down])
+        cp = _compound([rp[i] for i in down])
+        if cb < 0:
+            out["cattura_discese_pct"] = round(cp / cb * 100.0, 1)
+        out["ribasso_medio_portafoglio_pct"] = round(sum(rp[i] for i in down) / len(down) * 100.0, 3)
+        out["ribasso_medio_benchmark_pct"] = round(sum(rb[i] for i in down) / len(down) * 100.0, 3)
+    out["giorni_battuto_mercato_pct"] = round(sum(1 for i in range(n) if rp[i] > rb[i]) / n * 100.0, 1)
+    return out
+
+
+def monthly_vs_benchmark(aligned: list) -> list:
+    """Mese per mese: tu contro il mercato, da chiusura a chiusura, stesse date."""
+    if len(aligned) < 2:
+        return []
+    by_month: dict = {}
+    for a in aligned:
+        by_month.setdefault(a["date"][:7], []).append(a)
+    months = sorted(by_month)
+    out = []
+    prev = None
+    for i, m in enumerate(months):
+        pts = by_month[m]
+        p0 = prev["p"] if prev else pts[0]["p"]
+        b0 = prev["b"] if prev else pts[0]["b"]
+        p1, b1 = pts[-1]["p"], pts[-1]["b"]
+        rp = (p1 / p0 - 1.0) * 100.0 if p0 > 0 else None
+        rb = (b1 / b0 - 1.0) * 100.0 if b0 > 0 else None
+        year, mon = int(m[:4]), int(m[5:7])
+        month_end = f"{year:04d}-{mon:02d}-{calendar.monthrange(year, mon)[1]:02d}"
+        # Ultimo giorno di borsa del mese: puo' essere il 28-30; "parziale"
+        # se mancano piu' di 3 giorni di calendario alla fine del mese.
+        first_partial = (i == 0 and int(pts[0]["date"][8:10]) > 3)
+        last_partial = (i == len(months) - 1
+                        and (parse_ts(month_end) - parse_ts(pts[-1]["date"])).days > 3)
+        diff = (rp - rb) if (rp is not None and rb is not None) else None
+        out.append({
+            "mese": m,
+            "portafoglio_pct": _r(rp), "benchmark_pct": _r(rb),
+            "differenza_pp": _r(diff),
+            "meglio": (None if diff is None else
+                       "portafoglio" if diff > 0 else "benchmark" if diff < 0 else "pari"),
+            "giorni_comuni": len(pts),
+            "parziale": bool(first_partial or last_partial),
+        })
+        prev = pts[-1]
+    return out
+
+
+def benchmark_episodes(aligned: list, min_depth_pct: float = 1.0, top: int = 3) -> list:
+    """Le cadute piu' forti del MERCATO (da un massimo al minimo successivo) e
+    le risalite che le seguono, con cosa ha fatto il portafoglio nelle STESSE
+    date. E' la domanda "durante il covid il mercato -30%, tu?", applicata a
+    ogni episodio della finestra. Le cadute ancora aperte (senza recupero)
+    vengono incluse e marcate."""
+    n = len(aligned)
+    if n < 3:
+        return []
+    b = [a["b"] for a in aligned]
+    p = [a["p"] for a in aligned]
+    d = [a["date"] for a in aligned]
+    falls = []          # (peak_i, trough_i, recovery_i | None)
+    peak_i = trough_i = 0
+    for i in range(1, n):
+        if b[i] > b[peak_i]:
+            if trough_i > peak_i and b[trough_i] < b[peak_i]:
+                falls.append((peak_i, trough_i, i))
+            peak_i = trough_i = i
+        elif b[i] < b[trough_i]:
+            trough_i = i
+    if trough_i > peak_i and b[trough_i] < b[peak_i]:
+        falls.append((peak_i, trough_i, None))
+
+    rows = []
+    for pk, tr, rec in falls:
+        depth = (b[tr] / b[pk] - 1.0) * 100.0
+        if depth > -abs(min_depth_pct):
+            continue
+        port = (p[tr] / p[pk] - 1.0) * 100.0 if p[pk] > 0 else None
+        diff = (port - depth) if port is not None else None
+        rows.append({
+            "tipo": "caduta del mercato",
+            "dal": d[pk], "al": d[tr],
+            "giorni": (parse_ts(d[tr]) - parse_ts(d[pk])).days,
+            "benchmark_pct": _r(depth), "portafoglio_pct": _r(port),
+            "differenza_pp": _r(diff),
+            "esito": (None if diff is None else
+                      "ha tenuto meglio" if diff > 0 else "ha perso di piu'" if diff < 0 else "pari"),
+            "recuperato_il": d[rec] if rec is not None else "non ancora",
+            "_depth": depth,
+        })
+        # La risalita che segue: dal minimo al recupero (o alla fine dei dati).
+        end = rec if rec is not None else n - 1
+        if end > tr:
+            rise = (b[end] / b[tr] - 1.0) * 100.0
+            prise = (p[end] / p[tr] - 1.0) * 100.0 if p[tr] > 0 else None
+            rdiff = (prise - rise) if prise is not None else None
+            rows.append({
+                "tipo": "risalita del mercato",
+                "dal": d[tr], "al": d[end],
+                "giorni": (parse_ts(d[end]) - parse_ts(d[tr])).days,
+                "benchmark_pct": _r(rise), "portafoglio_pct": _r(prise),
+                "differenza_pp": _r(rdiff),
+                "esito": (None if rdiff is None else
+                          "ha preso di piu'" if rdiff > 0 else "ha preso di meno" if rdiff < 0 else "pari"),
+                "recuperato_il": "" if rec is not None else "risalita in corso",
+                "_depth": depth,
+            })
+    # Le cadute piu' profonde per prime, ognuna seguita dalla sua risalita.
+    rows.sort(key=lambda r: (r["_depth"], 0 if r["tipo"].startswith("caduta") else 1))
+    keep, seen = [], 0
+    for r in rows:
+        if r["tipo"].startswith("caduta"):
+            seen += 1
+        if seen > top:
+            break
+        r.pop("_depth", None)
+        keep.append(r)
+    return keep
+
+
+def benchmark_comparison(port_daily: list, bench_rows: list | None,
+                         benchmark_name: str = "S&P 500") -> dict:
+    """Il blocco completo "a parita' di rischio". Vuoto e dichiarato tale se
+    mancano le chiusure del benchmark o le date in comune sono troppo poche."""
+    aligned = align_daily(port_daily, bench_rows or [])
+    base = {"disponibile": False, "benchmark_nome": benchmark_name,
+            "giorni_comuni": len(aligned), "motivo": None}
+    if not bench_rows:
+        base["motivo"] = "chiusure del benchmark non disponibili dal fornitore dati"
+        return base
+    if len(aligned) < 3:
+        base["motivo"] = (f"solo {len(aligned)} giorni di borsa in comune tra "
+                          f"portafoglio e {benchmark_name}")
+        return base
+
+    dates = [a["date"] for a in aligned]
+    pv = [a["p"] for a in aligned]
+    bv = [a["b"] for a in aligned]
+    stats_p = nav_metrics([{"date": d, "value": v} for d, v in zip(dates, pv)])
+    stats_b = nav_metrics([{"date": d, "value": v} for d, v in zip(dates, bv)])
+    rp, rb = _daily_returns(pv), _daily_returns(bv)
+    rel = relative_stats(rp, rb)
+
+    def diff(a, b):
+        return None if a is None or b is None else round(a - b, 2)
+
+    metriche = []
+    for label, key, how in (
+        ("Rendimento nel periodo (%)", "rendimento_totale_pct",
+         "stesse date per entrambi"),
+        ("Rendimento annualizzato (%)", "rendimento_annualizzato_pct",
+         "il ritmo su un anno intero"),
+        ("Volatilita' annua (%)", "volatilita_annua_pct",
+         "quanto oscilla: piu' bassa = percorso piu' tranquillo"),
+        ("Sharpe", "sharpe",
+         "rendimento per unita' di oscillazione: vince chi ha il numero piu' alto"),
+        ("Sortino", "sortino",
+         "come Sharpe ma punisce solo le oscillazioni verso il basso"),
+        ("Calmar", "calmar",
+         "rendimento annuo diviso la perdita massima"),
+        ("Perdita massima (%)", "max_drawdown_pct",
+         "la caduta piu' profonda dal massimo: meno negativa = meglio"),
+        ("Giorni in guadagno (%)", "giorni_positivi_pct",
+         "quota di giorni chiusi in positivo"),
+    ):
+        a, b = stats_p.get(key), stats_b.get(key)
+        metriche.append({"metrica": label, "portafoglio": a, "benchmark": b,
+                         "differenza": diff(a, b), "come_leggerla": how})
+
+    # Verdetto: a parita' di rischio hai battuto il mercato se il tuo Sharpe
+    # e' piu' alto E l'alpha e' positivo. Un rendimento piu' alto con Sharpe
+    # piu' basso e' rischio in piu', non bravura.
+    sp, sb = stats_p.get("sharpe"), stats_b.get("sharpe")
+    alpha = rel.get("alpha_annuo_pct")
+    n = len(aligned)
+    if sp is None or sb is None:
+        verdetto = "insufficiente"
+        dettaglio = (f"Con {n} giorni di borsa in comune non si calcola uno Sharpe "
+                     f"attendibile per il confronto.")
+    elif sp > sb and (alpha or 0) > 0:
+        verdetto = "sovraperformato_a_parita_di_rischio"
+        dettaglio = (f"Sharpe {sp} contro {sb} del {benchmark_name} e alpha annuo "
+                     f"{alpha:+.2f}%: rendimento migliore per unita' di rischio, "
+                     f"non spiegato dal solo mercato.")
+    elif (stats_p.get("rendimento_totale_pct") or 0) > (stats_b.get("rendimento_totale_pct") or 0):
+        verdetto = "rendimento_maggiore_ma_rischio_maggiore"
+        dettaglio = (f"Rendimento piu' alto del {benchmark_name} ma Sharpe {sp} contro "
+                     f"{sb}: l'extra-rendimento e' stato pagato con piu' oscillazione. "
+                     f"A parita' di rischio NON e' meglio del mercato.")
+    else:
+        verdetto = "sotto_il_mercato"
+        dettaglio = (f"Sharpe {sp} contro {sb} del {benchmark_name}: in questa "
+                     f"finestra il mercato ha reso di piu' per unita' di rischio.")
+    if n < MIN_DAYS_FOR_RISK_VERDICT:
+        dettaglio += (f" Attenzione: {n} giorni sono pochi, il giudizio e' "
+                      f"indicativo (servono almeno {MIN_DAYS_FOR_RISK_VERDICT}).")
+
+    p0, b0 = pv[0], bv[0]
+    serie = []
+    for i, a in enumerate(aligned):
+        gp = (pv[i] / pv[i - 1] - 1.0) * 100.0 if i > 0 and pv[i - 1] > 0 else None
+        gb = (bv[i] / bv[i - 1] - 1.0) * 100.0 if i > 0 and bv[i - 1] > 0 else None
+        serie.append({
+            "data": a["date"],
+            "portafoglio_usd": round(pv[i], 2),
+            "benchmark_close": round(bv[i], 4),
+            "portafoglio_base100": round(pv[i] / p0 * 100.0, 3),
+            "benchmark_base100": round(bv[i] / b0 * 100.0, 3),
+            "portafoglio_giorno_pct": _r(gp, 3),
+            "benchmark_giorno_pct": _r(gb, 3),
+            "differenza_giorno_pp": _r((gp - gb) if gp is not None and gb is not None else None, 3),
+        })
+
+    return {
+        "disponibile": True,
+        "benchmark_nome": benchmark_name,
+        "giorni_comuni": n,
+        "dal": dates[0], "al": dates[-1],
+        "metriche": metriche,
+        "relazione": rel,
+        "mensile": monthly_vs_benchmark(aligned),
+        "episodi": benchmark_episodes(aligned),
+        "verdetto": verdetto,
+        "verdetto_dettaglio": dettaglio,
+        "serie": serie,
+        "nota": ("Tasso privo di rischio considerato zero in Sharpe e Sortino, per "
+                 "entrambi: il confronto resta corretto perche' la semplificazione "
+                 "e' la stessa da tutte e due le parti. Catture e beta sono su "
+                 "rendimenti giornalieri."),
+    }

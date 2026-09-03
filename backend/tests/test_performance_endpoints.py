@@ -60,6 +60,8 @@ def benchmark_finto(monkeypatch):
             "sp500_series_norm": [100.0, 101.0, 102.0],
         }
     monkeypatch.setattr(main, "get_portfolio_benchmark", _fake)
+    # Niente rete nemmeno per le chiusure giornaliere del benchmark.
+    monkeypatch.setattr(main, "_fetch_benchmark_rows", lambda span: [])
 
 
 # ── /api/live/performance ───────────────────────────────────────────────────
@@ -142,7 +144,8 @@ def test_export_transazioni_scarica_un_csv(client, portafoglio_con_trade):
 
 def test_export_copre_tutti_i_blocchi(client, portafoglio_con_trade):
     for dataset in ("transazioni", "operazioni", "curva_valore", "mensile",
-                    "per_strumento", "sintesi", "benchmark"):
+                    "per_strumento", "sintesi", "benchmark", "confronto_rischio",
+                    "confronto_mensile", "confronto_episodi"):
         res = client.get(
             f"/api/live/performance/export?dataset={dataset}&period=all")
         assert res.status_code == 200, dataset
@@ -197,3 +200,37 @@ def test_periodo_sconosciuto_risponde_400(client):
         res = client.get(path)
         assert res.status_code == 400, path
         assert "disponibili" in res.json()
+
+
+def test_confronto_a_parita_di_rischio_con_storico_vero(client, monkeypatch):
+    """40 giorni di snapshot nel passato + chiusure finte del benchmark sulle
+    stesse date: il blocco deve uscire completo, in JSON e in CSV."""
+    from datetime import datetime, timedelta, timezone
+    d0 = datetime.now(timezone.utc) - timedelta(days=40)
+    dates = [(d0 + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(40)]
+    with database.get_db() as conn:
+        for i, d in enumerate(dates):
+            conn.execute(
+                "INSERT INTO portfolio_snapshots (total_value, cash_balance, timestamp)"
+                " VALUES (?, ?, ?)", (100000 + 120 * i, 50000, d + "T20:00:00+00:00"))
+    monkeypatch.setattr(main, "_fetch_benchmark_rows",
+                        lambda span: [{"date": d, "close": 500 + 0.8 * i}
+                                      for i, d in enumerate(dates)])
+    main._RESP_CACHE.clear()
+
+    body = client.get("/api/live/performance?period=all").json()
+    cr = body["confronto_rischio"]
+    assert cr["disponibile"] is True
+    assert cr["giorni_comuni"] == 40
+    assert len(cr["metriche"]) == 8
+    assert cr["relazione"]["beta"] is not None
+
+    res = client.get("/api/live/performance/export?dataset=confronto_rischio&period=all")
+    lines = _csv_lines(res)
+    assert lines[0].split(",")[:4] == ["metrica", "portafoglio", "benchmark", "differenza"]
+    assert len(lines) > 12                           # 8 metriche + relazione + verdetto
+    assert any("Verdetto" in l for l in lines)
+
+    res = client.get("/api/live/performance/export?dataset=benchmark&period=all")
+    assert _csv_lines(res)[0].startswith("data,portafoglio_usd,benchmark_close")
+    assert len(_csv_lines(res)) == 41
